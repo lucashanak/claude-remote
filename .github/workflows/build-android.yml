@@ -1,0 +1,135 @@
+name: Build Android APK
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Download xterm.js assets
+        run: |
+          chmod +x setup-assets.sh
+          ./setup-assets.sh
+
+      - name: Determine version
+        id: version
+        run: |
+          LATEST=$(git describe --tags --abbrev=0 2>/dev/null || echo "v1.0.0")
+          LATEST="${LATEST#v}"
+          IFS='.' read -r MAJOR MINOR PATCH <<< "$LATEST"
+          PATCH=$((PATCH + 1))
+          VER="${MAJOR}.${MINOR}.${PATCH}"
+          TAG="v${VER}"
+          CODE=$((MAJOR * 10000 + MINOR * 100 + PATCH))
+
+          echo "version=$VER" >> "$GITHUB_OUTPUT"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "code=$CODE" >> "$GITHUB_OUTPUT"
+          echo "Version: $VER (code: $CODE, tag: $TAG)"
+
+      - name: Update version in build.gradle.kts
+        run: |
+          VER="${{ steps.version.outputs.version }}"
+          CODE="${{ steps.version.outputs.code }}"
+          sed -i "s/versionCode = .*/versionCode = $CODE/" androidApp/build.gradle.kts
+          sed -i "s/versionName = .*/versionName = \"$VER\"/" androidApp/build.gradle.kts
+
+      - name: Build release APK
+        run: ./gradlew :androidApp:assembleRelease
+
+      - name: Sign APK
+        run: |
+          echo "${{ secrets.ANDROID_KEYSTORE }}" | base64 -d > /tmp/release.keystore
+          APK=$(find androidApp/build -name "*.apk" -path "*/release/*" | head -1)
+          BT="${ANDROID_HOME}/build-tools/$(ls ${ANDROID_HOME}/build-tools/ | sort -V | tail -1)"
+
+          ${BT}/zipalign -v 4 "$APK" /tmp/aligned.apk
+          ${BT}/apksigner sign \
+            --ks /tmp/release.keystore \
+            --ks-key-alias clauderemote \
+            --ks-pass "pass:${{ secrets.ANDROID_KEYSTORE_PASSWORD }}" \
+            --key-pass "pass:${{ secrets.ANDROID_KEYSTORE_PASSWORD }}" \
+            --out ClaudeRemote.apk /tmp/aligned.apk
+          ${BT}/apksigner verify ClaudeRemote.apk
+
+          rm /tmp/release.keystore
+
+      - name: Compute SHA-256
+        id: hash
+        run: |
+          SHA=$(sha256sum ClaudeRemote.apk | cut -d' ' -f1)
+          echo "sha256=$SHA" >> "$GITHUB_OUTPUT"
+          echo "SHA-256: $SHA"
+
+      - name: Generate delta patch
+        id: patch
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          sudo apt-get install -y -qq bsdiff
+
+          NEW_VER="${{ steps.version.outputs.version }}"
+          APK_SIZE=$(stat -c%s "ClaudeRemote.apk")
+
+          PREV_TAG=$(gh release list --limit 1 --json tagName -q '.[0].tagName' 2>/dev/null || echo "")
+
+          if [ -n "$PREV_TAG" ]; then
+            PREV_VER="${PREV_TAG#v}"
+            mkdir -p /tmp/prev
+            gh release download "$PREV_TAG" --pattern "ClaudeRemote.apk" --dir /tmp/prev/ 2>/dev/null || true
+
+            if [ -f /tmp/prev/ClaudeRemote.apk ]; then
+              PATCH_NAME="patch-${PREV_VER}-to-${NEW_VER}.bspatch"
+              bsdiff /tmp/prev/ClaudeRemote.apk ClaudeRemote.apk "$PATCH_NAME"
+
+              PATCH_SIZE=$(stat -c%s "$PATCH_NAME")
+              PCT=$(( PATCH_SIZE * 100 / APK_SIZE ))
+              echo "Patch size: $PATCH_SIZE bytes ($PCT% of APK)"
+
+              if [ "$PATCH_SIZE" -lt "$((APK_SIZE * 80 / 100))" ]; then
+                echo "patch_file=$PATCH_NAME" >> "$GITHUB_OUTPUT"
+              else
+                echo "Patch too large ($PCT%), skipping"
+                rm "$PATCH_NAME"
+              fi
+            fi
+          fi
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${{ steps.version.outputs.tag }}"
+
+          ASSETS="ClaudeRemote.apk"
+          if [ -n "${{ steps.patch.outputs.patch_file }}" ]; then
+            ASSETS="$ASSETS ${{ steps.patch.outputs.patch_file }}"
+          fi
+
+          gh release create "$TAG" $ASSETS \
+            --target "${{ github.sha }}" \
+            --title "$TAG" \
+            --notes "sha256:${{ steps.hash.outputs.sha256 }}"
