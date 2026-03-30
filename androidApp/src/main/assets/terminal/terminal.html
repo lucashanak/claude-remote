@@ -1,0 +1,155 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>Claude Remote Terminal</title>
+<link rel="stylesheet" href="xterm.css">
+<style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body { width: 100%; height: 100%; overflow: hidden; background: #1E1E1E; }
+    #terminal { width: 100%; height: 100%; }
+</style>
+</head>
+<body>
+<div id="terminal"></div>
+<script src="xterm.js"></script>
+<script src="xterm-addon-fit.js"></script>
+<script src="xterm-addon-web-links.js"></script>
+<script>
+(function() {
+    'use strict';
+
+    const term = new Terminal({
+        cursorBlink: true,
+        fontSize: 14,
+        fontFamily: '"Fira Code", "Cascadia Code", "JetBrains Mono", "Menlo", monospace',
+        theme: {
+            background: '#1E1E1E',
+            foreground: '#D4D4D4',
+            cursor: '#AEAFAD',
+            selectionBackground: '#264F78',
+            black: '#1E1E1E',
+            red: '#F44747',
+            green: '#6A9955',
+            yellow: '#DCDCAA',
+            blue: '#569CD6',
+            magenta: '#C586C0',
+            cyan: '#4EC9B0',
+            white: '#D4D4D4',
+            brightBlack: '#808080',
+            brightRed: '#F44747',
+            brightGreen: '#6A9955',
+            brightYellow: '#DCDCAA',
+            brightBlue: '#569CD6',
+            brightMagenta: '#C586C0',
+            brightCyan: '#4EC9B0',
+            brightWhite: '#FFFFFF'
+        },
+        scrollback: 10000,
+        allowTransparency: false,
+        convertEol: false
+    });
+
+    const fitAddon = new FitAddon.FitAddon();
+    term.loadAddon(fitAddon);
+
+    const webLinksAddon = new WebLinksAddon.WebLinksAddon();
+    term.loadAddon(webLinksAddon);
+
+    term.open(document.getElementById('terminal'));
+    fitAddon.fit();
+
+    // Send input to native bridge
+    term.onData(function(data) {
+        if (window.TerminalBridge) {
+            window.TerminalBridge.onTerminalInput(data);
+        }
+    });
+
+    // Notify native of terminal ready
+    function notifySize() {
+        if (window.TerminalBridge) {
+            window.TerminalBridge.onTerminalResize(term.cols, term.rows);
+        }
+    }
+
+    term.onResize(function(size) {
+        notifySize();
+    });
+
+    // Initial size notification
+    setTimeout(function() {
+        fitAddon.fit();
+        if (window.TerminalBridge) {
+            window.TerminalBridge.onTerminalReady(term.cols, term.rows);
+        }
+    }, 100);
+
+    // Handle window resize
+    window.addEventListener('resize', function() {
+        fitAddon.fit();
+    });
+
+    // API for native code
+    window.writeOutput = function(data) {
+        term.write(data);
+    };
+
+    window.clearTerminal = function() {
+        term.clear();
+    };
+
+    window.setFontSize = function(size) {
+        term.options.fontSize = size;
+        fitAddon.fit();
+    };
+
+    window.setScrollback = function(lines) {
+        term.options.scrollback = lines;
+    };
+
+    window.applyColorScheme = function(scheme) {
+        var themes = {
+            'default': {
+                background: '#1E1E1E', foreground: '#D4D4D4', cursor: '#AEAFAD'
+            },
+            'solarized-dark': {
+                background: '#002B36', foreground: '#839496', cursor: '#93A1A1'
+            },
+            'dracula': {
+                background: '#282A36', foreground: '#F8F8F2', cursor: '#F8F8F0'
+            },
+            'monokai': {
+                background: '#272822', foreground: '#F8F8F2', cursor: '#F8F8F0'
+            }
+        };
+        var theme = themes[scheme] || themes['default'];
+        term.options.theme = Object.assign(term.options.theme, theme);
+    };
+
+    // Touch handling for mobile
+    var touchStartY = 0;
+    var scrollAccum = 0;
+
+    document.addEventListener('touchstart', function(e) {
+        touchStartY = e.touches[0].clientY;
+        scrollAccum = 0;
+    }, { passive: true });
+
+    document.addEventListener('touchmove', function(e) {
+        if (e.touches.length === 2) {
+            var deltaY = touchStartY - e.touches[0].clientY;
+            scrollAccum += deltaY;
+            var lines = Math.floor(scrollAccum / 20);
+            if (lines !== 0) {
+                term.scrollLines(lines);
+                scrollAccum -= lines * 20;
+            }
+            touchStartY = e.touches[0].clientY;
+        }
+    }, { passive: true });
+})();
+</script>
+</body>
+</html>
