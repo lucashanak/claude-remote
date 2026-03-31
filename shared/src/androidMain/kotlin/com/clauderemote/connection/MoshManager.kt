@@ -1,24 +1,20 @@
 package com.clauderemote.connection
 
-import android.content.Context
 import com.clauderemote.model.AuthMethod
 import com.clauderemote.model.SshServer
 import com.jcraft.jsch.ChannelExec
 import com.jcraft.jsch.JSch
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
-import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import java.io.FileDescriptor
-import java.io.FileInputStream
-import java.io.FileOutputStream
 
 actual class MoshManager {
     private var process: Process? = null
     private var readJob: Job? = null
-    private var outputStream: FileOutputStream? = null
 
     actual val isConnected: Boolean get() = process != null
 
@@ -58,9 +54,7 @@ actual class MoshManager {
             val moshPort = parts[2]
             val moshKey = parts[3]
 
-            // Step 2: Launch mosh-client
-            // On Android, mosh binary is at nativeLibraryDir/libmosh.so
-            // This will be set by the Android activity
+            // Step 2: Launch mosh-client binary
             val moshBinary = moshBinaryPath ?: "mosh-client"
             val pb = ProcessBuilder(moshBinary, server.host, moshPort)
             pb.environment()["MOSH_KEY"] = moshKey
@@ -68,19 +62,18 @@ actual class MoshManager {
             val proc = pb.start()
             process = proc
 
-            // Read loop
-            readJob = coroutineScope {
-                launch(Dispatchers.IO) {
-                    val buffer = ByteArray(8192)
-                    try {
-                        while (isActive) {
-                            val len = proc.inputStream.read(buffer)
-                            if (len < 0) break
-                            onOutput(String(buffer, 0, len, Charsets.UTF_8))
-                        }
-                    } catch (_: Exception) {}
-                    onDisconnect()
-                }
+            // Read loop in separate scope
+            val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+            readJob = scope.launch {
+                val buffer = ByteArray(8192)
+                try {
+                    while (isActive) {
+                        val len = proc.inputStream.read(buffer)
+                        if (len < 0) break
+                        onOutput(String(buffer, 0, len, Charsets.UTF_8))
+                    }
+                } catch (_: Exception) {}
+                onDisconnect()
             }
 
             // Send startup command
@@ -109,7 +102,6 @@ actual class MoshManager {
 
     actual fun resize(cols: Int, rows: Int) {
         // Mosh handles resize via its own protocol
-        // On Android with PtyProcess this would use ioctl
     }
 
     actual suspend fun disconnect() {

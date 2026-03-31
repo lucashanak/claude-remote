@@ -6,11 +6,11 @@ import com.clauderemote.storage.ServerStorage
 import com.jcraft.jsch.ChannelShell
 import com.jcraft.jsch.JSch
 import com.jcraft.jsch.Session
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancelAndJoin
-import kotlinx.coroutines.coroutineScope
-import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.InputStream
@@ -67,11 +67,10 @@ class SshManager(
         val inputStream = ch.inputStream
         ch.connect(connectTimeout)
 
-        // Start read loop
-        readJob = coroutineScope {
-            launch(Dispatchers.IO) {
-                readLoop(inputStream, onOutput, onDisconnect)
-            }
+        // Start read loop in a separate scope so it doesn't block connect()
+        val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+        readJob = scope.launch {
+            readLoop(inputStream, onOutput, onDisconnect)
         }
 
         sess

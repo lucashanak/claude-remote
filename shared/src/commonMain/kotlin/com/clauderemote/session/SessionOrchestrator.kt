@@ -3,9 +3,10 @@ package com.clauderemote.session
 import com.clauderemote.connection.SshManager
 import com.clauderemote.model.*
 import com.clauderemote.storage.ServerStorage
+import com.clauderemote.util.FileLogger
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
-import java.util.UUID
+import kotlin.random.Random
 
 /**
  * Orchestrates the full flow: server → SSH connect → tmux → cd folder → claude.
@@ -34,7 +35,7 @@ class SessionOrchestrator(
         onOutput: (String) -> Unit,
         onDisconnect: () -> Unit
     ): ClaudeSession = withContext(Dispatchers.IO) {
-        val sessionId = UUID.randomUUID().toString()
+        val sessionId = generateId()
 
         val session = ClaudeSession(
             id = sessionId,
@@ -94,8 +95,9 @@ class SessionOrchestrator(
         onOutput: (String) -> Unit,
         onDisconnect: () -> Unit
     ) {
-        // TODO: Mosh integration via expect/actual MoshManager
-        // For now, fall back to SSH
+        // Mosh not yet fully integrated — fall back to SSH with warning
+        FileLogger.log("SessionOrchestrator", "Mosh not yet implemented, falling back to SSH for ${session.server.name}")
+        onOutput("\r\n[Warning: Mosh not yet implemented, using SSH]\r\n")
         connectSsh(session, onOutput, onDisconnect)
     }
 
@@ -138,4 +140,9 @@ class SessionOrchestrator(
     }
 
     fun getConnection(sessionId: String): SshManager? = connections[sessionId]
+
+    private fun generateId(): String {
+        val bytes = Random.nextBytes(16)
+        return bytes.joinToString("") { "%02x".format(it) }
+    }
 }

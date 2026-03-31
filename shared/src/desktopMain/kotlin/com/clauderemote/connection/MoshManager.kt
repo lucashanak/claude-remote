@@ -1,9 +1,10 @@
 package com.clauderemote.connection
 
 import com.clauderemote.model.SshServer
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
-import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -34,18 +35,17 @@ actual class MoshManager {
             val proc = pb.start()
             process = proc
 
-            readJob = coroutineScope {
-                launch(Dispatchers.IO) {
-                    val buffer = ByteArray(8192)
-                    try {
-                        while (isActive) {
-                            val len = proc.inputStream.read(buffer)
-                            if (len < 0) break
-                            onOutput(String(buffer, 0, len, Charsets.UTF_8))
-                        }
-                    } catch (_: Exception) {}
-                    onDisconnect()
-                }
+            val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+            readJob = scope.launch {
+                val buffer = ByteArray(8192)
+                try {
+                    while (isActive) {
+                        val len = proc.inputStream.read(buffer)
+                        if (len < 0) break
+                        onOutput(String(buffer, 0, len, Charsets.UTF_8))
+                    }
+                } catch (_: Exception) {}
+                onDisconnect()
             }
 
             true

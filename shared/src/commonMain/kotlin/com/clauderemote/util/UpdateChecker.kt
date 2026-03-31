@@ -2,7 +2,6 @@ package com.clauderemote.util
 
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
-import kotlinx.serialization.Serializable
 import org.json.JSONArray
 import java.net.HttpURLConnection
 import java.net.URL

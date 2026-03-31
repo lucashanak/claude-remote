@@ -21,14 +21,14 @@ fun SettingsScreen(
     settings: AppSettings,
     onBack: () -> Unit
 ) {
-    var fontSize by remember { mutableIntStateOf(settings.terminalFontSize) }
-    var scrollback by remember { mutableIntStateOf(settings.terminalScrollback) }
+    var fontSize by remember { mutableStateOf(settings.terminalFontSize) }
+    var scrollback by remember { mutableStateOf(settings.terminalScrollback) }
     var defaultMode by remember { mutableStateOf(settings.defaultClaudeMode) }
     var defaultModel by remember { mutableStateOf(settings.defaultClaudeModel) }
     var defaultConnection by remember { mutableStateOf(settings.defaultConnectionType) }
     var autoReconnect by remember { mutableStateOf(settings.sshAutoReconnect) }
     var keepAlive by remember { mutableStateOf(settings.keepAliveEnabled) }
-    var connectTimeout by remember { mutableIntStateOf(settings.sshConnectTimeout) }
+    var connectTimeout by remember { mutableStateOf(settings.sshConnectTimeout) }
 
     Scaffold(
         topBar = {

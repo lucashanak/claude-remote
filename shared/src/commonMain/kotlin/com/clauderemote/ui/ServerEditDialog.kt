@@ -9,7 +9,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import com.clauderemote.model.AuthMethod
 import com.clauderemote.model.SshServer
-import java.util.UUID
+import kotlin.random.Random
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -130,7 +130,7 @@ fun ServerEditDialog(
             TextButton(
                 onClick = {
                     val saved = SshServer(
-                        id = server?.id ?: UUID.randomUUID().toString(),
+                        id = server?.id ?: Random.nextBytes(16).joinToString("") { "%02x".format(it) },
                         name = name.trim(),
                         host = host.trim(),
                         port = port.toIntOrNull() ?: 22,
