@@ -4,6 +4,8 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
+import com.clauderemote.connection.SshManager
+import com.clauderemote.connection.TmuxManager
 import com.clauderemote.model.*
 import com.clauderemote.session.SessionOrchestrator
 import com.clauderemote.session.TabManager
@@ -12,7 +14,9 @@ import com.clauderemote.storage.ServerStorage
 import com.clauderemote.ui.theme.ClaudeRemoteTheme
 import com.clauderemote.util.UpdateChecker
 import com.clauderemote.util.UpdateInfo
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 enum class Screen {
     LAUNCHER, CONNECT, TERMINAL, SETTINGS
@@ -35,6 +39,7 @@ fun App(
     var showServerDialog by remember { mutableStateOf(false) }
     var editingServer by remember { mutableStateOf<SshServer?>(null) }
     var tmuxSessions by remember { mutableStateOf<List<TmuxSession>>(emptyList()) }
+    var tmuxLoading by remember { mutableStateOf(false) }
     var connectionError by remember { mutableStateOf<String?>(null) }
 
     var serverList by remember { mutableStateOf(serverStorage.loadServers()) }
@@ -130,6 +135,30 @@ fun App(
                             selectedServer = server
                             tmuxSessions = emptyList()
                             currentScreen = Screen.CONNECT
+                            // Fetch tmux sessions in background
+                            scope.launch {
+                                tmuxLoading = true
+                                try {
+                                    withContext(Dispatchers.IO) {
+                                        val jsch = com.jcraft.jsch.JSch()
+                                        if (server.authMethod == AuthMethod.KEY && server.privateKey != null) {
+                                            jsch.addIdentity("key", server.privateKey.toByteArray(), null, null)
+                                        }
+                                        val sess = jsch.getSession(server.username, server.host, server.port)
+                                        if (server.authMethod == AuthMethod.PASSWORD && server.password != null) {
+                                            sess.setPassword(server.password)
+                                        }
+                                        sess.setConfig("StrictHostKeyChecking", "no")
+                                        sess.timeout = 10000
+                                        sess.connect(10000)
+                                        tmuxSessions = TmuxManager.listSessions(sess)
+                                        sess.disconnect()
+                                    }
+                                } catch (_: Exception) {
+                                    tmuxSessions = emptyList()
+                                }
+                                tmuxLoading = false
+                            }
                         },
                         onAddServer = {
                             editingServer = null

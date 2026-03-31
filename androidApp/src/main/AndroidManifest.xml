@@ -26,6 +26,11 @@
             </intent-filter>
         </activity>
 
+        <service
+            android:name="com.clauderemote.KeepAliveService"
+            android:exported="false"
+            android:foregroundServiceType="connectedDevice" />
+
         <provider
             android:name="androidx.core.content.FileProvider"
             android:authorities="${applicationId}.fileprovider"

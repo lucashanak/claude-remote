@@ -26,3 +26,10 @@ androidApp/src/main/assets/terminal/xterm-addon-*.js
 desktopApp/src/main/resources/terminal/xterm.js
 desktopApp/src/main/resources/terminal/xterm.css
 desktopApp/src/main/resources/terminal/xterm-addon-*.js
+
+## Mosh build artifacts
+build-mosh-tmp/
+androidApp/src/main/jniLibs/
+
+## KCEF cache
+.claude-remote/kcef/
