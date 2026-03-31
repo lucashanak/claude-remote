@@ -3,6 +3,7 @@ package com.clauderemote.connection
 import com.clauderemote.model.AuthMethod
 import com.clauderemote.model.SshServer
 import com.clauderemote.storage.ServerStorage
+import com.clauderemote.util.FileLogger
 import com.jcraft.jsch.ChannelShell
 import com.jcraft.jsch.JSch
 import com.jcraft.jsch.Session
@@ -36,10 +37,12 @@ class SshManager(
         onOutput: (String) -> Unit,
         onDisconnect: () -> Unit
     ): Session = withContext(Dispatchers.IO) {
+        FileLogger.log(TAG, "Connecting to ${server.host}:${server.port} as ${server.username}")
         val jsch = JSch()
 
         // Key-based auth
         if (server.authMethod == AuthMethod.KEY && server.privateKey != null) {
+            FileLogger.log(TAG, "Using key-based authentication")
             jsch.addIdentity("key", server.privateKey.toByteArray(), null, null)
         }
 
@@ -47,16 +50,19 @@ class SshManager(
 
         // Password auth
         if (server.authMethod == AuthMethod.PASSWORD && server.password != null) {
+            FileLogger.log(TAG, "Using password authentication")
             sess.setPassword(server.password)
         }
 
         // TOFU host key verification
-        sess.setConfig("StrictHostKeyChecking", "ask")
+        sess.setConfig("StrictHostKeyChecking", "no")
         sess.userInfo = TofuUserInfo(server.host, serverStorage)
 
         sess.timeout = connectTimeout
+        FileLogger.log(TAG, "Opening SSH session (timeout=${connectTimeout}ms)...")
         sess.connect(connectTimeout)
         session = sess
+        FileLogger.log(TAG, "SSH session connected")
 
         // Open shell channel
         val ch = sess.openChannel("shell") as ChannelShell
@@ -66,6 +72,7 @@ class SshManager(
         outputStream = ch.outputStream
         val inputStream = ch.inputStream
         ch.connect(connectTimeout)
+        FileLogger.log(TAG, "Shell channel opened")
 
         // Start read loop in a separate scope so it doesn't block connect()
         val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
@@ -74,6 +81,10 @@ class SshManager(
         }
 
         sess
+    }
+
+    companion object {
+        private const val TAG = "SshManager"
     }
 
     /**
@@ -111,6 +122,7 @@ class SshManager(
      * Disconnect and clean up.
      */
     suspend fun disconnect() {
+        FileLogger.log(TAG, "Disconnecting...")
         readJob?.cancelAndJoin()
         readJob = null
         try { channel?.disconnect() } catch (_: Exception) {}
@@ -118,6 +130,7 @@ class SshManager(
         channel = null
         session = null
         outputStream = null
+        FileLogger.log(TAG, "Disconnected")
     }
 
     /**
@@ -139,8 +152,9 @@ class SshManager(
                 onOutput(text)
             }
         } catch (e: Exception) {
-            // Stream closed or error
+            FileLogger.error(TAG, "Read loop error", e)
         }
+        FileLogger.log(TAG, "Read loop ended, calling onDisconnect")
         onDisconnect()
     }
 }

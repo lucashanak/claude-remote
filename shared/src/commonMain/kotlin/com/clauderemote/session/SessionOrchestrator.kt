@@ -49,6 +49,7 @@ class SessionOrchestrator(
         )
 
         tabManager.addTab(session)
+        FileLogger.log(TAG, "Launching session: ${server.name} → $folder (${connectionType.name}, ${mode.name}, ${model.name})")
 
         try {
             when (connectionType) {
@@ -60,8 +61,10 @@ class SessionOrchestrator(
             serverStorage.updateServer(server.withRecentFolder(folder))
 
             tabManager.updateTabStatus(sessionId, SessionStatus.ACTIVE)
+            FileLogger.log(TAG, "Session active: $sessionId")
             session.copy(status = SessionStatus.ACTIVE)
         } catch (e: Exception) {
+            FileLogger.error(TAG, "Session launch failed", e)
             tabManager.updateTabStatus(sessionId, SessionStatus.ERROR)
             throw e
         }
@@ -144,5 +147,9 @@ class SessionOrchestrator(
     private fun generateId(): String {
         val bytes = Random.nextBytes(16)
         return bytes.joinToString("") { "%02x".format(it) }
+    }
+
+    companion object {
+        private const val TAG = "SessionOrchestrator"
     }
 }
