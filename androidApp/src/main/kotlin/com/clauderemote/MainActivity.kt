@@ -266,11 +266,20 @@ class MainActivity : ComponentActivity() {
                 MotionEvent.ACTION_CANCEL -> {
                     longPressRunnable?.let { handler.removeCallbacks(it) }
                     val was2f = twoFingerActive
+                    val wasPinch = mode == "pinch"
                     val was1fScroll = oneFingerScrolling
                     val wasLongPress = longPressHandled
                     twoFingerActive = false
                     mode = null
                     oneFingerScrolling = false
+
+                    // After pinch zoom: re-fit terminal to fill container
+                    if (wasPinch) {
+                        webView.postDelayed({
+                            webView.evaluateJavascript("fitAddon.fit();if(A)A.onTerminalResize(term.cols,term.rows)", null)
+                        }, 100)
+                    }
+
                     if (was2f || was1fScroll || wasLongPress) return@setOnTouchListener true
                     false
                 }
