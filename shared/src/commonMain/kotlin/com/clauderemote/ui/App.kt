@@ -146,6 +146,26 @@ fun App(
                     LauncherScreen(
                         servers = serverList,
                         activeSessions = tabs,
+                        onQuickConnect = { server ->
+                            // Long-press: connect directly with defaults
+                            scope.launch {
+                                try {
+                                    connectionError = null
+                                    sessionOrchestrator.launchSession(
+                                        server = server,
+                                        folder = server.defaultFolder,
+                                        mode = server.defaultClaudeMode,
+                                        model = server.defaultClaudeModel,
+                                        connectionType = ConnectionType.SSH,
+                                        tmuxSessionName = "claude-${server.name}",
+                                        isNewTmuxSession = true
+                                    )
+                                    currentScreen = Screen.TERMINAL
+                                } catch (e: Exception) {
+                                    connectionError = e.message
+                                }
+                            }
+                        },
                         onConnectServer = { server ->
                             selectedServer = server
                             tmuxSessions = emptyList()
