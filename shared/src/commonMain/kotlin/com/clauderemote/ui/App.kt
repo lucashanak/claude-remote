@@ -347,11 +347,11 @@ fun App(
                             activeTabId?.let { sessionOrchestrator.sendClaudeCommand(it, cmd) }
                         },
                         onAttachFile = if (onPickFile != null) {
-                            suspend {
-                                val id = activeTabId ?: return@suspend null
+                            suspend attachFile@{
+                                val id = activeTabId ?: return@attachFile null
                                 val deferred = CompletableDeferred<Pair<ByteArray, String>?>()
                                 onPickFile { bytes, name -> deferred.complete(bytes to name) }
-                                val result = deferred.await() ?: return@suspend null
+                                val result = deferred.await() ?: return@attachFile null
                                 val (bytes, name) = result
                                 try {
                                     withContext(Dispatchers.IO) {
