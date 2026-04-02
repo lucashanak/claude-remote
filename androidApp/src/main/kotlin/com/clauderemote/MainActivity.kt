@@ -38,12 +38,17 @@ class MainActivity : ComponentActivity() {
         tabManager = TabManager()
         sessionOrchestrator = SessionOrchestrator(serverStorage, tabManager)
 
-        // Wire SSH output → terminal WebView
+        // Wire SSH output → terminal WebView (only for active tab)
         sessionOrchestrator.onTerminalOutput = { sessionId, data ->
-            // Only write to terminal if this session's tab is active
-            val activeId = tabManager.activeTabId.value
-            if (activeId == null || activeId == sessionId) {
-                writeToTerminal(data)
+            writeToTerminal(data)
+        }
+
+        // Tab switch: clear terminal, replay buffered output
+        sessionOrchestrator.onTabSwitched = { sessionId, bufferedOutput ->
+            FileLogger.log("MainActivity", "Tab switched to $sessionId, replaying ${bufferedOutput.length} chars")
+            clearTerminal()
+            if (bufferedOutput.isNotEmpty()) {
+                writeToTerminal(bufferedOutput)
             }
         }
 
@@ -120,6 +125,13 @@ class MainActivity : ComponentActivity() {
             tabManager.activeTabId.value?.let { id ->
                 sessionOrchestrator.resize(id, cols, rows)
             }
+        }
+    }
+
+    private fun clearTerminal() {
+        val wv = terminalWebView ?: return
+        wv.post {
+            wv.evaluateJavascript("if(typeof clearTerminal==='function')clearTerminal()", null)
         }
     }
 

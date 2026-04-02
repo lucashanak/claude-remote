@@ -176,7 +176,7 @@ fun App(
                             refreshServers()
                         },
                         onResumeSession = { session ->
-                            tabManager.switchTab(session.id)
+                            sessionOrchestrator.switchTab(session.id)
                             currentScreen = Screen.TERMINAL
                         },
                         onSettings = { currentScreen = Screen.SETTINGS }
@@ -215,7 +215,7 @@ fun App(
                     TerminalScreen(
                         tabs = tabs,
                         activeTabId = activeTabId,
-                        onTabSwitch = { tabManager.switchTab(it) },
+                        onTabSwitch = { sessionOrchestrator.switchTab(it) },
                         onTabClose = { id ->
                             scope.launch {
                                 sessionOrchestrator.disconnectSession(id)

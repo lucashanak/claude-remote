@@ -11,26 +11,26 @@ import kotlin.random.Random
 /**
  * Orchestrates the full flow: server → SSH connect → tmux → cd folder → claude.
  * Manages one SshManager per active session/tab.
+ * Buffers terminal output per session for tab switching.
  */
 class SessionOrchestrator(
     private val serverStorage: ServerStorage,
     private val tabManager: TabManager
 ) {
-    // One SshManager per session ID
     private val connections = mutableMapOf<String, SshManager>()
+
+    // Per-session terminal output buffer (ring buffer, capped at MAX_BUFFER)
+    private val outputBuffers = mutableMapOf<String, StringBuilder>()
 
     // Terminal output callback — set by the platform (Android WebView, Desktop terminal)
     var onTerminalOutput: ((sessionId: String, data: String) -> Unit)? = null
 
+    // Tab switch callback — platform clears terminal and replays buffer
+    var onTabSwitched: ((sessionId: String, bufferedOutput: String) -> Unit)? = null
+
     // Disconnect callback
     var onSessionDisconnect: ((sessionId: String) -> Unit)? = null
 
-    /**
-     * Launch a new Claude session:
-     * 1. SSH connect to server
-     * 2. Open tmux session
-     * 3. Run claude command in folder
-     */
     suspend fun launchSession(
         server: SshServer,
         folder: String,
@@ -52,6 +52,7 @@ class SessionOrchestrator(
             status = SessionStatus.CONNECTING
         )
 
+        outputBuffers[sessionId] = StringBuilder()
         tabManager.addTab(session)
         FileLogger.log(TAG, "Launching session: ${server.name} → $folder (${connectionType.name}, ${mode.name}, ${model.name})")
 
@@ -61,9 +62,7 @@ class SessionOrchestrator(
                 ConnectionType.MOSH -> connectMosh(session)
             }
 
-            // Update recent folders on server
             serverStorage.updateServer(server.withRecentFolder(folder))
-
             tabManager.updateTabStatus(sessionId, SessionStatus.ACTIVE)
             FileLogger.log(TAG, "Session active: $sessionId")
             session.copy(status = SessionStatus.ACTIVE)
@@ -74,6 +73,16 @@ class SessionOrchestrator(
         }
     }
 
+    /**
+     * Switch the active tab. Notifies platform to clear terminal and replay buffer.
+     */
+    fun switchTab(id: String) {
+        tabManager.switchTab(id)
+        val buffer = outputBuffers[id]?.toString() ?: ""
+        FileLogger.log(TAG, "Switching to tab $id (buffer: ${buffer.length} chars)")
+        onTabSwitched?.invoke(id, buffer)
+    }
+
     private suspend fun connectSsh(session: ClaudeSession) {
         val sshManager = SshManager(serverStorage)
         connections[session.id] = sshManager
@@ -81,7 +90,12 @@ class SessionOrchestrator(
         sshManager.connect(
             session.server,
             onOutput = { data ->
-                onTerminalOutput?.invoke(session.id, data)
+                // Buffer all output
+                appendToBuffer(session.id, data)
+                // Only forward to terminal if this tab is active
+                if (tabManager.activeTabId.value == session.id) {
+                    onTerminalOutput?.invoke(session.id, data)
+                }
             },
             onDisconnect = {
                 tabManager.updateTabStatus(session.id, SessionStatus.DISCONNECTED)
@@ -89,7 +103,6 @@ class SessionOrchestrator(
             }
         )
 
-        // Send tmux + claude command
         val command = ClaudeConfig.buildTmuxLaunchCommand(
             tmuxSessionName = session.tmuxSessionName,
             folder = session.folder,
@@ -100,10 +113,21 @@ class SessionOrchestrator(
     }
 
     private suspend fun connectMosh(session: ClaudeSession) {
-        // Mosh not yet fully integrated — fall back to SSH with warning
         FileLogger.log(TAG, "Mosh not yet implemented, falling back to SSH for ${session.server.name}")
-        onTerminalOutput?.invoke("", "\r\n[Warning: Mosh not yet implemented, using SSH]\r\n")
+        val warning = "\r\n[Warning: Mosh not yet implemented, using SSH]\r\n"
+        appendToBuffer("", warning)
+        onTerminalOutput?.invoke("", warning)
         connectSsh(session)
+    }
+
+    private fun appendToBuffer(sessionId: String, data: String) {
+        val buf = outputBuffers[sessionId] ?: return
+        buf.append(data)
+        // Cap buffer at MAX_BUFFER — keep tail
+        if (buf.length > MAX_BUFFER) {
+            val excess = buf.length - MAX_BUFFER
+            buf.delete(0, excess)
+        }
     }
 
     fun sendInput(sessionId: String, data: String) {
@@ -133,12 +157,14 @@ class SessionOrchestrator(
     suspend fun disconnectSession(sessionId: String) {
         connections[sessionId]?.disconnect()
         connections.remove(sessionId)
+        outputBuffers.remove(sessionId)
         tabManager.removeTab(sessionId)
     }
 
     suspend fun disconnectAll() {
         connections.values.forEach { it.disconnect() }
         connections.clear()
+        outputBuffers.clear()
     }
 
     fun getConnection(sessionId: String): SshManager? = connections[sessionId]
@@ -150,5 +176,6 @@ class SessionOrchestrator(
 
     companion object {
         private const val TAG = "SessionOrchestrator"
+        private const val MAX_BUFFER = 256 * 1024 // 256KB per session
     }
 }
