@@ -1,13 +1,16 @@
 package com.clauderemote.ui
 
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.systemBars
+import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
-import com.clauderemote.connection.SshManager
 import com.clauderemote.connection.TmuxManager
 import com.clauderemote.model.*
 import com.clauderemote.session.SessionOrchestrator
@@ -15,6 +18,7 @@ import com.clauderemote.session.TabManager
 import com.clauderemote.storage.AppSettings
 import com.clauderemote.storage.ServerStorage
 import com.clauderemote.ui.theme.ClaudeRemoteTheme
+import com.clauderemote.util.FileLogger
 import com.clauderemote.util.UpdateChecker
 import com.clauderemote.util.UpdateInfo
 import kotlinx.coroutines.Dispatchers
@@ -22,7 +26,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 enum class Screen {
-    LAUNCHER, CONNECT, TERMINAL, SETTINGS
+    LAUNCHER, CONNECT, TERMINAL, SETTINGS, LOG_VIEWER
 }
 
 @Composable
@@ -33,6 +37,7 @@ fun App(
     sessionOrchestrator: SessionOrchestrator,
     appVersion: String = "1.0.0",
     onInstallUpdate: ((ByteArray, UpdateInfo) -> Unit)? = null,
+    onBackPressed: (() -> Unit)? = null,
     terminalContent: @Composable (modifier: Modifier) -> Unit
 ) {
     val scope = rememberCoroutineScope()
@@ -62,6 +67,20 @@ fun App(
         } catch (_: Exception) {}
     }
 
+    // Back handler
+    androidx.activity.compose.BackHandler(enabled = currentScreen != Screen.LAUNCHER) {
+        when (currentScreen) {
+            Screen.TERMINAL -> {
+                // Don't exit app, go to launcher
+                currentScreen = Screen.LAUNCHER
+            }
+            Screen.CONNECT, Screen.SETTINGS, Screen.LOG_VIEWER -> {
+                currentScreen = Screen.LAUNCHER
+            }
+            Screen.LAUNCHER -> { /* system handles */ }
+        }
+    }
+
     fun refreshServers() {
         serverList = serverStorage.loadServers()
     }
@@ -72,13 +91,11 @@ fun App(
                 updateState = updateState.copy(downloading = true, error = null, statusText = "Downloading...")
 
                 val apkBytes = if (info.hasPatch) {
-                    // Delta patch chain
                     try {
                         applyPatchChain(info, appVersion) { status, progress ->
                             updateState = updateState.copy(statusText = status, progress = progress)
                         }
                     } catch (e: Exception) {
-                        // Fallback to full APK
                         updateState = updateState.copy(statusText = "Patch failed, downloading full APK...")
                         UpdateChecker.downloadFile(info.apkUrl) { progress, dl, total ->
                             updateState = updateState.copy(
@@ -96,7 +113,6 @@ fun App(
                     }
                 }
 
-                // Verify SHA-256
                 if (info.apkSha256 != null) {
                     val actualHash = UpdateChecker.sha256(apkBytes)
                     if (actualHash != info.apkSha256) {
@@ -120,7 +136,11 @@ fun App(
     }
 
     ClaudeRemoteTheme {
-        Column(modifier = Modifier.fillMaxSize()) {
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .windowInsetsPadding(WindowInsets.systemBars)
+        ) {
             // Update banner at top
             UpdateBanner(
                 state = updateState,
@@ -138,7 +158,6 @@ fun App(
                             selectedServer = server
                             tmuxSessions = emptyList()
                             currentScreen = Screen.CONNECT
-                            // Fetch tmux sessions in background
                             scope.launch {
                                 tmuxLoading = true
                                 try {
@@ -179,7 +198,8 @@ fun App(
                             sessionOrchestrator.switchTab(session.id)
                             currentScreen = Screen.TERMINAL
                         },
-                        onSettings = { currentScreen = Screen.SETTINGS }
+                        onSettings = { currentScreen = Screen.SETTINGS },
+                        onViewLog = { currentScreen = Screen.LOG_VIEWER }
                     )
                 }
 
@@ -243,6 +263,12 @@ fun App(
                         onBack = { currentScreen = Screen.LAUNCHER }
                     )
                 }
+
+                Screen.LOG_VIEWER -> {
+                    LogViewerScreen(
+                        onBack = { currentScreen = Screen.LAUNCHER }
+                    )
+                }
             }
         }
 
@@ -277,16 +303,10 @@ fun App(
     }
 }
 
-/**
- * Apply a chain of binary delta patches to produce the final APK bytes.
- */
 private suspend fun applyPatchChain(
     update: UpdateInfo,
     currentVersion: String,
     onStatus: (String, Int) -> Unit
 ): ByteArray {
-    val chain = update.patchChain
-    // Read current installed APK - this will be provided by platform
-    // For now, download full APK as fallback
     throw UnsupportedOperationException("Patch chain requires platform-specific APK access")
 }

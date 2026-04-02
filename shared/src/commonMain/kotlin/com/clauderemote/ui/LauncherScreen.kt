@@ -28,13 +28,17 @@ fun LauncherScreen(
     onEditServer: (SshServer) -> Unit,
     onDeleteServer: (SshServer) -> Unit,
     onResumeSession: (ClaudeSession) -> Unit,
-    onSettings: () -> Unit
+    onSettings: () -> Unit,
+    onViewLog: () -> Unit = {}
 ) {
     Scaffold(
         topBar = {
             TopAppBar(
                 title = { Text("Claude Remote") },
                 actions = {
+                    IconButton(onClick = onViewLog) {
+                        Icon(Icons.Default.Info, "Log")
+                    }
                     IconButton(onClick = onSettings) {
                         Icon(Icons.Default.Settings, "Settings")
                     }
