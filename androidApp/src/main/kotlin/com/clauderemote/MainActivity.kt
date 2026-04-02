@@ -23,6 +23,9 @@ import com.clauderemote.storage.ServerStorage
 import com.clauderemote.ui.App
 import com.clauderemote.util.FileLogger
 import com.clauderemote.util.UpdateInfo
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.GlobalScope
+import kotlinx.coroutines.launch
 import org.json.JSONObject
 import java.io.File
 
@@ -207,7 +210,7 @@ class MainActivity : ComponentActivity() {
                         it.status == com.clauderemote.model.SessionStatus.DISCONNECTED
                     }
                     if (disconnected.isNotEmpty()) {
-                        kotlinx.coroutines.GlobalScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+                            GlobalScope.launch(Dispatchers.IO) {
                             disconnected.forEach { session ->
                                 try {
                                     sessionOrchestrator.reconnectSession(session.id)
