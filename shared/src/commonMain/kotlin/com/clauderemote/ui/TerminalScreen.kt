@@ -142,7 +142,7 @@ fun TerminalScreen(
                     onSelect = { cmd ->
                         showCommandPicker = false
                         commandFilter = ""
-                        onSendCommand(cmd.command + "\n")
+                        onSendCommand(cmd.command + "\r")
                     },
                     onDismiss = { showCommandPicker = false; commandFilter = "" }
                 )
@@ -194,7 +194,7 @@ fun TerminalScreen(
                     ) {
                         snippets.forEach { snip ->
                             AssistChip(
-                                onClick = { onSendCommand(snip + "\n") },
+                                onClick = { onSendCommand(snip + "\r") },
                                 label = {
                                     Text(
                                         if (snip.length > 20) snip.take(18) + ".." else snip,
@@ -263,7 +263,7 @@ private fun PromptInputBar(
                     suggestions.forEach { cmd ->
                         AssistChip(
                             onClick = {
-                                onSendCommand(cmd.command + "\n")
+                                onSendCommand(cmd.command + "\r")
                                 text = ""
                             },
                             label = { Text(cmd.command, style = MaterialTheme.typography.bodySmall) }

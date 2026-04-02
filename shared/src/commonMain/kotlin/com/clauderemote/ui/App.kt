@@ -241,7 +241,36 @@ fun App(
                         ConnectScreen(
                             server = server,
                             tmuxSessions = tmuxSessions,
+                            appSettings = appSettings,
                             onBack = { currentScreen = Screen.LAUNCHER },
+                            onBrowseFolders = { path ->
+                                withContext(Dispatchers.IO) {
+                                    try {
+                                        val jsch = com.jcraft.jsch.JSch()
+                                        if (server.authMethod == AuthMethod.KEY && server.privateKey != null) {
+                                            jsch.addIdentity("key", server.privateKey.toByteArray(), null, null)
+                                        }
+                                        val sess = jsch.getSession(server.username, server.host, server.port)
+                                        if (server.authMethod == AuthMethod.PASSWORD && server.password != null) {
+                                            sess.setPassword(server.password)
+                                        }
+                                        sess.setConfig("StrictHostKeyChecking", "no")
+                                        sess.timeout = 10000
+                                        sess.connect(10000)
+                                        val ch = sess.openChannel("exec") as com.jcraft.jsch.ChannelExec
+                                        ch.setCommand("ls -1d ${path.trimEnd('/')}/*/ 2>/dev/null | head -50")
+                                        ch.inputStream = null
+                                        val input = ch.inputStream
+                                        ch.connect(5000)
+                                        val output = input.bufferedReader().readText()
+                                        ch.disconnect()
+                                        sess.disconnect()
+                                        output.lines().filter { it.isNotBlank() }.map { it.trimEnd('/') }
+                                    } catch (_: Exception) {
+                                        emptyList()
+                                    }
+                                }
+                            },
                             onKillTmux = { sessionName ->
                                 scope.launch {
                                     try {
@@ -306,7 +335,7 @@ fun App(
                             } else {
                                 scope.launch {
                                     sessionOrchestrator.disconnectSession(id)
-                                    if (tabs.isEmpty()) currentScreen = Screen.LAUNCHER
+                                    if (tabManager.tabs.value.isEmpty()) currentScreen = Screen.LAUNCHER
                                 }
                             }
                         },
@@ -416,7 +445,7 @@ fun App(
                         tabCloseConfirmId = null
                         scope.launch {
                             sessionOrchestrator.disconnectSession(id)
-                            if (tabs.isEmpty()) currentScreen = Screen.LAUNCHER
+                            if (tabManager.tabs.value.isEmpty()) currentScreen = Screen.LAUNCHER
                         }
                     }) { Text("Disconnect") }
                 },

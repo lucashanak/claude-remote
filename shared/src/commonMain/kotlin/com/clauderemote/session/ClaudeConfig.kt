@@ -50,7 +50,11 @@ object ClaudeConfig {
         model: ClaudeModel
     ): String {
         val claudeCmd = buildLaunchCommand(folder, mode, model)
-        return "tmux new-session -A -s '${tmuxSessionName.replace("'", "\\'")}' " +
+        val escaped = tmuxSessionName.replace("'", "\\'")
+        // Kill existing session with same name to avoid -A reattaching
+        // and sending keystrokes into a running program
+        return "tmux kill-session -t '$escaped' 2>/dev/null; " +
+                "tmux new-session -s '$escaped' " +
                 "\\; set-option -g mouse on " +
                 "\\; send-keys '${claudeCmd.replace("'", "\\'")}' Enter"
     }

@@ -15,22 +15,29 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.unit.dp
 import com.clauderemote.model.*
+import com.clauderemote.storage.AppSettings
+import kotlinx.coroutines.launch
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
 fun ConnectScreen(
     server: SshServer,
     tmuxSessions: List<TmuxSession>,
+    appSettings: AppSettings,
     onBack: () -> Unit,
     onKillTmux: ((String) -> Unit)? = null,
+    onBrowseFolders: (suspend (String) -> List<String>)? = null,
     onLaunch: (folder: String, mode: ClaudeMode, model: ClaudeModel, connectionType: ConnectionType, tmuxSession: String, isNewTmuxSession: Boolean) -> Unit
 ) {
     var folder by remember { mutableStateOf(server.defaultFolder) }
-    var selectedMode by remember { mutableStateOf(server.defaultClaudeMode) }
-    var selectedModel by remember { mutableStateOf(server.defaultClaudeModel) }
+    var selectedMode by remember { mutableStateOf(appSettings.defaultClaudeMode) }
+    var selectedModel by remember { mutableStateOf(appSettings.defaultClaudeModel) }
     var connectionType by remember { mutableStateOf(ConnectionType.SSH) }
     var tmuxSessionName by remember { mutableStateOf("claude-${server.name}-${server.defaultFolder.substringAfterLast('/')}") }
     var useExistingTmux by remember { mutableStateOf(false) }
+    var browseFolders by remember { mutableStateOf<List<String>>(emptyList()) }
+    var browseLoading by remember { mutableStateOf(false) }
+    val scope = rememberCoroutineScope()
     // Auto-update tmux name when folder changes
     LaunchedEffect(folder) {
         if (!useExistingTmux) {
@@ -65,13 +72,58 @@ fun ConnectScreen(
                 Column(modifier = Modifier.padding(16.dp)) {
                     Text("Folder", style = MaterialTheme.typography.titleSmall)
                     Spacer(Modifier.height(8.dp))
-                    OutlinedTextField(
-                        value = folder,
-                        onValueChange = { folder = it },
-                        label = { Text("Remote path") },
+                    Row(
                         modifier = Modifier.fillMaxWidth(),
-                        singleLine = true
-                    )
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        OutlinedTextField(
+                            value = folder,
+                            onValueChange = { folder = it },
+                            label = { Text("Remote path") },
+                            modifier = Modifier.weight(1f),
+                            singleLine = true
+                        )
+                        if (onBrowseFolders != null) {
+                            Spacer(Modifier.width(8.dp))
+                            FilledTonalButton(
+                                onClick = {
+                                    browseLoading = true
+                                    scope.launch {
+                                        browseFolders = onBrowseFolders.invoke(folder)
+                                        browseLoading = false
+                                    }
+                                },
+                                enabled = !browseLoading
+                            ) {
+                                if (browseLoading) {
+                                    CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
+                                } else {
+                                    Text("Browse")
+                                }
+                            }
+                        }
+                    }
+
+                    if (browseFolders.isNotEmpty()) {
+                        Spacer(Modifier.height(8.dp))
+                        Text("Subdirectories:", style = MaterialTheme.typography.bodySmall)
+                        FlowRow(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                            browseFolders.forEach { sub ->
+                                AssistChip(
+                                    onClick = {
+                                        folder = sub
+                                        browseFolders = emptyList()
+                                    },
+                                    label = {
+                                        Text(
+                                            sub.substringAfterLast('/'),
+                                            style = MaterialTheme.typography.bodySmall
+                                        )
+                                    }
+                                )
+                            }
+                        }
+                    }
 
                     if (server.recentFolders.isNotEmpty()) {
                         Spacer(Modifier.height(8.dp))
