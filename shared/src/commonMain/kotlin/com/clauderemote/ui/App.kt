@@ -271,6 +271,19 @@ fun App(
                         onSendEscape = {
                             activeTabId?.let { sessionOrchestrator.sendEscape(it) }
                         },
+                        onFetchCommands = {
+                            val id = activeTabId
+                            if (id != null) {
+                                val conn = sessionOrchestrator.getConnection(id)
+                                if (conn != null) {
+                                    com.clauderemote.session.CommandFetcher.fetchCommands(conn)
+                                } else {
+                                    com.clauderemote.session.CommandFetcher.getCachedOrFallback()
+                                }
+                            } else {
+                                com.clauderemote.session.CommandFetcher.getCachedOrFallback()
+                            }
+                        },
                         terminalContent = terminalContent
                     )
                 }

@@ -17,30 +17,9 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
 import com.clauderemote.model.ClaudeModel
 import com.clauderemote.model.ClaudeSession
-
-data class SlashCommand(val command: String, val description: String)
-
-private val CLAUDE_COMMANDS = listOf(
-    SlashCommand("/plan", "Enter plan mode"),
-    SlashCommand("/model", "Switch model (interactive)"),
-    SlashCommand("/clear", "Clear conversation context"),
-    SlashCommand("/compact", "Compact context manually"),
-    SlashCommand("/config", "Open settings"),
-    SlashCommand("/help", "Show help"),
-    SlashCommand("/rewind", "Undo code changes"),
-    SlashCommand("/resume", "Switch conversations"),
-    SlashCommand("/status", "View status"),
-    SlashCommand("/usage", "Check plan limits"),
-    SlashCommand("/stats", "Usage statistics"),
-    SlashCommand("/context", "View context info"),
-    SlashCommand("/add-dir", "Add directory"),
-    SlashCommand("/thinking", "Toggle thinking mode"),
-    SlashCommand("/commands", "List all commands"),
-    SlashCommand("/effort", "Set effort level"),
-    SlashCommand("/memory", "Edit memory files"),
-    SlashCommand("/copy", "Copy last response"),
-    SlashCommand("/debug", "Debug information"),
-)
+import com.clauderemote.session.CommandFetcher
+import com.clauderemote.session.SlashCommand
+import kotlinx.coroutines.launch
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -54,12 +33,15 @@ fun TerminalScreen(
     onSendCommand: (String) -> Unit,
     onSwitchModel: (ClaudeModel) -> Unit,
     onSendEscape: () -> Unit,
+    onFetchCommands: (suspend () -> List<SlashCommand>)? = null,
     terminalContent: @Composable (Modifier) -> Unit
 ) {
     var showControlBar by remember { mutableStateOf(true) }
     var showCommandPicker by remember { mutableStateOf(false) }
     var commandFilter by remember { mutableStateOf("") }
+    var commands by remember { mutableStateOf(CommandFetcher.getCachedOrFallback()) }
     val activeSession = tabs.find { it.id == activeTabId }
+    val scope = rememberCoroutineScope()
 
     Column(modifier = Modifier.fillMaxSize()) {
         // Top bar
@@ -94,6 +76,7 @@ fun TerminalScreen(
             // Command picker overlay
             if (showCommandPicker) {
                 CommandPicker(
+                    commands = commands,
                     filter = commandFilter,
                     onFilterChange = { commandFilter = it },
                     onSelect = { cmd ->
@@ -117,6 +100,13 @@ fun TerminalScreen(
                 onOpenCommands = {
                     showCommandPicker = true
                     commandFilter = ""
+                    // Fetch commands from remote in background
+                    if (onFetchCommands != null) {
+                        scope.launch {
+                            val fetched = onFetchCommands.invoke()
+                            commands = fetched
+                        }
+                    }
                 }
             )
         }
@@ -134,13 +124,14 @@ fun TerminalScreen(
 
 @Composable
 private fun CommandPicker(
+    commands: List<SlashCommand>,
     filter: String,
     onFilterChange: (String) -> Unit,
     onSelect: (SlashCommand) -> Unit,
     onDismiss: () -> Unit
 ) {
-    val filtered = if (filter.isBlank()) CLAUDE_COMMANDS
-    else CLAUDE_COMMANDS.filter {
+    val filtered = if (filter.isBlank()) commands
+    else commands.filter {
         it.command.contains(filter, ignoreCase = true) ||
         it.description.contains(filter, ignoreCase = true)
     }
