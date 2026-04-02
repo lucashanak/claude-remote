@@ -33,6 +33,7 @@ class MainActivity : ComponentActivity() {
     private lateinit var tabManager: TabManager
     private lateinit var sessionOrchestrator: SessionOrchestrator
     private var terminalWebView: WebView? = null
+    @Volatile private var pendingReplay = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         enableEdgeToEdge()
@@ -50,10 +51,16 @@ class MainActivity : ComponentActivity() {
         }
 
         sessionOrchestrator.onTabSwitched = { sessionId, bufferedOutput ->
-            FileLogger.log("MainActivity", "Tab switched to $sessionId, replaying ${bufferedOutput.length} chars")
-            clearTerminal()
-            if (bufferedOutput.isNotEmpty()) {
-                writeToTerminal(bufferedOutput)
+            FileLogger.log("MainActivity", "Tab switched to $sessionId, buffer: ${bufferedOutput.length} chars, webView: ${terminalWebView != null}")
+            val wv = terminalWebView
+            if (wv != null && wv.width > 0) {
+                clearTerminal()
+                if (bufferedOutput.isNotEmpty()) {
+                    writeToTerminal(bufferedOutput)
+                }
+            } else {
+                // WebView not ready yet (screen just switched) — replay on next onTerminalReady
+                pendingReplay = true
             }
         }
 
@@ -299,9 +306,15 @@ class MainActivity : ComponentActivity() {
         @JavascriptInterface
         fun onTerminalReady(cols: Int, rows: Int) {
             val wv = terminalWebView
-            FileLogger.log("MainActivity", "Terminal ready: ${cols}x${rows}, WebView: ${wv?.width}x${wv?.height}px")
+            FileLogger.log("MainActivity", "Terminal ready: ${cols}x${rows}, WebView: ${wv?.width}x${wv?.height}px, pendingReplay=$pendingReplay")
             tabManager.activeTabId.value?.let { id ->
                 sessionOrchestrator.resize(id, cols, rows)
+
+                // Replay buffer if tab was switched while WebView wasn't ready
+                if (pendingReplay) {
+                    pendingReplay = false
+                    sessionOrchestrator.switchTab(id)
+                }
             }
         }
 
