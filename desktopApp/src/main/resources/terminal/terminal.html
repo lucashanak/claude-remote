@@ -9,9 +9,11 @@
     * { margin: 0; padding: 0; box-sizing: border-box; }
     html, body { width: 100%; height: 100%; overflow: hidden; background: #1E1E1E; }
     #terminal { width: 100%; height: 100%; }
+    #error { color: #F44; font-family: monospace; padding: 20px; display: none; white-space: pre-wrap; }
 </style>
 </head>
 <body>
+<div id="error"></div>
 <div id="terminal"></div>
 <script src="xterm.js"></script>
 <script src="xterm-addon-fit.js"></script>
@@ -20,145 +22,158 @@
 (function() {
     'use strict';
 
-    const term = new Terminal({
-        cursorBlink: true,
-        fontSize: 14,
-        fontFamily: '"Fira Code", "Cascadia Code", "JetBrains Mono", "Menlo", monospace',
-        theme: {
-            background: '#1E1E1E',
-            foreground: '#D4D4D4',
-            cursor: '#AEAFAD',
-            selectionBackground: '#264F78',
-            black: '#1E1E1E',
-            red: '#F44747',
-            green: '#6A9955',
-            yellow: '#DCDCAA',
-            blue: '#569CD6',
-            magenta: '#C586C0',
-            cyan: '#4EC9B0',
-            white: '#D4D4D4',
-            brightBlack: '#808080',
-            brightRed: '#F44747',
-            brightGreen: '#6A9955',
-            brightYellow: '#DCDCAA',
-            brightBlue: '#569CD6',
-            brightMagenta: '#C586C0',
-            brightCyan: '#4EC9B0',
-            brightWhite: '#FFFFFF'
-        },
-        scrollback: 10000,
-        allowTransparency: false,
-        convertEol: false
-    });
-
-    const fitAddon = new FitAddon.FitAddon();
-    term.loadAddon(fitAddon);
-
-    const webLinksAddon = new WebLinksAddon.WebLinksAddon();
-    term.loadAddon(webLinksAddon);
-
-    term.open(document.getElementById('terminal'));
-    fitAddon.fit();
-
-    // Send input to native bridge
-    term.onData(function(data) {
-        if (window.TerminalBridge) {
-            window.TerminalBridge.onTerminalInput(data);
-        }
-    });
-
-    // Notify native of terminal ready
-    function notifySize() {
-        if (window.TerminalBridge) {
-            window.TerminalBridge.onTerminalResize(term.cols, term.rows);
-        }
+    var errorDiv = document.getElementById('error');
+    function showError(msg) {
+        errorDiv.style.display = 'block';
+        errorDiv.textContent += msg + '\n';
     }
 
-    term.onResize(function(size) {
-        notifySize();
-    });
+    // Check that libs loaded
+    if (typeof Terminal === 'undefined') {
+        showError('ERROR: xterm.js not loaded (Terminal undefined)');
+        return;
+    }
+    if (typeof FitAddon === 'undefined') {
+        showError('ERROR: FitAddon not loaded');
+        return;
+    }
 
-    // Initial size notification
-    setTimeout(function() {
-        fitAddon.fit();
-        if (window.TerminalBridge) {
-            window.TerminalBridge.onTerminalReady(term.cols, term.rows);
-        }
-    }, 100);
+    try {
+        var term = new Terminal({
+            cursorBlink: true,
+            fontSize: 14,
+            fontFamily: '"Fira Code", "Cascadia Code", "JetBrains Mono", "Menlo", monospace',
+            theme: {
+                background: '#1E1E1E',
+                foreground: '#D4D4D4',
+                cursor: '#AEAFAD',
+                selectionBackground: '#264F78',
+                black: '#1E1E1E',
+                red: '#F44747',
+                green: '#6A9955',
+                yellow: '#DCDCAA',
+                blue: '#569CD6',
+                magenta: '#C586C0',
+                cyan: '#4EC9B0',
+                white: '#D4D4D4',
+                brightBlack: '#808080',
+                brightRed: '#F44747',
+                brightGreen: '#6A9955',
+                brightYellow: '#DCDCAA',
+                brightBlue: '#569CD6',
+                brightMagenta: '#C586C0',
+                brightCyan: '#4EC9B0',
+                brightWhite: '#FFFFFF'
+            },
+            scrollback: 10000,
+            allowTransparency: false,
+            convertEol: false
+        });
 
-    // Handle window resize
-    window.addEventListener('resize', function() {
-        fitAddon.fit();
-    });
+        var fitAddon = new FitAddon.FitAddon();
+        term.loadAddon(fitAddon);
 
-    // API for native code
-    window.writeOutput = function(data) {
-        term.write(data);
-    };
-
-    // Base64 variant — avoids escaping issues with raw terminal data
-    window.writeOutputB64 = function(b64) {
         try {
-            var raw = atob(b64);
-            term.write(raw);
+            var webLinksAddon = new WebLinksAddon.WebLinksAddon();
+            term.loadAddon(webLinksAddon);
         } catch(e) {
-            console.error('writeOutputB64 error:', e);
+            // web-links addon is optional
         }
-    };
 
-    window.clearTerminal = function() {
-        term.reset();
-    };
+        term.open(document.getElementById('terminal'));
 
-    window.setFontSize = function(size) {
-        term.options.fontSize = size;
-        fitAddon.fit();
-    };
+        term.write('Terminal initialized. Waiting for connection...\r\n');
 
-    window.setScrollback = function(lines) {
-        term.options.scrollback = lines;
-    };
+        // Send input to native bridge
+        term.onData(function(data) {
+            if (window.TerminalBridge) {
+                window.TerminalBridge.onTerminalInput(data);
+            }
+        });
 
-    window.applyColorScheme = function(scheme) {
-        var themes = {
-            'default': {
-                background: '#1E1E1E', foreground: '#D4D4D4', cursor: '#AEAFAD'
-            },
-            'solarized-dark': {
-                background: '#002B36', foreground: '#839496', cursor: '#93A1A1'
-            },
-            'dracula': {
-                background: '#282A36', foreground: '#F8F8F2', cursor: '#F8F8F0'
-            },
-            'monokai': {
-                background: '#272822', foreground: '#F8F8F2', cursor: '#F8F8F0'
+        // Notify native of terminal size
+        function notifySize() {
+            if (window.TerminalBridge) {
+                window.TerminalBridge.onTerminalResize(term.cols, term.rows);
+            }
+        }
+
+        term.onResize(function(size) {
+            notifySize();
+        });
+
+        // Fit and notify after layout settles
+        function doFit() {
+            try {
+                fitAddon.fit();
+            } catch(e) {}
+        }
+
+        // Multiple fit attempts to handle Android WebView layout timing
+        setTimeout(function() {
+            doFit();
+            if (window.TerminalBridge) {
+                window.TerminalBridge.onTerminalReady(term.cols, term.rows);
+            }
+        }, 200);
+
+        setTimeout(doFit, 500);
+        setTimeout(doFit, 1000);
+
+        window.addEventListener('resize', doFit);
+
+        // API for native code
+        window.writeOutput = function(data) {
+            term.write(data);
+        };
+
+        // Base64 variant — avoids escaping issues with raw terminal data
+        window.writeOutputB64 = function(b64) {
+            try {
+                var raw = atob(b64);
+                term.write(raw);
+            } catch(e) {
+                showError('writeOutputB64 error: ' + e);
             }
         };
-        var theme = themes[scheme] || themes['default'];
-        term.options.theme = Object.assign(term.options.theme, theme);
-    };
 
-    // Touch handling for mobile
-    var touchStartY = 0;
-    var scrollAccum = 0;
+        window.clearTerminal = function() {
+            term.reset();
+        };
 
-    document.addEventListener('touchstart', function(e) {
-        touchStartY = e.touches[0].clientY;
-        scrollAccum = 0;
-    }, { passive: true });
+        window.setFontSize = function(size) {
+            term.options.fontSize = size;
+            doFit();
+        };
 
-    document.addEventListener('touchmove', function(e) {
-        if (e.touches.length === 2) {
-            var deltaY = touchStartY - e.touches[0].clientY;
-            scrollAccum += deltaY;
-            var lines = Math.floor(scrollAccum / 20);
-            if (lines !== 0) {
-                term.scrollLines(lines);
-                scrollAccum -= lines * 20;
-            }
-            touchStartY = e.touches[0].clientY;
-        }
-    }, { passive: true });
+        window.setScrollback = function(lines) {
+            term.options.scrollback = lines;
+        };
+
+        window.applyColorScheme = function(scheme) {
+            var themes = {
+                'default': { background: '#1E1E1E', foreground: '#D4D4D4', cursor: '#AEAFAD' },
+                'solarized-dark': { background: '#002B36', foreground: '#839496', cursor: '#93A1A1' },
+                'dracula': { background: '#282A36', foreground: '#F8F8F2', cursor: '#F8F8F0' },
+                'monokai': { background: '#272822', foreground: '#F8F8F2', cursor: '#F8F8F0' }
+            };
+            var t = themes[scheme] || themes['default'];
+            term.options.theme = Object.assign(term.options.theme, t);
+        };
+
+        // Diagnostics
+        window.getTerminalInfo = function() {
+            return JSON.stringify({
+                cols: term.cols, rows: term.rows,
+                element: !!term.element,
+                parentW: term.element ? term.element.parentElement.clientWidth : 0,
+                parentH: term.element ? term.element.parentElement.clientHeight : 0
+            });
+        };
+
+    } catch(e) {
+        showError('Terminal init error: ' + e.message + '\n' + e.stack);
+    }
 })();
 </script>
 </body>

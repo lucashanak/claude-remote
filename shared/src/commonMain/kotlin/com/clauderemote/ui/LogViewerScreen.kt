@@ -4,11 +4,13 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.Share
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
@@ -21,7 +23,8 @@ import com.clauderemote.util.FileLogger
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun LogViewerScreen(
-    onBack: () -> Unit
+    onBack: () -> Unit,
+    onShare: ((String) -> Unit)? = null
 ) {
     var logContent by remember { mutableStateOf(FileLogger.readLog()) }
 
@@ -35,6 +38,11 @@ fun LogViewerScreen(
                     }
                 },
                 actions = {
+                    if (onShare != null) {
+                        IconButton(onClick = { onShare(logContent) }) {
+                            Icon(Icons.Default.Share, "Share")
+                        }
+                    }
                     IconButton(onClick = { logContent = FileLogger.readLog() }) {
                         Icon(Icons.Default.Refresh, "Refresh")
                     }
@@ -51,7 +59,6 @@ fun LogViewerScreen(
         val verticalScroll = rememberScrollState()
         val horizontalScroll = rememberScrollState()
 
-        // Auto-scroll to bottom on load
         LaunchedEffect(logContent) {
             verticalScroll.animateScrollTo(verticalScroll.maxValue)
         }
@@ -62,18 +69,20 @@ fun LogViewerScreen(
                 .padding(padding)
                 .background(Color(0xFF1E1E1E))
         ) {
-            Text(
-                text = logContent,
-                modifier = Modifier
-                    .fillMaxSize()
-                    .verticalScroll(verticalScroll)
-                    .horizontalScroll(horizontalScroll)
-                    .padding(8.dp),
-                fontFamily = FontFamily.Monospace,
-                fontSize = 11.sp,
-                color = Color(0xFFCCCCCC),
-                lineHeight = 16.sp
-            )
+            SelectionContainer {
+                Text(
+                    text = logContent,
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .verticalScroll(verticalScroll)
+                        .horizontalScroll(horizontalScroll)
+                        .padding(8.dp),
+                    fontFamily = FontFamily.Monospace,
+                    fontSize = 11.sp,
+                    color = Color(0xFFCCCCCC),
+                    lineHeight = 16.sp
+                )
+            }
         }
     }
 }

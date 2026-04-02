@@ -37,7 +37,7 @@ fun App(
     sessionOrchestrator: SessionOrchestrator,
     appVersion: String = "1.0.0",
     onInstallUpdate: ((ByteArray, UpdateInfo) -> Unit)? = null,
-    onBackPressed: (() -> Unit)? = null,
+    onShareLog: ((String) -> Unit)? = null,
     terminalContent: @Composable (modifier: Modifier) -> Unit
 ) {
     val scope = rememberCoroutineScope()
@@ -266,7 +266,8 @@ fun App(
 
                 Screen.LOG_VIEWER -> {
                     LogViewerScreen(
-                        onBack = { currentScreen = Screen.LAUNCHER }
+                        onBack = { currentScreen = Screen.LAUNCHER },
+                        onShare = onShareLog
                     )
                 }
             }

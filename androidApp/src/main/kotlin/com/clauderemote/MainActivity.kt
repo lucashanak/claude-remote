@@ -72,6 +72,14 @@ class MainActivity : ComponentActivity() {
                 onInstallUpdate = { apkBytes, info ->
                     installUpdate(apkBytes, info)
                 },
+                onShareLog = { log ->
+                    val intent = Intent(Intent.ACTION_SEND).apply {
+                        type = "text/plain"
+                        putExtra(Intent.EXTRA_TEXT, log)
+                        putExtra(Intent.EXTRA_SUBJECT, "Claude Remote Debug Log")
+                    }
+                    startActivity(Intent.createChooser(intent, "Share Log"))
+                },
                 terminalContent = { modifier ->
                     TerminalWebView(modifier = modifier)
                 }
@@ -90,12 +98,32 @@ class MainActivity : ComponentActivity() {
                     setBackgroundColor(0xFF1E1E1E.toInt())
 
                     addJavascriptInterface(TerminalBridge(), "TerminalBridge")
+
+                    // Capture JS console messages to debug log
+                    webChromeClient = object : android.webkit.WebChromeClient() {
+                        override fun onConsoleMessage(msg: android.webkit.ConsoleMessage?): Boolean {
+                            msg?.let {
+                                FileLogger.log("WebView:JS", "${it.messageLevel()} ${it.message()} [${it.sourceId()}:${it.lineNumber()}]")
+                            }
+                            return true
+                        }
+                    }
+
                     webViewClient = object : WebViewClient() {
                         override fun onPageFinished(view: WebView?, url: String?) {
                             super.onPageFinished(view, url)
                             FileLogger.log("MainActivity", "Terminal WebView loaded: $url")
+                            // Query terminal dimensions after load
+                            view?.evaluateJavascript("typeof Terminal !== 'undefined' ? 'xterm OK' : 'xterm MISSING'") { result ->
+                                FileLogger.log("MainActivity", "xterm.js status: $result")
+                            }
+                        }
+
+                        override fun onReceivedError(view: WebView?, request: android.webkit.WebResourceRequest?, error: android.webkit.WebResourceError?) {
+                            FileLogger.error("WebView", "Resource error: ${request?.url} - ${error?.description}")
                         }
                     }
+
                     loadUrl("file:///android_asset/terminal/terminal.html")
 
                     terminalWebView = this
