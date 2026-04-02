@@ -176,23 +176,8 @@ const ro = new ResizeObserver(() => {
 });
 ro.observe(termEl);
 
-// ======================== SUPPRESS ANDROID KEYBOARD ========================
-function suppressKeyboard() {
-    document.querySelectorAll('.xterm-helper-textarea, textarea, input').forEach(el => {
-        el.setAttribute('inputmode', 'none');
-    });
-}
-const imeObserver = new MutationObserver(mutations => {
-    for (const m of mutations) for (const node of m.addedNodes) {
-        if (node.nodeType !== 1) continue;
-        if (node.matches && node.matches('textarea,input,.xterm-helper-textarea'))
-            node.setAttribute('inputmode', 'none');
-        if (node.querySelectorAll)
-            node.querySelectorAll('textarea,input,.xterm-helper-textarea').forEach(
-                el => el.setAttribute('inputmode', 'none'));
-    }
-});
-imeObserver.observe(document.body, { childList: true, subtree: true });
+// NOTE: No keyboard suppression — we need the system keyboard for input.
+// (vscode_android suppresses it because it has overlay keyboard, we don't)
 
 // ======================== API (called from Android) ========================
 function writeOutput(text) { term.write(text); }
@@ -204,7 +189,6 @@ function setScrollback(lines) { term.options.scrollback = lines; }
 if (A) {
     setTimeout(() => {
         fitAddon.fit();
-        suppressKeyboard();
         A.onTerminalReady(term.cols, term.rows);
     }, 100);
 }

@@ -149,7 +149,13 @@ class SessionOrchestrator(
     }
 
     fun sendClaudeCommand(sessionId: String, command: String) {
-        sendInput(sessionId, command)
+        val conn = connections[sessionId]
+        if (conn == null) {
+            FileLogger.error(TAG, "sendClaudeCommand: no connection for session $sessionId")
+            return
+        }
+        FileLogger.log(TAG, "sendClaudeCommand: ${command.length} bytes to $sessionId")
+        conn.sendInput(command)
     }
 
     fun switchModel(sessionId: String, model: ClaudeModel) {

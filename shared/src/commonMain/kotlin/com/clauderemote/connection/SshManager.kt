@@ -92,10 +92,15 @@ class SshManager(
      */
     fun sendInput(data: String) {
         try {
-            outputStream?.write(data.toByteArray(Charsets.UTF_8))
-            outputStream?.flush()
+            val os = outputStream
+            if (os == null) {
+                FileLogger.error(TAG, "sendInput: outputStream is null, cannot send ${data.length} bytes")
+                return
+            }
+            os.write(data.toByteArray(Charsets.UTF_8))
+            os.flush()
         } catch (e: Exception) {
-            // Connection lost
+            FileLogger.error(TAG, "sendInput failed", e)
         }
     }
 
