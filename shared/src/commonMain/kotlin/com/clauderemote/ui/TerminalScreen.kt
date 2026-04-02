@@ -92,6 +92,16 @@ fun TerminalScreen(
             }
         }
 
+        // Input field + Send (multiline prompt entry)
+        if (activeSession != null) {
+            PromptInputBar(
+                onSend = { text ->
+                    onSendCommand(text + "\r")
+                },
+                onSendCommand = onSendCommand
+            )
+        }
+
         // Control bar
         if (showControlBar && activeSession != null) {
             ClaudeControlBar(
@@ -194,6 +204,56 @@ private fun CommandPicker(
 }
 
 @Composable
+private fun PromptInputBar(
+    onSend: (String) -> Unit,
+    onSendCommand: (String) -> Unit
+) {
+    var text by remember { mutableStateOf("") }
+
+    Surface(
+        color = MaterialTheme.colorScheme.surfaceVariant,
+        tonalElevation = 2.dp
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 8.dp, vertical = 4.dp),
+            verticalAlignment = Alignment.Bottom
+        ) {
+            OutlinedTextField(
+                value = text,
+                onValueChange = { text = it },
+                modifier = Modifier.weight(1f),
+                placeholder = { Text("Type message...", style = MaterialTheme.typography.bodySmall) },
+                textStyle = MaterialTheme.typography.bodySmall,
+                minLines = 1,
+                maxLines = 5,
+                colors = OutlinedTextFieldDefaults.colors(
+                    focusedContainerColor = MaterialTheme.colorScheme.surface,
+                    unfocusedContainerColor = MaterialTheme.colorScheme.surface
+                )
+            )
+            Spacer(Modifier.width(8.dp))
+            Button(
+                onClick = {
+                    if (text.isNotBlank()) {
+                        onSend(text)
+                        text = ""
+                    } else {
+                        // Empty send = just Enter (confirm prompt, accept, etc.)
+                        onSendCommand("\r")
+                    }
+                },
+                modifier = Modifier.height(48.dp),
+                contentPadding = PaddingValues(horizontal = 16.dp)
+            ) {
+                Text("Send")
+            }
+        }
+    }
+}
+
+@Composable
 private fun ClaudeControlBar(
     onSendCommand: (String) -> Unit,
     onSendEscape: () -> Unit,
@@ -223,7 +283,7 @@ private fun ClaudeControlBar(
                 CtrlButton("C-c") { onSendCommand("\u0003") }
             }
 
-            // Row 2: Navigation + Send
+            // Row 2: Navigation + quick responses
             Row(
                 horizontalArrangement = Arrangement.spacedBy(4.dp),
                 modifier = Modifier.fillMaxWidth()
@@ -234,13 +294,8 @@ private fun ClaudeControlBar(
                 CtrlButton("\u2191") { onSendCommand("\u001B[A") }
                 CtrlButton("\u2192") { onSendCommand("\u001B[C") }
                 Spacer(Modifier.weight(1f))
-                Button(
-                    onClick = { onSendCommand("\r") },
-                    modifier = Modifier.height(32.dp),
-                    contentPadding = PaddingValues(horizontal = 16.dp)
-                ) {
-                    Text("Send", style = MaterialTheme.typography.bodySmall)
-                }
+                CtrlButton("y") { onSendCommand("y\r") }
+                CtrlButton("n") { onSendCommand("n\r") }
             }
         }
     }
