@@ -57,28 +57,22 @@ fun App(
     // Update state
     var updateState by remember { mutableStateOf(UpdateState()) }
 
-    // Check for updates on launch
+    // Check for updates on launch and periodically (every 5 min)
     LaunchedEffect(Unit) {
-        try {
-            val info = UpdateChecker.checkUpdate(appVersion)
-            if (info != null) {
-                updateState = UpdateState(info = info)
-            }
-        } catch (_: Exception) {}
+        while (true) {
+            try {
+                val info = UpdateChecker.checkUpdate(appVersion)
+                if (info != null && updateState.info?.version != info.version) {
+                    updateState = UpdateState(info = info)
+                }
+            } catch (_: Exception) {}
+            kotlinx.coroutines.delay(5 * 60 * 1000L)
+        }
     }
 
-    // Back handler
-    androidx.activity.compose.BackHandler(enabled = currentScreen != Screen.LAUNCHER) {
-        when (currentScreen) {
-            Screen.TERMINAL -> {
-                // Don't exit app, go to launcher
-                currentScreen = Screen.LAUNCHER
-            }
-            Screen.CONNECT, Screen.SETTINGS, Screen.LOG_VIEWER -> {
-                currentScreen = Screen.LAUNCHER
-            }
-            Screen.LAUNCHER -> { /* system handles */ }
-        }
+    // Back handler (Android only, no-op on desktop)
+    PlatformBackHandler(enabled = currentScreen != Screen.LAUNCHER) {
+        currentScreen = Screen.LAUNCHER
     }
 
     fun refreshServers() {

@@ -4,20 +4,21 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
 <title>Claude Remote Terminal</title>
-<link rel="stylesheet" href="xterm.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/css/xterm.min.css" />
 <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
     html, body { width: 100%; height: 100%; overflow: hidden; background: #1E1E1E; }
     #terminal { width: 100%; height: 100%; }
+    .xterm { height: 100%; }
     #error { color: #F44; font-family: monospace; padding: 20px; display: none; white-space: pre-wrap; }
 </style>
 </head>
 <body>
 <div id="error"></div>
 <div id="terminal"></div>
-<script src="xterm.js"></script>
-<script src="xterm-addon-fit.js"></script>
-<script src="xterm-addon-web-links.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/lib/xterm.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.10.0/lib/addon-fit.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@xterm/addon-web-links@0.11.0/lib/addon-web-links.min.js"></script>
 <script>
 (function() {
     'use strict';
@@ -28,9 +29,8 @@
         errorDiv.textContent += msg + '\n';
     }
 
-    // Check that libs loaded
     if (typeof Terminal === 'undefined') {
-        showError('ERROR: xterm.js not loaded (Terminal undefined)');
+        showError('ERROR: xterm.js not loaded');
         return;
     }
     if (typeof FitAddon === 'undefined') {
@@ -76,47 +76,35 @@
         try {
             var webLinksAddon = new WebLinksAddon.WebLinksAddon();
             term.loadAddon(webLinksAddon);
-        } catch(e) {
-            // web-links addon is optional
-        }
+        } catch(e) {}
 
         term.open(document.getElementById('terminal'));
+        term.write('Terminal ready.\r\n');
 
-        term.write('Terminal initialized. Waiting for connection...\r\n');
-
-        // Send input to native bridge
         term.onData(function(data) {
             if (window.TerminalBridge) {
                 window.TerminalBridge.onTerminalInput(data);
             }
         });
 
-        // Notify native of terminal size
         function notifySize() {
             if (window.TerminalBridge) {
                 window.TerminalBridge.onTerminalResize(term.cols, term.rows);
             }
         }
 
-        term.onResize(function(size) {
-            notifySize();
-        });
+        term.onResize(function() { notifySize(); });
 
-        // Fit and notify after layout settles
         function doFit() {
-            try {
-                fitAddon.fit();
-            } catch(e) {}
+            try { fitAddon.fit(); } catch(e) {}
         }
 
-        // Multiple fit attempts to handle Android WebView layout timing
         setTimeout(function() {
             doFit();
             if (window.TerminalBridge) {
                 window.TerminalBridge.onTerminalReady(term.cols, term.rows);
             }
         }, 200);
-
         setTimeout(doFit, 500);
         setTimeout(doFit, 1000);
 
@@ -127,7 +115,6 @@
             term.write(data);
         };
 
-        // Base64 variant — avoids escaping issues with raw terminal data
         window.writeOutputB64 = function(b64) {
             try {
                 var raw = atob(b64);
@@ -150,18 +137,6 @@
             term.options.scrollback = lines;
         };
 
-        window.applyColorScheme = function(scheme) {
-            var themes = {
-                'default': { background: '#1E1E1E', foreground: '#D4D4D4', cursor: '#AEAFAD' },
-                'solarized-dark': { background: '#002B36', foreground: '#839496', cursor: '#93A1A1' },
-                'dracula': { background: '#282A36', foreground: '#F8F8F2', cursor: '#F8F8F0' },
-                'monokai': { background: '#272822', foreground: '#F8F8F2', cursor: '#F8F8F0' }
-            };
-            var t = themes[scheme] || themes['default'];
-            term.options.theme = Object.assign(term.options.theme, t);
-        };
-
-        // Diagnostics
         window.getTerminalInfo = function() {
             return JSON.stringify({
                 cols: term.cols, rows: term.rows,
