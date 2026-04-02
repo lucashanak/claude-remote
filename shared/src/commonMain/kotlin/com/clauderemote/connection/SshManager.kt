@@ -25,6 +25,7 @@ class SshManager(
     private var channel: ChannelShell? = null
     private var outputStream: OutputStream? = null
     private var readJob: Job? = null
+    private val ioScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
 
     @Volatile private var disconnected = false
     val isConnected: Boolean get() = !disconnected && session?.isConnected == true && channel?.isConnected == true
@@ -94,28 +95,32 @@ class SshManager(
      */
     fun sendInput(data: String) {
         if (disconnected) return
-        try {
-            val os = outputStream ?: return
-            os.write(data.toByteArray(Charsets.UTF_8))
-            os.flush()
-        } catch (e: Exception) {
-            if (!disconnected) {
-                disconnected = true
-                FileLogger.error(TAG, "sendInput failed, marking disconnected", e)
+        ioScope.launch {
+            try {
+                val os = outputStream ?: return@launch
+                os.write(data.toByteArray(Charsets.UTF_8))
+                os.flush()
+            } catch (e: Exception) {
+                if (!disconnected) {
+                    disconnected = true
+                    FileLogger.error(TAG, "sendInput failed, marking disconnected", e)
+                }
             }
         }
     }
 
     fun sendBytes(data: ByteArray) {
         if (disconnected) return
-        try {
-            val os = outputStream ?: return
-            os.write(data)
-            os.flush()
-        } catch (e: Exception) {
-            if (!disconnected) {
-                disconnected = true
-                FileLogger.error(TAG, "sendBytes failed, marking disconnected", e)
+        ioScope.launch {
+            try {
+                val os = outputStream ?: return@launch
+                os.write(data)
+                os.flush()
+            } catch (e: Exception) {
+                if (!disconnected) {
+                    disconnected = true
+                    FileLogger.error(TAG, "sendBytes failed, marking disconnected", e)
+                }
             }
         }
     }
