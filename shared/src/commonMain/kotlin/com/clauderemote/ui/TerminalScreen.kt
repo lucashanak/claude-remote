@@ -65,11 +65,13 @@ fun TerminalScreen(
         }
 
         // Terminal content (WebView) - takes most space
-        terminalContent(
-            Modifier
+        Box(
+            modifier = Modifier
                 .fillMaxWidth()
                 .weight(1f)
-        )
+        ) {
+            terminalContent(Modifier.fillMaxSize())
+        }
 
         // Claude Control Bar
         if (showControlBar && activeSession != null) {

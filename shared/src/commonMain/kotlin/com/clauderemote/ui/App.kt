@@ -57,16 +57,25 @@ fun App(
     // Update state
     var updateState by remember { mutableStateOf(UpdateState()) }
 
-    // Check for updates on launch and periodically (every 5 min)
+    // Check for updates on launch
     LaunchedEffect(Unit) {
-        while (true) {
+        try {
+            val info = UpdateChecker.checkUpdate(appVersion)
+            if (info != null) {
+                updateState = UpdateState(info = info)
+            }
+        } catch (_: Exception) {}
+    }
+
+    // Manual update check function
+    fun checkForUpdate() {
+        scope.launch {
             try {
                 val info = UpdateChecker.checkUpdate(appVersion)
-                if (info != null && updateState.info?.version != info.version) {
+                if (info != null) {
                     updateState = UpdateState(info = info)
                 }
             } catch (_: Exception) {}
-            kotlinx.coroutines.delay(5 * 60 * 1000L)
         }
     }
 
@@ -203,6 +212,28 @@ fun App(
                             server = server,
                             tmuxSessions = tmuxSessions,
                             onBack = { currentScreen = Screen.LAUNCHER },
+                            onKillTmux = { sessionName ->
+                                scope.launch {
+                                    try {
+                                        withContext(Dispatchers.IO) {
+                                            val jsch = com.jcraft.jsch.JSch()
+                                            if (server.authMethod == AuthMethod.KEY && server.privateKey != null) {
+                                                jsch.addIdentity("key", server.privateKey.toByteArray(), null, null)
+                                            }
+                                            val sess = jsch.getSession(server.username, server.host, server.port)
+                                            if (server.authMethod == AuthMethod.PASSWORD && server.password != null) {
+                                                sess.setPassword(server.password)
+                                            }
+                                            sess.setConfig("StrictHostKeyChecking", "no")
+                                            sess.timeout = 10000
+                                            sess.connect(10000)
+                                            TmuxManager.killSession(sess, sessionName)
+                                            tmuxSessions = TmuxManager.listSessions(sess)
+                                            sess.disconnect()
+                                        }
+                                    } catch (_: Exception) {}
+                                }
+                            },
                             onLaunch = { folder, mode, model, connType, tmuxName ->
                                 scope.launch {
                                     try {
@@ -254,7 +285,8 @@ fun App(
                 Screen.SETTINGS -> {
                     SettingsScreen(
                         settings = appSettings,
-                        onBack = { currentScreen = Screen.LAUNCHER }
+                        onBack = { currentScreen = Screen.LAUNCHER },
+                        onCheckUpdate = { checkForUpdate() }
                     )
                 }
 

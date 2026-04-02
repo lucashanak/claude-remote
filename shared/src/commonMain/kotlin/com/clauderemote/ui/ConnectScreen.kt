@@ -22,6 +22,7 @@ fun ConnectScreen(
     server: SshServer,
     tmuxSessions: List<TmuxSession>,
     onBack: () -> Unit,
+    onKillTmux: ((String) -> Unit)? = null,
     onLaunch: (folder: String, mode: ClaudeMode, model: ClaudeModel, connectionType: ConnectionType, tmuxSession: String) -> Unit
 ) {
     var folder by remember { mutableStateOf(server.defaultFolder) }
@@ -223,14 +224,25 @@ fun ConnectScreen(
                                 onClick = null
                             )
                             Spacer(Modifier.width(8.dp))
-                            Text("${tmux.name} (${tmux.windows}w)")
+                            Text(
+                                "${tmux.name} (${tmux.windows}w)",
+                                modifier = Modifier.weight(1f)
+                            )
                             if (tmux.attached) {
-                                Spacer(Modifier.width(4.dp))
                                 Text(
                                     "attached",
                                     style = MaterialTheme.typography.bodySmall,
                                     color = MaterialTheme.colorScheme.primary
                                 )
+                                Spacer(Modifier.width(4.dp))
+                            }
+                            if (onKillTmux != null) {
+                                TextButton(
+                                    onClick = { onKillTmux(tmux.name) },
+                                    contentPadding = PaddingValues(horizontal = 8.dp)
+                                ) {
+                                    Text("Kill", color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
+                                }
                             }
                         }
                     }

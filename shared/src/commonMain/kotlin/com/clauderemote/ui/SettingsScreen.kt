@@ -19,7 +19,8 @@ import com.clauderemote.storage.AppSettings
 @Composable
 fun SettingsScreen(
     settings: AppSettings,
-    onBack: () -> Unit
+    onBack: () -> Unit,
+    onCheckUpdate: (() -> Unit)? = null
 ) {
     var fontSize by remember { mutableStateOf(settings.terminalFontSize) }
     var scrollback by remember { mutableStateOf(settings.terminalScrollback) }
@@ -129,6 +130,15 @@ fun SettingsScreen(
                 range = 5..60,
                 onValueChange = { connectTimeout = it; settings.sshConnectTimeout = it }
             )
+
+            // Update check
+            if (onCheckUpdate != null) {
+                HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
+                Text("Updates", style = MaterialTheme.typography.titleMedium)
+                Button(onClick = onCheckUpdate) {
+                    Text("Check for update")
+                }
+            }
 
             Spacer(Modifier.height(32.dp))
         }
