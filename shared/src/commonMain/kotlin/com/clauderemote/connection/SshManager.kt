@@ -4,6 +4,7 @@ import com.clauderemote.model.AuthMethod
 import com.clauderemote.model.SshServer
 import com.clauderemote.storage.ServerStorage
 import com.clauderemote.util.FileLogger
+import com.jcraft.jsch.ChannelSftp
 import com.jcraft.jsch.ChannelShell
 import com.jcraft.jsch.JSch
 import com.jcraft.jsch.Session
@@ -206,6 +207,29 @@ class SshManager(
         session = null
         outputStream = null
         FileLogger.log(TAG, "Disconnected")
+    }
+
+    /**
+     * Upload a file to the remote server via SFTP.
+     * Returns the full remote path of the uploaded file.
+     */
+    suspend fun uploadFile(
+        bytes: ByteArray,
+        remoteDir: String,
+        fileName: String
+    ): String = withContext(Dispatchers.IO) {
+        val sess = session ?: throw IllegalStateException("Not connected")
+        val sftp = sess.openChannel("sftp") as ChannelSftp
+        sftp.connect(10000)
+        try {
+            try { sftp.mkdir(remoteDir) } catch (_: Exception) {}
+            val remotePath = "$remoteDir/$fileName"
+            sftp.put(bytes.inputStream(), remotePath)
+            FileLogger.log(TAG, "Uploaded ${bytes.size} bytes to $remotePath")
+            remotePath
+        } finally {
+            sftp.disconnect()
+        }
     }
 
     fun getSession(): Session? = session

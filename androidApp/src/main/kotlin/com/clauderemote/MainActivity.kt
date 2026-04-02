@@ -37,6 +37,7 @@ class MainActivity : FragmentActivity() {
     private lateinit var sessionOrchestrator: SessionOrchestrator
     private var terminalWebView: WebView? = null
     private var keyFileCallback: ((String) -> Unit)? = null
+    private var attachFileCallback: ((ByteArray, String) -> Unit)? = null
 
     private val keyFilePicker = registerForActivityResult(
         androidx.activity.result.contract.ActivityResultContracts.GetContent()
@@ -68,6 +69,29 @@ class MainActivity : FragmentActivity() {
                 android.widget.Toast.makeText(this, "Import failed: ${e.message}", android.widget.Toast.LENGTH_LONG).show()
             }
         }
+    }
+
+    private val attachFilePicker = registerForActivityResult(
+        androidx.activity.result.contract.ActivityResultContracts.GetContent()
+    ) { uri ->
+        if (uri != null) {
+            try {
+                val bytes = contentResolver.openInputStream(uri)?.readBytes() ?: ByteArray(0)
+                val name = uri.lastPathSegment
+                    ?.substringAfterLast('/')
+                    ?.substringAfterLast(':')
+                    ?: "file_${System.currentTimeMillis()}"
+                val ext = contentResolver.getType(uri)?.substringAfter('/')?.let { ".$it" } ?: ""
+                val fileName = if (name.contains('.')) name else "$name$ext"
+                attachFileCallback?.invoke(bytes, fileName)
+            } catch (e: Exception) {
+                FileLogger.error("MainActivity", "Failed to read attached file", e)
+                attachFileCallback?.invoke(ByteArray(0), "")
+            }
+        } else {
+            attachFileCallback?.invoke(ByteArray(0), "")
+        }
+        attachFileCallback = null
     }
 
     private var biometricUnlocked = false
@@ -180,6 +204,14 @@ class MainActivity : FragmentActivity() {
                 },
                 onImportServers = {
                     importFilePicker.launch("application/json")
+                },
+                onPickFile = { callback ->
+                    attachFileCallback = { bytes, name ->
+                        if (bytes.isNotEmpty() && name.isNotEmpty()) {
+                            callback(bytes, name)
+                        }
+                    }
+                    attachFilePicker.launch("*/*")
                 },
                 onTerminalScreenVisible = {
                     // When terminal screen becomes visible, replay active tab buffer

@@ -39,6 +39,7 @@ fun TerminalScreen(
     onSwitchModel: (ClaudeModel) -> Unit,
     onSendEscape: () -> Unit,
     onReconnect: ((String) -> Unit)? = null,
+    onAttachFile: (suspend () -> String?)? = null,
     onFetchClaudeMd: (suspend () -> String)? = null,
     onFetchCommands: (suspend () -> List<SlashCommand>)? = null,
     terminalContent: @Composable (Modifier) -> Unit
@@ -213,7 +214,8 @@ fun TerminalScreen(
                 PromptInputBar(
                     commands = commands,
                     onSend = { text -> onSendCommand(text + "\r") },
-                    onSendCommand = onSendCommand
+                    onSendCommand = onSendCommand,
+                    onAttachFile = onAttachFile
                 )
             }
         }
@@ -244,9 +246,12 @@ fun TerminalScreen(
 private fun PromptInputBar(
     commands: List<SlashCommand>,
     onSend: (String) -> Unit,
-    onSendCommand: (String) -> Unit
+    onSendCommand: (String) -> Unit,
+    onAttachFile: (suspend () -> String?)? = null
 ) {
     var text by remember { mutableStateOf("") }
+    var uploading by remember { mutableStateOf(false) }
+    val promptScope = rememberCoroutineScope()
     // Show inline suggestions when text starts with /
     val suggestions = if (text.startsWith("/") && text.length > 1 && !text.contains("\n")) {
         commands.filter { it.command.contains(text.trim(), ignoreCase = true) }.take(5)
@@ -277,6 +282,35 @@ private fun PromptInputBar(
                 modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 4.dp),
                 verticalAlignment = Alignment.Bottom
             ) {
+                if (onAttachFile != null) {
+                    IconButton(
+                        onClick = {
+                            if (!uploading) {
+                                uploading = true
+                                promptScope.launch {
+                                    val path = onAttachFile.invoke()
+                                    if (path != null) {
+                                        text = if (text.isBlank()) path else "$text $path"
+                                    }
+                                    uploading = false
+                                }
+                            }
+                        },
+                        modifier = Modifier.size(36.dp),
+                        enabled = !uploading
+                    ) {
+                        if (uploading) {
+                            CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
+                        } else {
+                            Icon(
+                                imageVector = Icons.Default.Add,
+                                contentDescription = "Attach file",
+                                modifier = Modifier.size(20.dp)
+                            )
+                        }
+                    }
+                    Spacer(Modifier.width(4.dp))
+                }
                 OutlinedTextField(
                     value = text,
                     onValueChange = { text = it },

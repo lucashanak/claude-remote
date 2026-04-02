@@ -23,6 +23,7 @@ import com.clauderemote.ui.theme.ClaudeRemoteTheme
 import com.clauderemote.util.FileLogger
 import com.clauderemote.util.UpdateChecker
 import com.clauderemote.util.UpdateInfo
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -43,6 +44,7 @@ fun App(
     onTerminalScreenVisible: (() -> Unit)? = null,
     onPickKeyFile: ((callback: (String) -> Unit) -> Unit)? = null,
     onImportServers: (() -> Unit)? = null,
+    onPickFile: ((callback: (ByteArray, String) -> Unit) -> Unit)? = null,
     terminalContent: @Composable (modifier: Modifier) -> Unit
 ) {
     val scope = rememberCoroutineScope()
@@ -344,6 +346,23 @@ fun App(
                         onSendCommand = { cmd ->
                             activeTabId?.let { sessionOrchestrator.sendClaudeCommand(it, cmd) }
                         },
+                        onAttachFile = if (onPickFile != null) {
+                            suspend {
+                                val id = activeTabId ?: return@suspend null
+                                val deferred = CompletableDeferred<Pair<ByteArray, String>?>()
+                                onPickFile { bytes, name -> deferred.complete(bytes to name) }
+                                val result = deferred.await() ?: return@suspend null
+                                val (bytes, name) = result
+                                try {
+                                    withContext(Dispatchers.IO) {
+                                        sessionOrchestrator.uploadFile(id, bytes, name)
+                                    }
+                                } catch (e: Exception) {
+                                    FileLogger.error("App", "File upload failed", e)
+                                    null
+                                }
+                            }
+                        } else null,
                         onSwitchModel = { model ->
                             activeTabId?.let { sessionOrchestrator.switchModel(it, model) }
                         },

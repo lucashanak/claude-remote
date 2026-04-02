@@ -194,6 +194,19 @@ class SessionOrchestrator(
     }
 
     /**
+     * Upload a file to the remote server for the given session.
+     * Returns the remote path of the uploaded file.
+     */
+    suspend fun uploadFile(sessionId: String, bytes: ByteArray, fileName: String): String {
+        val conn = connections[sessionId]
+            ?: throw IllegalStateException("No connection for session $sessionId")
+        val remoteDir = "/tmp/claude-uploads"
+        val remotePath = conn.uploadFile(bytes, remoteDir, fileName)
+        FileLogger.log(TAG, "File uploaded: $remotePath (${bytes.size} bytes)")
+        return remotePath
+    }
+
+    /**
      * Reconnect a disconnected session. Reuses the same session config.
      */
     suspend fun reconnectSession(sessionId: String) {
