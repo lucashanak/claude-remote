@@ -65,6 +65,11 @@ class AppSettings(private val prefs: PlatformPreferences) {
         get() = prefs.getBoolean("keep_alive_enabled", true)
         set(value) = prefs.putBoolean("keep_alive_enabled", value)
 
+    // Theme: "system", "dark", "light"
+    var themeMode: String
+        get() = prefs.getString("theme_mode", "system")
+        set(value) = prefs.putString("theme_mode", value)
+
     // Security
     var biometricLockEnabled: Boolean
         get() = prefs.getBoolean("biometric_lock_enabled", false)

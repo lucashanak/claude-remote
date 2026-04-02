@@ -55,8 +55,23 @@ fun SettingsScreen(
                 .verticalScroll(rememberScrollState()),
             verticalArrangement = Arrangement.spacedBy(8.dp)
         ) {
+            // Appearance
+            Text("Appearance", style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(top = 8.dp))
+            var themeMode by remember { mutableStateOf(settings.themeMode) }
+            Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                listOf("system" to "System", "dark" to "Dark", "light" to "Light").forEach { (value, label) ->
+                    FilterChip(
+                        selected = themeMode == value,
+                        onClick = { themeMode = value; settings.themeMode = value },
+                        label = { Text(label) }
+                    )
+                }
+            }
+
+            HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
+
             // Terminal
-            Text("Terminal", style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(top = 8.dp))
+            Text("Terminal", style = MaterialTheme.typography.titleMedium)
 
             SettingsSlider(
                 label = "Font Size",

@@ -261,6 +261,7 @@ class MainActivity : ComponentActivity() {
         var longPressRunnable: Runnable? = null
         val handler = android.os.Handler(android.os.Looper.getMainLooper())
         val deadZoneDp = 5f
+        var lastTapTime = 0L
 
         webView.setOnTouchListener { v, event ->
             val density = v.resources.displayMetrics.density
@@ -389,6 +390,19 @@ class MainActivity : ComponentActivity() {
                     }
 
                     if (was2f || was1fScroll || wasLongPress) return@setOnTouchListener true
+
+                    // Double-tap detection: show keyboard
+                    if (event.actionMasked == MotionEvent.ACTION_UP && !was2f && !was1fScroll && !wasLongPress) {
+                        val now = System.currentTimeMillis()
+                        if (now - lastTapTime < 400) {
+                            // Double tap — focus xterm textarea to show keyboard
+                            webView.evaluateJavascript("term.focus();document.querySelector('.xterm-helper-textarea')?.focus()", null)
+                            val imm = webView.context.getSystemService(android.content.Context.INPUT_METHOD_SERVICE) as android.view.inputmethod.InputMethodManager
+                            imm.showSoftInput(webView, android.view.inputmethod.InputMethodManager.SHOW_IMPLICIT)
+                        }
+                        lastTapTime = now
+                    }
+
                     false
                 }
                 else -> false

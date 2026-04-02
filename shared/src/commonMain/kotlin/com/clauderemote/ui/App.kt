@@ -129,7 +129,13 @@ fun App(
         }
     }
 
-    ClaudeRemoteTheme {
+    val darkTheme = when (appSettings.themeMode) {
+        "dark" -> true
+        "light" -> false
+        else -> androidx.compose.foundation.isSystemInDarkTheme()
+    }
+
+    ClaudeRemoteTheme(darkTheme = darkTheme) {
         Column(
             modifier = Modifier
                 .fillMaxSize()

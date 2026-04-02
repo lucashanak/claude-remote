@@ -105,8 +105,10 @@ fun LauncherScreen(
             }
 
             items(sortedServers, key = { it.id }) { server ->
+                val activeCount = activeSessions.count { it.server.id == server.id && it.status == SessionStatus.ACTIVE }
                 ServerCard(
                     server = server,
+                    activeSessionCount = activeCount,
                     onConnect = { onConnectServer(server) },
                     onQuickConnect = onQuickConnect?.let { qc -> { qc(server) } },
                     onEdit = { onEditServer(server) },
@@ -181,6 +183,7 @@ private fun ActiveSessionCard(session: ClaudeSession, onClick: () -> Unit) {
 @OptIn(ExperimentalFoundationApi::class)
 private fun ServerCard(
     server: SshServer,
+    activeSessionCount: Int = 0,
     onConnect: () -> Unit,
     onQuickConnect: (() -> Unit)? = null,
     onEdit: () -> Unit,
@@ -215,7 +218,13 @@ private fun ServerCard(
                 }
 
                 Column(modifier = Modifier.weight(1f)) {
-                    Text(server.name, style = MaterialTheme.typography.titleSmall)
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(server.name, style = MaterialTheme.typography.titleSmall)
+                        if (activeSessionCount > 0) {
+                            Spacer(Modifier.width(6.dp))
+                            Badge { Text("$activeSessionCount") }
+                        }
+                    }
                     Text(
                         server.displayAddress,
                         style = MaterialTheme.typography.bodySmall,

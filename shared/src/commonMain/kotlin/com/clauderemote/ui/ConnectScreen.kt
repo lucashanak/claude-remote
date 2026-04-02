@@ -29,7 +29,14 @@ fun ConnectScreen(
     var selectedMode by remember { mutableStateOf(server.defaultClaudeMode) }
     var selectedModel by remember { mutableStateOf(server.defaultClaudeModel) }
     var connectionType by remember { mutableStateOf(ConnectionType.SSH) }
-    var tmuxSessionName by remember { mutableStateOf("claude-${server.name}") }
+    var tmuxSessionName by remember { mutableStateOf("claude-${server.name}-${server.defaultFolder.substringAfterLast('/')}") }
+    // Auto-update tmux name when folder changes
+    LaunchedEffect(folder) {
+        if (!useExistingTmux) {
+            val folderName = folder.substringAfterLast('/').ifBlank { folder.trimEnd('/').substringAfterLast('/') }
+            tmuxSessionName = "claude-${server.name}-${folderName}".take(32)
+        }
+    }
     var useExistingTmux by remember { mutableStateOf(false) }
     var modelExpanded by remember { mutableStateOf(false) }
 
