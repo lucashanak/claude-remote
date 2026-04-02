@@ -38,6 +38,7 @@ fun TerminalScreen(
     onSendCommand: (String) -> Unit,
     onSwitchModel: (ClaudeModel) -> Unit,
     onSendEscape: () -> Unit,
+    onReconnect: ((String) -> Unit)? = null,
     onFetchClaudeMd: (suspend () -> String)? = null,
     onFetchCommands: (suspend () -> List<SlashCommand>)? = null,
     terminalContent: @Composable (Modifier) -> Unit
@@ -78,6 +79,28 @@ fun TerminalScreen(
                 }
                 TextButton(onClick = { showControlBar = !showControlBar }) {
                     Text(if (showControlBar) "Hide" else "Ctrl", style = MaterialTheme.typography.bodySmall)
+                }
+            }
+        }
+
+        // Disconnected banner
+        if (activeSession?.status == SessionStatus.DISCONNECTED || activeSession?.status == SessionStatus.ERROR) {
+            Surface(color = MaterialTheme.colorScheme.errorContainer) {
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 6.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        "Disconnected",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onErrorContainer
+                    )
+                    if (onReconnect != null && activeSession != null) {
+                        TextButton(onClick = { onReconnect(activeSession.id) }) {
+                            Text("Reconnect")
+                        }
+                    }
                 }
             }
         }

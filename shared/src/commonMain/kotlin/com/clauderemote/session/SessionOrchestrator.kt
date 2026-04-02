@@ -189,6 +189,30 @@ class SessionOrchestrator(
         sendInput(sessionId, ClaudeConfig.escapeSequence())
     }
 
+    /**
+     * Reconnect a disconnected session. Reuses the same session config.
+     */
+    suspend fun reconnectSession(sessionId: String) {
+        val session = tabManager.getTab(sessionId) ?: return
+        FileLogger.log(TAG, "Reconnecting session $sessionId to ${session.server.name}")
+
+        // Clean up old connection
+        connections[sessionId]?.disconnect()
+        connections.remove(sessionId)
+
+        tabManager.updateTabStatus(sessionId, SessionStatus.CONNECTING)
+
+        try {
+            connectSsh(session, false) // attach to existing tmux
+            tabManager.updateTabStatus(sessionId, SessionStatus.ACTIVE)
+            onSessionActive?.invoke(session)
+            FileLogger.log(TAG, "Reconnected: $sessionId")
+        } catch (e: Exception) {
+            FileLogger.error(TAG, "Reconnect failed", e)
+            tabManager.updateTabStatus(sessionId, SessionStatus.ERROR)
+        }
+    }
+
     suspend fun disconnectSession(sessionId: String) {
         connections[sessionId]?.disconnect()
         connections.remove(sessionId)

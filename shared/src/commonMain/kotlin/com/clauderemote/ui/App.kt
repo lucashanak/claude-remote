@@ -296,6 +296,9 @@ fun App(
                         tabs = tabs,
                         activeTabId = activeTabId,
                         onTabSwitch = { sessionOrchestrator.switchTab(it) },
+                        onReconnect = { id ->
+                            scope.launch { sessionOrchestrator.reconnectSession(id) }
+                        },
                         onTabClose = { id ->
                             val session = tabManager.getTab(id)
                             if (session?.status == SessionStatus.ACTIVE) {

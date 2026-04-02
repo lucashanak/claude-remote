@@ -148,6 +148,9 @@ class MainActivity : ComponentActivity() {
             KeepAliveService.updateDescription("${tab?.tabTitle ?: "Session"}: $hint")
         }
 
+        // Network change detection — reconnect disconnected sessions
+        registerNetworkCallback()
+
         val appVersion = try {
             packageManager.getPackageInfo(packageName, 0).versionName ?: "1.0.0"
         } catch (_: Exception) { "1.0.0" }
@@ -187,6 +190,35 @@ class MainActivity : ComponentActivity() {
                     TerminalWebView(modifier = modifier)
                 }
             )
+        }
+    }
+
+    private fun registerNetworkCallback() {
+        try {
+            val cm = getSystemService(CONNECTIVITY_SERVICE) as android.net.ConnectivityManager
+            val request = android.net.NetworkRequest.Builder()
+                .addCapability(android.net.NetworkCapabilities.NET_CAPABILITY_INTERNET)
+                .build()
+            cm.registerNetworkCallback(request, object : android.net.ConnectivityManager.NetworkCallback() {
+                override fun onAvailable(network: android.net.Network) {
+                    // Network came back — try reconnecting disconnected sessions
+                    FileLogger.log("Network", "Network available, checking for disconnected sessions")
+                    val disconnected = tabManager.tabs.value.filter {
+                        it.status == com.clauderemote.model.SessionStatus.DISCONNECTED
+                    }
+                    if (disconnected.isNotEmpty()) {
+                        kotlinx.coroutines.GlobalScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+                            disconnected.forEach { session ->
+                                try {
+                                    sessionOrchestrator.reconnectSession(session.id)
+                                } catch (_: Exception) {}
+                            }
+                        }
+                    }
+                }
+            })
+        } catch (e: Exception) {
+            FileLogger.error("Network", "Failed to register network callback", e)
         }
     }
 
