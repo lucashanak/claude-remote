@@ -5,6 +5,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Close
@@ -17,6 +18,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
 import com.clauderemote.model.ClaudeModel
 import com.clauderemote.model.ClaudeSession
+import com.clauderemote.model.SessionStatus
 import com.clauderemote.session.CommandFetcher
 import com.clauderemote.session.SlashCommand
 import kotlinx.coroutines.launch
@@ -45,14 +47,9 @@ fun TerminalScreen(
 
     Column(modifier = Modifier.fillMaxSize()) {
         // Top bar
-        Surface(
-            color = MaterialTheme.colorScheme.surfaceVariant,
-            tonalElevation = 2.dp
-        ) {
+        Surface(color = MaterialTheme.colorScheme.surfaceVariant, tonalElevation = 2.dp) {
             Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 4.dp, vertical = 2.dp),
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 4.dp, vertical = 2.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 IconButton(onClick = onMenuOpen, modifier = Modifier.size(36.dp)) {
@@ -73,7 +70,6 @@ fun TerminalScreen(
         Box(modifier = Modifier.fillMaxWidth().weight(1f)) {
             terminalContent(Modifier.fillMaxSize())
 
-            // Command picker overlay
             if (showCommandPicker) {
                 CommandPicker(
                     commands = commands,
@@ -84,20 +80,16 @@ fun TerminalScreen(
                         commandFilter = ""
                         onSendCommand(cmd.command + "\n")
                     },
-                    onDismiss = {
-                        showCommandPicker = false
-                        commandFilter = ""
-                    }
+                    onDismiss = { showCommandPicker = false; commandFilter = "" }
                 )
             }
         }
 
-        // Input field + Send (multiline prompt entry)
+        // Prompt input with inline slash autocomplete
         if (activeSession != null) {
             PromptInputBar(
-                onSend = { text ->
-                    onSendCommand(text + "\r")
-                },
+                commands = commands,
+                onSend = { text -> onSendCommand(text + "\r") },
                 onSendCommand = onSendCommand
             )
         }
@@ -110,27 +102,91 @@ fun TerminalScreen(
                 onOpenCommands = {
                     showCommandPicker = true
                     commandFilter = ""
-                    // Fetch commands from remote in background
                     if (onFetchCommands != null) {
-                        scope.launch {
-                            val fetched = onFetchCommands.invoke()
-                            commands = fetched
-                        }
+                        scope.launch { commands = onFetchCommands.invoke() }
                     }
                 }
             )
         }
 
         // Tab bar
-        TabBar(
-            tabs = tabs,
-            activeTabId = activeTabId,
-            onTabSwitch = onTabSwitch,
-            onTabClose = onTabClose,
-            onNewTab = onNewTab
-        )
+        TabBar(tabs, activeTabId, onTabSwitch, onTabClose, onNewTab)
     }
 }
+
+// ======================== PROMPT INPUT ========================
+
+@Composable
+private fun PromptInputBar(
+    commands: List<SlashCommand>,
+    onSend: (String) -> Unit,
+    onSendCommand: (String) -> Unit
+) {
+    var text by remember { mutableStateOf("") }
+    // Show inline suggestions when text starts with /
+    val suggestions = if (text.startsWith("/") && text.length > 1 && !text.contains("\n")) {
+        commands.filter { it.command.contains(text.trim(), ignoreCase = true) }.take(5)
+    } else emptyList()
+
+    Surface(color = MaterialTheme.colorScheme.surfaceVariant, tonalElevation = 2.dp) {
+        Column(modifier = Modifier.fillMaxWidth()) {
+            // Inline suggestions
+            if (suggestions.isNotEmpty()) {
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 2.dp),
+                    horizontalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
+                    suggestions.forEach { cmd ->
+                        AssistChip(
+                            onClick = {
+                                onSendCommand(cmd.command + "\n")
+                                text = ""
+                            },
+                            label = { Text(cmd.command, style = MaterialTheme.typography.bodySmall) }
+                        )
+                    }
+                }
+            }
+
+            // Input row
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 4.dp),
+                verticalAlignment = Alignment.Bottom
+            ) {
+                OutlinedTextField(
+                    value = text,
+                    onValueChange = { text = it },
+                    modifier = Modifier.weight(1f),
+                    placeholder = { Text("Type message or /command...") },
+                    textStyle = MaterialTheme.typography.bodySmall,
+                    minLines = 1,
+                    maxLines = 5,
+                    colors = OutlinedTextFieldDefaults.colors(
+                        focusedContainerColor = MaterialTheme.colorScheme.surface,
+                        unfocusedContainerColor = MaterialTheme.colorScheme.surface
+                    )
+                )
+                Spacer(Modifier.width(8.dp))
+                Button(
+                    onClick = {
+                        if (text.isNotBlank()) {
+                            onSend(text)
+                            text = ""
+                        } else {
+                            onSendCommand("\r")
+                        }
+                    },
+                    modifier = Modifier.height(48.dp),
+                    contentPadding = PaddingValues(horizontal = 16.dp)
+                ) {
+                    Text("Send")
+                }
+            }
+        }
+    }
+}
+
+// ======================== COMMAND PICKER ========================
 
 @Composable
 private fun CommandPicker(
@@ -147,16 +203,12 @@ private fun CommandPicker(
     }
 
     Surface(
-        modifier = Modifier
-            .fillMaxWidth()
-            .fillMaxHeight(0.6f)
-            .padding(8.dp),
+        modifier = Modifier.fillMaxWidth().fillMaxHeight(0.6f).padding(8.dp),
         shape = MaterialTheme.shapes.medium,
         tonalElevation = 8.dp,
         shadowElevation = 8.dp
     ) {
         Column(modifier = Modifier.fillMaxSize()) {
-            // Search/filter bar
             Row(
                 modifier = Modifier.fillMaxWidth().padding(8.dp),
                 verticalAlignment = Alignment.CenterVertically
@@ -170,12 +222,9 @@ private fun CommandPicker(
                     textStyle = MaterialTheme.typography.bodyMedium
                 )
                 Spacer(Modifier.width(8.dp))
-                IconButton(onClick = onDismiss) {
-                    Icon(Icons.Default.Close, "Close")
-                }
+                IconButton(onClick = onDismiss) { Icon(Icons.Default.Close, "Close") }
             }
 
-            // Command list
             LazyColumn(modifier = Modifier.fillMaxSize()) {
                 items(filtered) { cmd ->
                     Row(
@@ -185,16 +234,8 @@ private fun CommandPicker(
                             .padding(horizontal = 16.dp, vertical = 10.dp),
                         horizontalArrangement = Arrangement.SpaceBetween
                     ) {
-                        Text(
-                            cmd.command,
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = MaterialTheme.colorScheme.primary
-                        )
-                        Text(
-                            cmd.description,
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
+                        Text(cmd.command, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.primary)
+                        Text(cmd.description, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
                     HorizontalDivider()
                 }
@@ -203,55 +244,7 @@ private fun CommandPicker(
     }
 }
 
-@Composable
-private fun PromptInputBar(
-    onSend: (String) -> Unit,
-    onSendCommand: (String) -> Unit
-) {
-    var text by remember { mutableStateOf("") }
-
-    Surface(
-        color = MaterialTheme.colorScheme.surfaceVariant,
-        tonalElevation = 2.dp
-    ) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 8.dp, vertical = 4.dp),
-            verticalAlignment = Alignment.Bottom
-        ) {
-            OutlinedTextField(
-                value = text,
-                onValueChange = { text = it },
-                modifier = Modifier.weight(1f),
-                placeholder = { Text("Type message...", style = MaterialTheme.typography.bodySmall) },
-                textStyle = MaterialTheme.typography.bodySmall,
-                minLines = 1,
-                maxLines = 5,
-                colors = OutlinedTextFieldDefaults.colors(
-                    focusedContainerColor = MaterialTheme.colorScheme.surface,
-                    unfocusedContainerColor = MaterialTheme.colorScheme.surface
-                )
-            )
-            Spacer(Modifier.width(8.dp))
-            Button(
-                onClick = {
-                    if (text.isNotBlank()) {
-                        onSend(text)
-                        text = ""
-                    } else {
-                        // Empty send = just Enter (confirm prompt, accept, etc.)
-                        onSendCommand("\r")
-                    }
-                },
-                modifier = Modifier.height(48.dp),
-                contentPadding = PaddingValues(horizontal = 16.dp)
-            ) {
-                Text("Send")
-            }
-        }
-    }
-}
+// ======================== CONTROL BAR ========================
 
 @Composable
 private fun ClaudeControlBar(
@@ -259,31 +252,21 @@ private fun ClaudeControlBar(
     onSendEscape: () -> Unit,
     onOpenCommands: () -> Unit
 ) {
-    Surface(
-        color = MaterialTheme.colorScheme.surfaceVariant,
-        tonalElevation = 4.dp
-    ) {
+    Surface(color = MaterialTheme.colorScheme.surfaceVariant, tonalElevation = 4.dp) {
         Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 8.dp, vertical = 4.dp),
+            modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 4.dp),
             verticalArrangement = Arrangement.spacedBy(4.dp)
         ) {
-            // Row 1: Commands
             Row(
                 horizontalArrangement = Arrangement.spacedBy(4.dp),
                 modifier = Modifier.fillMaxWidth()
             ) {
                 CtrlButton("Mode") { onSendCommand("\u001B[Z") }
                 CtrlButton("/") { onOpenCommands() }
-
                 Spacer(Modifier.weight(1f))
-
                 CtrlButton("Esc") { onSendEscape() }
                 CtrlButton("C-c") { onSendCommand("\u0003") }
             }
-
-            // Row 2: Navigation + quick responses
             Row(
                 horizontalArrangement = Arrangement.spacedBy(4.dp),
                 modifier = Modifier.fillMaxWidth()
@@ -312,6 +295,8 @@ private fun CtrlButton(label: String, onClick: () -> Unit) {
     }
 }
 
+// ======================== TAB BAR ========================
+
 @Composable
 private fun TabBar(
     tabs: List<ClaudeSession>,
@@ -320,15 +305,9 @@ private fun TabBar(
     onTabClose: (String) -> Unit,
     onNewTab: () -> Unit
 ) {
-    Surface(
-        color = MaterialTheme.colorScheme.surface,
-        tonalElevation = 1.dp
-    ) {
+    Surface(color = MaterialTheme.colorScheme.surface, tonalElevation = 1.dp) {
         Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .height(40.dp)
-                .padding(horizontal = 4.dp),
+            modifier = Modifier.fillMaxWidth().height(40.dp).padding(horizontal = 4.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
             tabs.forEach { tab ->
@@ -343,6 +322,14 @@ private fun TabBar(
                         modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
+                        val dotColor = when (tab.status) {
+                            SessionStatus.ACTIVE -> Color(0xFF4CAF50)
+                            SessionStatus.CONNECTING -> Color(0xFFFF9800)
+                            SessionStatus.DISCONNECTED -> Color(0xFFF44336)
+                            SessionStatus.ERROR -> Color(0xFFF44336)
+                        }
+                        Box(modifier = Modifier.size(8.dp).background(dotColor, shape = CircleShape))
+                        Spacer(Modifier.width(4.dp))
                         Text(tab.tabTitle, style = MaterialTheme.typography.bodySmall, maxLines = 1)
                         Spacer(Modifier.width(4.dp))
                         IconButton(onClick = { onTabClose(tab.id) }, modifier = Modifier.size(16.dp)) {

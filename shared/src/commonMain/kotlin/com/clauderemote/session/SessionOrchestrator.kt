@@ -31,6 +31,9 @@ class SessionOrchestrator(
     // Disconnect callback
     var onSessionDisconnect: ((sessionId: String) -> Unit)? = null
 
+    // Session became active callback (for keep-alive etc.)
+    var onSessionActive: ((ClaudeSession) -> Unit)? = null
+
     suspend fun launchSession(
         server: SshServer,
         folder: String,
@@ -66,6 +69,7 @@ class SessionOrchestrator(
             serverStorage.updateServer(server.withRecentFolder(folder))
             tabManager.updateTabStatus(sessionId, SessionStatus.ACTIVE)
             FileLogger.log(TAG, "Session active: $sessionId")
+            onSessionActive?.invoke(session)
             session.copy(status = SessionStatus.ACTIVE)
         } catch (e: Exception) {
             FileLogger.error(TAG, "Session launch failed", e)

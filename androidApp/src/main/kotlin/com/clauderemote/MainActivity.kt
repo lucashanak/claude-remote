@@ -49,7 +49,6 @@ class MainActivity : ComponentActivity() {
             writeToTerminal(data)
         }
 
-        // Tab switch: replay buffer with delay to ensure WebView is visible
         sessionOrchestrator.onTabSwitched = { sessionId, bufferedOutput ->
             FileLogger.log("MainActivity", "Tab switched to $sessionId, buffer: ${bufferedOutput.length} chars")
             replayBuffer(bufferedOutput)
@@ -57,6 +56,17 @@ class MainActivity : ComponentActivity() {
 
         sessionOrchestrator.onSessionDisconnect = { sessionId ->
             FileLogger.log("MainActivity", "Session disconnected: $sessionId")
+            // Stop keep-alive when no active sessions remain
+            if (tabManager.tabs.value.none { it.status == com.clauderemote.model.SessionStatus.ACTIVE }) {
+                KeepAliveService.stop(this)
+            }
+        }
+
+        // Start/update keep-alive when sessions change
+        sessionOrchestrator.onSessionActive = { session ->
+            if (appSettings.keepAliveEnabled) {
+                KeepAliveService.start(this, "${session.server.name}: ${session.folder}")
+            }
         }
 
         val appVersion = try {
