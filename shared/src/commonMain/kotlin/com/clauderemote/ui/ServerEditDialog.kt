@@ -142,7 +142,7 @@ fun ServerEditDialog(
                         defaultFolder = defaultFolder.ifBlank { "~" },
                         recentFolders = server?.recentFolders ?: emptyList(),
                         defaultClaudeMode = server?.defaultClaudeMode ?: com.clauderemote.model.ClaudeMode.NORMAL,
-                        defaultClaudeModel = server?.defaultClaudeModel ?: com.clauderemote.model.ClaudeModel.SONNET,
+                        defaultClaudeModel = server?.defaultClaudeModel ?: com.clauderemote.model.ClaudeModel.DEFAULT,
                         portForwards = server?.portForwards ?: emptyList()
                     )
                     onSave(saved)

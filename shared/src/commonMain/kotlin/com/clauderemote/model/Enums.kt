@@ -4,14 +4,15 @@ import kotlinx.serialization.Serializable
 
 @Serializable
 enum class ClaudeMode(val displayName: String, val cliFlag: String?) {
-    PLAN("Plan", null),
     NORMAL("Normal", null),
+    PLAN("Plan", null),
     AUTO_ACCEPT("Auto-accept", "--auto-accept"),
     YOLO("YOLO", "--dangerously-skip-permissions");
 }
 
 @Serializable
-enum class ClaudeModel(val displayName: String, val cliValue: String) {
+enum class ClaudeModel(val displayName: String, val cliValue: String?) {
+    DEFAULT("Default", null),
     OPUS("Opus", "opus"),
     SONNET("Sonnet", "sonnet"),
     HAIKU("Haiku", "haiku");

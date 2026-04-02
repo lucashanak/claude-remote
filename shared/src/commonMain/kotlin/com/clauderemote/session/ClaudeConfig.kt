@@ -28,8 +28,10 @@ object ClaudeConfig {
 
         val claudeArgs = mutableListOf("claude")
 
-        claudeArgs.add("--model")
-        claudeArgs.add(model.cliValue)
+        if (model.cliValue != null) {
+            claudeArgs.add("--model")
+            claudeArgs.add(model.cliValue)
+        }
 
         when (mode) {
             ClaudeMode.AUTO_ACCEPT -> claudeArgs.add("--auto-accept")

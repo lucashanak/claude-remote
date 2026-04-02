@@ -7,8 +7,10 @@
 <style>
 * { margin:0; padding:0; box-sizing:border-box; }
 html, body { background:#1E1E1E; overflow:hidden; width:100%; height:100%; display:flex; flex-direction:column; }
-#terminal { flex:1; min-height:0; touch-action:none; }
-.xterm { height:100%; }
+#terminal { flex:1; min-height:0; touch-action:none; background:#1E1E1E; }
+.xterm { height:100%; background:#1E1E1E; }
+.xterm-viewport { background:#1E1E1E !important; }
+.xterm-screen { background:#1E1E1E; }
 #toast { position:fixed; bottom:60px; left:50%; transform:translateX(-50%); padding:6px 16px; background:rgba(0,122,204,0.85); color:#fff; font-size:12px; font-family:-apple-system,sans-serif; border-radius:16px; pointer-events:none; opacity:0; transition:opacity 0.2s; z-index:100; }
 #toast.show { opacity:1; }
 #ctxMenu { position:fixed; display:none; background:#2d2d2d; border:1px solid rgba(255,255,255,0.15); border-radius:8px; padding:4px 0; z-index:200; box-shadow:0 4px 16px rgba(0,0,0,0.5); min-width:140px; }

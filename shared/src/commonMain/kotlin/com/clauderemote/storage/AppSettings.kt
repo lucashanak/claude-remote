@@ -29,7 +29,7 @@ class AppSettings(private val prefs: PlatformPreferences) {
     var defaultClaudeModel: ClaudeModel
         get() = try {
             ClaudeModel.valueOf(prefs.getString("default_claude_model", "SONNET"))
-        } catch (e: Exception) { ClaudeModel.SONNET }
+        } catch (e: Exception) { ClaudeModel.DEFAULT }
         set(value) = prefs.putString("default_claude_model", value.name)
 
     // SSH defaults

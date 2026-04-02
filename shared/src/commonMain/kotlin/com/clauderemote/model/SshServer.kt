@@ -26,7 +26,7 @@ data class SshServer(
     val defaultFolder: String = "~",
     val recentFolders: List<String> = emptyList(),
     val defaultClaudeMode: ClaudeMode = ClaudeMode.NORMAL,
-    val defaultClaudeModel: ClaudeModel = ClaudeModel.SONNET,
+    val defaultClaudeModel: ClaudeModel = ClaudeModel.DEFAULT,
     val portForwards: List<PortForward> = emptyList()
 ) {
     val displayAddress: String get() = "$username@$host${if (port != 22) ":$port" else ""}"

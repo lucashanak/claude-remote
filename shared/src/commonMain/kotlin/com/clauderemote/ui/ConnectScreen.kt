@@ -28,7 +28,7 @@ fun ConnectScreen(
     var folder by remember { mutableStateOf(server.defaultFolder) }
     var selectedMode by remember { mutableStateOf(server.defaultClaudeMode) }
     var selectedModel by remember { mutableStateOf(server.defaultClaudeModel) }
-    var connectionType by remember { mutableStateOf(if (server.preferMosh) ConnectionType.MOSH else ConnectionType.SSH) }
+    var connectionType by remember { mutableStateOf(ConnectionType.SSH) }
     var tmuxSessionName by remember { mutableStateOf("claude-${server.name}") }
     var useExistingTmux by remember { mutableStateOf(false) }
     var modelExpanded by remember { mutableStateOf(false) }
@@ -157,13 +157,17 @@ fun ConnectScreen(
                     // Connection type
                     Text("Connection", style = MaterialTheme.typography.bodyMedium)
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        ConnectionType.entries.forEach { type ->
-                            FilterChip(
-                                selected = connectionType == type,
-                                onClick = { connectionType = type },
-                                label = { Text(type.displayName) }
-                            )
-                        }
+                        FilterChip(
+                            selected = connectionType == ConnectionType.SSH,
+                            onClick = { connectionType = ConnectionType.SSH },
+                            label = { Text("SSH") }
+                        )
+                        FilterChip(
+                            selected = connectionType == ConnectionType.MOSH,
+                            onClick = { connectionType = ConnectionType.MOSH },
+                            label = { Text("Mosh (not yet)") },
+                            enabled = false
+                        )
                     }
                 }
             }
