@@ -57,14 +57,13 @@ fun TerminalScreen(
                     modifier = Modifier.weight(1f)
                 )
 
-                // Toggle control bar
                 TextButton(onClick = { showControlBar = !showControlBar }) {
                     Text(if (showControlBar) "Hide" else "Controls", style = MaterialTheme.typography.bodySmall)
                 }
             }
         }
 
-        // Terminal content (WebView) - takes most space
+        // Terminal content (WebView) - takes all remaining space
         Box(
             modifier = Modifier
                 .fillMaxWidth()
@@ -112,39 +111,19 @@ private fun ClaudeControlBar(
         Column(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(8.dp)
+                .padding(horizontal = 8.dp, vertical = 4.dp),
+            verticalArrangement = Arrangement.spacedBy(4.dp)
         ) {
-            // Mode buttons
+            // Row 1: Claude commands + model
             Row(
                 horizontalArrangement = Arrangement.spacedBy(4.dp),
                 modifier = Modifier.fillMaxWidth()
             ) {
-                // Quick mode buttons
-                FilledTonalButton(
-                    onClick = { onSendCommand("/plan\n") },
-                    modifier = Modifier.height(32.dp),
-                    contentPadding = PaddingValues(horizontal = 12.dp)
-                ) {
-                    Text("Plan", style = MaterialTheme.typography.bodySmall)
-                }
+                CtrlButton("Plan") { onSendCommand("/plan\n") }
+                CtrlButton("Auto") { onSendCommand("/auto-accept\n") }
 
-                FilledTonalButton(
-                    onClick = { onSendCommand("/auto-accept\n") },
-                    modifier = Modifier.height(32.dp),
-                    contentPadding = PaddingValues(horizontal = 12.dp)
-                ) {
-                    Text("Auto", style = MaterialTheme.typography.bodySmall)
-                }
-
-                // Model dropdown
                 Box {
-                    FilledTonalButton(
-                        onClick = { onModelMenuToggle(true) },
-                        modifier = Modifier.height(32.dp),
-                        contentPadding = PaddingValues(horizontal = 12.dp)
-                    ) {
-                        Text(session.model.displayName, style = MaterialTheme.typography.bodySmall)
-                    }
+                    CtrlButton(session.model.displayName) { onModelMenuToggle(true) }
                     DropdownMenu(
                         expanded = modelMenuExpanded,
                         onDismissRequest = { onModelMenuToggle(false) }
@@ -163,24 +142,36 @@ private fun ClaudeControlBar(
 
                 Spacer(Modifier.weight(1f))
 
-                // Quick commands
-                FilledTonalButton(
-                    onClick = onSendEscape,
-                    modifier = Modifier.height(32.dp),
-                    contentPadding = PaddingValues(horizontal = 12.dp)
-                ) {
-                    Text("Esc", style = MaterialTheme.typography.bodySmall)
-                }
+                CtrlButton("Esc") { onSendEscape() }
+                CtrlButton("/clear") { onSendCommand("/clear\n") }
+            }
 
-                FilledTonalButton(
-                    onClick = { onSendCommand("/clear\n") },
-                    modifier = Modifier.height(32.dp),
-                    contentPadding = PaddingValues(horizontal = 12.dp)
-                ) {
-                    Text("/clear", style = MaterialTheme.typography.bodySmall)
-                }
+            // Row 2: Arrow keys + Tab + Enter
+            Row(
+                horizontalArrangement = Arrangement.spacedBy(4.dp),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                CtrlButton("Tab") { onSendCommand("\t") }
+                Spacer(Modifier.weight(1f))
+                CtrlButton("\u2190") { onSendCommand("\u001B[D") } // Left
+                CtrlButton("\u2193") { onSendCommand("\u001B[B") } // Down
+                CtrlButton("\u2191") { onSendCommand("\u001B[A") } // Up
+                CtrlButton("\u2192") { onSendCommand("\u001B[C") } // Right
+                Spacer(Modifier.weight(1f))
+                CtrlButton("Ctrl+C") { onSendCommand("\u0003") }
             }
         }
+    }
+}
+
+@Composable
+private fun CtrlButton(label: String, onClick: () -> Unit) {
+    FilledTonalButton(
+        onClick = onClick,
+        modifier = Modifier.height(32.dp),
+        contentPadding = PaddingValues(horizontal = 10.dp)
+    ) {
+        Text(label, style = MaterialTheme.typography.bodySmall)
     }
 }
 

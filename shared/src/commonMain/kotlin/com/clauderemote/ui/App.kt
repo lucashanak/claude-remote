@@ -93,27 +93,12 @@ fun App(
             try {
                 updateState = updateState.copy(downloading = true, error = null, statusText = "Downloading...")
 
-                val apkBytes = if (info.hasPatch) {
-                    try {
-                        applyPatchChain(info, appVersion) { status, progress ->
-                            updateState = updateState.copy(statusText = status, progress = progress)
-                        }
-                    } catch (e: Exception) {
-                        updateState = updateState.copy(statusText = "Patch failed, downloading full APK...")
-                        UpdateChecker.downloadFile(info.apkUrl) { progress, dl, total ->
-                            updateState = updateState.copy(
-                                progress = progress,
-                                statusText = "Downloading ${UpdateChecker.formatBytes(dl)} / ${UpdateChecker.formatBytes(total)}"
-                            )
-                        }
-                    }
-                } else {
-                    UpdateChecker.downloadFile(info.apkUrl) { progress, dl, total ->
-                        updateState = updateState.copy(
-                            progress = progress,
-                            statusText = "Downloading ${UpdateChecker.formatBytes(dl)} / ${UpdateChecker.formatBytes(total)}"
-                        )
-                    }
+                // Always download full APK (delta patching needs platform APK access)
+                val apkBytes = UpdateChecker.downloadFile(info.apkUrl) { progress, dl, total ->
+                    updateState = updateState.copy(
+                        progress = progress,
+                        statusText = "Downloading ${UpdateChecker.formatBytes(dl)} / ${UpdateChecker.formatBytes(total)}"
+                    )
                 }
 
                 if (info.apkSha256 != null) {
@@ -328,12 +313,4 @@ fun App(
             )
         }
     }
-}
-
-private suspend fun applyPatchChain(
-    update: UpdateInfo,
-    currentVersion: String,
-    onStatus: (String, Int) -> Unit
-): ByteArray {
-    throw UnsupportedOperationException("Patch chain requires platform-specific APK access")
 }

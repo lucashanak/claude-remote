@@ -2,183 +2,212 @@
 <html>
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-<title>Claude Remote Terminal</title>
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/css/xterm.min.css" />
 <style>
-    * { margin: 0; padding: 0; box-sizing: border-box; }
-    html, body {
-        background: #1E1E1E;
-        overflow: hidden;
-        width: 100%;
-        height: 100vh;
-        display: flex;
-        flex-direction: column;
-    }
-    #terminal {
-        flex: 1;
-        min-height: 0;
-    }
-    .xterm { height: 100%; }
-    #error { color: #F44; font-family: monospace; padding: 20px; display: none; white-space: pre-wrap; }
+* { margin:0; padding:0; box-sizing:border-box; }
+html, body { background:#1E1E1E; overflow:hidden; width:100%; height:100%; display:flex; flex-direction:column; }
+#terminal { flex:1; min-height:0; touch-action:none; }
+.xterm { height:100%; }
+#toast { position:fixed; bottom:60px; left:50%; transform:translateX(-50%); padding:6px 16px; background:rgba(0,122,204,0.85); color:#fff; font-size:12px; font-family:-apple-system,sans-serif; border-radius:16px; pointer-events:none; opacity:0; transition:opacity 0.2s; z-index:100; }
+#toast.show { opacity:1; }
+#ctxMenu { position:fixed; display:none; background:#2d2d2d; border:1px solid rgba(255,255,255,0.15); border-radius:8px; padding:4px 0; z-index:200; box-shadow:0 4px 16px rgba(0,0,0,0.5); min-width:140px; }
+.ctx-item { display:block; width:100%; padding:10px 16px; font-size:14px; font-family:-apple-system,sans-serif; color:#ddd; background:none; border:none; text-align:left; cursor:pointer; }
+.ctx-item:active { background:rgba(0,122,204,0.3); }
+.ctx-sep { height:1px; background:rgba(255,255,255,0.1); margin:4px 0; }
 </style>
 </head>
 <body>
-<div id="error"></div>
 <div id="terminal"></div>
+<div id="toast"></div>
+<div id="ctxMenu">
+    <button class="ctx-item" id="ctxCopy">Copy</button>
+    <button class="ctx-item" id="ctxPaste">Paste</button>
+    <div class="ctx-sep"></div>
+    <button class="ctx-item" id="ctxSelectAll">Select All</button>
+    <button class="ctx-item" id="ctxClear">Clear</button>
+</div>
 <script src="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/lib/xterm.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.10.0/lib/addon-fit.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/@xterm/addon-web-links@0.11.0/lib/addon-web-links.min.js"></script>
 <script>
-(function() {
-    'use strict';
+'use strict';
 
-    var errorDiv = document.getElementById('error');
-    function showError(msg) {
-        errorDiv.style.display = 'block';
-        errorDiv.textContent += msg + '\n';
+const A = window.Android;
+
+function showToast(msg, ms) {
+    const t = document.getElementById('toast');
+    t.textContent = msg;
+    t.classList.add('show');
+    setTimeout(() => t.classList.remove('show'), ms || 1200);
+}
+
+// ======================== TERMINAL ========================
+const term = new Terminal({
+    cursorBlink: true,
+    fontSize: 14,
+    fontFamily: "'Droid Sans Mono', 'Noto Sans Mono', 'Liberation Mono', monospace",
+    theme: {
+        background:'#1E1E1E', foreground:'#CCCCCC', cursor:'#AEAFAD', selectionBackground:'#264F78',
+        black:'#000000', red:'#CD3131', green:'#0DBC79', yellow:'#E5E510',
+        blue:'#2472C8', magenta:'#BC3FBC', cyan:'#11A8CD', white:'#E5E5E5',
+        brightBlack:'#666666', brightRed:'#F14C4C', brightGreen:'#23D18B', brightYellow:'#F5F543',
+        brightBlue:'#3B8EEA', brightMagenta:'#D670D6', brightCyan:'#29B8DB', brightWhite:'#FFFFFF'
+    },
+    allowTransparency: false,
+    scrollback: 10000,
+    convertEol: true,
+    allowProposedApi: true
+});
+
+const fitAddon = new FitAddon.FitAddon();
+term.loadAddon(fitAddon);
+
+try {
+    const webLinksAddon = new WebLinksAddon.WebLinksAddon((e, uri) => {
+        if (A) A.openUrl(uri);
+    });
+    term.loadAddon(webLinksAddon);
+} catch(e) {}
+
+const termEl = document.getElementById('terminal');
+term.open(termEl);
+
+// Send user input to Android
+term.onData(data => { if (A) A.onTerminalInput(data); });
+
+// ======================== SMART SCROLL ========================
+function scrollTerminal(lines) {
+    if (lines === 0) return;
+    const isAlt = term.buffer.active.type === 'alternate';
+    const mouseMode = (term.modes && term.modes.mouseTrackingMode) || 'none';
+
+    if (isAlt && mouseMode !== 'none' && A) {
+        const btn = lines < 0 ? 64 : 65;
+        const count = Math.min(Math.abs(lines), 15);
+        const seq = '\x1b[<' + btn + ';1;1M';
+        for (let i = 0; i < count; i++) A.onTerminalInput(seq);
+    } else {
+        term.scrollLines(lines);
     }
+}
 
-    function log(msg) {
-        if (window.TerminalBridge) {
-            try { window.TerminalBridge.onTerminalInput('\x00LOG:' + msg); } catch(e) {}
-        }
+function selectWordAt(px, py) {
+    const rect = getScreenRect();
+    const cell = getCellSize();
+    const col = Math.floor((px - rect.left) / cell.w);
+    const row = Math.floor((py - rect.top) / cell.h);
+    const vp = term.buffer.active.viewportY;
+    const line = term.buffer.active.getLine(row + vp);
+    if (!line) return;
+    const lineText = line.translateToString();
+    const wordChars = /[a-zA-Z0-9_\-\.\/~]/;
+    let start = Math.min(col, lineText.length - 1);
+    let end = start;
+    while (start > 0 && wordChars.test(lineText[start - 1])) start--;
+    while (end < lineText.length - 1 && wordChars.test(lineText[end + 1])) end++;
+    const len = end - start + 1;
+    if (len > 0 && wordChars.test(lineText[start] || '')) {
+        term.select(start, row + vp, len);
     }
+}
 
-    if (typeof Terminal === 'undefined') {
-        showError('ERROR: xterm.js not loaded');
-        return;
-    }
-
+function getCellSize() {
     try {
-        var term = new Terminal({
-            cursorBlink: true,
-            fontSize: 14,
-            fontFamily: '"Fira Code", "Cascadia Code", "JetBrains Mono", "Menlo", monospace',
-            theme: {
-                background: '#1E1E1E',
-                foreground: '#D4D4D4',
-                cursor: '#AEAFAD',
-                selectionBackground: '#264F78',
-                black: '#1E1E1E',
-                red: '#F44747',
-                green: '#6A9955',
-                yellow: '#DCDCAA',
-                blue: '#569CD6',
-                magenta: '#C586C0',
-                cyan: '#4EC9B0',
-                white: '#D4D4D4',
-                brightBlack: '#808080',
-                brightRed: '#F44747',
-                brightGreen: '#6A9955',
-                brightYellow: '#DCDCAA',
-                brightBlue: '#569CD6',
-                brightMagenta: '#C586C0',
-                brightCyan: '#4EC9B0',
-                brightWhite: '#FFFFFF'
-            },
-            scrollback: 10000,
-            convertEol: false
-        });
-
-        var fitAddon = new FitAddon.FitAddon();
-        term.loadAddon(fitAddon);
-
-        try {
-            var webLinksAddon = new WebLinksAddon.WebLinksAddon();
-            term.loadAddon(webLinksAddon);
-        } catch(e) {}
-
-        var termDiv = document.getElementById('terminal');
-        term.open(termDiv);
-
-        term.onData(function(data) {
-            // Filter out our log messages
-            if (data.indexOf('\x00LOG:') === 0) return;
-            if (window.TerminalBridge) {
-                window.TerminalBridge.onTerminalInput(data);
-            }
-        });
-
-        term.onResize(function() {
-            if (window.TerminalBridge) {
-                window.TerminalBridge.onTerminalResize(term.cols, term.rows);
-            }
-        });
-
-        function doFit() {
-            try {
-                fitAddon.fit();
-            } catch(e) {}
-        }
-
-        function initFit() {
-            var w = termDiv.clientWidth;
-            var h = termDiv.clientHeight;
-            var bw = document.body.clientWidth;
-            var bh = document.body.clientHeight;
-            var ww = window.innerWidth;
-            var wh = window.innerHeight;
-
-            if (h > 10) {
-                doFit();
-                if (window.TerminalBridge) {
-                    window.TerminalBridge.onTerminalReady(term.cols, term.rows);
-                }
-                log('fit OK: term=' + w + 'x' + h + ' body=' + bw + 'x' + bh + ' win=' + ww + 'x' + wh + ' cols=' + term.cols + ' rows=' + term.rows);
-            } else {
-                log('waiting for height: term=' + w + 'x' + h + ' body=' + bw + 'x' + bh + ' win=' + ww + 'x' + wh);
-                setTimeout(initFit, 100);
-            }
-        }
-
-        // Start trying to fit after a short delay
-        setTimeout(initFit, 100);
-
-        window.addEventListener('resize', function() {
-            doFit();
-        });
-
-        // API for native code
-        window.writeOutput = function(data) {
-            term.write(data);
-        };
-
-        window.writeOutputB64 = function(b64) {
-            try {
-                var raw = atob(b64);
-                term.write(raw);
-            } catch(e) {
-                showError('writeOutputB64 error: ' + e);
-            }
-        };
-
-        window.clearTerminal = function() {
-            term.reset();
-        };
-
-        window.setFontSize = function(size) {
-            term.options.fontSize = size;
-            doFit();
-        };
-
-        window.setScrollback = function(lines) {
-            term.options.scrollback = lines;
-        };
-
-        window.getTerminalInfo = function() {
-            return JSON.stringify({
-                cols: term.cols, rows: term.rows,
-                termW: termDiv.clientWidth, termH: termDiv.clientHeight,
-                bodyW: document.body.clientWidth, bodyH: document.body.clientHeight,
-                winW: window.innerWidth, winH: window.innerHeight
-            });
-        };
-
-    } catch(e) {
-        showError('Terminal init error: ' + e.message + '\n' + e.stack);
+        const dims = term._core._renderService.dimensions;
+        return { w: dims.css.cell.width, h: dims.css.cell.height };
+    } catch(_) {
+        const screen = document.querySelector('.xterm-screen');
+        if (!screen) return { w:8, h:16 };
+        return { w: screen.clientWidth / term.cols, h: screen.clientHeight / term.rows };
     }
-})();
+}
+
+function getScreenRect() {
+    const screen = document.querySelector('.xterm-screen');
+    return screen ? screen.getBoundingClientRect() : {left:0,top:0,width:0,height:0};
+}
+
+// ======================== CONTEXT MENU ========================
+const ctxMenu = document.getElementById('ctxMenu');
+
+function showCtxMenu(x, y) {
+    const mw = ctxMenu.offsetWidth || 140, mh = ctxMenu.offsetHeight || 200;
+    ctxMenu.style.left = Math.max(4, Math.min(x, window.innerWidth - mw - 8)) + 'px';
+    ctxMenu.style.top = Math.max(4, Math.min(y, window.innerHeight - mh - 8)) + 'px';
+    ctxMenu.style.display = 'block';
+}
+function hideCtxMenu() { ctxMenu.style.display = 'none'; }
+
+// 2-finger tap → context menu
+let ctxTapStart = 0, ctxTapPos = {x:0,y:0}, ctxTapMoved = false;
+termEl.addEventListener('touchstart', e => {
+    if (e.touches.length === 2) {
+        ctxTapStart = Date.now(); ctxTapMoved = false;
+        ctxTapPos = { x:(e.touches[0].clientX+e.touches[1].clientX)/2, y:(e.touches[0].clientY+e.touches[1].clientY)/2 };
+    }
+}, {passive:true});
+termEl.addEventListener('touchmove', e => { if (e.touches.length === 2) ctxTapMoved = true; }, {passive:true});
+termEl.addEventListener('touchend', e => {
+    if (ctxTapStart > 0 && !ctxTapMoved && Date.now() - ctxTapStart < 400) showCtxMenu(ctxTapPos.x, ctxTapPos.y);
+    if (e.touches.length === 0) ctxTapStart = 0;
+}, {passive:true});
+
+document.addEventListener('touchstart', e => {
+    if (e.touches.length === 1 && ctxMenu.style.display === 'block' && !ctxMenu.contains(e.target)) hideCtxMenu();
+}, {passive:true});
+
+document.getElementById('ctxCopy').addEventListener('click', () => {
+    hideCtxMenu();
+    const sel = term.getSelection();
+    if (sel && A) { A.copyToClipboard(sel); showToast('Copied'); }
+});
+document.getElementById('ctxPaste').addEventListener('click', () => {
+    hideCtxMenu();
+    if (A) { const t = A.getClipboard(); if (t) { A.onTerminalInput(t); showToast('Pasted'); } }
+});
+document.getElementById('ctxSelectAll').addEventListener('click', () => { hideCtxMenu(); term.selectAll(); });
+document.getElementById('ctxClear').addEventListener('click', () => { hideCtxMenu(); term.clear(); });
+
+// ======================== RESIZE (ResizeObserver) ========================
+const ro = new ResizeObserver(() => {
+    fitAddon.fit();
+    if (A) A.onTerminalResize(term.cols, term.rows);
+});
+ro.observe(termEl);
+
+// ======================== SUPPRESS ANDROID KEYBOARD ========================
+function suppressKeyboard() {
+    document.querySelectorAll('.xterm-helper-textarea, textarea, input').forEach(el => {
+        el.setAttribute('inputmode', 'none');
+    });
+}
+const imeObserver = new MutationObserver(mutations => {
+    for (const m of mutations) for (const node of m.addedNodes) {
+        if (node.nodeType !== 1) continue;
+        if (node.matches && node.matches('textarea,input,.xterm-helper-textarea'))
+            node.setAttribute('inputmode', 'none');
+        if (node.querySelectorAll)
+            node.querySelectorAll('textarea,input,.xterm-helper-textarea').forEach(
+                el => el.setAttribute('inputmode', 'none'));
+    }
+});
+imeObserver.observe(document.body, { childList: true, subtree: true });
+
+// ======================== API (called from Android) ========================
+function writeOutput(text) { term.write(text); }
+function clearTerminal() { term.reset(); }
+function setFontSize(size) { term.options.fontSize = size; fitAddon.fit(); }
+function setScrollback(lines) { term.options.scrollback = lines; }
+
+// ======================== INIT ========================
+if (A) {
+    setTimeout(() => {
+        fitAddon.fit();
+        suppressKeyboard();
+        A.onTerminalReady(term.cols, term.rows);
+    }, 100);
+}
 </script>
 </body>
 </html>
