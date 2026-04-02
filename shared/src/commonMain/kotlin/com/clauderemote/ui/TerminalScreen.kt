@@ -114,31 +114,16 @@ private fun ClaudeControlBar(
                 .padding(horizontal = 8.dp, vertical = 4.dp),
             verticalArrangement = Arrangement.spacedBy(4.dp)
         ) {
-            // Row 1: Claude commands + model
+            // Row 1: Mode toggle + Claude slash commands
             Row(
                 horizontalArrangement = Arrangement.spacedBy(4.dp),
                 modifier = Modifier.fillMaxWidth()
             ) {
-                CtrlButton("Plan") { onSendCommand("/plan\n") }
-                CtrlButton("Auto") { onSendCommand("/auto-accept\n") }
-
-                Box {
-                    CtrlButton(session.model.displayName) { onModelMenuToggle(true) }
-                    DropdownMenu(
-                        expanded = modelMenuExpanded,
-                        onDismissRequest = { onModelMenuToggle(false) }
-                    ) {
-                        ClaudeModel.entries.forEach { model ->
-                            DropdownMenuItem(
-                                text = { Text(model.displayName) },
-                                onClick = {
-                                    onSwitchModel(model)
-                                    onModelMenuToggle(false)
-                                }
-                            )
-                        }
-                    }
-                }
+                // Shift+Tab cycles modes: normal → plan → auto-accept
+                CtrlButton("Mode") { onSendCommand("\u001B[Z") }
+                CtrlButton("/plan") { onSendCommand("/plan\n") }
+                CtrlButton("/model") { onSendCommand("/model\n") }
+                CtrlButton("/compact") { onSendCommand("/compact\n") }
 
                 Spacer(Modifier.weight(1f))
 
@@ -146,19 +131,20 @@ private fun ClaudeControlBar(
                 CtrlButton("/clear") { onSendCommand("/clear\n") }
             }
 
-            // Row 2: Arrow keys + Tab + Enter
+            // Row 2: Navigation + editing
             Row(
                 horizontalArrangement = Arrangement.spacedBy(4.dp),
                 modifier = Modifier.fillMaxWidth()
             ) {
                 CtrlButton("Tab") { onSendCommand("\t") }
+                CtrlButton("Enter") { onSendCommand("\r") }
                 Spacer(Modifier.weight(1f))
-                CtrlButton("\u2190") { onSendCommand("\u001B[D") } // Left
-                CtrlButton("\u2193") { onSendCommand("\u001B[B") } // Down
-                CtrlButton("\u2191") { onSendCommand("\u001B[A") } // Up
-                CtrlButton("\u2192") { onSendCommand("\u001B[C") } // Right
+                CtrlButton("\u2190") { onSendCommand("\u001B[D") }
+                CtrlButton("\u2193") { onSendCommand("\u001B[B") }
+                CtrlButton("\u2191") { onSendCommand("\u001B[A") }
+                CtrlButton("\u2192") { onSendCommand("\u001B[C") }
                 Spacer(Modifier.weight(1f))
-                CtrlButton("Ctrl+C") { onSendCommand("\u0003") }
+                CtrlButton("C-c") { onSendCommand("\u0003") }
             }
         }
     }
