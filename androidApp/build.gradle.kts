@@ -59,3 +59,10 @@ dependencies {
     implementation("androidx.activity:activity-compose:1.9.3")
     implementation("androidx.core:core-ktx:1.15.0")
 }
+
+// Copy shared terminal assets before build
+tasks.register<Copy>("copySharedAssets") {
+    from("${rootProject.projectDir}/shared-assets/terminal")
+    into("src/main/assets/terminal")
+}
+tasks.named("preBuild") { dependsOn("copySharedAssets") }

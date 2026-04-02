@@ -20,6 +20,13 @@ dependencies {
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-swing:1.9.0")
 }
 
+// Copy shared terminal assets before build
+tasks.register<Copy>("copySharedAssets") {
+    from("${rootProject.projectDir}/shared-assets/terminal")
+    into("src/main/resources/terminal")
+}
+tasks.named("processResources") { dependsOn("copySharedAssets") }
+
 compose.desktop {
     application {
         mainClass = "com.clauderemote.MainKt"

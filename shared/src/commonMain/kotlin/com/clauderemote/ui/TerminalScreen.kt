@@ -252,11 +252,27 @@ private fun ClaudeControlBar(
     onSendEscape: () -> Unit,
     onOpenCommands: () -> Unit
 ) {
+    var ctrlActive by remember { mutableStateOf(false) }
+
+    // Send char or Ctrl+char
+    fun send(ch: String) {
+        if (ctrlActive && ch.length == 1) {
+            val c = ch[0]
+            if (c in 'a'..'z') {
+                onSendCommand((c - 'a' + 1).toChar().toString())
+                ctrlActive = false
+                return
+            }
+        }
+        onSendCommand(ch)
+    }
+
     Surface(color = MaterialTheme.colorScheme.surfaceVariant, tonalElevation = 4.dp) {
         Column(
             modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 4.dp),
             verticalArrangement = Arrangement.spacedBy(4.dp)
         ) {
+            // Row 1: Claude commands
             Row(
                 horizontalArrangement = Arrangement.spacedBy(4.dp),
                 modifier = Modifier.fillMaxWidth()
@@ -267,11 +283,24 @@ private fun ClaudeControlBar(
                 CtrlButton("Esc") { onSendEscape() }
                 CtrlButton("C-c") { onSendCommand("\u0003") }
             }
+            // Row 2: Navigation + modifiers
             Row(
                 horizontalArrangement = Arrangement.spacedBy(4.dp),
                 modifier = Modifier.fillMaxWidth()
             ) {
-                CtrlButton("Tab") { onSendCommand("\t") }
+                // Ctrl toggle
+                FilledTonalButton(
+                    onClick = { ctrlActive = !ctrlActive },
+                    modifier = Modifier.height(32.dp),
+                    contentPadding = PaddingValues(horizontal = 10.dp),
+                    colors = if (ctrlActive) ButtonDefaults.filledTonalButtonColors(
+                        containerColor = MaterialTheme.colorScheme.primary,
+                        contentColor = MaterialTheme.colorScheme.onPrimary
+                    ) else ButtonDefaults.filledTonalButtonColors()
+                ) {
+                    Text("Ctrl", style = MaterialTheme.typography.bodySmall)
+                }
+                CtrlButton("Tab") { send("\t") }
                 CtrlButton("\u2190") { onSendCommand("\u001B[D") }
                 CtrlButton("\u2193") { onSendCommand("\u001B[B") }
                 CtrlButton("\u2191") { onSendCommand("\u001B[A") }

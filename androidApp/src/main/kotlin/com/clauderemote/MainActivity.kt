@@ -155,10 +155,14 @@ class MainActivity : ComponentActivity() {
                     webViewClient = object : WebViewClient() {
                         override fun onPageFinished(view: WebView?, url: String?) {
                             FileLogger.log("MainActivity", "WebView loaded, size: ${view?.width}x${view?.height}px")
-                            // Apply saved font size
+                            // Apply saved settings
                             val savedSize = appSettings.terminalFontSize
                             if (savedSize != 14) {
                                 view?.evaluateJavascript("setFontSize($savedSize)", null)
+                            }
+                            val scheme = appSettings.terminalColorScheme
+                            if (scheme != "default") {
+                                view?.evaluateJavascript("applyColorScheme('$scheme')", null)
                             }
                         }
                     }

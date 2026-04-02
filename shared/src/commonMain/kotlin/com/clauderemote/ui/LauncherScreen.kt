@@ -27,10 +27,12 @@ fun LauncherScreen(
     onAddServer: () -> Unit,
     onEditServer: (SshServer) -> Unit,
     onDeleteServer: (SshServer) -> Unit,
+    onToggleFavorite: ((SshServer) -> Unit)? = null,
     onResumeSession: (ClaudeSession) -> Unit,
     onSettings: () -> Unit,
     onViewLog: () -> Unit = {}
 ) {
+    val sortedServers = servers.sortedByDescending { it.favorite }
     Scaffold(
         topBar = {
             TopAppBar(
@@ -98,12 +100,13 @@ fun LauncherScreen(
                 }
             }
 
-            items(servers, key = { it.id }) { server ->
+            items(sortedServers, key = { it.id }) { server ->
                 ServerCard(
                     server = server,
                     onConnect = { onConnectServer(server) },
                     onEdit = { onEditServer(server) },
-                    onDelete = { onDeleteServer(server) }
+                    onDelete = { onDeleteServer(server) },
+                    onToggleFavorite = onToggleFavorite?.let { toggle -> { toggle(server) } }
                 )
             }
 
@@ -165,7 +168,8 @@ private fun ServerCard(
     server: SshServer,
     onConnect: () -> Unit,
     onEdit: () -> Unit,
-    onDelete: () -> Unit
+    onDelete: () -> Unit,
+    onToggleFavorite: (() -> Unit)? = null
 ) {
     var showDeleteConfirm by remember { mutableStateOf(false) }
 
@@ -174,6 +178,17 @@ private fun ServerCard(
             modifier = Modifier.padding(16.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
+            // Favorite star
+            if (onToggleFavorite != null) {
+                IconButton(onClick = onToggleFavorite, modifier = Modifier.size(32.dp)) {
+                    Text(
+                        if (server.favorite) "\u2605" else "\u2606",
+                        color = if (server.favorite) MaterialTheme.colorScheme.primary
+                               else MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
+
             Column(modifier = Modifier.weight(1f)) {
                 Text(server.name, style = MaterialTheme.typography.titleSmall)
                 Text(

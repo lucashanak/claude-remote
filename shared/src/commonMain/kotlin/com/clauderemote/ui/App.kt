@@ -186,6 +186,10 @@ fun App(
                             serverStorage.deleteServer(server.id)
                             refreshServers()
                         },
+                        onToggleFavorite = { server ->
+                            serverStorage.updateServer(server.copy(favorite = !server.favorite))
+                            refreshServers()
+                        },
                         onResumeSession = { session ->
                             sessionOrchestrator.switchTab(session.id)
                             currentScreen = Screen.TERMINAL
