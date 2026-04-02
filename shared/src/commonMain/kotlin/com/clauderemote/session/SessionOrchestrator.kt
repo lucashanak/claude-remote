@@ -19,6 +19,12 @@ class SessionOrchestrator(
     // One SshManager per session ID
     private val connections = mutableMapOf<String, SshManager>()
 
+    // Terminal output callback — set by the platform (Android WebView, Desktop terminal)
+    var onTerminalOutput: ((sessionId: String, data: String) -> Unit)? = null
+
+    // Disconnect callback
+    var onSessionDisconnect: ((sessionId: String) -> Unit)? = null
+
     /**
      * Launch a new Claude session:
      * 1. SSH connect to server
@@ -31,9 +37,7 @@ class SessionOrchestrator(
         mode: ClaudeMode,
         model: ClaudeModel,
         connectionType: ConnectionType,
-        tmuxSessionName: String,
-        onOutput: (String) -> Unit,
-        onDisconnect: () -> Unit
+        tmuxSessionName: String
     ): ClaudeSession = withContext(Dispatchers.IO) {
         val sessionId = generateId()
 
@@ -53,8 +57,8 @@ class SessionOrchestrator(
 
         try {
             when (connectionType) {
-                ConnectionType.SSH -> connectSsh(session, onOutput, onDisconnect)
-                ConnectionType.MOSH -> connectMosh(session, onOutput, onDisconnect)
+                ConnectionType.SSH -> connectSsh(session)
+                ConnectionType.MOSH -> connectMosh(session)
             }
 
             // Update recent folders on server
@@ -70,18 +74,20 @@ class SessionOrchestrator(
         }
     }
 
-    private suspend fun connectSsh(
-        session: ClaudeSession,
-        onOutput: (String) -> Unit,
-        onDisconnect: () -> Unit
-    ) {
+    private suspend fun connectSsh(session: ClaudeSession) {
         val sshManager = SshManager(serverStorage)
         connections[session.id] = sshManager
 
-        sshManager.connect(session.server, onOutput) {
-            tabManager.updateTabStatus(session.id, SessionStatus.DISCONNECTED)
-            onDisconnect()
-        }
+        sshManager.connect(
+            session.server,
+            onOutput = { data ->
+                onTerminalOutput?.invoke(session.id, data)
+            },
+            onDisconnect = {
+                tabManager.updateTabStatus(session.id, SessionStatus.DISCONNECTED)
+                onSessionDisconnect?.invoke(session.id)
+            }
+        )
 
         // Send tmux + claude command
         val command = ClaudeConfig.buildTmuxLaunchCommand(
@@ -93,15 +99,11 @@ class SessionOrchestrator(
         sshManager.sendInput(command + "\n")
     }
 
-    private suspend fun connectMosh(
-        session: ClaudeSession,
-        onOutput: (String) -> Unit,
-        onDisconnect: () -> Unit
-    ) {
+    private suspend fun connectMosh(session: ClaudeSession) {
         // Mosh not yet fully integrated — fall back to SSH with warning
-        FileLogger.log("SessionOrchestrator", "Mosh not yet implemented, falling back to SSH for ${session.server.name}")
-        onOutput("\r\n[Warning: Mosh not yet implemented, using SSH]\r\n")
-        connectSsh(session, onOutput, onDisconnect)
+        FileLogger.log(TAG, "Mosh not yet implemented, falling back to SSH for ${session.server.name}")
+        onTerminalOutput?.invoke("", "\r\n[Warning: Mosh not yet implemented, using SSH]\r\n")
+        connectSsh(session)
     }
 
     fun sendInput(sessionId: String, data: String) {
@@ -116,9 +118,6 @@ class SessionOrchestrator(
         connections[sessionId]?.resize(cols, rows)
     }
 
-    /**
-     * Send a claude slash command (e.g. /model, /plan, /clear).
-     */
     fun sendClaudeCommand(sessionId: String, command: String) {
         sendInput(sessionId, command)
     }

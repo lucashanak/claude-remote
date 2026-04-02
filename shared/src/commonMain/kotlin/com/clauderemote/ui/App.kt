@@ -199,9 +199,7 @@ fun App(
                                             mode = mode,
                                             model = model,
                                             connectionType = connType,
-                                            tmuxSessionName = tmuxName,
-                                            onOutput = {},
-                                            onDisconnect = {}
+                                            tmuxSessionName = tmuxName
                                         )
                                         currentScreen = Screen.TERMINAL
                                     } catch (e: Exception) {

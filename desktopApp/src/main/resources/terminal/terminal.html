@@ -96,6 +96,16 @@
         term.write(data);
     };
 
+    // Base64 variant — avoids escaping issues with raw terminal data
+    window.writeOutputB64 = function(b64) {
+        try {
+            var raw = atob(b64);
+            term.write(raw);
+        } catch(e) {
+            console.error('writeOutputB64 error:', e);
+        }
+    };
+
     window.clearTerminal = function() {
         term.clear();
     };
