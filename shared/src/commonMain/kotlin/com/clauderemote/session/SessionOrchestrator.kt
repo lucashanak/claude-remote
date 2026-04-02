@@ -159,6 +159,10 @@ class SessionOrchestrator(
         }
     }
 
+    fun clearBuffer(sessionId: String) {
+        outputBuffers[sessionId]?.clear()
+    }
+
     fun sendInput(sessionId: String, data: String) {
         connections[sessionId]?.sendInput(data)
     }

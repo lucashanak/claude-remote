@@ -68,22 +68,41 @@ fun TerminalScreen(
                     style = MaterialTheme.typography.bodyMedium,
                     modifier = Modifier.weight(1f)
                 )
-                if (onFetchClaudeMd != null) {
-                    TextButton(onClick = {
-                        scope.launch {
-                            claudeMdContent = onFetchClaudeMd.invoke()
-                            showClaudeMd = true
-                        }
-                    }) {
-                        Text("MD", style = MaterialTheme.typography.bodySmall)
-                    }
-                }
+                // Compact/Full toggle
                 TextButton(onClick = { compactMode = !compactMode }) {
-                    Text(if (compactMode) "Full" else "Compact", style = MaterialTheme.typography.bodySmall)
+                    Text(if (compactMode) "Full" else "Min", style = MaterialTheme.typography.bodySmall)
                 }
                 if (!compactMode) {
                     TextButton(onClick = { showControlBar = !showControlBar }) {
                         Text(if (showControlBar) "Hide" else "Ctrl", style = MaterialTheme.typography.bodySmall)
+                    }
+                }
+                // More menu
+                var moreMenu by remember { mutableStateOf(false) }
+                Box {
+                    IconButton(onClick = { moreMenu = true }, modifier = Modifier.size(36.dp)) {
+                        Text("\u22EE", style = MaterialTheme.typography.titleMedium) // vertical ellipsis
+                    }
+                    DropdownMenu(expanded = moreMenu, onDismissRequest = { moreMenu = false }) {
+                        if (onFetchClaudeMd != null) {
+                            DropdownMenuItem(
+                                text = { Text("View CLAUDE.md") },
+                                onClick = {
+                                    moreMenu = false
+                                    scope.launch {
+                                        claudeMdContent = onFetchClaudeMd.invoke()
+                                        showClaudeMd = true
+                                    }
+                                }
+                            )
+                        }
+                        DropdownMenuItem(
+                            text = { Text("Reset terminal") },
+                            onClick = {
+                                moreMenu = false
+                                onSendCommand("\u001Bc") // ESC c = full terminal reset
+                            }
+                        )
                     }
                 }
             }
@@ -271,7 +290,16 @@ private fun PromptInputBar(
                         unfocusedContainerColor = MaterialTheme.colorScheme.surface
                     )
                 )
-                Spacer(Modifier.width(8.dp))
+                // Clear text button
+                if (text.isNotBlank()) {
+                    IconButton(
+                        onClick = { text = "" },
+                        modifier = Modifier.size(36.dp)
+                    ) {
+                        Icon(Icons.Default.Close, "Clear", modifier = Modifier.size(16.dp))
+                    }
+                }
+                Spacer(Modifier.width(4.dp))
                 Button(
                     onClick = {
                         if (text.isNotBlank()) {
