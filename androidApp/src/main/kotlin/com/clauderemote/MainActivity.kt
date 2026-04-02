@@ -33,7 +33,6 @@ class MainActivity : ComponentActivity() {
     private lateinit var tabManager: TabManager
     private lateinit var sessionOrchestrator: SessionOrchestrator
     private var terminalWebView: WebView? = null
-    @Volatile private var pendingReplay = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         enableEdgeToEdge()
@@ -45,23 +44,15 @@ class MainActivity : ComponentActivity() {
         tabManager = TabManager()
         sessionOrchestrator = SessionOrchestrator(serverStorage, tabManager)
 
-        // Wire SSH output → terminal WebView using JSONObject.quote for safe JS injection
+        // Wire SSH output → terminal WebView
         sessionOrchestrator.onTerminalOutput = { sessionId, data ->
             writeToTerminal(data)
         }
 
+        // Tab switch: replay buffer with delay to ensure WebView is visible
         sessionOrchestrator.onTabSwitched = { sessionId, bufferedOutput ->
-            FileLogger.log("MainActivity", "Tab switched to $sessionId, buffer: ${bufferedOutput.length} chars, webView: ${terminalWebView != null}")
-            val wv = terminalWebView
-            if (wv != null && wv.width > 0) {
-                clearTerminal()
-                if (bufferedOutput.isNotEmpty()) {
-                    writeToTerminal(bufferedOutput)
-                }
-            } else {
-                // WebView not ready yet (screen just switched) — replay on next onTerminalReady
-                pendingReplay = true
-            }
+            FileLogger.log("MainActivity", "Tab switched to $sessionId, buffer: ${bufferedOutput.length} chars")
+            replayBuffer(bufferedOutput)
         }
 
         sessionOrchestrator.onSessionDisconnect = { sessionId ->
@@ -88,11 +79,29 @@ class MainActivity : ComponentActivity() {
                     }
                     startActivity(Intent.createChooser(intent, "Share Log"))
                 },
+                onTerminalScreenVisible = {
+                    // When terminal screen becomes visible, replay active tab buffer
+                    val activeId = tabManager.activeTabId.value ?: return@App
+                    val buffer = sessionOrchestrator.getBuffer(activeId)
+                    if (buffer.isNotEmpty()) {
+                        replayBuffer(buffer)
+                    }
+                },
                 terminalContent = { modifier ->
                     TerminalWebView(modifier = modifier)
                 }
             )
         }
+    }
+
+    private fun replayBuffer(bufferedOutput: String) {
+        // Delay to ensure WebView is laid out and visible
+        terminalWebView?.postDelayed({
+            clearTerminal()
+            if (bufferedOutput.isNotEmpty()) {
+                writeToTerminal(bufferedOutput)
+            }
+        }, 150)
     }
 
     @SuppressLint("SetJavaScriptEnabled", "ClickableViewAccessibility")
@@ -120,14 +129,11 @@ class MainActivity : ComponentActivity() {
                         }
                     }
 
-                    // Suppress native context menu (we have our own)
                     setOnLongClickListener { true }
                     isLongClickable = false
                     isHapticFeedbackEnabled = false
 
-                    // Setup touch handling: 1-finger scroll, long-press select, 2-finger pinch zoom
                     setupTouchHandlers(this)
-
                     loadUrl("file:///android_asset/terminal/terminal.html")
                     terminalWebView = this
                     FileLogger.log("MainActivity", "Terminal WebView created")
@@ -137,18 +143,13 @@ class MainActivity : ComponentActivity() {
         )
     }
 
-    /**
-     * Native touch handler — same pattern as vscode_android SshSessionManager.
-     * 1-finger drag → scroll, long-press → select word
-     * 2-finger scroll / pinch → scroll or font size zoom
-     */
     @SuppressLint("ClickableViewAccessibility")
     private fun setupTouchHandlers(webView: WebView) {
         var twoFingerActive = false
         var twoFingerStartY = 0f
         var twoFingerStartDist = 0f
         var startFontSize = 14
-        var mode: String? = null // "scroll" | "pinch"
+        var mode: String? = null
         var scrollAccum2f = 0f
 
         var oneFingerFontSize = 14
@@ -188,7 +189,7 @@ class MainActivity : ComponentActivity() {
                         }
                     }
                     handler.postDelayed(longPressRunnable!!, 500)
-                    false // Let WebView see ACTION_DOWN for focus
+                    false
                 }
                 MotionEvent.ACTION_POINTER_DOWN -> {
                     longPressRunnable?.let { handler.removeCallbacks(it) }
@@ -208,7 +209,6 @@ class MainActivity : ComponentActivity() {
                     false
                 }
                 MotionEvent.ACTION_MOVE -> {
-                    // 2-finger move
                     if (twoFingerActive && event.pointerCount >= 2) {
                         val dx = event.getX(0) - event.getX(1)
                         val dy = event.getY(0) - event.getY(1)
@@ -244,7 +244,6 @@ class MainActivity : ComponentActivity() {
                         return@setOnTouchListener false
                     }
 
-                    // 1-finger move — always consume to block xterm.js touchmove
                     if (event.pointerCount == 1 && !twoFingerActive) {
                         val dx = event.x - oneFingerStartX
                         val dy = event.y - oneFingerStartY
@@ -280,7 +279,6 @@ class MainActivity : ComponentActivity() {
                     mode = null
                     oneFingerScrolling = false
 
-                    // After pinch zoom: re-fit terminal to fill container
                     if (wasPinch) {
                         webView.postDelayed({
                             webView.evaluateJavascript("fitAddon.fit();if(A)A.onTerminalResize(term.cols,term.rows)", null)
@@ -306,15 +304,9 @@ class MainActivity : ComponentActivity() {
         @JavascriptInterface
         fun onTerminalReady(cols: Int, rows: Int) {
             val wv = terminalWebView
-            FileLogger.log("MainActivity", "Terminal ready: ${cols}x${rows}, WebView: ${wv?.width}x${wv?.height}px, pendingReplay=$pendingReplay")
+            FileLogger.log("MainActivity", "Terminal ready: ${cols}x${rows}, WebView: ${wv?.width}x${wv?.height}px")
             tabManager.activeTabId.value?.let { id ->
                 sessionOrchestrator.resize(id, cols, rows)
-
-                // Replay buffer if tab was switched while WebView wasn't ready
-                if (pendingReplay) {
-                    pendingReplay = false
-                    sessionOrchestrator.switchTab(id)
-                }
             }
         }
 
@@ -369,7 +361,6 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    /** Write terminal output using JSONObject.quote() for safe JS string injection */
     private fun writeToTerminal(data: String) {
         val wv = terminalWebView ?: return
         val safe = JSONObject.quote(data)

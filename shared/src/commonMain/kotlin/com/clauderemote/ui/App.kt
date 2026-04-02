@@ -3,8 +3,10 @@ package com.clauderemote.ui
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.ime
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.systemBars
+import androidx.compose.foundation.layout.union
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Text
@@ -38,6 +40,7 @@ fun App(
     appVersion: String = "1.0.0",
     onInstallUpdate: ((ByteArray, UpdateInfo) -> Unit)? = null,
     onShareLog: ((String) -> Unit)? = null,
+    onTerminalScreenVisible: (() -> Unit)? = null,
     terminalContent: @Composable (modifier: Modifier) -> Unit
 ) {
     val scope = rememberCoroutineScope()
@@ -127,7 +130,7 @@ fun App(
         Column(
             modifier = Modifier
                 .fillMaxSize()
-                .windowInsetsPadding(WindowInsets.systemBars)
+                .windowInsetsPadding(WindowInsets.systemBars.union(WindowInsets.ime))
         ) {
             // Update banner at top
             UpdateBanner(
@@ -243,6 +246,10 @@ fun App(
                 }
 
                 Screen.TERMINAL -> {
+                    // Notify platform when terminal screen becomes visible
+                    LaunchedEffect(Unit) {
+                        onTerminalScreenVisible?.invoke()
+                    }
                     TerminalScreen(
                         tabs = tabs,
                         activeTabId = activeTabId,

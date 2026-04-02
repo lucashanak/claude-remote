@@ -181,6 +181,8 @@ class SessionOrchestrator(
 
     fun getConnection(sessionId: String): SshManager? = connections[sessionId]
 
+    fun getBuffer(sessionId: String): String = outputBuffers[sessionId]?.toString() ?: ""
+
     private fun generateId(): String {
         val bytes = Random.nextBytes(16)
         return bytes.joinToString("") { "%02x".format(it) }
