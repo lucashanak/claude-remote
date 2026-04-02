@@ -92,6 +92,13 @@ class MainActivity : ComponentActivity() {
         AndroidView(
             factory = { context ->
                 WebView(context).apply {
+                    // Force MATCH_PARENT — Compose AndroidView doesn't always
+                    // propagate height constraints to WebView correctly
+                    layoutParams = android.view.ViewGroup.LayoutParams(
+                        android.view.ViewGroup.LayoutParams.MATCH_PARENT,
+                        android.view.ViewGroup.LayoutParams.MATCH_PARENT
+                    )
+
                     settings.javaScriptEnabled = true
                     settings.domStorageEnabled = true
                     settings.allowFileAccess = true
@@ -99,7 +106,6 @@ class MainActivity : ComponentActivity() {
 
                     addJavascriptInterface(TerminalBridge(), "TerminalBridge")
 
-                    // Capture JS console messages to debug log
                     webChromeClient = object : android.webkit.WebChromeClient() {
                         override fun onConsoleMessage(msg: android.webkit.ConsoleMessage?): Boolean {
                             msg?.let {
@@ -112,8 +118,7 @@ class MainActivity : ComponentActivity() {
                     webViewClient = object : WebViewClient() {
                         override fun onPageFinished(view: WebView?, url: String?) {
                             super.onPageFinished(view, url)
-                            FileLogger.log("MainActivity", "Terminal WebView loaded: $url")
-                            // Query terminal dimensions after load
+                            FileLogger.log("MainActivity", "WebView loaded, size: ${view?.width}x${view?.height}px")
                             view?.evaluateJavascript("typeof Terminal !== 'undefined' ? 'xterm OK' : 'xterm MISSING'") { result ->
                                 FileLogger.log("MainActivity", "xterm.js status: $result")
                             }
