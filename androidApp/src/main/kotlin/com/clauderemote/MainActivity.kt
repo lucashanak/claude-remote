@@ -137,6 +137,11 @@ class MainActivity : ComponentActivity() {
     private inner class TerminalBridge {
         @JavascriptInterface
         fun onTerminalInput(data: String) {
+            // Capture JS log messages
+            if (data.startsWith("\u0000LOG:")) {
+                FileLogger.log("Terminal:JS", data.substring(5))
+                return
+            }
             tabManager.activeTabId.value?.let { id ->
                 sessionOrchestrator.sendInput(id, data)
             }
@@ -144,7 +149,10 @@ class MainActivity : ComponentActivity() {
 
         @JavascriptInterface
         fun onTerminalReady(cols: Int, rows: Int) {
-            FileLogger.log("MainActivity", "Terminal ready: ${cols}x${rows}")
+            val wv = terminalWebView
+            val wvW = wv?.width ?: 0
+            val wvH = wv?.height ?: 0
+            FileLogger.log("MainActivity", "Terminal ready: ${cols}x${rows}, WebView: ${wvW}x${wvH}px")
             tabManager.activeTabId.value?.let { id ->
                 sessionOrchestrator.resize(id, cols, rows)
             }
