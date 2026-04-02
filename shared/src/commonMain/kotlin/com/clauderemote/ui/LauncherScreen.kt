@@ -170,7 +170,7 @@ private fun ActiveSessionCard(session: ClaudeSession, onClick: () -> Unit) {
                     style = MaterialTheme.typography.bodySmall
                 )
                 Text(
-                    "claude (${session.mode.displayName.lowercase()})",
+                    "claude (${session.mode.displayName.lowercase()}) \u2022 ${session.durationText}",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )

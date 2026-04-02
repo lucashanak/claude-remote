@@ -44,6 +44,7 @@ fun TerminalScreen(
     terminalContent: @Composable (Modifier) -> Unit
 ) {
     var showControlBar by remember { mutableStateOf(true) }
+    var compactMode by remember { mutableStateOf(false) } // hides prompt+controls for max terminal
     var showCommandPicker by remember { mutableStateOf(false) }
     var showClaudeMd by remember { mutableStateOf(false) }
     var claudeMdContent by remember { mutableStateOf("") }
@@ -77,8 +78,13 @@ fun TerminalScreen(
                         Text("MD", style = MaterialTheme.typography.bodySmall)
                     }
                 }
-                TextButton(onClick = { showControlBar = !showControlBar }) {
-                    Text(if (showControlBar) "Hide" else "Ctrl", style = MaterialTheme.typography.bodySmall)
+                TextButton(onClick = { compactMode = !compactMode }) {
+                    Text(if (compactMode) "Full" else "Compact", style = MaterialTheme.typography.bodySmall)
+                }
+                if (!compactMode) {
+                    TextButton(onClick = { showControlBar = !showControlBar }) {
+                        Text(if (showControlBar) "Hide" else "Ctrl", style = MaterialTheme.typography.bodySmall)
+                    }
                 }
             }
         }
@@ -158,41 +164,43 @@ fun TerminalScreen(
             }
         }
 
-        // Snippet bar (per-server quick commands)
-        val snippets = activeSession?.server?.snippets ?: emptyList()
-        if (snippets.isNotEmpty()) {
-            Surface(color = MaterialTheme.colorScheme.surfaceVariant, tonalElevation = 1.dp) {
-                Row(
-                    modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 2.dp),
-                    horizontalArrangement = Arrangement.spacedBy(4.dp)
-                ) {
-                    snippets.forEach { snip ->
-                        AssistChip(
-                            onClick = { onSendCommand(snip + "\n") },
-                            label = {
-                                Text(
-                                    if (snip.length > 20) snip.take(18) + ".." else snip,
-                                    style = MaterialTheme.typography.labelSmall
-                                )
-                            },
-                            modifier = Modifier.height(28.dp)
-                        )
+        if (!compactMode) {
+            // Snippet bar (per-server quick commands)
+            val snippets = activeSession?.server?.snippets ?: emptyList()
+            if (snippets.isNotEmpty()) {
+                Surface(color = MaterialTheme.colorScheme.surfaceVariant, tonalElevation = 1.dp) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 2.dp),
+                        horizontalArrangement = Arrangement.spacedBy(4.dp)
+                    ) {
+                        snippets.forEach { snip ->
+                            AssistChip(
+                                onClick = { onSendCommand(snip + "\n") },
+                                label = {
+                                    Text(
+                                        if (snip.length > 20) snip.take(18) + ".." else snip,
+                                        style = MaterialTheme.typography.labelSmall
+                                    )
+                                },
+                                modifier = Modifier.height(28.dp)
+                            )
+                        }
                     }
                 }
             }
-        }
 
-        // Prompt input with inline slash autocomplete
-        if (activeSession != null) {
-            PromptInputBar(
-                commands = commands,
-                onSend = { text -> onSendCommand(text + "\r") },
-                onSendCommand = onSendCommand
-            )
+            // Prompt input with inline slash autocomplete
+            if (activeSession != null) {
+                PromptInputBar(
+                    commands = commands,
+                    onSend = { text -> onSendCommand(text + "\r") },
+                    onSendCommand = onSendCommand
+                )
+            }
         }
 
         // Control bar
-        if (showControlBar && activeSession != null) {
+        if (!compactMode && showControlBar && activeSession != null) {
             ClaudeControlBar(
                 onSendCommand = onSendCommand,
                 onSendEscape = onSendEscape,
