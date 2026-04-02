@@ -309,6 +309,28 @@ fun App(
                         onSwitchModel = { model ->
                             activeTabId?.let { sessionOrchestrator.switchModel(it, model) }
                         },
+                        onFetchClaudeMd = {
+                            val id = activeTabId
+                            if (id != null) {
+                                val conn = sessionOrchestrator.getConnection(id)
+                                val sess = conn?.getSession()
+                                if (sess != null) {
+                                    try {
+                                        val folder = tabManager.getTab(id)?.folder ?: "~"
+                                        kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                                            val ch = sess.openChannel("exec") as com.jcraft.jsch.ChannelExec
+                                            ch.setCommand("cat $folder/CLAUDE.md 2>/dev/null || cat ~/.claude/CLAUDE.md 2>/dev/null || echo '(no CLAUDE.md found)'")
+                                            ch.inputStream = null
+                                            val input = ch.inputStream
+                                            ch.connect(5000)
+                                            val content = input.bufferedReader().readText()
+                                            ch.disconnect()
+                                            content
+                                        }
+                                    } catch (_: Exception) { "(failed to read CLAUDE.md)" }
+                                } else "(no connection)"
+                            } else "(no active tab)"
+                        },
                         onSendEscape = {
                             activeTabId?.let { sessionOrchestrator.sendEscape(it) }
                         },

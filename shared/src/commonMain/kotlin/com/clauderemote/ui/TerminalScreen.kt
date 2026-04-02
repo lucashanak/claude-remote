@@ -2,8 +2,11 @@ package com.clauderemote.ui
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
@@ -35,11 +38,14 @@ fun TerminalScreen(
     onSendCommand: (String) -> Unit,
     onSwitchModel: (ClaudeModel) -> Unit,
     onSendEscape: () -> Unit,
+    onFetchClaudeMd: (suspend () -> String)? = null,
     onFetchCommands: (suspend () -> List<SlashCommand>)? = null,
     terminalContent: @Composable (Modifier) -> Unit
 ) {
     var showControlBar by remember { mutableStateOf(true) }
     var showCommandPicker by remember { mutableStateOf(false) }
+    var showClaudeMd by remember { mutableStateOf(false) }
+    var claudeMdContent by remember { mutableStateOf("") }
     var commandFilter by remember { mutableStateOf("") }
     var commands by remember { mutableStateOf(CommandFetcher.getCachedOrFallback()) }
     val activeSession = tabs.find { it.id == activeTabId }
@@ -60,6 +66,16 @@ fun TerminalScreen(
                     style = MaterialTheme.typography.bodyMedium,
                     modifier = Modifier.weight(1f)
                 )
+                if (onFetchClaudeMd != null) {
+                    TextButton(onClick = {
+                        scope.launch {
+                            claudeMdContent = onFetchClaudeMd.invoke()
+                            showClaudeMd = true
+                        }
+                    }) {
+                        Text("MD", style = MaterialTheme.typography.bodySmall)
+                    }
+                }
                 TextButton(onClick = { showControlBar = !showControlBar }) {
                     Text(if (showControlBar) "Hide" else "Ctrl", style = MaterialTheme.typography.bodySmall)
                 }
@@ -82,6 +98,40 @@ fun TerminalScreen(
                     },
                     onDismiss = { showCommandPicker = false; commandFilter = "" }
                 )
+            }
+
+            // CLAUDE.md viewer overlay
+            if (showClaudeMd) {
+                Surface(
+                    modifier = Modifier.fillMaxWidth().fillMaxHeight(0.7f).padding(8.dp),
+                    shape = MaterialTheme.shapes.medium,
+                    tonalElevation = 8.dp,
+                    shadowElevation = 8.dp
+                ) {
+                    Column(modifier = Modifier.fillMaxSize()) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth().padding(8.dp),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text("CLAUDE.md", style = MaterialTheme.typography.titleSmall)
+                            IconButton(onClick = { showClaudeMd = false }) {
+                                Icon(Icons.Default.Close, "Close")
+                            }
+                        }
+                        androidx.compose.foundation.text.selection.SelectionContainer {
+                            Text(
+                                text = claudeMdContent.ifBlank { "(not found)" },
+                                modifier = Modifier
+                                    .fillMaxSize()
+                                    .verticalScroll(rememberScrollState())
+                                    .padding(8.dp),
+                                style = MaterialTheme.typography.bodySmall,
+                                fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace
+                            )
+                        }
+                    }
+                }
             }
         }
 
@@ -339,8 +389,13 @@ private fun ClaudeControlBar(
 
 @Composable
 private fun CtrlButton(label: String, onClick: () -> Unit) {
+    val haptic = androidx.compose.ui.hapticfeedback.HapticFeedbackType.TextHandleMove
+    val hapticFeedback = androidx.compose.ui.platform.LocalHapticFeedback.current
     FilledTonalButton(
-        onClick = onClick,
+        onClick = {
+            hapticFeedback.performHapticFeedback(haptic)
+            onClick()
+        },
         modifier = Modifier.height(32.dp),
         contentPadding = PaddingValues(horizontal = 10.dp)
     ) {
@@ -360,7 +415,11 @@ private fun TabBar(
 ) {
     Surface(color = MaterialTheme.colorScheme.surface, tonalElevation = 1.dp) {
         Row(
-            modifier = Modifier.fillMaxWidth().height(40.dp).padding(horizontal = 4.dp),
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(40.dp)
+                .padding(horizontal = 4.dp)
+                .horizontalScroll(rememberScrollState()),
             verticalAlignment = Alignment.CenterVertically
         ) {
             tabs.forEach { tab ->
