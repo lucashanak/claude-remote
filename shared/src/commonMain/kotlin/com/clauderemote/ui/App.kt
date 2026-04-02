@@ -204,6 +204,15 @@ fun App(
                             editingServer = server
                             showServerDialog = true
                         },
+                        onDuplicateServer = { server ->
+                            val copy = server.copy(
+                                id = kotlin.random.Random.nextBytes(16).joinToString("") { "%02x".format(it) },
+                                name = "${server.name} (copy)",
+                                favorite = false
+                            )
+                            serverStorage.addServer(copy)
+                            refreshServers()
+                        },
                         onDeleteServer = { server ->
                             serverStorage.deleteServer(server.id)
                             refreshServers()

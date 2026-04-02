@@ -29,6 +29,7 @@ fun LauncherScreen(
     onQuickConnect: ((SshServer) -> Unit)? = null,
     onAddServer: () -> Unit,
     onEditServer: (SshServer) -> Unit,
+    onDuplicateServer: ((SshServer) -> Unit)? = null,
     onDeleteServer: (SshServer) -> Unit,
     onToggleFavorite: ((SshServer) -> Unit)? = null,
     onResumeSession: (ClaudeSession) -> Unit,
@@ -109,6 +110,7 @@ fun LauncherScreen(
                     onConnect = { onConnectServer(server) },
                     onQuickConnect = onQuickConnect?.let { qc -> { qc(server) } },
                     onEdit = { onEditServer(server) },
+                    onDuplicate = onDuplicateServer?.let { dup -> { dup(server) } },
                     onDelete = { onDeleteServer(server) },
                     onToggleFavorite = onToggleFavorite?.let { toggle -> { toggle(server) } }
                 )
@@ -182,6 +184,7 @@ private fun ServerCard(
     onConnect: () -> Unit,
     onQuickConnect: (() -> Unit)? = null,
     onEdit: () -> Unit,
+    onDuplicate: (() -> Unit)? = null,
     onDelete: () -> Unit,
     onToggleFavorite: (() -> Unit)? = null
 ) {
@@ -222,6 +225,11 @@ private fun ServerCard(
 
                 IconButton(onClick = onEdit) {
                     Icon(Icons.Default.Edit, "Edit", modifier = Modifier.size(20.dp))
+                }
+                if (onDuplicate != null) {
+                    IconButton(onClick = onDuplicate) {
+                        Icon(Icons.Default.Add, "Duplicate", modifier = Modifier.size(20.dp))
+                    }
                 }
                 IconButton(onClick = { showDeleteConfirm = true }) {
                     Icon(Icons.Default.Delete, "Delete", modifier = Modifier.size(20.dp))

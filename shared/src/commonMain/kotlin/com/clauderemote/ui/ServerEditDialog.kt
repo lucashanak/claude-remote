@@ -29,6 +29,7 @@ fun ServerEditDialog(
     var privateKey by remember { mutableStateOf(server?.privateKey ?: "") }
     var preferMosh by remember { mutableStateOf(server?.preferMosh ?: false) }
     var defaultFolder by remember { mutableStateOf(server?.defaultFolder ?: "~") }
+    var startupCommand by remember { mutableStateOf(server?.startupCommand ?: "") }
     var portForwards by remember { mutableStateOf(server?.portForwards ?: emptyList()) }
     var newPfLocal by remember { mutableStateOf("") }
     var newPfRemote by remember { mutableStateOf("") }
@@ -92,6 +93,7 @@ fun ServerEditDialog(
                     )
                 }
 
+                var passwordVisible by remember { mutableStateOf(false) }
                 when (authMethod) {
                     AuthMethod.PASSWORD -> {
                         OutlinedTextField(
@@ -99,7 +101,16 @@ fun ServerEditDialog(
                             onValueChange = { password = it },
                             label = { Text("Password") },
                             modifier = Modifier.fillMaxWidth(),
-                            singleLine = true
+                            singleLine = true,
+                            visualTransformation = if (passwordVisible)
+                                androidx.compose.ui.text.input.VisualTransformation.None
+                            else androidx.compose.ui.text.input.PasswordVisualTransformation(),
+                            trailingIcon = {
+                                TextButton(onClick = { passwordVisible = !passwordVisible }) {
+                                    Text(if (passwordVisible) "Hide" else "Show",
+                                        style = MaterialTheme.typography.bodySmall)
+                                }
+                            }
                         )
                     }
                     AuthMethod.KEY -> {
@@ -125,6 +136,14 @@ fun ServerEditDialog(
                     value = defaultFolder,
                     onValueChange = { defaultFolder = it },
                     label = { Text("Default Folder") },
+                    modifier = Modifier.fillMaxWidth(),
+                    singleLine = true
+                )
+                OutlinedTextField(
+                    value = startupCommand,
+                    onValueChange = { startupCommand = it },
+                    label = { Text("Startup Command (optional)") },
+                    placeholder = { Text("e.g. source ~/.profile") },
                     modifier = Modifier.fillMaxWidth(),
                     singleLine = true
                 )
@@ -202,7 +221,8 @@ fun ServerEditDialog(
                         recentFolders = server?.recentFolders ?: emptyList(),
                         defaultClaudeMode = server?.defaultClaudeMode ?: com.clauderemote.model.ClaudeMode.NORMAL,
                         defaultClaudeModel = server?.defaultClaudeModel ?: com.clauderemote.model.ClaudeModel.DEFAULT,
-                        portForwards = portForwards
+                        portForwards = portForwards,
+                        startupCommand = startupCommand.trim()
                     )
                     onSave(saved)
                 },

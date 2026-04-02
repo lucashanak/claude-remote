@@ -111,6 +111,12 @@ class SessionOrchestrator(
         // Wait for shell prompt before sending commands
         kotlinx.coroutines.delay(500)
 
+        // Run startup command if configured
+        if (session.server.startupCommand.isNotBlank()) {
+            sshManager.sendInput(session.server.startupCommand + "\n")
+            kotlinx.coroutines.delay(300)
+        }
+
         if (isNewTmuxSession) {
             val command = ClaudeConfig.buildTmuxLaunchCommand(
                 tmuxSessionName = session.tmuxSessionName,
