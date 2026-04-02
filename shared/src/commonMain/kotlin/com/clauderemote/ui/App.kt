@@ -316,6 +316,7 @@ fun App(
                 Screen.SETTINGS -> {
                     SettingsScreen(
                         settings = appSettings,
+                        appVersion = appVersion,
                         onBack = { currentScreen = Screen.LAUNCHER },
                         onCheckUpdate = { checkForUpdate() }
                     )

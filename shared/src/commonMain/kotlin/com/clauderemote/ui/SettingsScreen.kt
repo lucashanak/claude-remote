@@ -19,6 +19,7 @@ import com.clauderemote.storage.AppSettings
 @Composable
 fun SettingsScreen(
     settings: AppSettings,
+    appVersion: String = "",
     onBack: () -> Unit,
     onCheckUpdate: (() -> Unit)? = null
 ) {
@@ -151,6 +152,16 @@ fun SettingsScreen(
                 Button(onClick = onCheckUpdate) {
                     Text("Check for update")
                 }
+            }
+
+            // Version
+            if (appVersion.isNotBlank()) {
+                HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
+                Text(
+                    "Claude Remote v$appVersion",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
             }
 
             Spacer(Modifier.height(32.dp))

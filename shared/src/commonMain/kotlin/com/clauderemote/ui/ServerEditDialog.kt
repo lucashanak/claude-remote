@@ -8,6 +8,7 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import com.clauderemote.model.AuthMethod
+import com.clauderemote.model.PortForward
 import com.clauderemote.model.SshServer
 import kotlin.random.Random
 
@@ -28,6 +29,9 @@ fun ServerEditDialog(
     var privateKey by remember { mutableStateOf(server?.privateKey ?: "") }
     var preferMosh by remember { mutableStateOf(server?.preferMosh ?: false) }
     var defaultFolder by remember { mutableStateOf(server?.defaultFolder ?: "~") }
+    var portForwards by remember { mutableStateOf(server?.portForwards ?: emptyList()) }
+    var newPfLocal by remember { mutableStateOf("") }
+    var newPfRemote by remember { mutableStateOf("") }
 
     val isNew = server == null
     val isValid = name.isNotBlank() && host.isNotBlank() && username.isNotBlank()
@@ -132,6 +136,53 @@ fun ServerEditDialog(
                     )
                     Text("Prefer Mosh connection")
                 }
+
+                // Port forwarding
+                Text("Port Forwards", style = MaterialTheme.typography.bodyMedium,
+                    modifier = Modifier.padding(top = 8.dp))
+                portForwards.forEachIndexed { idx, pf ->
+                    Row(
+                        verticalAlignment = androidx.compose.ui.Alignment.CenterVertically,
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text(
+                            "${pf.type} ${pf.localPort}:${pf.remoteHost}:${pf.remotePort}",
+                            style = MaterialTheme.typography.bodySmall,
+                            modifier = Modifier.weight(1f)
+                        )
+                        TextButton(onClick = {
+                            portForwards = portForwards.toMutableList().also { it.removeAt(idx) }
+                        }) { Text("X") }
+                    }
+                }
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(4.dp),
+                    verticalAlignment = androidx.compose.ui.Alignment.CenterVertically
+                ) {
+                    OutlinedTextField(
+                        value = newPfLocal,
+                        onValueChange = { newPfLocal = it.filter { c -> c.isDigit() } },
+                        label = { Text("Local") },
+                        modifier = Modifier.weight(1f),
+                        singleLine = true
+                    )
+                    Text(":", style = MaterialTheme.typography.bodyMedium)
+                    OutlinedTextField(
+                        value = newPfRemote,
+                        onValueChange = { newPfRemote = it.filter { c -> c.isDigit() } },
+                        label = { Text("Remote") },
+                        modifier = Modifier.weight(1f),
+                        singleLine = true
+                    )
+                    TextButton(onClick = {
+                        val lp = newPfLocal.toIntOrNull()
+                        val rp = newPfRemote.toIntOrNull()
+                        if (lp != null && rp != null) {
+                            portForwards = portForwards + PortForward(localPort = lp, remotePort = rp)
+                            newPfLocal = ""; newPfRemote = ""
+                        }
+                    }) { Text("Add") }
+                }
             }
         },
         confirmButton = {
@@ -151,7 +202,7 @@ fun ServerEditDialog(
                         recentFolders = server?.recentFolders ?: emptyList(),
                         defaultClaudeMode = server?.defaultClaudeMode ?: com.clauderemote.model.ClaudeMode.NORMAL,
                         defaultClaudeModel = server?.defaultClaudeModel ?: com.clauderemote.model.ClaudeModel.DEFAULT,
-                        portForwards = server?.portForwards ?: emptyList()
+                        portForwards = portForwards
                     )
                     onSave(saved)
                 },
