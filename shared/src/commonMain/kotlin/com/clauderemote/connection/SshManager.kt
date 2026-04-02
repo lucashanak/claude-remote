@@ -12,14 +12,16 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import java.io.InputStream
 import java.io.OutputStream
 
 class SshManager(
     private val serverStorage: ServerStorage,
-    private val connectTimeout: Int = 15000
+    private val connectTimeout: Int = 15000,
+    private val maxReconnectAttempts: Int = 3
 ) {
     private var session: Session? = null
     private var channel: ChannelShell? = null
@@ -28,6 +30,11 @@ class SshManager(
     private val ioScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
 
     @Volatile private var disconnected = false
+    private var reconnectAttempts = 0
+    private var currentServer: SshServer? = null
+    private var currentOnOutput: ((String) -> Unit)? = null
+    private var currentOnDisconnect: (() -> Unit)? = null
+
     val isConnected: Boolean get() = !disconnected && session?.isConnected == true && channel?.isConnected == true
 
     /**
@@ -38,61 +45,95 @@ class SshManager(
         server: SshServer,
         onOutput: (String) -> Unit,
         onDisconnect: () -> Unit
+    ): Session {
+        currentServer = server
+        currentOnOutput = onOutput
+        currentOnDisconnect = onDisconnect
+        reconnectAttempts = 0
+        return doConnect(server, onOutput, onDisconnect)
+    }
+
+    private suspend fun doConnect(
+        server: SshServer,
+        onOutput: (String) -> Unit,
+        onDisconnect: () -> Unit
     ): Session = withContext(Dispatchers.IO) {
         disconnected = false
         FileLogger.log(TAG, "Connecting to ${server.host}:${server.port} as ${server.username}")
+
+        // Reset xterm state (exit alt buffer, disable mouse) to clear stale state
+        onOutput("\u001b[?1049l\u001b[?1002l\u001b[?1003l\u001b[?1006l")
+
         val jsch = JSch()
 
-        // Key-based auth
         if (server.authMethod == AuthMethod.KEY && server.privateKey != null) {
-            FileLogger.log(TAG, "Using key-based authentication")
             jsch.addIdentity("key", server.privateKey.toByteArray(), null, null)
         }
 
         val sess = jsch.getSession(server.username, server.host, server.port)
 
-        // Password auth
         if (server.authMethod == AuthMethod.PASSWORD && server.password != null) {
-            FileLogger.log(TAG, "Using password authentication")
             sess.setPassword(server.password)
         }
 
-        // TOFU host key verification
         sess.setConfig("StrictHostKeyChecking", "no")
         sess.userInfo = TofuUserInfo(server.host, serverStorage)
-
         sess.timeout = connectTimeout
-        FileLogger.log(TAG, "Opening SSH session (timeout=${connectTimeout}ms)...")
+
+        FileLogger.log(TAG, "Opening SSH session...")
         sess.connect(connectTimeout)
         session = sess
         FileLogger.log(TAG, "SSH session connected")
 
-        // Open shell channel
         val ch = sess.openChannel("shell") as ChannelShell
-        ch.setPtyType("xterm-256color", 80, 24, 0, 0)
-        channel = ch
-
-        outputStream = ch.outputStream
+        ch.setPtyType("xterm-256color")
         val inputStream = ch.inputStream
+        outputStream = ch.outputStream
         ch.connect(connectTimeout)
+        channel = ch
+        reconnectAttempts = 0
         FileLogger.log(TAG, "Shell channel opened")
 
-        // Start read loop in a separate scope so it doesn't block connect()
-        val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
-        readJob = scope.launch {
-            readLoop(inputStream, onOutput, onDisconnect)
+        // Read loop with auto-reconnect on failure
+        readJob = ioScope.launch {
+            try {
+                val buf = ByteArray(8192)
+                while (isActive && ch.isConnected) {
+                    val n = inputStream.read(buf)
+                    if (n < 0) break
+                    if (n == 0) { delay(50); if (ch.isClosed) break; continue }
+                    val text = String(buf, 0, n)
+                    onOutput(text)
+                }
+            } catch (_: Exception) {
+            } finally {
+                if (!disconnected) {
+                    disconnected = true
+                    // Try auto-reconnect
+                    val srv = currentServer
+                    if (reconnectAttempts < maxReconnectAttempts && srv != null) {
+                        reconnectAttempts++
+                        FileLogger.log(TAG, "Connection lost. Reconnecting ($reconnectAttempts/$maxReconnectAttempts)...")
+                        onOutput("\r\n\u001B[33mConnection lost. Reconnecting ($reconnectAttempts/$maxReconnectAttempts)...\u001B[0m\r\n")
+                        delay(2000)
+                        try {
+                            doConnect(srv, onOutput, onDisconnect)
+                        } catch (e: Exception) {
+                            FileLogger.error(TAG, "Reconnect failed", e)
+                            onOutput("\r\n\u001B[31mReconnect failed: ${e.message}\u001B[0m\r\n")
+                            onDisconnect()
+                        }
+                    } else {
+                        FileLogger.log(TAG, "Read loop ended, disconnecting")
+                        onDisconnect()
+                    }
+                }
+            }
         }
 
         sess
     }
 
-    companion object {
-        private const val TAG = "SshManager"
-    }
-
-    /**
-     * Send text to the remote shell.
-     */
     fun sendInput(data: String) {
         if (disconnected) return
         ioScope.launch {
@@ -125,17 +166,16 @@ class SshManager(
         }
     }
 
-    /**
-     * Resize the PTY.
-     */
     fun resize(cols: Int, rows: Int) {
-        channel?.setPtySize(cols, rows, 0, 0)
+        try {
+            channel?.setPtySize(cols, rows, cols * 8, rows * 16)
+        } catch (_: Exception) {}
     }
 
-    /**
-     * Disconnect and clean up.
-     */
     suspend fun disconnect() {
+        disconnected = true
+        reconnectAttempts = maxReconnectAttempts // prevent auto-reconnect
+        currentServer = null
         FileLogger.log(TAG, "Disconnecting...")
         readJob?.cancelAndJoin()
         readJob = null
@@ -147,47 +187,21 @@ class SshManager(
         FileLogger.log(TAG, "Disconnected")
     }
 
-    /**
-     * Get the raw JSch session for exec commands (tmux, folder browsing).
-     */
     fun getSession(): Session? = session
 
-    private suspend fun readLoop(
-        inputStream: InputStream,
-        onOutput: (String) -> Unit,
-        onDisconnect: () -> Unit
-    ) {
-        val buffer = ByteArray(8192)
-        try {
-            while (true) {
-                val len = inputStream.read(buffer)
-                if (len < 0) break
-                val text = String(buffer, 0, len, Charsets.UTF_8)
-                onOutput(text)
-            }
-        } catch (e: Exception) {
-            FileLogger.error(TAG, "Read loop error", e)
-        }
-        FileLogger.log(TAG, "Read loop ended, calling onDisconnect")
-        onDisconnect()
+    companion object {
+        private const val TAG = "SshManager"
     }
 }
 
-/**
- * TOFU (Trust On First Use) host key verification.
- */
 private class TofuUserInfo(
     private val host: String,
     private val serverStorage: ServerStorage
 ) : com.jcraft.jsch.UserInfo {
-
     override fun getPassphrase(): String? = null
     override fun getPassword(): String? = null
     override fun promptPassword(message: String?): Boolean = false
     override fun promptPassphrase(message: String?): Boolean = false
-    override fun promptYesNo(message: String?): Boolean {
-        // Auto-accept host keys (TOFU) and save fingerprint
-        return true
-    }
+    override fun promptYesNo(message: String?): Boolean = true
     override fun showMessage(message: String?) {}
 }

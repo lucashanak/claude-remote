@@ -88,22 +88,26 @@ class SessionOrchestrator(
         val sshManager = SshManager(serverStorage)
         connections[session.id] = sshManager
 
+        fun emit(text: String) {
+            appendToBuffer(session.id, text)
+            if (tabManager.activeTabId.value == session.id) {
+                onTerminalOutput?.invoke(session.id, text)
+            }
+        }
+
         sshManager.connect(
             session.server,
-            onOutput = { data ->
-                appendToBuffer(session.id, data)
-                if (tabManager.activeTabId.value == session.id) {
-                    onTerminalOutput?.invoke(session.id, data)
-                }
-            },
+            onOutput = { data -> emit(data) },
             onDisconnect = {
                 tabManager.updateTabStatus(session.id, SessionStatus.DISCONNECTED)
                 onSessionDisconnect?.invoke(session.id)
             }
         )
 
+        // Wait for shell prompt before sending commands
+        kotlinx.coroutines.delay(500)
+
         if (isNewTmuxSession) {
-            // New session: create tmux + launch claude
             val command = ClaudeConfig.buildTmuxLaunchCommand(
                 tmuxSessionName = session.tmuxSessionName,
                 folder = session.folder,
@@ -112,7 +116,6 @@ class SessionOrchestrator(
             )
             sshManager.sendInput(command + "\n")
         } else {
-            // Attach to existing tmux session — don't send claude command
             val command = "tmux attach-session -t '${session.tmuxSessionName.replace("'", "\\'")}'"
             sshManager.sendInput(command + "\n")
         }

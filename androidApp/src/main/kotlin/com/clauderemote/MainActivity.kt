@@ -126,6 +126,11 @@ class MainActivity : ComponentActivity() {
                     webViewClient = object : WebViewClient() {
                         override fun onPageFinished(view: WebView?, url: String?) {
                             FileLogger.log("MainActivity", "WebView loaded, size: ${view?.width}x${view?.height}px")
+                            // Apply saved font size
+                            val savedSize = appSettings.terminalFontSize
+                            if (savedSize != 14) {
+                                view?.evaluateJavascript("setFontSize($savedSize)", null)
+                            }
                         }
                     }
 
@@ -282,6 +287,10 @@ class MainActivity : ComponentActivity() {
                     if (wasPinch) {
                         webView.postDelayed({
                             webView.evaluateJavascript("fitAddon.fit();if(A)A.onTerminalResize(term.cols,term.rows)", null)
+                            // Save font size
+                            webView.evaluateJavascript("term.options.fontSize") { size ->
+                                size?.toIntOrNull()?.let { appSettings.terminalFontSize = it }
+                            }
                         }, 100)
                     }
 
