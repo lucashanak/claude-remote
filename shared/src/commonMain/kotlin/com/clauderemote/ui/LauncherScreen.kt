@@ -36,8 +36,8 @@ fun LauncherScreen(
             TopAppBar(
                 title = { Text("Claude Remote") },
                 actions = {
-                    IconButton(onClick = onViewLog) {
-                        Icon(Icons.Default.Info, "Log")
+                    TextButton(onClick = onViewLog) {
+                        Text("Log")
                     }
                     IconButton(onClick = onSettings) {
                         Icon(Icons.Default.Settings, "Settings")
