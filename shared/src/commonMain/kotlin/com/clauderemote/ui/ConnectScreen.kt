@@ -23,7 +23,7 @@ fun ConnectScreen(
     tmuxSessions: List<TmuxSession>,
     onBack: () -> Unit,
     onKillTmux: ((String) -> Unit)? = null,
-    onLaunch: (folder: String, mode: ClaudeMode, model: ClaudeModel, connectionType: ConnectionType, tmuxSession: String) -> Unit
+    onLaunch: (folder: String, mode: ClaudeMode, model: ClaudeModel, connectionType: ConnectionType, tmuxSession: String, isNewTmuxSession: Boolean) -> Unit
 ) {
     var folder by remember { mutableStateOf(server.defaultFolder) }
     var selectedMode by remember { mutableStateOf(server.defaultClaudeMode) }
@@ -252,7 +252,7 @@ fun ConnectScreen(
             // Launch button
             Button(
                 onClick = {
-                    onLaunch(folder, selectedMode, selectedModel, connectionType, tmuxSessionName)
+                    onLaunch(folder, selectedMode, selectedModel, connectionType, tmuxSessionName, !useExistingTmux)
                 },
                 modifier = Modifier
                     .fillMaxWidth()

@@ -37,7 +37,8 @@ class SessionOrchestrator(
         mode: ClaudeMode,
         model: ClaudeModel,
         connectionType: ConnectionType,
-        tmuxSessionName: String
+        tmuxSessionName: String,
+        isNewTmuxSession: Boolean = true
     ): ClaudeSession = withContext(Dispatchers.IO) {
         val sessionId = generateId()
 
@@ -58,8 +59,8 @@ class SessionOrchestrator(
 
         try {
             when (connectionType) {
-                ConnectionType.SSH -> connectSsh(session)
-                ConnectionType.MOSH -> connectMosh(session)
+                ConnectionType.SSH -> connectSsh(session, isNewTmuxSession)
+                ConnectionType.MOSH -> connectMosh(session, isNewTmuxSession)
             }
 
             serverStorage.updateServer(server.withRecentFolder(folder))
@@ -83,16 +84,14 @@ class SessionOrchestrator(
         onTabSwitched?.invoke(id, buffer)
     }
 
-    private suspend fun connectSsh(session: ClaudeSession) {
+    private suspend fun connectSsh(session: ClaudeSession, isNewTmuxSession: Boolean) {
         val sshManager = SshManager(serverStorage)
         connections[session.id] = sshManager
 
         sshManager.connect(
             session.server,
             onOutput = { data ->
-                // Buffer all output
                 appendToBuffer(session.id, data)
-                // Only forward to terminal if this tab is active
                 if (tabManager.activeTabId.value == session.id) {
                     onTerminalOutput?.invoke(session.id, data)
                 }
@@ -103,21 +102,28 @@ class SessionOrchestrator(
             }
         )
 
-        val command = ClaudeConfig.buildTmuxLaunchCommand(
-            tmuxSessionName = session.tmuxSessionName,
-            folder = session.folder,
-            mode = session.mode,
-            model = session.model
-        )
-        sshManager.sendInput(command + "\n")
+        if (isNewTmuxSession) {
+            // New session: create tmux + launch claude
+            val command = ClaudeConfig.buildTmuxLaunchCommand(
+                tmuxSessionName = session.tmuxSessionName,
+                folder = session.folder,
+                mode = session.mode,
+                model = session.model
+            )
+            sshManager.sendInput(command + "\n")
+        } else {
+            // Attach to existing tmux session — don't send claude command
+            val command = "tmux attach-session -t '${session.tmuxSessionName.replace("'", "\\'")}'"
+            sshManager.sendInput(command + "\n")
+        }
     }
 
-    private suspend fun connectMosh(session: ClaudeSession) {
+    private suspend fun connectMosh(session: ClaudeSession, isNewTmuxSession: Boolean) {
         FileLogger.log(TAG, "Mosh not yet implemented, falling back to SSH for ${session.server.name}")
         val warning = "\r\n[Warning: Mosh not yet implemented, using SSH]\r\n"
         appendToBuffer("", warning)
         onTerminalOutput?.invoke("", warning)
-        connectSsh(session)
+        connectSsh(session, isNewTmuxSession)
     }
 
     private fun appendToBuffer(sessionId: String, data: String) {

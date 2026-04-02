@@ -219,7 +219,7 @@ fun App(
                                     } catch (_: Exception) {}
                                 }
                             },
-                            onLaunch = { folder, mode, model, connType, tmuxName ->
+                            onLaunch = { folder, mode, model, connType, tmuxName, isNewTmux ->
                                 scope.launch {
                                     try {
                                         connectionError = null
@@ -229,7 +229,8 @@ fun App(
                                             mode = mode,
                                             model = model,
                                             connectionType = connType,
-                                            tmuxSessionName = tmuxName
+                                            tmuxSessionName = tmuxName,
+                                            isNewTmuxSession = isNewTmux
                                         )
                                         currentScreen = Screen.TERMINAL
                                     } catch (e: Exception) {
