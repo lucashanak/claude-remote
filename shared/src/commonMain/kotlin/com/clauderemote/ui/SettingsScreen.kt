@@ -147,6 +147,18 @@ fun SettingsScreen(
                 onValueChange = { connectTimeout = it; settings.sshConnectTimeout = it }
             )
 
+            HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
+
+            // Security
+            Text("Security", style = MaterialTheme.typography.titleMedium)
+
+            var biometricLock by remember { mutableStateOf(settings.biometricLockEnabled) }
+            SettingsSwitch(
+                label = "Biometric lock",
+                checked = biometricLock,
+                onCheckedChange = { biometricLock = it; settings.biometricLockEnabled = it }
+            )
+
             // Update check
             if (onCheckUpdate != null) {
                 HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))

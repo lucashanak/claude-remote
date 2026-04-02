@@ -30,6 +30,8 @@ fun ServerEditDialog(
     var preferMosh by remember { mutableStateOf(server?.preferMosh ?: false) }
     var defaultFolder by remember { mutableStateOf(server?.defaultFolder ?: "~") }
     var startupCommand by remember { mutableStateOf(server?.startupCommand ?: "") }
+    var snippets by remember { mutableStateOf(server?.snippets ?: emptyList()) }
+    var newSnippet by remember { mutableStateOf("") }
     var portForwards by remember { mutableStateOf(server?.portForwards ?: emptyList()) }
     var newPfLocal by remember { mutableStateOf("") }
     var newPfRemote by remember { mutableStateOf("") }
@@ -148,6 +150,40 @@ fun ServerEditDialog(
                     singleLine = true
                 )
 
+                // Snippets (quick commands shown in terminal)
+                Text("Snippets", style = MaterialTheme.typography.bodyMedium,
+                    modifier = Modifier.padding(top = 8.dp))
+                snippets.forEachIndexed { idx, snip ->
+                    Row(
+                        verticalAlignment = androidx.compose.ui.Alignment.CenterVertically,
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text(snip, style = MaterialTheme.typography.bodySmall, modifier = Modifier.weight(1f))
+                        TextButton(onClick = {
+                            snippets = snippets.toMutableList().also { it.removeAt(idx) }
+                        }) { Text("X") }
+                    }
+                }
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(4.dp),
+                    verticalAlignment = androidx.compose.ui.Alignment.CenterVertically
+                ) {
+                    OutlinedTextField(
+                        value = newSnippet,
+                        onValueChange = { newSnippet = it },
+                        label = { Text("Command") },
+                        placeholder = { Text("e.g. git pull") },
+                        modifier = Modifier.weight(1f),
+                        singleLine = true
+                    )
+                    TextButton(onClick = {
+                        if (newSnippet.isNotBlank()) {
+                            snippets = snippets + newSnippet.trim()
+                            newSnippet = ""
+                        }
+                    }) { Text("Add") }
+                }
+
                 Row(verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
                     Checkbox(
                         checked = preferMosh,
@@ -222,7 +258,8 @@ fun ServerEditDialog(
                         defaultClaudeMode = server?.defaultClaudeMode ?: com.clauderemote.model.ClaudeMode.NORMAL,
                         defaultClaudeModel = server?.defaultClaudeModel ?: com.clauderemote.model.ClaudeModel.DEFAULT,
                         portForwards = portForwards,
-                        startupCommand = startupCommand.trim()
+                        startupCommand = startupCommand.trim(),
+                        snippets = snippets
                     )
                     onSave(saved)
                 },

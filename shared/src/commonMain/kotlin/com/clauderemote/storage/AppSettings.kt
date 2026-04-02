@@ -64,4 +64,9 @@ class AppSettings(private val prefs: PlatformPreferences) {
     var keepAliveEnabled: Boolean
         get() = prefs.getBoolean("keep_alive_enabled", true)
         set(value) = prefs.putBoolean("keep_alive_enabled", value)
+
+    // Security
+    var biometricLockEnabled: Boolean
+        get() = prefs.getBoolean("biometric_lock_enabled", false)
+        set(value) = prefs.putBoolean("biometric_lock_enabled", value)
 }

@@ -58,6 +58,7 @@ dependencies {
     implementation(project(":shared"))
     implementation("androidx.activity:activity-compose:1.9.3")
     implementation("androidx.core:core-ktx:1.15.0")
+    implementation("androidx.biometric:biometric:1.1.0")
 }
 
 // Copy shared terminal assets before build
