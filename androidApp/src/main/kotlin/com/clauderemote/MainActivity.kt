@@ -142,6 +142,12 @@ class MainActivity : ComponentActivity() {
             }
         }
 
+        // Notification when Claude needs input in background tab
+        sessionOrchestrator.onClaudeNeedsInput = { sessionId, hint ->
+            val tab = tabManager.getTab(sessionId)
+            KeepAliveService.updateDescription("${tab?.tabTitle ?: "Session"}: $hint")
+        }
+
         val appVersion = try {
             packageManager.getPackageInfo(packageName, 0).versionName ?: "1.0.0"
         } catch (_: Exception) { "1.0.0" }

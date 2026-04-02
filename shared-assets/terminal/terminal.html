@@ -29,10 +29,19 @@ html, body { background:#1E1E1E; overflow:hidden; width:100%; height:100%; displ
     <button class="ctx-item" id="ctxSelectAll">Select All</button>
     <button class="ctx-item" id="ctxClear">Clear</button>
     <div class="ctx-sep"></div>
+    <button class="ctx-item" id="ctxSearch">Search</button>
     <button class="ctx-item" id="ctxExport">Export Log</button>
+</div>
+<div id="searchBar" style="display:none; align-items:center; gap:4px; padding:4px 8px; background:#252525; border-bottom:1px solid rgba(255,255,255,0.1);">
+    <input id="searchInput" type="text" placeholder="Search..." style="flex:1; padding:6px 10px; font-size:13px; background:rgba(255,255,255,0.08); color:#ddd; border:1px solid rgba(255,255,255,0.15); border-radius:4px; outline:none;">
+    <span id="searchCount" style="font-size:11px; color:#888; min-width:40px; text-align:center;"></span>
+    <button class="ctx-item" id="searchPrev" style="padding:4px 8px;">&#9650;</button>
+    <button class="ctx-item" id="searchNext" style="padding:4px 8px;">&#9660;</button>
+    <button class="ctx-item" id="searchClose" style="padding:4px 8px;">&#10005;</button>
 </div>
 <script src="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/lib/xterm.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.10.0/lib/addon-fit.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@xterm/addon-search@0.15.0/lib/addon-search.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/@xterm/addon-web-links@0.11.0/lib/addon-web-links.min.js"></script>
 <script>
 'use strict';
@@ -74,11 +83,45 @@ try {
     term.loadAddon(webLinksAddon);
 } catch(e) {}
 
+let searchAddon = null;
+try {
+    searchAddon = new SearchAddon.SearchAddon();
+    term.loadAddon(searchAddon);
+} catch(e) {}
+
 const termEl = document.getElementById('terminal');
 term.open(termEl);
 
 // Send user input to Android
 term.onData(data => { if (A) A.onTerminalInput(data); });
+
+// ======================== SEARCH ========================
+const searchBar = document.getElementById('searchBar');
+const searchInput = document.getElementById('searchInput');
+const searchCount = document.getElementById('searchCount');
+let searchOpen = false;
+
+function toggleSearch() {
+    searchOpen = !searchOpen;
+    searchBar.style.display = searchOpen ? 'flex' : 'none';
+    if (searchOpen) { searchInput.focus(); }
+    else if (searchAddon) { searchAddon.clearDecorations(); searchCount.textContent = ''; fitAddon.fit(); }
+}
+
+if (searchInput) {
+    searchInput.addEventListener('input', () => {
+        if (searchAddon && searchInput.value) searchAddon.findNext(searchInput.value);
+        else if (searchAddon) searchAddon.clearDecorations();
+    });
+}
+document.getElementById('searchNext')?.addEventListener('click', () => {
+    if (searchAddon && searchInput.value) searchAddon.findNext(searchInput.value);
+});
+document.getElementById('searchPrev')?.addEventListener('click', () => {
+    if (searchAddon && searchInput.value) searchAddon.findPrevious(searchInput.value);
+});
+document.getElementById('searchClose')?.addEventListener('click', toggleSearch);
+document.getElementById('ctxSearch')?.addEventListener('click', () => { hideCtxMenu(); if (!searchOpen) toggleSearch(); });
 
 // ======================== SMART SCROLL ========================
 function scrollTerminal(lines) {

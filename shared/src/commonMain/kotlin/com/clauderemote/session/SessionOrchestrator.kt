@@ -34,6 +34,9 @@ class SessionOrchestrator(
     // Session became active callback (for keep-alive etc.)
     var onSessionActive: ((ClaudeSession) -> Unit)? = null
 
+    // Notification callback when Claude needs attention
+    var onClaudeNeedsInput: ((sessionId: String, hint: String) -> Unit)? = null
+
     suspend fun launchSession(
         server: SshServer,
         folder: String,
@@ -96,6 +99,13 @@ class SessionOrchestrator(
             appendToBuffer(session.id, text)
             if (tabManager.activeTabId.value == session.id) {
                 onTerminalOutput?.invoke(session.id, text)
+            }
+            // Detect when Claude needs input (background tab notification)
+            if (tabManager.activeTabId.value != session.id) {
+                if (text.contains("[Y/n]") || text.contains("[y/N]") ||
+                    text.contains("Do you want to") || text.contains("permission")) {
+                    onClaudeNeedsInput?.invoke(session.id, "Approval needed")
+                }
             }
         }
 
