@@ -131,20 +131,27 @@ private fun ClaudeControlBar(
                 CtrlButton("/clear") { onSendCommand("/clear\n") }
             }
 
-            // Row 2: Navigation + editing
+            // Row 2: Navigation + Send
             Row(
                 horizontalArrangement = Arrangement.spacedBy(4.dp),
                 modifier = Modifier.fillMaxWidth()
             ) {
                 CtrlButton("Tab") { onSendCommand("\t") }
-                CtrlButton("Enter") { onSendCommand("\r") }
+                CtrlButton("C-c") { onSendCommand("\u0003") }
                 Spacer(Modifier.weight(1f))
                 CtrlButton("\u2190") { onSendCommand("\u001B[D") }
                 CtrlButton("\u2193") { onSendCommand("\u001B[B") }
                 CtrlButton("\u2191") { onSendCommand("\u001B[A") }
                 CtrlButton("\u2192") { onSendCommand("\u001B[C") }
                 Spacer(Modifier.weight(1f))
-                CtrlButton("C-c") { onSendCommand("\u0003") }
+                // Send = Enter (submit message to Claude)
+                Button(
+                    onClick = { onSendCommand("\r") },
+                    modifier = Modifier.height(32.dp),
+                    contentPadding = PaddingValues(horizontal = 16.dp)
+                ) {
+                    Text("Send", style = MaterialTheme.typography.bodySmall)
+                }
             }
         }
     }

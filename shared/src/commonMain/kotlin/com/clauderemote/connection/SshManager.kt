@@ -26,7 +26,8 @@ class SshManager(
     private var outputStream: OutputStream? = null
     private var readJob: Job? = null
 
-    val isConnected: Boolean get() = session?.isConnected == true && channel?.isConnected == true
+    @Volatile private var disconnected = false
+    val isConnected: Boolean get() = !disconnected && session?.isConnected == true && channel?.isConnected == true
 
     /**
      * Connect to server and open a shell channel.
@@ -37,6 +38,7 @@ class SshManager(
         onOutput: (String) -> Unit,
         onDisconnect: () -> Unit
     ): Session = withContext(Dispatchers.IO) {
+        disconnected = false
         FileLogger.log(TAG, "Connecting to ${server.host}:${server.port} as ${server.username}")
         val jsch = JSch()
 
@@ -91,28 +93,30 @@ class SshManager(
      * Send text to the remote shell.
      */
     fun sendInput(data: String) {
+        if (disconnected) return
         try {
-            val os = outputStream
-            if (os == null) {
-                FileLogger.error(TAG, "sendInput: outputStream is null, cannot send ${data.length} bytes")
-                return
-            }
+            val os = outputStream ?: return
             os.write(data.toByteArray(Charsets.UTF_8))
             os.flush()
         } catch (e: Exception) {
-            FileLogger.error(TAG, "sendInput failed", e)
+            if (!disconnected) {
+                disconnected = true
+                FileLogger.error(TAG, "sendInput failed, marking disconnected", e)
+            }
         }
     }
 
-    /**
-     * Send raw bytes (e.g. escape sequences).
-     */
     fun sendBytes(data: ByteArray) {
+        if (disconnected) return
         try {
-            outputStream?.write(data)
-            outputStream?.flush()
+            val os = outputStream ?: return
+            os.write(data)
+            os.flush()
         } catch (e: Exception) {
-            // Connection lost
+            if (!disconnected) {
+                disconnected = true
+                FileLogger.error(TAG, "sendBytes failed, marking disconnected", e)
+            }
         }
     }
 
