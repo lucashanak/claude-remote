@@ -47,6 +47,24 @@ class MainActivity : ComponentActivity() {
             }
         }
         keyFileCallback = null
+
+    }
+
+    private val importFilePicker = registerForActivityResult(
+        androidx.activity.result.contract.ActivityResultContracts.GetContent()
+    ) { uri ->
+        if (uri != null) {
+            try {
+                val json = contentResolver.openInputStream(uri)?.bufferedReader()?.readText() ?: ""
+                val imported = kotlinx.serialization.json.Json { ignoreUnknownKeys = true }
+                    .decodeFromString<List<com.clauderemote.model.SshServer>>(json)
+                imported.forEach { serverStorage.addServer(it) }
+                android.widget.Toast.makeText(this, "Imported ${imported.size} servers", android.widget.Toast.LENGTH_SHORT).show()
+            } catch (e: Exception) {
+                FileLogger.error("MainActivity", "Import failed", e)
+                android.widget.Toast.makeText(this, "Import failed: ${e.message}", android.widget.Toast.LENGTH_LONG).show()
+            }
+        }
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -107,6 +125,9 @@ class MainActivity : ComponentActivity() {
                 onPickKeyFile = { callback ->
                     keyFileCallback = callback
                     keyFilePicker.launch("*/*")
+                },
+                onImportServers = {
+                    importFilePicker.launch("application/json")
                 },
                 onTerminalScreenVisible = {
                     // When terminal screen becomes visible, replay active tab buffer

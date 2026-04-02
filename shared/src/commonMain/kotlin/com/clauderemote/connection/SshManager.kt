@@ -85,6 +85,27 @@ class SshManager(
         session = sess
         FileLogger.log(TAG, "SSH session connected")
 
+        // Setup port forwarding
+        for (pf in server.portForwards) {
+            try {
+                when (pf.type) {
+                    "L" -> {
+                        sess.setPortForwardingL(pf.localPort, pf.remoteHost, pf.remotePort)
+                        FileLogger.log(TAG, "Port forward: L${pf.localPort} -> ${pf.remoteHost}:${pf.remotePort}")
+                        onOutput("\u001B[33mPort forward: L${pf.localPort} -> ${pf.remoteHost}:${pf.remotePort}\u001B[0m\r\n")
+                    }
+                    "R" -> {
+                        sess.setPortForwardingR(pf.remotePort, pf.remoteHost, pf.localPort)
+                        FileLogger.log(TAG, "Port forward: R${pf.remotePort} -> ${pf.remoteHost}:${pf.localPort}")
+                        onOutput("\u001B[33mPort forward: R${pf.remotePort} -> ${pf.remoteHost}:${pf.localPort}\u001B[0m\r\n")
+                    }
+                }
+            } catch (e: Exception) {
+                FileLogger.error(TAG, "Port forward failed: $pf", e)
+                onOutput("\u001B[31mPort forward failed: ${e.message}\u001B[0m\r\n")
+            }
+        }
+
         val ch = sess.openChannel("shell") as ChannelShell
         ch.setPtyType("xterm-256color")
         val inputStream = ch.inputStream

@@ -21,7 +21,9 @@ fun SettingsScreen(
     settings: AppSettings,
     appVersion: String = "",
     onBack: () -> Unit,
-    onCheckUpdate: (() -> Unit)? = null
+    onCheckUpdate: (() -> Unit)? = null,
+    onExportServers: (() -> Unit)? = null,
+    onImportServers: (() -> Unit)? = null
 ) {
     var fontSize by remember { mutableStateOf(settings.terminalFontSize) }
     var scrollback by remember { mutableStateOf(settings.terminalScrollback) }
@@ -151,6 +153,20 @@ fun SettingsScreen(
                 Text("Updates", style = MaterialTheme.typography.titleMedium)
                 Button(onClick = onCheckUpdate) {
                     Text("Check for update")
+                }
+            }
+
+            // Backup
+            if (onExportServers != null || onImportServers != null) {
+                HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
+                Text("Backup", style = MaterialTheme.typography.titleMedium)
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    if (onExportServers != null) {
+                        Button(onClick = onExportServers) { Text("Export Servers") }
+                    }
+                    if (onImportServers != null) {
+                        OutlinedButton(onClick = onImportServers) { Text("Import Servers") }
+                    }
                 }
             }
 

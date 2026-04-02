@@ -42,6 +42,7 @@ fun App(
     onShareLog: ((String) -> Unit)? = null,
     onTerminalScreenVisible: (() -> Unit)? = null,
     onPickKeyFile: ((callback: (String) -> Unit) -> Unit)? = null,
+    onImportServers: (() -> Unit)? = null,
     terminalContent: @Composable (modifier: Modifier) -> Unit
 ) {
     val scope = rememberCoroutineScope()
@@ -53,6 +54,7 @@ fun App(
     var tmuxSessions by remember { mutableStateOf<List<TmuxSession>>(emptyList()) }
     var tmuxLoading by remember { mutableStateOf(false) }
     var connectionError by remember { mutableStateOf<String?>(null) }
+    var tabCloseConfirmId by remember { mutableStateOf<String?>(null) }
 
     var serverList by remember { mutableStateOf(serverStorage.loadServers()) }
     val tabs by tabManager.tabs.collectAsState()
@@ -280,9 +282,14 @@ fun App(
                         activeTabId = activeTabId,
                         onTabSwitch = { sessionOrchestrator.switchTab(it) },
                         onTabClose = { id ->
-                            scope.launch {
-                                sessionOrchestrator.disconnectSession(id)
-                                if (tabs.isEmpty()) currentScreen = Screen.LAUNCHER
+                            val session = tabManager.getTab(id)
+                            if (session?.status == SessionStatus.ACTIVE) {
+                                tabCloseConfirmId = id
+                            } else {
+                                scope.launch {
+                                    sessionOrchestrator.disconnectSession(id)
+                                    if (tabs.isEmpty()) currentScreen = Screen.LAUNCHER
+                                }
                             }
                         },
                         onNewTab = { currentScreen = Screen.LAUNCHER },
@@ -318,7 +325,15 @@ fun App(
                         settings = appSettings,
                         appVersion = appVersion,
                         onBack = { currentScreen = Screen.LAUNCHER },
-                        onCheckUpdate = { checkForUpdate() }
+                        onCheckUpdate = { checkForUpdate() },
+                        onExportServers = {
+                            val json = kotlinx.serialization.json.Json { prettyPrint = true }
+                                .encodeToString(kotlinx.serialization.builtins.ListSerializer(
+                                    com.clauderemote.model.SshServer.serializer()
+                                ), serverStorage.loadServers())
+                            onShareLog?.invoke(json)
+                        },
+                        onImportServers = onImportServers
                     )
                 }
 
@@ -346,6 +361,28 @@ fun App(
                     showServerDialog = false
                 },
                 onPickKeyFile = onPickKeyFile
+            )
+        }
+
+        // Close tab confirmation
+        tabCloseConfirmId?.let { id ->
+            val session = tabManager.getTab(id)
+            AlertDialog(
+                onDismissRequest = { tabCloseConfirmId = null },
+                title = { Text("Close Session") },
+                text = { Text("Disconnect from ${session?.server?.name ?: "server"}?") },
+                confirmButton = {
+                    TextButton(onClick = {
+                        tabCloseConfirmId = null
+                        scope.launch {
+                            sessionOrchestrator.disconnectSession(id)
+                            if (tabs.isEmpty()) currentScreen = Screen.LAUNCHER
+                        }
+                    }) { Text("Disconnect") }
+                },
+                dismissButton = {
+                    TextButton(onClick = { tabCloseConfirmId = null }) { Text("Cancel") }
+                }
             )
         }
 
