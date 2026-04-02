@@ -15,7 +15,7 @@ import com.clauderemote.model.ClaudeModel
 import com.clauderemote.model.ConnectionType
 import com.clauderemote.storage.AppSettings
 
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
 fun SettingsScreen(
     settings: AppSettings,
@@ -24,6 +24,7 @@ fun SettingsScreen(
 ) {
     var fontSize by remember { mutableStateOf(settings.terminalFontSize) }
     var scrollback by remember { mutableStateOf(settings.terminalScrollback) }
+    var colorScheme by remember { mutableStateOf(settings.terminalColorScheme) }
     var defaultMode by remember { mutableStateOf(settings.defaultClaudeMode) }
     var defaultModel by remember { mutableStateOf(settings.defaultClaudeModel) }
     var defaultConnection by remember { mutableStateOf(settings.defaultConnectionType) }
@@ -68,6 +69,18 @@ fun SettingsScreen(
                 step = 1000,
                 onValueChange = { scrollback = it; settings.terminalScrollback = it }
             )
+
+            Text("Color Scheme", style = MaterialTheme.typography.bodyMedium, modifier = Modifier.padding(top = 8.dp))
+            val schemes = listOf("default", "solarized-dark", "dracula", "monokai", "linux")
+            FlowRow(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                schemes.forEach { scheme ->
+                    FilterChip(
+                        selected = colorScheme == scheme,
+                        onClick = { colorScheme = scheme; settings.terminalColorScheme = scheme },
+                        label = { Text(scheme) }
+                    )
+                }
+            }
 
             HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
 

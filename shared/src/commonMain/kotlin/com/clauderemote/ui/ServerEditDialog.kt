@@ -14,9 +14,10 @@ import kotlin.random.Random
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ServerEditDialog(
-    server: SshServer? = null, // null = new server
+    server: SshServer? = null,
     onDismiss: () -> Unit,
-    onSave: (SshServer) -> Unit
+    onSave: (SshServer) -> Unit,
+    onPickKeyFile: ((callback: (String) -> Unit) -> Unit)? = null
 ) {
     var name by remember { mutableStateOf(server?.name ?: "") }
     var host by remember { mutableStateOf(server?.host ?: "") }
@@ -101,11 +102,18 @@ fun ServerEditDialog(
                         OutlinedTextField(
                             value = privateKey,
                             onValueChange = { privateKey = it },
-                            label = { Text("Private Key (paste content)") },
+                            label = { Text("Private Key (paste or import)") },
                             modifier = Modifier.fillMaxWidth(),
                             minLines = 3,
                             maxLines = 5
                         )
+                        if (onPickKeyFile != null) {
+                            TextButton(onClick = {
+                                onPickKeyFile { content -> privateKey = content }
+                            }) {
+                                Text("Import from file")
+                            }
+                        }
                     }
                 }
 

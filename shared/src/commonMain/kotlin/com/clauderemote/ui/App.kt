@@ -41,6 +41,7 @@ fun App(
     onInstallUpdate: ((ByteArray, UpdateInfo) -> Unit)? = null,
     onShareLog: ((String) -> Unit)? = null,
     onTerminalScreenVisible: (() -> Unit)? = null,
+    onPickKeyFile: ((callback: (String) -> Unit) -> Unit)? = null,
     terminalContent: @Composable (modifier: Modifier) -> Unit
 ) {
     val scope = rememberCoroutineScope()
@@ -318,7 +319,8 @@ fun App(
                     }
                     refreshServers()
                     showServerDialog = false
-                }
+                },
+                onPickKeyFile = onPickKeyFile
             )
         }
 

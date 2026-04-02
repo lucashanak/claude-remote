@@ -28,6 +28,8 @@ html, body { background:#1E1E1E; overflow:hidden; width:100%; height:100%; displ
     <div class="ctx-sep"></div>
     <button class="ctx-item" id="ctxSelectAll">Select All</button>
     <button class="ctx-item" id="ctxClear">Clear</button>
+    <div class="ctx-sep"></div>
+    <button class="ctx-item" id="ctxExport">Export Log</button>
 </div>
 <script src="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/lib/xterm.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.10.0/lib/addon-fit.min.js"></script>
@@ -170,6 +172,21 @@ document.getElementById('ctxPaste').addEventListener('click', () => {
 });
 document.getElementById('ctxSelectAll').addEventListener('click', () => { hideCtxMenu(); term.selectAll(); });
 document.getElementById('ctxClear').addEventListener('click', () => { hideCtxMenu(); term.clear(); });
+document.getElementById('ctxExport').addEventListener('click', () => {
+    hideCtxMenu();
+    exportScrollback();
+    showToast('Exporting...');
+});
+
+function exportScrollback() {
+    const lines = [];
+    const buf = term.buffer.active;
+    for (let i = 0; i < buf.length; i++) {
+        const line = buf.getLine(i);
+        if (line) lines.push(line.translateToString(true));
+    }
+    if (A) A.exportScrollback(lines.join('\n'));
+}
 
 // ======================== RESIZE (ResizeObserver) ========================
 const ro = new ResizeObserver(() => {

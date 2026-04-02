@@ -33,6 +33,21 @@ class MainActivity : ComponentActivity() {
     private lateinit var tabManager: TabManager
     private lateinit var sessionOrchestrator: SessionOrchestrator
     private var terminalWebView: WebView? = null
+    private var keyFileCallback: ((String) -> Unit)? = null
+
+    private val keyFilePicker = registerForActivityResult(
+        androidx.activity.result.contract.ActivityResultContracts.GetContent()
+    ) { uri ->
+        if (uri != null) {
+            try {
+                val content = contentResolver.openInputStream(uri)?.bufferedReader()?.readText() ?: ""
+                keyFileCallback?.invoke(content)
+            } catch (e: Exception) {
+                FileLogger.error("MainActivity", "Failed to read key file", e)
+            }
+        }
+        keyFileCallback = null
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         enableEdgeToEdge()
@@ -88,6 +103,10 @@ class MainActivity : ComponentActivity() {
                         putExtra(Intent.EXTRA_SUBJECT, "Claude Remote Debug Log")
                     }
                     startActivity(Intent.createChooser(intent, "Share Log"))
+                },
+                onPickKeyFile = { callback ->
+                    keyFileCallback = callback
+                    keyFilePicker.launch("*/*")
                 },
                 onTerminalScreenVisible = {
                     // When terminal screen becomes visible, replay active tab buffer
@@ -357,6 +376,25 @@ class MainActivity : ComponentActivity() {
                 startActivity(intent)
             } catch (e: Exception) {
                 FileLogger.error("MainActivity", "Failed to open URL: $url", e)
+            }
+        }
+
+        @JavascriptInterface
+        fun exportScrollback(content: String) {
+            try {
+                val dir = File(cacheDir, "exports")
+                dir.mkdirs()
+                val file = File(dir, "terminal_${System.currentTimeMillis()}.log")
+                file.writeText(content)
+                val uri = FileProvider.getUriForFile(this@MainActivity, "${packageName}.fileprovider", file)
+                val intent = Intent(Intent.ACTION_SEND).apply {
+                    type = "text/plain"
+                    putExtra(Intent.EXTRA_STREAM, uri)
+                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                }
+                startActivity(Intent.createChooser(intent, "Export terminal log"))
+            } catch (e: Exception) {
+                FileLogger.error("MainActivity", "Export failed", e)
             }
         }
 
