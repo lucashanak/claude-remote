@@ -100,7 +100,7 @@ class MainActivity : FragmentActivity() {
         attachFileCallback = null
     }
 
-    private var isAppInForeground = false
+    @Volatile private var isAppInForeground = false
 
     private fun requestNotificationPermission() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
@@ -188,11 +188,13 @@ class MainActivity : FragmentActivity() {
         sessionOrchestrator.onClaudeNeedsInput = { sessionId, hint, isActiveTab ->
             val tab = tabManager.getTab(sessionId)
             val title = tab?.tabTitle ?: "Session"
-            FileLogger.log("Notify", "Claude needs input: '$hint' fg=$isAppInForeground activeTab=$isActiveTab keepAlive=${KeepAliveService.isRunning} notif=${appSettings.notificationsEnabled}")
+            val fg = isAppInForeground
+            FileLogger.log("Notify", "Claude needs input: '$hint' fg=$fg activeTab=$isActiveTab keepAlive=${KeepAliveService.isRunning} notif=${appSettings.notificationsEnabled}")
             KeepAliveService.updateDescription("$title: $hint")
 
             // Send alert notification when app is backgrounded or tab is inactive
-            if ((!isAppInForeground || !isActiveTab) && appSettings.notificationsEnabled) {
+            if ((!fg || !isActiveTab) && appSettings.notificationsEnabled) {
+                FileLogger.log("Notify", "Sending alert for '$title'")
                 KeepAliveService.sendAlert(sessionId, title, hint)
             }
         }

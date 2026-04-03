@@ -137,12 +137,17 @@ class KeepAliveService : Service() {
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
         )
 
+        @Suppress("DEPRECATION")
         val notification = Notification.Builder(this, ALERT_CHANNEL_ID)
             .setContentTitle(sessionTitle)
             .setContentText(hint)
             .setSmallIcon(android.R.drawable.ic_dialog_info)
             .setContentIntent(openIntent)
             .setAutoCancel(true)
+            .setPriority(Notification.PRIORITY_HIGH)
+            .setCategory(Notification.CATEGORY_MESSAGE)
+            .setDefaults(Notification.DEFAULT_ALL)
+            .setFullScreenIntent(openIntent, false)
             .build()
 
         val nm = getSystemService(NotificationManager::class.java)
