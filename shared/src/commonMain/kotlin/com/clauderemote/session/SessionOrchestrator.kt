@@ -228,14 +228,26 @@ class SessionOrchestrator(
         outputBuffers[sessionId]?.clear()
     }
 
+    private fun warnNoConnection(sessionId: String) {
+        val msg = "\r\n\u001B[31mNo connection — input dropped. Try reconnecting.\u001B[0m\r\n"
+        appendToBuffer(sessionId, msg)
+        if (tabManager.activeTabId.value == sessionId) {
+            onTerminalOutput?.invoke(sessionId, msg)
+        }
+    }
+
     fun sendInput(sessionId: String, data: String) {
         promptDetector.onUserInput(sessionId)
-        connections[sessionId]?.sendInput(data)
+        val conn = connections[sessionId]
+        if (conn == null) { warnNoConnection(sessionId); return }
+        conn.sendInput(data)
     }
 
     fun sendBytes(sessionId: String, data: ByteArray) {
         promptDetector.onUserInput(sessionId)
-        connections[sessionId]?.sendBytes(data)
+        val conn = connections[sessionId]
+        if (conn == null) { warnNoConnection(sessionId); return }
+        conn.sendBytes(data)
     }
 
     fun resize(sessionId: String, cols: Int, rows: Int) {
@@ -244,10 +256,7 @@ class SessionOrchestrator(
 
     fun sendClaudeCommand(sessionId: String, command: String) {
         val conn = connections[sessionId]
-        if (conn == null) {
-            FileLogger.error(TAG, "sendClaudeCommand: no connection for session $sessionId")
-            return
-        }
+        if (conn == null) { warnNoConnection(sessionId); return }
         FileLogger.log(TAG, "sendClaudeCommand: ${command.length} bytes to $sessionId")
         promptDetector.onUserInput(sessionId)
         conn.sendInput(command)

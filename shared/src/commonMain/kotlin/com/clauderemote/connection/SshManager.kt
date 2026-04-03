@@ -17,6 +17,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeout
 import java.io.OutputStream
 
 class SshManager(
@@ -27,7 +28,8 @@ class SshManager(
     private var channel: ChannelShell? = null
     private var outputStream: OutputStream? = null
     private var readJob: Job? = null
-    private val ioScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+    private var ioScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+    private var onConnectionLost: (() -> Unit)? = null
 
     @Volatile private var disconnected = false
 
@@ -43,6 +45,8 @@ class SshManager(
         onConnectionLost: () -> Unit
     ): Session = withContext(Dispatchers.IO) {
         disconnected = false
+        this@SshManager.onConnectionLost = onConnectionLost
+        ioScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
         FileLogger.log(TAG, "Connecting to ${server.host}:${server.port} as ${server.username}")
 
         // Reset xterm state
@@ -58,6 +62,8 @@ class SshManager(
             sess.setPassword(server.password)
         }
         sess.setConfig("StrictHostKeyChecking", "no")
+        sess.setConfig("ServerAliveInterval", "15")
+        sess.setConfig("ServerAliveCountMax", "3")
         sess.userInfo = TofuUserInfo(server.host, serverStorage)
         sess.timeout = connectTimeout
 
@@ -118,13 +124,18 @@ class SshManager(
         if (disconnected) return
         ioScope.launch {
             try {
-                val os = outputStream ?: return@launch
-                os.write(data.toByteArray(Charsets.UTF_8))
-                os.flush()
+                withTimeout(WRITE_TIMEOUT) {
+                    withContext(Dispatchers.IO) {
+                        val os = outputStream ?: return@withContext
+                        os.write(data.toByteArray(Charsets.UTF_8))
+                        os.flush()
+                    }
+                }
             } catch (e: Exception) {
                 if (!disconnected) {
                     disconnected = true
-                    FileLogger.error(TAG, "sendInput failed, marking disconnected", e)
+                    FileLogger.error(TAG, "sendInput failed/timeout", e)
+                    onConnectionLost?.invoke()
                 }
             }
         }
@@ -134,13 +145,18 @@ class SshManager(
         if (disconnected) return
         ioScope.launch {
             try {
-                val os = outputStream ?: return@launch
-                os.write(data)
-                os.flush()
+                withTimeout(WRITE_TIMEOUT) {
+                    withContext(Dispatchers.IO) {
+                        val os = outputStream ?: return@withContext
+                        os.write(data)
+                        os.flush()
+                    }
+                }
             } catch (e: Exception) {
                 if (!disconnected) {
                     disconnected = true
-                    FileLogger.error(TAG, "sendBytes failed, marking disconnected", e)
+                    FileLogger.error(TAG, "sendBytes failed/timeout", e)
+                    onConnectionLost?.invoke()
                 }
             }
         }
@@ -152,9 +168,11 @@ class SshManager(
 
     suspend fun disconnect() {
         disconnected = true
+        onConnectionLost = null
         FileLogger.log(TAG, "Disconnecting...")
         readJob?.cancelAndJoin()
         readJob = null
+        ioScope.coroutineContext[Job]?.cancelAndJoin()
         try { channel?.disconnect() } catch (_: Exception) {}
         try { session?.disconnect() } catch (_: Exception) {}
         channel = null
@@ -179,6 +197,7 @@ class SshManager(
 
     companion object {
         private const val TAG = "SshManager"
+        private const val WRITE_TIMEOUT = 5000L
     }
 }
 
