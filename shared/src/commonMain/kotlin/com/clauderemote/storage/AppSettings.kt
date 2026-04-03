@@ -70,6 +70,11 @@ class AppSettings(private val prefs: PlatformPreferences) {
         get() = prefs.getString("theme_mode", "system")
         set(value) = prefs.putString("theme_mode", value)
 
+    // Notifications
+    var notificationsEnabled: Boolean
+        get() = prefs.getBoolean("notifications_enabled", true)
+        set(value) = prefs.putBoolean("notifications_enabled", value)
+
     // Security
     var biometricLockEnabled: Boolean
         get() = prefs.getBoolean("biometric_lock_enabled", false)

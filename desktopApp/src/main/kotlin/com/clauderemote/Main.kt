@@ -13,6 +13,7 @@ import com.clauderemote.storage.AppSettings
 import com.clauderemote.storage.PlatformPreferences
 import com.clauderemote.storage.ServerStorage
 import com.clauderemote.ui.App
+import com.clauderemote.util.FileLogger
 import javafx.application.Platform
 import javafx.concurrent.Worker
 import javafx.embed.swing.JFXPanel
@@ -39,6 +40,30 @@ fun main() = application {
     }
     sessionOrchestrator.onTabSwitched = { _, bufferedOutput ->
         replayBuffer(bufferedOutput)
+    }
+
+    // Desktop notifications via SystemTray
+    sessionOrchestrator.onClaudeNeedsInput = { _, hint, _ ->
+        if (appSettings.notificationsEnabled) {
+            try {
+                if (java.awt.SystemTray.isSupported()) {
+                    val tray = java.awt.SystemTray.getSystemTray()
+                    if (tray.trayIcons.isEmpty()) {
+                        val icon = java.awt.Toolkit.getDefaultToolkit().createImage(
+                            object {}.javaClass.getResource("/icon.png")
+                        )
+                        val trayIcon = java.awt.TrayIcon(icon, "Claude Remote")
+                        trayIcon.isImageAutoSize = true
+                        tray.add(trayIcon)
+                    }
+                    tray.trayIcons.firstOrNull()?.displayMessage(
+                        "Claude Remote", hint, java.awt.TrayIcon.MessageType.INFO
+                    )
+                }
+            } catch (e: Exception) {
+                FileLogger.log("Desktop", "System tray notification failed: ${e.message}")
+            }
+        }
     }
 
     Window(

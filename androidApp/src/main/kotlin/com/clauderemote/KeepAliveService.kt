@@ -15,7 +15,9 @@ import com.clauderemote.util.FileLogger
 class KeepAliveService : Service() {
     companion object {
         private const val CHANNEL_ID = "keepalive"
+        private const val ALERT_CHANNEL_ID = "claude_alerts"
         private const val NOTIFICATION_ID = 1
+        private const val ALERT_NOTIFICATION_BASE_ID = 1000
         private const val TAG = "KeepAlive"
 
         private var instance: KeepAliveService? = null
@@ -37,6 +39,14 @@ class KeepAliveService : Service() {
 
         fun updateDescription(description: String) {
             instance?.updateNotification(description)
+        }
+
+        fun sendAlert(sessionId: String, sessionTitle: String, hint: String) {
+            instance?.postAlert(sessionId, sessionTitle, hint)
+        }
+
+        fun clearAlert(sessionId: String) {
+            instance?.dismissAlert(sessionId)
         }
 
         val isRunning: Boolean get() = instance != null
@@ -69,7 +79,9 @@ class KeepAliveService : Service() {
 
     private fun createNotificationChannel() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val channel = NotificationChannel(
+            val nm = getSystemService(NotificationManager::class.java)
+
+            val keepaliveChannel = NotificationChannel(
                 CHANNEL_ID,
                 "Active Connection",
                 NotificationManager.IMPORTANCE_LOW
@@ -77,8 +89,18 @@ class KeepAliveService : Service() {
                 description = "Keeps the app alive during active Claude sessions"
                 setShowBadge(false)
             }
-            val nm = getSystemService(NotificationManager::class.java)
-            nm.createNotificationChannel(channel)
+            nm.createNotificationChannel(keepaliveChannel)
+
+            val alertChannel = NotificationChannel(
+                ALERT_CHANNEL_ID,
+                "Claude Alerts",
+                NotificationManager.IMPORTANCE_HIGH
+            ).apply {
+                description = "Notifications when Claude needs your attention"
+                enableVibration(true)
+                enableLights(true)
+            }
+            nm.createNotificationChannel(alertChannel)
         }
     }
 
@@ -103,6 +125,34 @@ class KeepAliveService : Service() {
     fun updateNotification(description: String) {
         val nm = getSystemService(NotificationManager::class.java)
         nm.notify(NOTIFICATION_ID, buildNotification(description))
+    }
+
+    fun postAlert(sessionId: String, sessionTitle: String, hint: String) {
+        val openIntent = PendingIntent.getActivity(
+            this, sessionId.hashCode(),
+            Intent(this, MainActivity::class.java).apply {
+                flags = Intent.FLAG_ACTIVITY_SINGLE_TOP
+                putExtra("switch_to_session", sessionId)
+            },
+            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+        )
+
+        val notification = Notification.Builder(this, ALERT_CHANNEL_ID)
+            .setContentTitle(sessionTitle)
+            .setContentText(hint)
+            .setSmallIcon(android.R.drawable.ic_dialog_info)
+            .setContentIntent(openIntent)
+            .setAutoCancel(true)
+            .build()
+
+        val nm = getSystemService(NotificationManager::class.java)
+        nm.notify(ALERT_NOTIFICATION_BASE_ID + sessionId.hashCode().and(0xFFFF), notification)
+        FileLogger.log(TAG, "Alert sent: $sessionTitle — $hint")
+    }
+
+    fun dismissAlert(sessionId: String) {
+        val nm = getSystemService(NotificationManager::class.java)
+        nm.cancel(ALERT_NOTIFICATION_BASE_ID + sessionId.hashCode().and(0xFFFF))
     }
 
     @Suppress("DEPRECATION")

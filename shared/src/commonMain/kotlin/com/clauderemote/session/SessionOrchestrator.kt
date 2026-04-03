@@ -23,6 +23,9 @@ class SessionOrchestrator(
     // Per-session terminal output buffer (ring buffer, capped at MAX_BUFFER)
     private val outputBuffers = mutableMapOf<String, StringBuilder>()
 
+    // Prompt detection for notifications
+    private val promptDetector = InputPromptDetector()
+
     // Terminal output callback — set by the platform (Android WebView, Desktop terminal)
     var onTerminalOutput: ((sessionId: String, data: String) -> Unit)? = null
 
@@ -36,7 +39,7 @@ class SessionOrchestrator(
     var onSessionActive: ((ClaudeSession) -> Unit)? = null
 
     // Notification callback when Claude needs attention
-    var onClaudeNeedsInput: ((sessionId: String, hint: String) -> Unit)? = null
+    var onClaudeNeedsInput: ((sessionId: String, hint: String, isActiveTab: Boolean) -> Unit)? = null
 
     suspend fun launchSession(
         server: SshServer,
@@ -87,9 +90,12 @@ class SessionOrchestrator(
      */
     fun switchTab(id: String) {
         tabManager.switchTab(id)
+        promptDetector.onUserInput(id) // Clear waiting state on tab focus
         val buffer = outputBuffers[id]?.toString() ?: ""
         FileLogger.log(TAG, "Switching to tab $id (buffer: ${buffer.length} chars)")
+        promptDetector.suppressDetection = true
         onTabSwitched?.invoke(id, buffer)
+        promptDetector.suppressDetection = false
     }
 
     private val reconnectScope = kotlinx.coroutines.CoroutineScope(
@@ -102,14 +108,14 @@ class SessionOrchestrator(
 
         fun emit(text: String) {
             appendToBuffer(session.id, text)
-            if (tabManager.activeTabId.value == session.id) {
+            val isActive = tabManager.activeTabId.value == session.id
+            if (isActive) {
                 onTerminalOutput?.invoke(session.id, text)
             }
-            if (tabManager.activeTabId.value != session.id) {
-                if (text.contains("[Y/n]") || text.contains("[y/N]") ||
-                    text.contains("Do you want to") || text.contains("permission")) {
-                    onClaudeNeedsInput?.invoke(session.id, "Approval needed")
-                }
+            // Detect prompts for all sessions (active and background)
+            val detection = promptDetector.onOutput(session.id, text)
+            if (detection != null) {
+                onClaudeNeedsInput?.invoke(session.id, detection.type.displayHint, isActive)
             }
         }
 
@@ -223,6 +229,7 @@ class SessionOrchestrator(
     }
 
     fun sendInput(sessionId: String, data: String) {
+        promptDetector.onUserInput(sessionId)
         connections[sessionId]?.sendInput(data)
     }
 
@@ -293,6 +300,7 @@ class SessionOrchestrator(
         connections[sessionId]?.disconnect()
         connections.remove(sessionId)
         outputBuffers.remove(sessionId)
+        promptDetector.removeSession(sessionId)
         tabManager.removeTab(sessionId)
     }
 

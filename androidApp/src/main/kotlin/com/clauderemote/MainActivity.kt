@@ -95,6 +95,7 @@ class MainActivity : FragmentActivity() {
         attachFileCallback = null
     }
 
+    private var isAppInForeground = false
     private var biometricUnlocked = false
 
     private fun checkBiometric() {
@@ -170,11 +171,20 @@ class MainActivity : FragmentActivity() {
             }
         }
 
-        // Notification when Claude needs input in background tab
-        sessionOrchestrator.onClaudeNeedsInput = { sessionId, hint ->
+        // Notification when Claude needs input
+        sessionOrchestrator.onClaudeNeedsInput = { sessionId, hint, isActiveTab ->
             val tab = tabManager.getTab(sessionId)
-            KeepAliveService.updateDescription("${tab?.tabTitle ?: "Session"}: $hint")
+            val title = tab?.tabTitle ?: "Session"
+            KeepAliveService.updateDescription("$title: $hint")
+
+            // Send alert notification when app is backgrounded or tab is inactive
+            if ((!isAppInForeground || !isActiveTab) && appSettings.notificationsEnabled) {
+                KeepAliveService.sendAlert(sessionId, title, hint)
+            }
         }
+
+        // Handle notification tap intent
+        handleSessionIntent(intent)
 
         // Network change detection — reconnect disconnected sessions
         registerNetworkCallback()
@@ -226,6 +236,30 @@ class MainActivity : FragmentActivity() {
                     TerminalWebView(modifier = modifier)
                 }
             )
+        }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        isAppInForeground = true
+        // Clear alerts for active tab when app comes to foreground
+        tabManager.activeTabId.value?.let { KeepAliveService.clearAlert(it) }
+    }
+
+    override fun onPause() {
+        super.onPause()
+        isAppInForeground = false
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        handleSessionIntent(intent)
+    }
+
+    private fun handleSessionIntent(intent: Intent?) {
+        intent?.getStringExtra("switch_to_session")?.let { sessionId ->
+            sessionOrchestrator.switchTab(sessionId)
+            KeepAliveService.clearAlert(sessionId)
         }
     }
 
@@ -497,6 +531,7 @@ class MainActivity : FragmentActivity() {
         fun onTerminalInput(data: String) {
             tabManager.activeTabId.value?.let { id ->
                 sessionOrchestrator.sendInput(id, data)
+                KeepAliveService.clearAlert(id)
             }
         }
 

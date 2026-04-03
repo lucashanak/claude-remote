@@ -33,6 +33,7 @@ fun SettingsScreen(
     var defaultConnection by remember { mutableStateOf(settings.defaultConnectionType) }
     var autoReconnect by remember { mutableStateOf(settings.sshAutoReconnect) }
     var keepAlive by remember { mutableStateOf(settings.keepAliveEnabled) }
+    var notifications by remember { mutableStateOf(settings.notificationsEnabled) }
     var connectTimeout by remember { mutableStateOf(settings.sshConnectTimeout) }
 
     Scaffold(
@@ -153,6 +154,12 @@ fun SettingsScreen(
                 label = "Keep alive (background)",
                 checked = keepAlive,
                 onCheckedChange = { keepAlive = it; settings.keepAliveEnabled = it }
+            )
+
+            SettingsSwitch(
+                label = "Notify when Claude is ready",
+                checked = notifications,
+                onCheckedChange = { notifications = it; settings.notificationsEnabled = it }
             )
 
             SettingsSlider(
