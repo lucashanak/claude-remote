@@ -214,15 +214,7 @@ fun TerminalScreen(
             if (activeSession != null) {
                 PromptInputBar(
                     commands = commands,
-                    onSend = { text ->
-                        if (text.contains('\n')) {
-                            // Multi-line: use bracketed paste so terminal doesn't
-                            // interpret newlines as submit
-                            onSendCommand("\u001b[200~$text\u001b[201~\r")
-                        } else {
-                            onSendCommand(text + "\r")
-                        }
-                    },
+                    onSend = { text -> onSendCommand(text + "\r") },
                     onSendCommand = onSendCommand,
                     onAttachFile = onAttachFile
                 )
@@ -251,6 +243,7 @@ fun TerminalScreen(
 
 // ======================== PROMPT INPUT ========================
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun PromptInputBar(
     commands: List<SlashCommand>,
@@ -259,6 +252,10 @@ private fun PromptInputBar(
     onAttachFile: (suspend () -> String?)? = null
 ) {
     var text by rememberSaveable { mutableStateOf("") }
+    // Attached file paths tracked separately from text input
+    // Stored as \n-separated string for rememberSaveable compatibility
+    var attachedFilesRaw by rememberSaveable { mutableStateOf("") }
+    val attachedFiles: List<String> = if (attachedFilesRaw.isBlank()) emptyList() else attachedFilesRaw.split('\n')
     var uploading by remember { mutableStateOf(false) }
     val promptScope = rememberCoroutineScope()
     // Show inline suggestions when text starts with /
@@ -266,8 +263,47 @@ private fun PromptInputBar(
         commands.filter { it.command.contains(text.trim(), ignoreCase = true) }.take(5)
     } else emptyList()
 
+    fun buildAndSend() {
+        val parts = mutableListOf<String>()
+        if (text.isNotBlank()) parts.add(text.replace('\n', ' ').trim())
+        parts.addAll(attachedFiles)
+        if (parts.isNotEmpty()) {
+            onSend(parts.joinToString(" "))
+            text = ""
+            attachedFilesRaw = ""
+        } else {
+            onSendCommand("\r")
+        }
+    }
+
     Surface(color = MaterialTheme.colorScheme.surfaceVariant, tonalElevation = 2.dp) {
         Column(modifier = Modifier.fillMaxWidth()) {
+            // Attached files chips
+            if (attachedFiles.isNotEmpty()) {
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 2.dp),
+                    horizontalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
+                    attachedFiles.forEachIndexed { idx, path ->
+                        InputChip(
+                            selected = true,
+                            onClick = {},
+                            label = { Text(path.substringAfterLast('/'), style = MaterialTheme.typography.labelSmall) },
+                            trailingIcon = {
+                                Icon(
+                                    Icons.Default.Close,
+                                    "Remove",
+                                    modifier = Modifier.size(14.dp).clickable {
+                                        attachedFilesRaw = attachedFiles.filterIndexed { i, _ -> i != idx }.joinToString("\n")
+                                    }
+                                )
+                            },
+                            modifier = Modifier.height(26.dp)
+                        )
+                    }
+                }
+            }
+
             // Inline suggestions
             if (suggestions.isNotEmpty()) {
                 Row(
@@ -299,7 +335,7 @@ private fun PromptInputBar(
                                 promptScope.launch {
                                     val path = onAttachFile.invoke()
                                     if (path != null) {
-                                        text = if (text.isBlank()) path else "$text $path"
+                                        attachedFilesRaw = (attachedFiles + path).joinToString("\n")
                                     }
                                     uploading = false
                                 }
@@ -324,19 +360,23 @@ private fun PromptInputBar(
                     value = text,
                     onValueChange = { text = it },
                     modifier = Modifier.weight(1f),
-                    placeholder = { Text("Type message or /command...") },
+                    placeholder = {
+                        Text(
+                            if (attachedFiles.isNotEmpty()) "Add instructions..."
+                            else "Type message or /command..."
+                        )
+                    },
                     textStyle = MaterialTheme.typography.bodySmall,
-                    minLines = 1,
-                    maxLines = 5,
+                    singleLine = true,
                     colors = OutlinedTextFieldDefaults.colors(
                         focusedContainerColor = MaterialTheme.colorScheme.surface,
                         unfocusedContainerColor = MaterialTheme.colorScheme.surface
                     )
                 )
                 // Clear text button
-                if (text.isNotBlank()) {
+                if (text.isNotBlank() || attachedFiles.isNotEmpty()) {
                     IconButton(
-                        onClick = { text = "" },
+                        onClick = { text = ""; attachedFilesRaw = "" },
                         modifier = Modifier.size(36.dp)
                     ) {
                         Icon(Icons.Default.Close, "Clear", modifier = Modifier.size(16.dp))
@@ -344,14 +384,7 @@ private fun PromptInputBar(
                 }
                 Spacer(Modifier.width(4.dp))
                 Button(
-                    onClick = {
-                        if (text.isNotBlank()) {
-                            onSend(text)
-                            text = ""
-                        } else {
-                            onSendCommand("\r")
-                        }
-                    },
+                    onClick = { buildAndSend() },
                     modifier = Modifier.height(48.dp),
                     contentPadding = PaddingValues(horizontal = 16.dp)
                 ) {
