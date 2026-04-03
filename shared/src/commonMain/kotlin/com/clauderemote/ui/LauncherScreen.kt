@@ -17,6 +17,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import com.clauderemote.model.ClaudeSession
+import com.clauderemote.model.RemoteSession
 import com.clauderemote.model.SessionStatus
 import com.clauderemote.model.SshServer
 
@@ -25,6 +26,10 @@ import com.clauderemote.model.SshServer
 fun LauncherScreen(
     servers: List<SshServer>,
     activeSessions: List<ClaudeSession>,
+    remoteSessions: List<RemoteSession> = emptyList(),
+    remoteSessionsLoading: Boolean = false,
+    onRefreshRemote: (() -> Unit)? = null,
+    onAttachRemote: ((RemoteSession) -> Unit)? = null,
     onConnectServer: (SshServer) -> Unit,
     onQuickConnect: ((SshServer) -> Unit)? = null,
     onAddServer: () -> Unit,
@@ -75,6 +80,35 @@ fun LauncherScreen(
                 }
                 items(activeSessions, key = { it.id }) { session ->
                     ActiveSessionCard(session, onClick = { onResumeSession(session) })
+                }
+                item { Spacer(Modifier.height(16.dp)) }
+            }
+
+            // Remote Sessions (tmux sessions discovered on servers)
+            // Filter out sessions already connected in-app
+            val connectedTmuxNames = activeSessions.map { it.tmuxSessionName }.toSet()
+            val filteredRemote = remoteSessions.filter { it.tmuxSession.name !in connectedTmuxNames }
+            if (filteredRemote.isNotEmpty() || remoteSessionsLoading) {
+                item {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.padding(vertical = 8.dp)
+                    ) {
+                        Text(
+                            "Remote Sessions",
+                            style = MaterialTheme.typography.titleMedium,
+                            modifier = Modifier.weight(1f)
+                        )
+                        if (remoteSessionsLoading) {
+                            CircularProgressIndicator(
+                                modifier = Modifier.size(16.dp),
+                                strokeWidth = 2.dp
+                            )
+                        }
+                    }
+                }
+                items(filteredRemote, key = { "${it.server.id}:${it.tmuxSession.name}" }) { remote ->
+                    RemoteSessionCard(remote, onClick = { onAttachRemote?.invoke(remote) })
                 }
                 item { Spacer(Modifier.height(16.dp)) }
             }
@@ -284,5 +318,46 @@ private fun ServerCard(
                 }
             }
         )
+    }
+}
+
+@Composable
+private fun RemoteSessionCard(remote: RemoteSession, onClick: () -> Unit) {
+    Card(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onClick),
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.surfaceVariant
+        )
+    ) {
+        Row(
+            modifier = Modifier.padding(16.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Surface(
+                modifier = Modifier.size(12.dp),
+                shape = MaterialTheme.shapes.small,
+                color = if (remote.tmuxSession.attached)
+                    MaterialTheme.colorScheme.tertiary
+                else
+                    MaterialTheme.colorScheme.outline
+            ) {}
+
+            Spacer(Modifier.width(12.dp))
+
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    remote.tmuxSession.name,
+                    style = MaterialTheme.typography.titleSmall
+                )
+                Text(
+                    "${remote.server.name} \u2022 ${remote.tmuxSession.windows}w" +
+                        if (remote.tmuxSession.attached) " \u2022 attached" else "",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+        }
     }
 }

@@ -25,6 +25,8 @@ import com.clauderemote.util.UpdateChecker
 import com.clauderemote.util.UpdateInfo
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
@@ -62,6 +64,55 @@ fun App(
     var serverList by remember { mutableStateOf(serverStorage.loadServers()) }
     val tabs by tabManager.tabs.collectAsState()
     val activeTabId by tabManager.activeTabId.collectAsState()
+
+    // Remote tmux sessions discovered on servers
+    var remoteSessions by remember { mutableStateOf<List<RemoteSession>>(emptyList()) }
+    var remoteSessionsLoading by remember { mutableStateOf(false) }
+
+    fun scanRemoteSessions() {
+        val servers = serverList
+        if (servers.isEmpty()) return
+        scope.launch {
+            remoteSessionsLoading = true
+            try {
+                val results = withContext(Dispatchers.IO) {
+                    servers.map { server ->
+                        async {
+                            try {
+                                val jsch = com.jcraft.jsch.JSch()
+                                if (server.authMethod == AuthMethod.KEY && server.privateKey != null) {
+                                    jsch.addIdentity("key", server.privateKey.toByteArray(), null, null)
+                                }
+                                val sess = jsch.getSession(server.username, server.host, server.port)
+                                if (server.authMethod == AuthMethod.PASSWORD && server.password != null) {
+                                    sess.setPassword(server.password)
+                                }
+                                sess.setConfig("StrictHostKeyChecking", "no")
+                                sess.timeout = 5000
+                                sess.connect(5000)
+                                val sessions = TmuxManager.listSessions(sess)
+                                sess.disconnect()
+                                sessions.map { RemoteSession(server, it) }
+                            } catch (_: Exception) {
+                                emptyList()
+                            }
+                        }
+                    }.awaitAll().flatten()
+                }
+                remoteSessions = results
+            } catch (_: Exception) {
+                remoteSessions = emptyList()
+            }
+            remoteSessionsLoading = false
+        }
+    }
+
+    // Scan remote sessions when launcher is shown
+    LaunchedEffect(currentScreen) {
+        if (currentScreen == Screen.LAUNCHER) {
+            scanRemoteSessions()
+        }
+    }
 
     // Update state
     var updateState by remember { mutableStateOf(UpdateState()) }
@@ -179,6 +230,28 @@ fun App(
                     LauncherScreen(
                         servers = serverList,
                         activeSessions = tabs,
+                        remoteSessions = remoteSessions,
+                        remoteSessionsLoading = remoteSessionsLoading,
+                        onRefreshRemote = { scanRemoteSessions() },
+                        onAttachRemote = { remote ->
+                            scope.launch {
+                                try {
+                                    connectionError = null
+                                    sessionOrchestrator.launchSession(
+                                        server = remote.server,
+                                        folder = remote.server.defaultFolder,
+                                        mode = remote.server.defaultClaudeMode,
+                                        model = remote.server.defaultClaudeModel,
+                                        connectionType = ConnectionType.SSH,
+                                        tmuxSessionName = remote.tmuxSession.name,
+                                        isNewTmuxSession = false
+                                    )
+                                    currentScreen = Screen.TERMINAL
+                                } catch (e: Exception) {
+                                    connectionError = e.message
+                                }
+                            }
+                        },
                         onQuickConnect = { server ->
                             // Long-press: connect directly with defaults
                             scope.launch {

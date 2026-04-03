@@ -32,3 +32,11 @@ data class TmuxSession(
     val attached: Boolean,
     val created: String
 )
+
+/**
+ * A tmux session discovered on a remote server (not yet connected in-app).
+ */
+data class RemoteSession(
+    val server: SshServer,
+    val tmuxSession: TmuxSession
+)
