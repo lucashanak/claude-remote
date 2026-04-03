@@ -10,6 +10,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
@@ -53,6 +54,7 @@ fun TerminalScreen(
     var showControlBar by remember { mutableStateOf(true) }
     var compactMode by remember { mutableStateOf(false) } // hides prompt+controls for max terminal
     var showCommandPicker by remember { mutableStateOf(false) }
+    val inputFocusRequester = remember { FocusRequester() }
     var showClaudeMd by remember { mutableStateOf(false) }
     var claudeMdContent by remember { mutableStateOf("") }
     var commandFilter by remember { mutableStateOf("") }
@@ -230,7 +232,11 @@ fun TerminalScreen(
                         commandFilter = ""
                         onSendCommand(cmd.command + "\r")
                     },
-                    onDismiss = { showCommandPicker = false; commandFilter = "" }
+                    onDismiss = {
+                        showCommandPicker = false
+                        commandFilter = ""
+                        try { inputFocusRequester.requestFocus() } catch (_: Exception) {}
+                    }
                 )
             }
 
@@ -300,7 +306,8 @@ fun TerminalScreen(
                     commands = commands,
                     onSend = { text -> onSendCommand(text + "\r") },
                     onSendCommand = onSendCommand,
-                    onAttachFile = onAttachFile
+                    onAttachFile = onAttachFile,
+                    inputFocusRequester = inputFocusRequester
                 )
             }
         }
@@ -341,7 +348,8 @@ private fun PromptInputBar(
     commands: List<SlashCommand>,
     onSend: (String) -> Unit,
     onSendCommand: (String) -> Unit,
-    onAttachFile: (suspend () -> String?)? = null
+    onAttachFile: (suspend () -> String?)? = null,
+    inputFocusRequester: FocusRequester? = null
 ) {
     var text by rememberSaveable { mutableStateOf("") }
     var attachedFilesRaw by rememberSaveable { mutableStateOf("") }
@@ -482,6 +490,7 @@ private fun PromptInputBar(
                     textStyle = MaterialTheme.typography.bodyMedium.copy(
                         color = MaterialTheme.colorScheme.onSurface
                     ),
+                    cursorBrush = SolidColor(Color(0xFFAAAAAA)),
                     decorationBox = { innerTextField ->
                         OutlinedTextFieldDefaults.DecorationBox(
                             value = text,
@@ -594,10 +603,12 @@ private fun PromptInputBar(
                 BasicTextField(
                     value = text,
                     onValueChange = { text = it },
-                    modifier = Modifier.weight(1f).padding(horizontal = 4.dp),
+                    modifier = Modifier.weight(1f).padding(horizontal = 4.dp)
+                        .then(if (inputFocusRequester != null) Modifier.focusRequester(inputFocusRequester) else Modifier),
                     textStyle = MaterialTheme.typography.bodySmall.copy(
                         color = MaterialTheme.colorScheme.onSurface
                     ),
+                    cursorBrush = SolidColor(Color(0xFFAAAAAA)),
                     maxLines = 4,
                     keyboardOptions = KeyboardOptions(imeAction = ImeAction.None),
                     decorationBox = { innerTextField ->
