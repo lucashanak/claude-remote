@@ -52,11 +52,74 @@ jobs:
       - name: Build DMG
         run: ./gradlew :desktopApp:packageDmg
 
+      - name: Rename DMG
+        run: |
+          DMG=$(find desktopApp/build/compose/binaries/main/dmg -name "*.dmg" | head -1)
+          cp "$DMG" ClaudeRemote-macOS.dmg
+
       - name: Upload DMG
         uses: actions/upload-artifact@v4
         with:
           name: ClaudeRemote-macOS
-          path: desktopApp/build/compose/binaries/main/dmg/*.dmg
+          path: ClaudeRemote-macOS.dmg
+
+  build-windows:
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Generate Gradle wrapper
+        run: gradle wrapper --gradle-version=8.11.1
+
+      - name: Download xterm.js assets
+        shell: bash
+        run: |
+          chmod +x setup-assets.sh
+          ./setup-assets.sh
+
+      - name: Determine version
+        id: version
+        shell: bash
+        run: |
+          LATEST=$(git describe --tags --abbrev=0 2>/dev/null || echo "v1.0.0")
+          LATEST="${LATEST#v}"
+          IFS='.' read -r MAJOR MINOR PATCH <<< "$LATEST"
+          PATCH=$((PATCH + 1))
+          VER="${MAJOR}.${MINOR}.${PATCH}"
+          echo "version=$VER" >> "$GITHUB_OUTPUT"
+
+      - name: Update version
+        shell: bash
+        run: |
+          VER="${{ steps.version.outputs.version }}"
+          sed -i "s/packageVersion = .*/packageVersion = \"$VER\"/" desktopApp/build.gradle.kts
+
+      - name: Build MSI
+        run: ./gradlew :desktopApp:packageMsi
+
+      - name: Rename MSI
+        shell: bash
+        run: |
+          MSI=$(find desktopApp/build/compose/binaries/main/msi -name "*.msi" | head -1)
+          cp "$MSI" ClaudeRemote-windows.msi
+
+      - name: Upload MSI
+        uses: actions/upload-artifact@v4
+        with:
+          name: ClaudeRemote-Windows
+          path: ClaudeRemote-windows.msi
 
   build-linux:
     runs-on: ubuntu-latest
@@ -83,11 +146,86 @@ jobs:
           chmod +x setup-assets.sh
           ./setup-assets.sh
 
+      - name: Determine version
+        id: version
+        run: |
+          LATEST=$(git describe --tags --abbrev=0 2>/dev/null || echo "v1.0.0")
+          LATEST="${LATEST#v}"
+          IFS='.' read -r MAJOR MINOR PATCH <<< "$LATEST"
+          PATCH=$((PATCH + 1))
+          VER="${MAJOR}.${MINOR}.${PATCH}"
+          echo "version=$VER" >> "$GITHUB_OUTPUT"
+
+      - name: Update version
+        run: |
+          VER="${{ steps.version.outputs.version }}"
+          sed -i "s/packageVersion = .*/packageVersion = \"$VER\"/" desktopApp/build.gradle.kts
+
       - name: Build DEB
         run: ./gradlew :desktopApp:packageDeb
+
+      - name: Rename DEB
+        run: |
+          DEB=$(find desktopApp/build/compose/binaries/main/deb -name "*.deb" | head -1)
+          cp "$DEB" ClaudeRemote-linux.deb
 
       - name: Upload DEB
         uses: actions/upload-artifact@v4
         with:
           name: ClaudeRemote-Linux
-          path: desktopApp/build/compose/binaries/main/deb/*.deb
+          path: ClaudeRemote-linux.deb
+
+  release:
+    needs: [build-macos, build-windows, build-linux]
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Determine version
+        id: version
+        run: |
+          LATEST=$(git describe --tags --abbrev=0 2>/dev/null || echo "v1.0.0")
+          LATEST="${LATEST#v}"
+          IFS='.' read -r MAJOR MINOR PATCH <<< "$LATEST"
+          PATCH=$((PATCH + 1))
+          VER="${MAJOR}.${MINOR}.${PATCH}"
+          TAG="v${VER}"
+          echo "version=$VER" >> "$GITHUB_OUTPUT"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Download macOS artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ClaudeRemote-macOS
+
+      - name: Download Windows artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ClaudeRemote-Windows
+
+      - name: Download Linux artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ClaudeRemote-Linux
+
+      - name: Attach to existing release or create desktop release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${{ steps.version.outputs.tag }}"
+          ASSETS="ClaudeRemote-macOS.dmg ClaudeRemote-windows.msi ClaudeRemote-linux.deb"
+
+          # Try to attach to existing release (created by Android workflow)
+          if gh release view "$TAG" &>/dev/null; then
+            echo "Release $TAG exists, uploading desktop artifacts..."
+            gh release upload "$TAG" $ASSETS --clobber
+          else
+            echo "Release $TAG not found, creating desktop release..."
+            gh release create "$TAG" $ASSETS \
+              --target "${{ github.sha }}" \
+              --title "$TAG" \
+              --notes "Desktop release: macOS DMG + Windows MSI + Linux DEB"
+          fi

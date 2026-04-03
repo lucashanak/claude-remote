@@ -65,11 +65,90 @@ fun TerminalScreen(
                 IconButton(onClick = onMenuOpen, modifier = Modifier.size(36.dp)) {
                     Icon(Icons.Default.Menu, "Menu", modifier = Modifier.size(20.dp))
                 }
-                Text(
-                    activeSession?.tabTitle ?: "",
-                    style = MaterialTheme.typography.bodyMedium,
-                    modifier = Modifier.weight(1f)
-                )
+
+                // Session dropdown (replaces tab bar)
+                var sessionDropdown by remember { mutableStateOf(false) }
+                Box(modifier = Modifier.weight(1f)) {
+                    Row(
+                        modifier = Modifier.clickable { if (tabs.size > 1) sessionDropdown = true },
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        // Status dot
+                        if (activeSession != null) {
+                            val dotColor = when (activeSession.status) {
+                                SessionStatus.ACTIVE -> Color(0xFF4CAF50)
+                                SessionStatus.CONNECTING -> Color(0xFFFF9800)
+                                SessionStatus.DISCONNECTED, SessionStatus.ERROR -> Color(0xFFF44336)
+                            }
+                            Box(modifier = Modifier.size(8.dp).background(dotColor, shape = CircleShape))
+                            Spacer(Modifier.width(6.dp))
+                        }
+                        Text(
+                            activeSession?.tabTitle ?: "",
+                            style = MaterialTheme.typography.bodyMedium
+                        )
+                        if (tabs.size > 1) {
+                            Text(
+                                " (${tabs.size})",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                            Text(" \u25BE", style = MaterialTheme.typography.bodySmall) // ▾
+                        }
+                    }
+                    DropdownMenu(
+                        expanded = sessionDropdown,
+                        onDismissRequest = { sessionDropdown = false }
+                    ) {
+                        tabs.forEach { tab ->
+                            val isActive = tab.id == activeTabId
+                            val dotColor = when (tab.status) {
+                                SessionStatus.ACTIVE -> Color(0xFF4CAF50)
+                                SessionStatus.CONNECTING -> Color(0xFFFF9800)
+                                SessionStatus.DISCONNECTED, SessionStatus.ERROR -> Color(0xFFF44336)
+                            }
+                            DropdownMenuItem(
+                                text = {
+                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                        Box(modifier = Modifier.size(8.dp).background(dotColor, shape = CircleShape))
+                                        Spacer(Modifier.width(8.dp))
+                                        Text(
+                                            tab.tabTitle,
+                                            style = if (isActive) MaterialTheme.typography.bodyMedium
+                                                   else MaterialTheme.typography.bodySmall
+                                        )
+                                    }
+                                },
+                                onClick = {
+                                    sessionDropdown = false
+                                    onTabSwitch(tab.id)
+                                },
+                                trailingIcon = {
+                                    IconButton(
+                                        onClick = {
+                                            sessionDropdown = false
+                                            onTabClose(tab.id)
+                                        },
+                                        modifier = Modifier.size(24.dp)
+                                    ) {
+                                        Icon(Icons.Default.Close, "Close", modifier = Modifier.size(14.dp))
+                                    }
+                                }
+                            )
+                        }
+                        HorizontalDivider()
+                        DropdownMenuItem(
+                            text = {
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Icon(Icons.Default.Add, "New", modifier = Modifier.size(16.dp))
+                                    Spacer(Modifier.width(8.dp))
+                                    Text("New session")
+                                }
+                            },
+                            onClick = { sessionDropdown = false; onNewTab() }
+                        )
+                    }
+                }
                 // Compact/Full toggle
                 TextButton(onClick = { compactMode = !compactMode }) {
                     Text(if (compactMode) "Full" else "Min", style = MaterialTheme.typography.bodySmall)
@@ -236,8 +315,6 @@ fun TerminalScreen(
             )
         }
 
-        // Tab bar
-        TabBar(tabs, activeTabId, onTabSwitch, onTabClose, onNewTab)
     }
 }
 
@@ -717,55 +794,3 @@ private fun CtrlButton(label: String, onClick: () -> Unit) {
 }
 
 // ======================== TAB BAR ========================
-
-@Composable
-private fun TabBar(
-    tabs: List<ClaudeSession>,
-    activeTabId: String?,
-    onTabSwitch: (String) -> Unit,
-    onTabClose: (String) -> Unit,
-    onNewTab: () -> Unit
-) {
-    Surface(color = MaterialTheme.colorScheme.surface, tonalElevation = 1.dp) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .height(40.dp)
-                .padding(horizontal = 4.dp)
-                .horizontalScroll(rememberScrollState()),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            tabs.forEach { tab ->
-                val isActive = tab.id == activeTabId
-                Surface(
-                    onClick = { onTabSwitch(tab.id) },
-                    color = if (isActive) MaterialTheme.colorScheme.primaryContainer else Color.Transparent,
-                    shape = MaterialTheme.shapes.small,
-                    modifier = Modifier.padding(horizontal = 2.dp)
-                ) {
-                    Row(
-                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        val dotColor = when (tab.status) {
-                            SessionStatus.ACTIVE -> Color(0xFF4CAF50)
-                            SessionStatus.CONNECTING -> Color(0xFFFF9800)
-                            SessionStatus.DISCONNECTED -> Color(0xFFF44336)
-                            SessionStatus.ERROR -> Color(0xFFF44336)
-                        }
-                        Box(modifier = Modifier.size(8.dp).background(dotColor, shape = CircleShape))
-                        Spacer(Modifier.width(4.dp))
-                        Text(tab.tabTitle, style = MaterialTheme.typography.bodySmall, maxLines = 1)
-                        Spacer(Modifier.width(4.dp))
-                        IconButton(onClick = { onTabClose(tab.id) }, modifier = Modifier.size(16.dp)) {
-                            Icon(Icons.Default.Close, "Close", modifier = Modifier.size(12.dp))
-                        }
-                    }
-                }
-            }
-            IconButton(onClick = onNewTab, modifier = Modifier.size(32.dp)) {
-                Icon(Icons.Default.Add, "New Tab", modifier = Modifier.size(16.dp))
-            }
-        }
-    }
-}

@@ -1,13 +1,8 @@
 package com.clauderemote
 
-import androidx.compose.foundation.background
-import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.material3.Text
 import androidx.compose.runtime.*
-import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.awt.SwingPanel
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Window
 import androidx.compose.ui.window.application
@@ -18,6 +13,18 @@ import com.clauderemote.storage.AppSettings
 import com.clauderemote.storage.PlatformPreferences
 import com.clauderemote.storage.ServerStorage
 import com.clauderemote.ui.App
+import javafx.application.Platform
+import javafx.concurrent.Worker
+import javafx.embed.swing.JFXPanel
+import javafx.scene.Scene
+import javafx.scene.web.WebEngine
+import javafx.scene.web.WebView
+import netscape.javascript.JSObject
+import java.awt.BorderLayout
+import javax.swing.JPanel
+
+/** Reference to the JavaFX WebEngine for terminal I/O */
+private var webEngine: WebEngine? = null
 
 fun main() = application {
     val prefs = PlatformPreferences()
@@ -25,6 +32,14 @@ fun main() = application {
     val appSettings = AppSettings(prefs)
     val tabManager = TabManager()
     val sessionOrchestrator = SessionOrchestrator(serverStorage, tabManager)
+
+    // Wire SSH output → terminal WebView
+    sessionOrchestrator.onTerminalOutput = { _, data ->
+        writeToTerminal(data)
+    }
+    sessionOrchestrator.onTabSwitched = { _, bufferedOutput ->
+        replayBuffer(bufferedOutput)
+    }
 
     Window(
         onCloseRequest = ::exitApplication,
@@ -37,24 +52,195 @@ fun main() = application {
             tabManager = tabManager,
             sessionOrchestrator = sessionOrchestrator,
             appVersion = "1.0.0",
+            onTerminalScreenVisible = {
+                val activeId = tabManager.activeTabId.value ?: return@App
+                val buffer = sessionOrchestrator.getBuffer(activeId)
+                if (buffer.isNotEmpty()) {
+                    replayBuffer(buffer)
+                }
+            },
             terminalContent = { modifier ->
-                DesktopTerminalPlaceholder(modifier)
+                DesktopTerminalWebView(
+                    modifier = modifier,
+                    tabManager = tabManager,
+                    sessionOrchestrator = sessionOrchestrator,
+                    appSettings = appSettings
+                )
             }
         )
     }
 }
 
 @Composable
-private fun DesktopTerminalPlaceholder(modifier: Modifier) {
-    Box(
-        modifier = modifier
-            .fillMaxSize()
-            .background(Color(0xFF1E1E1E)),
-        contentAlignment = Alignment.Center
-    ) {
-        Text(
-            "Terminal view — JCEF/JavaFX integration pending",
-            color = Color(0xFF888888)
-        )
+private fun DesktopTerminalWebView(
+    modifier: Modifier,
+    tabManager: TabManager,
+    sessionOrchestrator: SessionOrchestrator,
+    appSettings: AppSettings
+) {
+    // Keep strong reference so GC doesn't collect the bridge (JSObject uses weak refs)
+    val bridge = remember {
+        DesktopTerminalBridge(tabManager, sessionOrchestrator, appSettings)
+    }
+
+    SwingPanel(
+        modifier = modifier,
+        factory = {
+            JPanel(BorderLayout()).also { panel ->
+                val jfxPanel = JFXPanel() // This initializes the JavaFX toolkit
+                panel.add(jfxPanel, BorderLayout.CENTER)
+
+                Platform.setImplicitExit(false)
+                Platform.runLater {
+                    val webView = WebView()
+                    val engine = webView.engine
+                    webEngine = engine
+
+                    engine.loadWorker.stateProperty().addListener { _, _, newState ->
+                        if (newState == Worker.State.SUCCEEDED) {
+                            // Inject the bridge as window.Android (same name as Android app)
+                            val window = engine.executeScript("window") as JSObject
+                            window.setMember("Android", bridge)
+                            // Re-assign the cached `A` variable and trigger init
+                            engine.executeScript(
+                                "A = window.Android; if(A) { setTimeout(function() { fitAddon.fit(); A.onTerminalReady(term.cols, term.rows); }, 50); }"
+                            )
+                            // Apply saved settings
+                            val fontSize = appSettings.terminalFontSize
+                            if (fontSize != 14) {
+                                engine.executeScript("setFontSize($fontSize)")
+                            }
+                            val scheme = appSettings.terminalColorScheme
+                            if (scheme != "default") {
+                                engine.executeScript("applyColorScheme('$scheme')")
+                            }
+                        }
+                    }
+
+                    val url = DesktopTerminalWebView::class.java.getResource("/terminal/terminal.html")?.toExternalForm()
+                    if (url != null) {
+                        engine.load(url)
+                    }
+
+                    jfxPanel.scene = Scene(webView)
+                }
+            }
+        }
+    )
+}
+
+/**
+ * JavaScript bridge exposed to terminal.html as `window.Android`.
+ * Method signatures must match what the HTML expects.
+ */
+class DesktopTerminalBridge(
+    private val tabManager: TabManager,
+    private val sessionOrchestrator: SessionOrchestrator,
+    private val appSettings: AppSettings
+) {
+    fun onTerminalInput(data: String) {
+        tabManager.activeTabId.value?.let { id ->
+            sessionOrchestrator.sendInput(id, data)
+        }
+    }
+
+    fun onTerminalReady(cols: Int, rows: Int) {
+        tabManager.activeTabId.value?.let { id ->
+            sessionOrchestrator.resize(id, cols, rows)
+        }
+    }
+
+    fun onTerminalResize(cols: Int, rows: Int) {
+        tabManager.activeTabId.value?.let { id ->
+            sessionOrchestrator.resize(id, cols, rows)
+        }
+    }
+
+    fun copyToClipboard(text: String) {
+        val clipboard = java.awt.Toolkit.getDefaultToolkit().systemClipboard
+        clipboard.setContents(java.awt.datatransfer.StringSelection(text), null)
+    }
+
+    fun getClipboard(): String {
+        return try {
+            val clipboard = java.awt.Toolkit.getDefaultToolkit().systemClipboard
+            clipboard.getData(java.awt.datatransfer.DataFlavor.stringFlavor) as? String ?: ""
+        } catch (_: Exception) { "" }
+    }
+
+    fun openUrl(url: String) {
+        try {
+            java.awt.Desktop.getDesktop().browse(java.net.URI(url))
+        } catch (_: Exception) {}
+    }
+
+    fun exportScrollback(content: String) {
+        try {
+            val tmpFile = java.io.File.createTempFile("terminal_", ".log")
+            tmpFile.writeText(content)
+            java.awt.Desktop.getDesktop().open(tmpFile)
+        } catch (_: Exception) {}
+    }
+
+    fun haptic() { /* no-op on desktop */ }
+
+    fun setHandleDrag(active: Boolean) { /* no-op on desktop */ }
+}
+
+// ── Terminal I/O helpers ──
+
+private fun jsonQuote(s: String): String {
+    val sb = StringBuilder("\"")
+    for (c in s) {
+        when (c) {
+            '"' -> sb.append("\\\"")
+            '\\' -> sb.append("\\\\")
+            '\n' -> sb.append("\\n")
+            '\r' -> sb.append("\\r")
+            '\t' -> sb.append("\\t")
+            '\b' -> sb.append("\\b")
+            else -> if (c.code < 0x20) sb.append("\\u%04x".format(c.code)) else sb.append(c)
+        }
+    }
+    sb.append("\"")
+    return sb.toString()
+}
+
+private fun writeToTerminal(data: String) {
+    val engine = webEngine ?: return
+    val safe = jsonQuote(data)
+    Platform.runLater {
+        try {
+            engine.executeScript("writeOutput($safe)")
+        } catch (_: Exception) {}
+    }
+}
+
+private fun clearTerminal() {
+    val engine = webEngine ?: return
+    Platform.runLater {
+        try {
+            engine.executeScript("clearTerminal()")
+        } catch (_: Exception) {}
+    }
+}
+
+private fun replayBuffer(bufferedOutput: String) {
+    val engine = webEngine ?: return
+    // Delay to ensure WebView is visible (mirrors Android's 150ms delay)
+    Platform.runLater {
+        val timer = javax.swing.Timer(150) {
+            Platform.runLater {
+                try {
+                    engine.executeScript("clearTerminal()")
+                    if (bufferedOutput.isNotEmpty()) {
+                        val safe = jsonQuote(bufferedOutput)
+                        engine.executeScript("writeOutput($safe)")
+                    }
+                } catch (_: Exception) {}
+            }
+        }
+        timer.isRepeats = false
+        timer.start()
     }
 }
