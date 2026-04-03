@@ -1,7 +1,10 @@
 package com.clauderemote
 
+import android.Manifest
 import android.annotation.SuppressLint
 import android.content.Intent
+import android.content.pm.PackageManager
+import android.os.Build
 import android.os.Bundle
 import android.view.MotionEvent
 import android.webkit.JavascriptInterface
@@ -10,6 +13,8 @@ import android.webkit.WebView
 import android.webkit.WebViewClient
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.core.app.ActivityCompat
+import androidx.core.content.ContextCompat
 import androidx.fragment.app.FragmentActivity
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
@@ -98,6 +103,17 @@ class MainActivity : FragmentActivity() {
     private var isAppInForeground = false
     private var biometricUnlocked = false
 
+    private fun requestNotificationPermission() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            if (ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS)
+                != PackageManager.PERMISSION_GRANTED) {
+                ActivityCompat.requestPermissions(
+                    this, arrayOf(Manifest.permission.POST_NOTIFICATIONS), 1001
+                )
+            }
+        }
+    }
+
     private fun checkBiometric() {
         val prefs = getSharedPreferences("claude_remote", MODE_PRIVATE)
         if (!prefs.getBoolean("biometric_lock_enabled", false)) {
@@ -139,6 +155,8 @@ class MainActivity : FragmentActivity() {
         if (!biometricUnlocked) {
             checkBiometric()
         }
+
+        requestNotificationPermission()
 
         val prefs = PlatformPreferences(this)
         serverStorage = ServerStorage(prefs)
