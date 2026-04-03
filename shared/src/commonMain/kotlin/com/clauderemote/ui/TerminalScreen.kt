@@ -214,7 +214,15 @@ fun TerminalScreen(
             if (activeSession != null) {
                 PromptInputBar(
                     commands = commands,
-                    onSend = { text -> onSendCommand(text + "\r") },
+                    onSend = { text ->
+                        if (text.contains('\n')) {
+                            // Multi-line: use bracketed paste so terminal doesn't
+                            // interpret newlines as submit
+                            onSendCommand("\u001b[200~$text\u001b[201~\r")
+                        } else {
+                            onSendCommand(text + "\r")
+                        }
+                    },
                     onSendCommand = onSendCommand,
                     onAttachFile = onAttachFile
                 )
