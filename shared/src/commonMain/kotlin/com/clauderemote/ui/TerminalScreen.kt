@@ -9,6 +9,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
@@ -18,6 +19,8 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.unit.dp
@@ -471,17 +474,37 @@ private fun PromptInputBar(
                 }
 
                 // Big text editor
-                OutlinedTextField(
+                BasicTextField(
                     value = text,
                     onValueChange = { text = it },
-                    modifier = Modifier.fillMaxWidth().heightIn(min = 120.dp, max = 300.dp)
+                    modifier = Modifier.fillMaxWidth().heightIn(min = 100.dp, max = 280.dp)
                         .padding(horizontal = 8.dp),
-                    placeholder = { Text("Type your message...\n\nEnter = new line\nSend button = submit") },
-                    textStyle = MaterialTheme.typography.bodyMedium,
-                    colors = OutlinedTextFieldDefaults.colors(
-                        focusedContainerColor = MaterialTheme.colorScheme.surface,
-                        unfocusedContainerColor = MaterialTheme.colorScheme.surface
-                    )
+                    textStyle = MaterialTheme.typography.bodyMedium.copy(
+                        color = MaterialTheme.colorScheme.onSurface
+                    ),
+                    decorationBox = { innerTextField ->
+                        OutlinedTextFieldDefaults.DecorationBox(
+                            value = text,
+                            innerTextField = innerTextField,
+                            enabled = true,
+                            singleLine = false,
+                            visualTransformation = androidx.compose.ui.text.input.VisualTransformation.None,
+                            interactionSource = remember { androidx.compose.foundation.interaction.MutableInteractionSource() },
+                            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 8.dp),
+                            placeholder = { Text("Type your message...\n\nEnter = new line\nSend button = submit") },
+                            container = {
+                                OutlinedTextFieldDefaults.ContainerBox(
+                                    enabled = true,
+                                    isError = false,
+                                    interactionSource = remember { androidx.compose.foundation.interaction.MutableInteractionSource() },
+                                    colors = OutlinedTextFieldDefaults.colors(
+                                        focusedContainerColor = MaterialTheme.colorScheme.surface,
+                                        unfocusedContainerColor = MaterialTheme.colorScheme.surface
+                                    )
+                                )
+                            }
+                        )
+                    }
                 )
 
                 // Bottom action row
@@ -568,18 +591,38 @@ private fun PromptInputBar(
                     }
                 }
 
-                OutlinedTextField(
+                BasicTextField(
                     value = text,
                     onValueChange = { text = it },
                     modifier = Modifier.weight(1f).padding(horizontal = 4.dp),
-                    placeholder = { Text("Message or /command...") },
-                    textStyle = MaterialTheme.typography.bodySmall,
+                    textStyle = MaterialTheme.typography.bodySmall.copy(
+                        color = MaterialTheme.colorScheme.onSurface
+                    ),
                     maxLines = 4,
                     keyboardOptions = KeyboardOptions(imeAction = ImeAction.None),
-                    colors = OutlinedTextFieldDefaults.colors(
-                        focusedContainerColor = MaterialTheme.colorScheme.surface,
-                        unfocusedContainerColor = MaterialTheme.colorScheme.surface
-                    )
+                    decorationBox = { innerTextField ->
+                        OutlinedTextFieldDefaults.DecorationBox(
+                            value = text,
+                            innerTextField = innerTextField,
+                            enabled = true,
+                            singleLine = false,
+                            visualTransformation = androidx.compose.ui.text.input.VisualTransformation.None,
+                            interactionSource = remember { androidx.compose.foundation.interaction.MutableInteractionSource() },
+                            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp),
+                            placeholder = { Text("Message or /command...", style = MaterialTheme.typography.bodySmall) },
+                            container = {
+                                OutlinedTextFieldDefaults.ContainerBox(
+                                    enabled = true,
+                                    isError = false,
+                                    interactionSource = remember { androidx.compose.foundation.interaction.MutableInteractionSource() },
+                                    colors = OutlinedTextFieldDefaults.colors(
+                                        focusedContainerColor = MaterialTheme.colorScheme.surface,
+                                        unfocusedContainerColor = MaterialTheme.colorScheme.surface
+                                    )
+                                )
+                            }
+                        )
+                    }
                 )
 
                 // Expand button
@@ -676,6 +719,8 @@ private fun CommandPicker(
         shadowElevation = 8.dp
     ) {
         Column(modifier = Modifier.fillMaxSize()) {
+            val filterFocus = remember { FocusRequester() }
+            LaunchedEffect(Unit) { filterFocus.requestFocus() }
             Row(
                 modifier = Modifier.fillMaxWidth().padding(8.dp),
                 verticalAlignment = Alignment.CenterVertically
@@ -684,7 +729,7 @@ private fun CommandPicker(
                     value = filter,
                     onValueChange = onFilterChange,
                     placeholder = { Text("Filter commands...") },
-                    modifier = Modifier.weight(1f),
+                    modifier = Modifier.weight(1f).focusRequester(filterFocus),
                     singleLine = true,
                     textStyle = MaterialTheme.typography.bodyMedium
                 )
@@ -719,63 +764,22 @@ private fun ClaudeControlBar(
     onSendEscape: () -> Unit,
     onOpenCommands: () -> Unit
 ) {
-    var ctrlActive by remember { mutableStateOf(false) }
-
-    // Send char or Ctrl+char
-    fun send(ch: String) {
-        if (ctrlActive && ch.length == 1) {
-            val c = ch[0]
-            if (c in 'a'..'z') {
-                onSendCommand((c - 'a' + 1).toChar().toString())
-                ctrlActive = false
-                return
-            }
-        }
-        onSendCommand(ch)
-    }
-
     Surface(color = MaterialTheme.colorScheme.surfaceVariant, tonalElevation = 4.dp) {
-        Column(
-            modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 4.dp),
-            verticalArrangement = Arrangement.spacedBy(4.dp)
+        Row(
+            horizontalArrangement = Arrangement.spacedBy(4.dp),
+            modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 4.dp)
         ) {
-            // Row 1: Claude commands
-            Row(
-                horizontalArrangement = Arrangement.spacedBy(4.dp),
-                modifier = Modifier.fillMaxWidth()
-            ) {
-                CtrlButton("Mode") { onSendCommand("\u001B[Z") }
-                CtrlButton("/") { onOpenCommands() }
-                Spacer(Modifier.weight(1f))
-                CtrlButton("Esc") { onSendEscape() }
-                CtrlButton("C-c") { onSendCommand("\u0003") }
-            }
-            // Row 2: Navigation + modifiers
-            Row(
-                horizontalArrangement = Arrangement.spacedBy(4.dp),
-                modifier = Modifier.fillMaxWidth()
-            ) {
-                // Ctrl toggle
-                FilledTonalButton(
-                    onClick = { ctrlActive = !ctrlActive },
-                    modifier = Modifier.height(32.dp),
-                    contentPadding = PaddingValues(horizontal = 10.dp),
-                    colors = if (ctrlActive) ButtonDefaults.filledTonalButtonColors(
-                        containerColor = MaterialTheme.colorScheme.primary,
-                        contentColor = MaterialTheme.colorScheme.onPrimary
-                    ) else ButtonDefaults.filledTonalButtonColors()
-                ) {
-                    Text("Ctrl", style = MaterialTheme.typography.bodySmall)
-                }
-                CtrlButton("Tab") { send("\t") }
-                CtrlButton("\u2190") { onSendCommand("\u001B[D") }
-                CtrlButton("\u2193") { onSendCommand("\u001B[B") }
-                CtrlButton("\u2191") { onSendCommand("\u001B[A") }
-                CtrlButton("\u2192") { onSendCommand("\u001B[C") }
-                Spacer(Modifier.weight(1f))
-                CtrlButton("y") { onSendCommand("y\r") }
-                CtrlButton("n") { onSendCommand("n\r") }
-            }
+            CtrlButton("Mode") { onSendCommand("\u001B[Z") }
+            CtrlButton("/") { onOpenCommands() }
+            CtrlButton("Esc") { onSendEscape() }
+            CtrlButton("C-c") { onSendCommand("\u0003") }
+            CtrlButton("\u2190") { onSendCommand("\u001B[D") }
+            CtrlButton("\u2193") { onSendCommand("\u001B[B") }
+            CtrlButton("\u2191") { onSendCommand("\u001B[A") }
+            CtrlButton("\u2192") { onSendCommand("\u001B[C") }
+            Spacer(Modifier.weight(1f))
+            CtrlButton("y") { onSendCommand("y\r") }
+            CtrlButton("n") { onSendCommand("n\r") }
         }
     }
 }
