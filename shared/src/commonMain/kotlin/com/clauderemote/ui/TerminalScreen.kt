@@ -243,6 +243,16 @@ fun TerminalScreen(
 
 // ======================== PROMPT INPUT ========================
 
+private val PROMPT_TEMPLATES = listOf(
+    "Fix bug in ",
+    "Explain ",
+    "Write tests for ",
+    "Refactor ",
+    "Add feature: ",
+    "Review and improve ",
+    "Create a ",
+)
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun PromptInputBar(
@@ -252,29 +262,39 @@ private fun PromptInputBar(
     onAttachFile: (suspend () -> String?)? = null
 ) {
     var text by rememberSaveable { mutableStateOf("") }
-    // Attached file paths tracked separately from text input
-    // Stored as \n-separated string for rememberSaveable compatibility
     var attachedFilesRaw by rememberSaveable { mutableStateOf("") }
     val attachedFiles: List<String> = if (attachedFilesRaw.isBlank()) emptyList() else attachedFilesRaw.split('\n')
     var uploading by remember { mutableStateOf(false) }
+    var expanded by remember { mutableStateOf(false) } // full-screen editor
+    var showTemplates by remember { mutableStateOf(false) }
+    var showHistory by remember { mutableStateOf(false) }
     val promptScope = rememberCoroutineScope()
-    // Show inline suggestions when text starts with /
+
+    // History (in-memory, persists across recompositions via saveable)
+    var historyRaw by rememberSaveable { mutableStateOf("") }
+    val history: List<String> = if (historyRaw.isBlank()) emptyList()
+        else historyRaw.split("\u0000").filter { it.isNotBlank() }
+
+    // Slash suggestions
     val suggestions = if (text.startsWith("/") && text.length > 1 && !text.contains("\n")) {
         commands.filter { it.command.contains(text.trim(), ignoreCase = true) }.take(5)
     } else emptyList()
 
+    fun addToHistory(msg: String) {
+        if (msg.isBlank()) return
+        val updated = (listOf(msg) + history.filter { it != msg }).take(50)
+        historyRaw = updated.joinToString("\u0000")
+    }
+
     fun buildAndSend() {
-        val userText = text.replace('\n', ' ').trim()
+        val userText = text.trim()
         if (attachedFiles.isEmpty() && userText.isNotBlank()) {
+            addToHistory(userText)
             onSend(userText)
         } else if (attachedFiles.isNotEmpty()) {
-            // Format prompt so Claude Code reads the attached files
             val fileRefs = attachedFiles.joinToString(" ") { "\"$it\"" }
-            val prompt = if (userText.isNotBlank()) {
-                "Read the attached file(s) $fileRefs — $userText"
-            } else {
-                "Read and analyze the file(s) $fileRefs"
-            }
+            val prompt = if (userText.isNotBlank()) "Read $fileRefs — $userText" else "Read and analyze $fileRefs"
+            addToHistory(prompt)
             onSend(prompt)
         } else {
             onSendCommand("\r")
@@ -282,37 +302,155 @@ private fun PromptInputBar(
         }
         text = ""
         attachedFilesRaw = ""
+        expanded = false
     }
+
+    // Full-screen editor mode
+    if (expanded) {
+        Surface(
+            modifier = Modifier.fillMaxWidth(),
+            color = MaterialTheme.colorScheme.surface,
+            tonalElevation = 4.dp
+        ) {
+            Column(modifier = Modifier.fillMaxWidth()) {
+                // Toolbar
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 4.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                        TextButton(onClick = { expanded = false }) { Text("Collapse") }
+                        TextButton(onClick = { showTemplates = !showTemplates }) { Text("Templates") }
+                        TextButton(onClick = { showHistory = !showHistory }) { Text("History") }
+                    }
+                    // Char count
+                    Text(
+                        "${text.length} chars",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+
+                // Templates dropdown
+                if (showTemplates) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 2.dp)
+                            .horizontalScroll(rememberScrollState()),
+                        horizontalArrangement = Arrangement.spacedBy(4.dp)
+                    ) {
+                        PROMPT_TEMPLATES.forEach { tmpl ->
+                            AssistChip(
+                                onClick = { text = tmpl; showTemplates = false },
+                                label = { Text(tmpl.trimEnd(), style = MaterialTheme.typography.labelSmall) }
+                            )
+                        }
+                    }
+                }
+
+                // History dropdown
+                if (showHistory && history.isNotEmpty()) {
+                    Column(
+                        modifier = Modifier.fillMaxWidth().heightIn(max = 150.dp)
+                            .verticalScroll(rememberScrollState())
+                    ) {
+                        history.take(10).forEach { item ->
+                            Text(
+                                text = if (item.length > 60) item.take(57) + "..." else item,
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clickable { text = item; showHistory = false }
+                                    .padding(horizontal = 12.dp, vertical = 8.dp),
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurface
+                            )
+                            HorizontalDivider()
+                        }
+                    }
+                }
+
+                // Attached files
+                if (attachedFiles.isNotEmpty()) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 2.dp),
+                        horizontalArrangement = Arrangement.spacedBy(4.dp)
+                    ) {
+                        attachedFiles.forEachIndexed { idx, path ->
+                            InputChip(
+                                selected = true, onClick = {},
+                                label = { Text(path.substringAfterLast('/'), style = MaterialTheme.typography.labelSmall) },
+                                trailingIcon = {
+                                    Icon(Icons.Default.Close, "Remove",
+                                        modifier = Modifier.size(14.dp).clickable {
+                                            attachedFilesRaw = attachedFiles.filterIndexed { i, _ -> i != idx }.joinToString("\n")
+                                        })
+                                },
+                                modifier = Modifier.height(26.dp)
+                            )
+                        }
+                    }
+                }
+
+                // Big text editor
+                OutlinedTextField(
+                    value = text,
+                    onValueChange = { text = it },
+                    modifier = Modifier.fillMaxWidth().heightIn(min = 120.dp, max = 300.dp)
+                        .padding(horizontal = 8.dp),
+                    placeholder = { Text("Type your message...\n\nEnter = new line\nSend button = submit") },
+                    textStyle = MaterialTheme.typography.bodyMedium,
+                    colors = OutlinedTextFieldDefaults.colors(
+                        focusedContainerColor = MaterialTheme.colorScheme.surface,
+                        unfocusedContainerColor = MaterialTheme.colorScheme.surface
+                    )
+                )
+
+                // Bottom action row
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(8.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                        if (onAttachFile != null) {
+                            IconButton(
+                                onClick = {
+                                    if (!uploading) {
+                                        uploading = true
+                                        promptScope.launch {
+                                            val path = onAttachFile.invoke()
+                                            if (path != null) attachedFilesRaw = (attachedFiles + path).joinToString("\n")
+                                            uploading = false
+                                        }
+                                    }
+                                },
+                                modifier = Modifier.size(36.dp), enabled = !uploading
+                            ) {
+                                if (uploading) CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
+                                else Icon(Icons.Default.Add, "Attach", modifier = Modifier.size(20.dp))
+                            }
+                        }
+                        if (text.isNotBlank()) {
+                            IconButton(onClick = { text = "" }, modifier = Modifier.size(36.dp)) {
+                                Icon(Icons.Default.Close, "Clear", modifier = Modifier.size(16.dp))
+                            }
+                        }
+                    }
+                    Button(
+                        onClick = { buildAndSend() },
+                        contentPadding = PaddingValues(horizontal = 24.dp)
+                    ) { Text("Send") }
+                }
+            }
+        }
+        return
+    }
+
+    // ======================== COMPACT MODE (default) ========================
 
     Surface(color = MaterialTheme.colorScheme.surfaceVariant, tonalElevation = 2.dp) {
         Column(modifier = Modifier.fillMaxWidth()) {
-            // Attached files chips
-            if (attachedFiles.isNotEmpty()) {
-                Row(
-                    modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 2.dp),
-                    horizontalArrangement = Arrangement.spacedBy(4.dp)
-                ) {
-                    attachedFiles.forEachIndexed { idx, path ->
-                        InputChip(
-                            selected = true,
-                            onClick = {},
-                            label = { Text(path.substringAfterLast('/'), style = MaterialTheme.typography.labelSmall) },
-                            trailingIcon = {
-                                Icon(
-                                    Icons.Default.Close,
-                                    "Remove",
-                                    modifier = Modifier.size(14.dp).clickable {
-                                        attachedFilesRaw = attachedFiles.filterIndexed { i, _ -> i != idx }.joinToString("\n")
-                                    }
-                                )
-                            },
-                            modifier = Modifier.height(26.dp)
-                        )
-                    }
-                }
-            }
-
-            // Inline suggestions
+            // Slash suggestions
             if (suggestions.isNotEmpty()) {
                 Row(
                     modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 2.dp),
@@ -320,20 +458,17 @@ private fun PromptInputBar(
                 ) {
                     suggestions.forEach { cmd ->
                         AssistChip(
-                            onClick = {
-                                onSendCommand(cmd.command + "\r")
-                                text = ""
-                            },
+                            onClick = { onSendCommand(cmd.command + "\r"); text = "" },
                             label = { Text(cmd.command, style = MaterialTheme.typography.bodySmall) }
                         )
                     }
                 }
             }
 
-            // Input row
+            // Compact input row
             Row(
                 modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 4.dp),
-                verticalAlignment = Alignment.Bottom
+                verticalAlignment = Alignment.CenterVertically
             ) {
                 if (onAttachFile != null) {
                     IconButton(
@@ -342,38 +477,23 @@ private fun PromptInputBar(
                                 uploading = true
                                 promptScope.launch {
                                     val path = onAttachFile.invoke()
-                                    if (path != null) {
-                                        attachedFilesRaw = (attachedFiles + path).joinToString("\n")
-                                    }
+                                    if (path != null) attachedFilesRaw = (attachedFiles + path).joinToString("\n")
                                     uploading = false
                                 }
                             }
                         },
-                        modifier = Modifier.size(36.dp),
-                        enabled = !uploading
+                        modifier = Modifier.size(32.dp), enabled = !uploading
                     ) {
-                        if (uploading) {
-                            CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
-                        } else {
-                            Icon(
-                                imageVector = Icons.Default.Add,
-                                contentDescription = "Attach file",
-                                modifier = Modifier.size(20.dp)
-                            )
-                        }
+                        if (uploading) CircularProgressIndicator(modifier = Modifier.size(14.dp), strokeWidth = 2.dp)
+                        else Icon(Icons.Default.Add, "Attach", modifier = Modifier.size(18.dp))
                     }
-                    Spacer(Modifier.width(4.dp))
                 }
+
                 OutlinedTextField(
                     value = text,
                     onValueChange = { text = it },
-                    modifier = Modifier.weight(1f),
-                    placeholder = {
-                        Text(
-                            if (attachedFiles.isNotEmpty()) "Add instructions..."
-                            else "Type message or /command..."
-                        )
-                    },
+                    modifier = Modifier.weight(1f).padding(horizontal = 4.dp),
+                    placeholder = { Text("Message or /command...") },
                     textStyle = MaterialTheme.typography.bodySmall,
                     singleLine = true,
                     colors = OutlinedTextFieldDefaults.colors(
@@ -381,22 +501,72 @@ private fun PromptInputBar(
                         unfocusedContainerColor = MaterialTheme.colorScheme.surface
                     )
                 )
-                // Clear text button
-                if (text.isNotBlank() || attachedFiles.isNotEmpty()) {
+
+                // Expand button
+                IconButton(
+                    onClick = { expanded = true },
+                    modifier = Modifier.size(32.dp)
+                ) {
+                    Text("\u2922", style = MaterialTheme.typography.titleMedium) // expand arrows
+                }
+
+                // History button
+                if (history.isNotEmpty()) {
                     IconButton(
-                        onClick = { text = ""; attachedFilesRaw = "" },
-                        modifier = Modifier.size(36.dp)
+                        onClick = { showHistory = !showHistory },
+                        modifier = Modifier.size(32.dp)
                     ) {
-                        Icon(Icons.Default.Close, "Clear", modifier = Modifier.size(16.dp))
+                        Text("\u2191", style = MaterialTheme.typography.titleMedium) // up arrow
                     }
                 }
-                Spacer(Modifier.width(4.dp))
+
                 Button(
                     onClick = { buildAndSend() },
-                    modifier = Modifier.height(48.dp),
-                    contentPadding = PaddingValues(horizontal = 16.dp)
+                    modifier = Modifier.height(40.dp),
+                    contentPadding = PaddingValues(horizontal = 12.dp)
+                ) { Text("Send") }
+            }
+
+            // History popup in compact mode
+            if (showHistory && history.isNotEmpty()) {
+                Surface(
+                    tonalElevation = 8.dp,
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp)
                 ) {
-                    Text("Send")
+                    Column(modifier = Modifier.heightIn(max = 120.dp).verticalScroll(rememberScrollState())) {
+                        history.take(8).forEach { item ->
+                            Text(
+                                text = if (item.length > 50) item.take(47) + "..." else item,
+                                modifier = Modifier.fillMaxWidth()
+                                    .clickable { text = item; showHistory = false }
+                                    .padding(horizontal = 12.dp, vertical = 6.dp),
+                                style = MaterialTheme.typography.bodySmall
+                            )
+                            HorizontalDivider()
+                        }
+                    }
+                }
+            }
+
+            // Attached files in compact
+            if (attachedFiles.isNotEmpty()) {
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 2.dp),
+                    horizontalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
+                    attachedFiles.forEachIndexed { idx, path ->
+                        InputChip(
+                            selected = true, onClick = {},
+                            label = { Text(path.substringAfterLast('/'), style = MaterialTheme.typography.labelSmall) },
+                            trailingIcon = {
+                                Icon(Icons.Default.Close, "Remove",
+                                    modifier = Modifier.size(14.dp).clickable {
+                                        attachedFilesRaw = attachedFiles.filterIndexed { i, _ -> i != idx }.joinToString("\n")
+                                    })
+                            },
+                            modifier = Modifier.height(24.dp)
+                        )
+                    }
                 }
             }
         }
