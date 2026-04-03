@@ -17,11 +17,26 @@ html, body { background:#1E1E1E; overflow:hidden; width:100%; height:100%; displ
 .ctx-item { display:block; width:100%; padding:10px 16px; font-size:14px; font-family:-apple-system,sans-serif; color:#ddd; background:none; border:none; text-align:left; cursor:pointer; }
 .ctx-item:active { background:rgba(0,122,204,0.3); }
 .ctx-sep { height:1px; background:rgba(255,255,255,0.1); margin:4px 0; }
+/* Selection handles (Android-style teardrops) */
+.sel-handle { position:fixed; width:28px; height:28px; z-index:150; display:none; touch-action:none; }
+.sel-handle svg { width:100%; height:100%; filter:drop-shadow(0 1px 2px rgba(0,0,0,0.5)); }
+/* Selection floating toolbar */
+#selToolbar { position:fixed; display:none; z-index:250; background:#363636; border-radius:20px; padding:2px 4px; box-shadow:0 2px 12px rgba(0,0,0,0.6); flex-direction:row; align-items:center; gap:0; }
+.sel-action { padding:8px 14px; font-size:13px; font-family:-apple-system,sans-serif; color:#eee; background:none; border:none; cursor:pointer; border-radius:16px; white-space:nowrap; }
+.sel-action:active { background:rgba(255,255,255,0.12); }
 </style>
 </head>
 <body>
 <div id="terminal"></div>
 <div id="toast"></div>
+<!-- Selection handles -->
+<div class="sel-handle" id="handleLeft"><svg viewBox="0 0 28 28"><circle cx="14" cy="6" r="6" fill="#007acc"/><rect x="12" y="6" width="4" height="16" rx="2" fill="#007acc"/></svg></div>
+<div class="sel-handle" id="handleRight"><svg viewBox="0 0 28 28"><circle cx="14" cy="6" r="6" fill="#007acc"/><rect x="12" y="6" width="4" height="16" rx="2" fill="#007acc"/></svg></div>
+<div id="selToolbar">
+    <button class="sel-action" id="selCopy">Copy</button>
+    <button class="sel-action" id="selAll">All</button>
+    <button class="sel-action" id="selPaste">Paste</button>
+</div>
 <div id="ctxMenu">
     <button class="ctx-item" id="ctxCopy">Copy</button>
     <button class="ctx-item" id="ctxPaste">Paste</button>
@@ -76,184 +91,217 @@ const term = new Terminal({
 const fitAddon = new FitAddon.FitAddon();
 term.loadAddon(fitAddon);
 
-try {
-    const webLinksAddon = new WebLinksAddon.WebLinksAddon((e, uri) => {
-        if (A) A.openUrl(uri);
-    });
-    term.loadAddon(webLinksAddon);
-} catch(e) {}
-
+try { const w = new WebLinksAddon.WebLinksAddon((e,u) => { if(A) A.openUrl(u); }); term.loadAddon(w); } catch(e) {}
 let searchAddon = null;
-try {
-    searchAddon = new SearchAddon.SearchAddon();
-    term.loadAddon(searchAddon);
-} catch(e) {}
+try { searchAddon = new SearchAddon.SearchAddon(); term.loadAddon(searchAddon); } catch(e) {}
 
 const termEl = document.getElementById('terminal');
 term.open(termEl);
-
-// Send user input to Android
 term.onData(data => { if (A) A.onTerminalInput(data); });
 
-// ======================== SEARCH ========================
-const searchBar = document.getElementById('searchBar');
-const searchInput = document.getElementById('searchInput');
-const searchCount = document.getElementById('searchCount');
-let searchOpen = false;
-
-function toggleSearch() {
-    searchOpen = !searchOpen;
-    searchBar.style.display = searchOpen ? 'flex' : 'none';
-    if (searchOpen) { searchInput.focus(); }
-    else if (searchAddon) { searchAddon.clearDecorations(); searchCount.textContent = ''; fitAddon.fit(); }
+// ======================== HELPERS ========================
+function getCellSize() {
+    try { const d = term._core._renderService.dimensions; return { w: d.css.cell.width, h: d.css.cell.height }; }
+    catch(_) { const s = document.querySelector('.xterm-screen'); if(!s) return {w:8,h:16}; return {w:s.clientWidth/term.cols, h:s.clientHeight/term.rows}; }
 }
-
-if (searchInput) {
-    searchInput.addEventListener('input', () => {
-        if (searchAddon && searchInput.value) searchAddon.findNext(searchInput.value);
-        else if (searchAddon) searchAddon.clearDecorations();
-    });
+function getScreenRect() { const s = document.querySelector('.xterm-screen'); return s ? s.getBoundingClientRect() : {left:0,top:0}; }
+function posToCell(px, py) {
+    const r = getScreenRect(), c = getCellSize();
+    return { col: Math.max(0, Math.min(Math.round((px-r.left)/c.w), term.cols-1)), row: Math.max(0, Math.round((py-r.top)/c.h)) };
 }
-document.getElementById('searchNext')?.addEventListener('click', () => {
-    if (searchAddon && searchInput.value) searchAddon.findNext(searchInput.value);
-});
-document.getElementById('searchPrev')?.addEventListener('click', () => {
-    if (searchAddon && searchInput.value) searchAddon.findPrevious(searchInput.value);
-});
-document.getElementById('searchClose')?.addEventListener('click', toggleSearch);
-document.getElementById('ctxSearch')?.addEventListener('click', () => { hideCtxMenu(); if (!searchOpen) toggleSearch(); });
 
 // ======================== SMART SCROLL ========================
 function scrollTerminal(lines) {
     if (lines === 0) return;
     const isAlt = term.buffer.active.type === 'alternate';
     const mouseMode = (term.modes && term.modes.mouseTrackingMode) || 'none';
-
     if (isAlt && mouseMode !== 'none' && A) {
-        const btn = lines < 0 ? 64 : 65;
-        const count = Math.min(Math.abs(lines), 15);
+        const btn = lines < 0 ? 64 : 65, count = Math.min(Math.abs(lines), 15);
         const seq = '\x1b[<' + btn + ';1;1M';
         for (let i = 0; i < count; i++) A.onTerminalInput(seq);
-    } else {
-        term.scrollLines(lines);
-    }
+    } else { term.scrollLines(lines); }
 }
 
 function selectWordAt(px, py) {
-    const rect = getScreenRect();
-    const cell = getCellSize();
-    const col = Math.floor((px - rect.left) / cell.w);
-    const row = Math.floor((py - rect.top) / cell.h);
-    const vp = term.buffer.active.viewportY;
-    const line = term.buffer.active.getLine(row + vp);
+    const r = getScreenRect(), c = getCellSize();
+    const col = Math.floor((px-r.left)/c.w), row = Math.floor((py-r.top)/c.h);
+    const vp = term.buffer.active.viewportY, line = term.buffer.active.getLine(row+vp);
     if (!line) return;
-    const lineText = line.translateToString();
-    const wordChars = /[a-zA-Z0-9_\-\.\/~]/;
-    let start = Math.min(col, lineText.length - 1);
-    let end = start;
-    while (start > 0 && wordChars.test(lineText[start - 1])) start--;
-    while (end < lineText.length - 1 && wordChars.test(lineText[end + 1])) end++;
-    const len = end - start + 1;
-    if (len > 0 && wordChars.test(lineText[start] || '')) {
-        term.select(start, row + vp, len);
-    }
+    const t = line.translateToString(), wc = /[a-zA-Z0-9_\-\.\/~@#$%]/;
+    let s = Math.min(col, t.length-1), e = s;
+    while (s > 0 && wc.test(t[s-1])) s--;
+    while (e < t.length-1 && wc.test(t[e+1])) e++;
+    if (e-s+1 > 0 && wc.test(t[s]||'')) term.select(s, row+vp, e-s+1);
 }
 
-function getCellSize() {
-    try {
-        const dims = term._core._renderService.dimensions;
-        return { w: dims.css.cell.width, h: dims.css.cell.height };
-    } catch(_) {
-        const screen = document.querySelector('.xterm-screen');
-        if (!screen) return { w:8, h:16 };
-        return { w: screen.clientWidth / term.cols, h: screen.clientHeight / term.rows };
+// ======================== SELECTION HANDLES ========================
+const handleLeft = document.getElementById('handleLeft');
+const handleRight = document.getElementById('handleRight');
+const selToolbar = document.getElementById('selToolbar');
+let draggingHandle = null;
+
+function updateHandles() {
+    const pos = term.getSelectionPosition();
+    if (!pos || !term.hasSelection()) {
+        handleLeft.style.display = 'none'; handleRight.style.display = 'none'; return;
     }
+    const r = getScreenRect(), c = getCellSize(), vp = term.buffer.active.viewportY;
+    const sx = r.left + pos.start.x * c.w, sy = r.top + (pos.start.y - vp) * c.h;
+    handleLeft.style.left = (sx - 14) + 'px'; handleLeft.style.top = (sy + c.h) + 'px'; handleLeft.style.display = 'block';
+    const ex = r.left + pos.end.x * c.w, ey = r.top + (pos.end.y - vp) * c.h;
+    handleRight.style.left = (ex - 14) + 'px'; handleRight.style.top = (ey + c.h) + 'px'; handleRight.style.display = 'block';
 }
 
-function getScreenRect() {
-    const screen = document.querySelector('.xterm-screen');
-    return screen ? screen.getBoundingClientRect() : {left:0,top:0,width:0,height:0};
+function showSelToolbar() {
+    const pos = term.getSelectionPosition();
+    if (!pos || !term.hasSelection()) { selToolbar.style.display = 'none'; return; }
+    const r = getScreenRect(), c = getCellSize(), vp = term.buffer.active.viewportY;
+    const selTop = r.top + (pos.start.y - vp) * c.h;
+    const selBottom = r.top + (pos.end.y - vp + 1) * c.h;
+    const sx = r.left + pos.start.x * c.w, ex = r.left + pos.end.x * c.w;
+    const midX = (pos.start.y === pos.end.y) ? (sx+ex)/2 : window.innerWidth/2;
+    selToolbar.style.display = 'flex';
+    const tw = selToolbar.offsetWidth, th = selToolbar.offsetHeight || 40;
+    let toolbarY = selTop - th - 8;
+    if (toolbarY < 4) toolbarY = selBottom + 36;
+    toolbarY = Math.max(4, Math.min(toolbarY, window.innerHeight - th - 4));
+    selToolbar.style.left = Math.max(4, Math.min(midX - tw/2, window.innerWidth - tw - 4)) + 'px';
+    selToolbar.style.top = toolbarY + 'px';
 }
+
+function hideSelToolbar() { selToolbar.style.display = 'none'; }
+
+term.onSelectionChange(() => {
+    if (term.hasSelection()) { updateHandles(); showSelToolbar(); }
+    else { updateHandles(); hideSelToolbar(); }
+});
+
+// Selection toolbar actions
+document.getElementById('selCopy').addEventListener('click', () => {
+    const sel = term.getSelection();
+    if (sel && A) { A.copyToClipboard(sel); showToast('Copied'); }
+    term.clearSelection(); hideSelToolbar();
+});
+document.getElementById('selAll').addEventListener('click', () => { term.selectAll(); });
+document.getElementById('selPaste').addEventListener('click', () => {
+    term.clearSelection(); hideSelToolbar();
+    if (A) { const t = A.getClipboard(); if (t) { A.onTerminalInput(t); showToast('Pasted'); } }
+});
+
+// Handle dragging
+handleLeft.addEventListener('touchstart', e => { e.preventDefault(); draggingHandle = 'left'; hideSelToolbar(); }, {passive:false});
+handleRight.addEventListener('touchstart', e => { e.preventDefault(); draggingHandle = 'right'; hideSelToolbar(); }, {passive:false});
+
+document.addEventListener('touchmove', e => {
+    if (!draggingHandle) return;
+    e.preventDefault();
+    const touch = e.touches[0], c = posToCell(touch.clientX, touch.clientY);
+    const pos = term.getSelectionPosition();
+    if (!pos) return;
+    const vp = term.buffer.active.viewportY;
+    if (draggingHandle === 'left') {
+        const startRow = c.row + vp, endRow = pos.end.y, endCol = pos.end.x;
+        if (startRow < endRow || (startRow === endRow && c.col < endCol)) {
+            term.select(c.col, startRow, (endRow-startRow)*term.cols + (endCol-c.col));
+        }
+    } else {
+        const startRow = pos.start.y, startCol = pos.start.x, endRow = c.row + vp;
+        if (endRow > startRow || (endRow === startRow && c.col > startCol)) {
+            term.select(startCol, startRow, (endRow-startRow)*term.cols + (c.col-startCol));
+        }
+    }
+    updateHandles();
+}, {passive:false});
+
+document.addEventListener('touchend', () => {
+    if (draggingHandle) { draggingHandle = null; if (term.hasSelection()) showSelToolbar(); }
+}, {passive:true});
+
+// Dismiss handles/toolbar on tap outside
+document.addEventListener('touchstart', e => {
+    if (e.touches.length === 1) {
+        if (ctxMenu.style.display === 'block' && !ctxMenu.contains(e.target)) hideCtxMenu();
+        if (selToolbar.style.display === 'flex' && !selToolbar.contains(e.target)
+            && e.target !== handleLeft && e.target !== handleRight
+            && !handleLeft.contains(e.target) && !handleRight.contains(e.target)) {
+            setTimeout(() => { if (!term.hasSelection()) { hideSelToolbar(); updateHandles(); } }, 100);
+        }
+    }
+}, {passive:true});
 
 // ======================== CONTEXT MENU ========================
 const ctxMenu = document.getElementById('ctxMenu');
-
 function showCtxMenu(x, y) {
-    const mw = ctxMenu.offsetWidth || 140, mh = ctxMenu.offsetHeight || 200;
-    ctxMenu.style.left = Math.max(4, Math.min(x, window.innerWidth - mw - 8)) + 'px';
-    ctxMenu.style.top = Math.max(4, Math.min(y, window.innerHeight - mh - 8)) + 'px';
+    const mw = ctxMenu.offsetWidth||140, mh = ctxMenu.offsetHeight||200;
+    ctxMenu.style.left = Math.max(4, Math.min(x, window.innerWidth-mw-8)) + 'px';
+    ctxMenu.style.top = Math.max(4, Math.min(y, window.innerHeight-mh-8)) + 'px';
     ctxMenu.style.display = 'block';
+    document.getElementById('ctxCopy').style.opacity = term.hasSelection() ? '1' : '0.4';
 }
 function hideCtxMenu() { ctxMenu.style.display = 'none'; }
 
 // 2-finger tap → context menu
 let ctxTapStart = 0, ctxTapPos = {x:0,y:0}, ctxTapMoved = false;
 termEl.addEventListener('touchstart', e => {
-    if (e.touches.length === 2) {
-        ctxTapStart = Date.now(); ctxTapMoved = false;
-        ctxTapPos = { x:(e.touches[0].clientX+e.touches[1].clientX)/2, y:(e.touches[0].clientY+e.touches[1].clientY)/2 };
-    }
+    if (e.touches.length === 2) { ctxTapStart = Date.now(); ctxTapMoved = false; ctxTapPos = {x:(e.touches[0].clientX+e.touches[1].clientX)/2, y:(e.touches[0].clientY+e.touches[1].clientY)/2}; }
 }, {passive:true});
 termEl.addEventListener('touchmove', e => { if (e.touches.length === 2) ctxTapMoved = true; }, {passive:true});
 termEl.addEventListener('touchend', e => {
-    if (ctxTapStart > 0 && !ctxTapMoved && Date.now() - ctxTapStart < 400) showCtxMenu(ctxTapPos.x, ctxTapPos.y);
+    if (ctxTapStart > 0 && !ctxTapMoved && Date.now()-ctxTapStart < 400) showCtxMenu(ctxTapPos.x, ctxTapPos.y);
     if (e.touches.length === 0) ctxTapStart = 0;
 }, {passive:true});
 
-document.addEventListener('touchstart', e => {
-    if (e.touches.length === 1 && ctxMenu.style.display === 'block' && !ctxMenu.contains(e.target)) hideCtxMenu();
-}, {passive:true});
-
-document.getElementById('ctxCopy').addEventListener('click', () => {
-    hideCtxMenu();
-    const sel = term.getSelection();
-    if (sel && A) { A.copyToClipboard(sel); showToast('Copied'); }
-});
-document.getElementById('ctxPaste').addEventListener('click', () => {
-    hideCtxMenu();
-    if (A) { const t = A.getClipboard(); if (t) { A.onTerminalInput(t); showToast('Pasted'); } }
-});
+document.getElementById('ctxCopy').addEventListener('click', () => { hideCtxMenu(); const s=term.getSelection(); if(s&&A){A.copyToClipboard(s);showToast('Copied');} });
+document.getElementById('ctxPaste').addEventListener('click', () => { hideCtxMenu(); if(A){const t=A.getClipboard();if(t){A.onTerminalInput(t);showToast('Pasted');}} });
 document.getElementById('ctxSelectAll').addEventListener('click', () => { hideCtxMenu(); term.selectAll(); });
 document.getElementById('ctxClear').addEventListener('click', () => { hideCtxMenu(); term.clear(); });
-document.getElementById('ctxExport').addEventListener('click', () => {
-    hideCtxMenu();
-    exportScrollback();
-    showToast('Exporting...');
-});
+document.getElementById('ctxSearch')?.addEventListener('click', () => { hideCtxMenu(); if(!searchOpen) toggleSearch(); });
+document.getElementById('ctxExport').addEventListener('click', () => { hideCtxMenu(); exportScrollback(); showToast('Exporting...'); });
 
 function exportScrollback() {
-    const lines = [];
-    const buf = term.buffer.active;
-    for (let i = 0; i < buf.length; i++) {
-        const line = buf.getLine(i);
-        if (line) lines.push(line.translateToString(true));
-    }
+    const lines = [], buf = term.buffer.active;
+    for (let i = 0; i < buf.length; i++) { const l = buf.getLine(i); if(l) lines.push(l.translateToString(true)); }
     if (A) A.exportScrollback(lines.join('\n'));
 }
 
-// ======================== RESIZE (ResizeObserver) ========================
-const ro = new ResizeObserver(() => {
-    fitAddon.fit();
-    if (A) A.onTerminalResize(term.cols, term.rows);
-});
+// ======================== SEARCH ========================
+const searchBar = document.getElementById('searchBar');
+const searchInput = document.getElementById('searchInput');
+const searchCount = document.getElementById('searchCount');
+let searchOpen = false;
+function toggleSearch() {
+    searchOpen = !searchOpen;
+    searchBar.style.display = searchOpen ? 'flex' : 'none';
+    if (searchOpen) searchInput.focus();
+    else if (searchAddon) { searchAddon.clearDecorations(); searchCount.textContent = ''; fitAddon.fit(); }
+}
+if (searchInput) searchInput.addEventListener('input', () => { if(searchAddon&&searchInput.value) searchAddon.findNext(searchInput.value); else if(searchAddon) searchAddon.clearDecorations(); });
+document.getElementById('searchNext')?.addEventListener('click', () => { if(searchAddon&&searchInput.value) searchAddon.findNext(searchInput.value); });
+document.getElementById('searchPrev')?.addEventListener('click', () => { if(searchAddon&&searchInput.value) searchAddon.findPrevious(searchInput.value); });
+document.getElementById('searchClose')?.addEventListener('click', toggleSearch);
+
+// ======================== RESIZE ========================
+const ro = new ResizeObserver(() => { fitAddon.fit(); if (A) A.onTerminalResize(term.cols, term.rows); });
 ro.observe(termEl);
 
-// NOTE: No keyboard suppression — we need the system keyboard for input.
-// (vscode_android suppresses it because it has overlay keyboard, we don't)
-
-// ======================== API (called from Android) ========================
+// ======================== API ========================
 function writeOutput(text) { term.write(text); }
 function clearTerminal() { term.reset(); }
 function setFontSize(size) { term.options.fontSize = size; fitAddon.fit(); }
 function setScrollback(lines) { term.options.scrollback = lines; }
+function applyColorScheme(name) {
+    const schemes = {
+        'default': {background:'#1E1E1E',foreground:'#CCCCCC',cursor:'#AEAFAD'},
+        'solarized-dark': {background:'#002B36',foreground:'#839496',cursor:'#93A1A1'},
+        'dracula': {background:'#282A36',foreground:'#F8F8F2',cursor:'#F8F8F2'},
+        'monokai': {background:'#272822',foreground:'#F8F8F2',cursor:'#F8F8F2'},
+        'linux': {background:'#000000',foreground:'#AAAAAA',cursor:'#AAAAAA'}
+    };
+    const s = schemes[name]; if(s) { term.options.theme = Object.assign(term.options.theme, s); document.body.style.background = s.background; }
+}
 
 // ======================== INIT ========================
-if (A) {
-    setTimeout(() => {
-        fitAddon.fit();
-        A.onTerminalReady(term.cols, term.rows);
-    }, 100);
-}
+if (A) { setTimeout(() => { fitAddon.fit(); A.onTerminalReady(term.cols, term.rows); }, 100); }
 </script>
 </body>
 </html>
