@@ -21,8 +21,7 @@ import java.io.OutputStream
 
 class SshManager(
     private val serverStorage: ServerStorage,
-    private val connectTimeout: Int = 15000,
-    private val maxReconnectAttempts: Int = 3
+    private val connectTimeout: Int = 15000
 ) {
     private var session: Session? = null
     private var channel: ChannelShell? = null
@@ -31,78 +30,55 @@ class SshManager(
     private val ioScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
 
     @Volatile private var disconnected = false
-    private var reconnectAttempts = 0
-    private var currentServer: SshServer? = null
-    private var currentOnOutput: ((String) -> Unit)? = null
-    private var currentOnDisconnect: (() -> Unit)? = null
 
     val isConnected: Boolean get() = !disconnected && session?.isConnected == true && channel?.isConnected == true
 
     /**
      * Connect to server and open a shell channel.
-     * Returns the JSch Session for use with TmuxManager etc.
+     * onConnectionLost is called when connection drops (for reconnect by orchestrator).
      */
     suspend fun connect(
         server: SshServer,
         onOutput: (String) -> Unit,
-        onDisconnect: () -> Unit
-    ): Session {
-        currentServer = server
-        currentOnOutput = onOutput
-        currentOnDisconnect = onDisconnect
-        reconnectAttempts = 0
-        return doConnect(server, onOutput, onDisconnect)
-    }
-
-    private suspend fun doConnect(
-        server: SshServer,
-        onOutput: (String) -> Unit,
-        onDisconnect: () -> Unit
+        onConnectionLost: () -> Unit
     ): Session = withContext(Dispatchers.IO) {
         disconnected = false
         FileLogger.log(TAG, "Connecting to ${server.host}:${server.port} as ${server.username}")
 
-        // Reset xterm state (exit alt buffer, disable mouse) to clear stale state
+        // Reset xterm state
         onOutput("\u001b[?1049l\u001b[?1002l\u001b[?1003l\u001b[?1006l")
 
         val jsch = JSch()
-
         if (server.authMethod == AuthMethod.KEY && server.privateKey != null) {
             jsch.addIdentity("key", server.privateKey.toByteArray(), null, null)
         }
 
         val sess = jsch.getSession(server.username, server.host, server.port)
-
         if (server.authMethod == AuthMethod.PASSWORD && server.password != null) {
             sess.setPassword(server.password)
         }
-
         sess.setConfig("StrictHostKeyChecking", "no")
         sess.userInfo = TofuUserInfo(server.host, serverStorage)
         sess.timeout = connectTimeout
 
-        FileLogger.log(TAG, "Opening SSH session...")
         sess.connect(connectTimeout)
         session = sess
         FileLogger.log(TAG, "SSH session connected")
 
-        // Setup port forwarding
+        // Port forwarding
         for (pf in server.portForwards) {
             try {
                 when (pf.type) {
                     "L" -> {
                         sess.setPortForwardingL(pf.localPort, pf.remoteHost, pf.remotePort)
-                        FileLogger.log(TAG, "Port forward: L${pf.localPort} -> ${pf.remoteHost}:${pf.remotePort}")
                         onOutput("\u001B[33mPort forward: L${pf.localPort} -> ${pf.remoteHost}:${pf.remotePort}\u001B[0m\r\n")
                     }
                     "R" -> {
                         sess.setPortForwardingR(pf.remotePort, pf.remoteHost, pf.localPort)
-                        FileLogger.log(TAG, "Port forward: R${pf.remotePort} -> ${pf.remoteHost}:${pf.localPort}")
                         onOutput("\u001B[33mPort forward: R${pf.remotePort} -> ${pf.remoteHost}:${pf.localPort}\u001B[0m\r\n")
                     }
                 }
             } catch (e: Exception) {
-                FileLogger.error(TAG, "Port forward failed: $pf", e)
                 onOutput("\u001B[31mPort forward failed: ${e.message}\u001B[0m\r\n")
             }
         }
@@ -113,10 +89,9 @@ class SshManager(
         outputStream = ch.outputStream
         ch.connect(connectTimeout)
         channel = ch
-        reconnectAttempts = 0
         FileLogger.log(TAG, "Shell channel opened")
 
-        // Read loop with auto-reconnect on failure
+        // Read loop — calls onConnectionLost when stream ends
         readJob = ioScope.launch {
             try {
                 val buf = ByteArray(8192)
@@ -124,31 +99,14 @@ class SshManager(
                     val n = inputStream.read(buf)
                     if (n < 0) break
                     if (n == 0) { delay(50); if (ch.isClosed) break; continue }
-                    val text = String(buf, 0, n)
-                    onOutput(text)
+                    onOutput(String(buf, 0, n))
                 }
             } catch (_: Exception) {
             } finally {
                 if (!disconnected) {
                     disconnected = true
-                    // Try auto-reconnect
-                    val srv = currentServer
-                    if (reconnectAttempts < maxReconnectAttempts && srv != null) {
-                        reconnectAttempts++
-                        FileLogger.log(TAG, "Connection lost. Reconnecting ($reconnectAttempts/$maxReconnectAttempts)...")
-                        onOutput("\r\n\u001B[33mConnection lost. Reconnecting ($reconnectAttempts/$maxReconnectAttempts)...\u001B[0m\r\n")
-                        delay(2000)
-                        try {
-                            doConnect(srv, onOutput, onDisconnect)
-                        } catch (e: Exception) {
-                            FileLogger.error(TAG, "Reconnect failed", e)
-                            onOutput("\r\n\u001B[31mReconnect failed: ${e.message}\u001B[0m\r\n")
-                            onDisconnect()
-                        }
-                    } else {
-                        FileLogger.log(TAG, "Read loop ended, disconnecting")
-                        onDisconnect()
-                    }
+                    FileLogger.log(TAG, "Connection lost")
+                    onConnectionLost()
                 }
             }
         }
@@ -189,15 +147,11 @@ class SshManager(
     }
 
     fun resize(cols: Int, rows: Int) {
-        try {
-            channel?.setPtySize(cols, rows, cols * 8, rows * 16)
-        } catch (_: Exception) {}
+        try { channel?.setPtySize(cols, rows, cols * 8, rows * 16) } catch (_: Exception) {}
     }
 
     suspend fun disconnect() {
         disconnected = true
-        reconnectAttempts = maxReconnectAttempts // prevent auto-reconnect
-        currentServer = null
         FileLogger.log(TAG, "Disconnecting...")
         readJob?.cancelAndJoin()
         readJob = null
@@ -209,15 +163,7 @@ class SshManager(
         FileLogger.log(TAG, "Disconnected")
     }
 
-    /**
-     * Upload a file to the remote server via SFTP.
-     * Returns the full remote path of the uploaded file.
-     */
-    suspend fun uploadFile(
-        bytes: ByteArray,
-        remoteDir: String,
-        fileName: String
-    ): String = withContext(Dispatchers.IO) {
+    suspend fun uploadFile(bytes: ByteArray, remoteDir: String, fileName: String): String = withContext(Dispatchers.IO) {
         val sess = session ?: throw IllegalStateException("Not connected")
         val sftp = sess.openChannel("sftp") as ChannelSftp
         sftp.connect(10000)
@@ -225,11 +171,8 @@ class SshManager(
             try { sftp.mkdir(remoteDir) } catch (_: Exception) {}
             val remotePath = "$remoteDir/$fileName"
             sftp.put(bytes.inputStream(), remotePath)
-            FileLogger.log(TAG, "Uploaded ${bytes.size} bytes to $remotePath")
             remotePath
-        } finally {
-            sftp.disconnect()
-        }
+        } finally { sftp.disconnect() }
     }
 
     fun getSession(): Session? = session

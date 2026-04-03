@@ -91,6 +91,10 @@ class SessionOrchestrator(
         onTabSwitched?.invoke(id, buffer)
     }
 
+    private val reconnectScope = kotlinx.coroutines.CoroutineScope(
+        kotlinx.coroutines.Dispatchers.IO + kotlinx.coroutines.SupervisorJob()
+    )
+
     private suspend fun connectSsh(session: ClaudeSession, isNewTmuxSession: Boolean) {
         val sshManager = SshManager(serverStorage)
         connections[session.id] = sshManager
@@ -100,7 +104,6 @@ class SessionOrchestrator(
             if (tabManager.activeTabId.value == session.id) {
                 onTerminalOutput?.invoke(session.id, text)
             }
-            // Detect when Claude needs input (background tab notification)
             if (tabManager.activeTabId.value != session.id) {
                 if (text.contains("[Y/n]") || text.contains("[y/N]") ||
                     text.contains("Do you want to") || text.contains("permission")) {
@@ -112,22 +115,30 @@ class SessionOrchestrator(
         sshManager.connect(
             session.server,
             onOutput = { data -> emit(data) },
-            onDisconnect = {
+            onConnectionLost = {
+                // Auto-reconnect with tmux reattach
                 tabManager.updateTabStatus(session.id, SessionStatus.DISCONNECTED)
-                onSessionDisconnect?.invoke(session.id)
+                reconnectScope.launch {
+                    autoReconnect(session, ::emit)
+                }
             }
         )
 
-        // Wait for shell prompt before sending commands
+        // Wait for shell prompt
         kotlinx.coroutines.delay(500)
 
-        // Run startup command if configured
+        // Startup command
         if (session.server.startupCommand.isNotBlank()) {
             sshManager.sendInput(session.server.startupCommand + "\n")
             kotlinx.coroutines.delay(300)
         }
 
-        if (isNewTmuxSession) {
+        // Tmux
+        sendTmuxCommand(sshManager, session, isNewTmuxSession)
+    }
+
+    private fun sendTmuxCommand(sshManager: SshManager, session: ClaudeSession, isNew: Boolean) {
+        if (isNew) {
             val command = ClaudeConfig.buildTmuxLaunchCommand(
                 tmuxSessionName = session.tmuxSessionName,
                 folder = session.folder,
@@ -136,12 +147,56 @@ class SessionOrchestrator(
             )
             sshManager.sendInput(command + "\n")
         } else {
-            // Attach to existing tmux session, -d detaches other clients
             val escaped = session.tmuxSessionName.replace("'", "\\'")
             val command = "tmux attach-session -d -t '$escaped' 2>/dev/null || tmux new-session -A -s '$escaped' \\; set-option -g mouse on"
             FileLogger.log(TAG, "Attaching to tmux: $command")
             sshManager.sendInput(command + "\n")
         }
+    }
+
+    private suspend fun autoReconnect(
+        session: ClaudeSession,
+        emit: (String) -> Unit,
+        maxAttempts: Int = 3
+    ) {
+        for (attempt in 1..maxAttempts) {
+            emit("\r\n\u001B[33mConnection lost. Reconnecting ($attempt/$maxAttempts)...\u001B[0m\r\n")
+            FileLogger.log(TAG, "Auto-reconnect attempt $attempt/$maxAttempts for ${session.id}")
+            kotlinx.coroutines.delay(2000L * attempt) // increasing delay
+
+            try {
+                // Clean up old connection
+                connections[session.id]?.disconnect()
+                connections.remove(session.id)
+
+                val sshManager = SshManager(serverStorage)
+                connections[session.id] = sshManager
+
+                sshManager.connect(
+                    session.server,
+                    onOutput = { data -> emit(data) },
+                    onConnectionLost = {
+                        tabManager.updateTabStatus(session.id, SessionStatus.DISCONNECTED)
+                        reconnectScope.launch { autoReconnect(session, emit) }
+                    }
+                )
+
+                // Wait for shell, then reattach tmux
+                kotlinx.coroutines.delay(500)
+                sendTmuxCommand(sshManager, session, false) // always attach existing
+
+                tabManager.updateTabStatus(session.id, SessionStatus.ACTIVE)
+                onSessionActive?.invoke(session)
+                emit("\r\n\u001B[32mReconnected!\u001B[0m\r\n")
+                FileLogger.log(TAG, "Auto-reconnect succeeded for ${session.id}")
+                return
+            } catch (e: Exception) {
+                FileLogger.error(TAG, "Auto-reconnect attempt $attempt failed", e)
+            }
+        }
+
+        emit("\r\n\u001B[31mReconnect failed after $maxAttempts attempts.\u001B[0m\r\n")
+        onSessionDisconnect?.invoke(session.id)
     }
 
     private suspend fun connectMosh(session: ClaudeSession, isNewTmuxSession: Boolean) {
