@@ -184,17 +184,28 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Determine version
+      - name: Find target release
         id: version
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          LATEST=$(git describe --tags --abbrev=0 2>/dev/null || echo "v1.0.0")
-          LATEST="${LATEST#v}"
-          IFS='.' read -r MAJOR MINOR PATCH <<< "$LATEST"
-          PATCH=$((PATCH + 1))
-          VER="${MAJOR}.${MINOR}.${PATCH}"
-          TAG="v${VER}"
-          echo "version=$VER" >> "$GITHUB_OUTPUT"
+          # Wait briefly for Android workflow to create the release
+          sleep 30
+
+          # Find latest release tag (created by Android or earlier desktop run)
+          TAG=$(gh release list --limit 1 --json tagName -q '.[0].tagName' 2>/dev/null || echo "")
+
+          if [ -z "$TAG" ]; then
+            # Fallback: compute version from git tags
+            LATEST=$(git describe --tags --abbrev=0 2>/dev/null || echo "v1.0.0")
+            LATEST="${LATEST#v}"
+            IFS='.' read -r MAJOR MINOR PATCH <<< "$LATEST"
+            PATCH=$((PATCH + 1))
+            TAG="v${MAJOR}.${MINOR}.${PATCH}"
+          fi
+
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "Target release: $TAG"
 
       - name: Download macOS artifact
         uses: actions/download-artifact@v4
@@ -211,19 +222,18 @@ jobs:
         with:
           name: ClaudeRemote-Linux
 
-      - name: Attach to existing release or create desktop release
+      - name: Upload desktop artifacts to release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           TAG="${{ steps.version.outputs.tag }}"
           ASSETS="ClaudeRemote-macOS.dmg ClaudeRemote-windows.msi ClaudeRemote-linux.deb"
 
-          # Try to attach to existing release (created by Android workflow)
           if gh release view "$TAG" &>/dev/null; then
-            echo "Release $TAG exists, uploading desktop artifacts..."
+            echo "Uploading to existing release $TAG..."
             gh release upload "$TAG" $ASSETS --clobber
           else
-            echo "Release $TAG not found, creating desktop release..."
+            echo "Creating release $TAG..."
             gh release create "$TAG" $ASSETS \
               --target "${{ github.sha }}" \
               --title "$TAG" \
