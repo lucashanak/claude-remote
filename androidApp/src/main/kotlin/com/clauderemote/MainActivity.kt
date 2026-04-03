@@ -36,6 +36,7 @@ class MainActivity : FragmentActivity() {
     private lateinit var tabManager: TabManager
     private lateinit var sessionOrchestrator: SessionOrchestrator
     private var terminalWebView: WebView? = null
+    @Volatile var handleDragActive = false // set by JS when dragging selection handles
     private var keyFileCallback: ((String) -> Unit)? = null
     private var attachFileCallback: ((ByteArray, String) -> Unit)? = null
 
@@ -417,7 +418,8 @@ class MainActivity : FragmentActivity() {
                         return@setOnTouchListener false
                     }
 
-                    if (event.pointerCount == 1 && !twoFingerActive) {
+                    // 1-finger move — but NOT when JS is dragging selection handles
+                    if (event.pointerCount == 1 && !twoFingerActive && !handleDragActive) {
                         val dx = event.x - oneFingerStartX
                         val dy = event.y - oneFingerStartY
                         if (!oneFingerScrolling && (dx * dx + dy * dy > deadZone * deadZone)) {
@@ -438,6 +440,8 @@ class MainActivity : FragmentActivity() {
                         }
                         return@setOnTouchListener true
                     }
+                    // Let JS handle moves when dragging selection handles
+                    if (handleDragActive) return@setOnTouchListener false
                     false
                 }
                 MotionEvent.ACTION_POINTER_UP,
@@ -484,6 +488,11 @@ class MainActivity : FragmentActivity() {
     }
 
     private inner class TerminalBridge {
+        @JavascriptInterface
+        fun setHandleDrag(active: Boolean) {
+            handleDragActive = active
+        }
+
         @JavascriptInterface
         fun onTerminalInput(data: String) {
             tabManager.activeTabId.value?.let { id ->

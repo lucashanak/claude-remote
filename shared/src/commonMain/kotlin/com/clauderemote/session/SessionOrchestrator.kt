@@ -136,7 +136,10 @@ class SessionOrchestrator(
             )
             sshManager.sendInput(command + "\n")
         } else {
-            val command = "tmux attach-session -t '${session.tmuxSessionName.replace("'", "\\'")}'"
+            // Attach to existing tmux session, -d detaches other clients
+            val escaped = session.tmuxSessionName.replace("'", "\\'")
+            val command = "tmux attach-session -d -t '$escaped' 2>/dev/null || tmux new-session -A -s '$escaped' \\; set-option -g mouse on"
+            FileLogger.log(TAG, "Attaching to tmux: $command")
             sshManager.sendInput(command + "\n")
         }
     }
