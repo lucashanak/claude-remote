@@ -264,16 +264,24 @@ private fun PromptInputBar(
     } else emptyList()
 
     fun buildAndSend() {
-        val parts = mutableListOf<String>()
-        if (text.isNotBlank()) parts.add(text.replace('\n', ' ').trim())
-        parts.addAll(attachedFiles)
-        if (parts.isNotEmpty()) {
-            onSend(parts.joinToString(" "))
-            text = ""
-            attachedFilesRaw = ""
+        val userText = text.replace('\n', ' ').trim()
+        if (attachedFiles.isEmpty() && userText.isNotBlank()) {
+            onSend(userText)
+        } else if (attachedFiles.isNotEmpty()) {
+            // Format prompt so Claude Code reads the attached files
+            val fileRefs = attachedFiles.joinToString(" ") { "\"$it\"" }
+            val prompt = if (userText.isNotBlank()) {
+                "Read the attached file(s) $fileRefs — $userText"
+            } else {
+                "Read and analyze the file(s) $fileRefs"
+            }
+            onSend(prompt)
         } else {
             onSendCommand("\r")
+            return
         }
+        text = ""
+        attachedFilesRaw = ""
     }
 
     Surface(color = MaterialTheme.colorScheme.surfaceVariant, tonalElevation = 2.dp) {
