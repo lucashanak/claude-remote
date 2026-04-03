@@ -39,8 +39,11 @@ jobs:
 
       - name: Determine version
         id: version
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          LATEST=$(git describe --tags --abbrev=0 2>/dev/null || echo "v1.0.0")
+          # Get the latest release tag (most reliable source of truth)
+          LATEST=$(gh release list --limit 1 --json tagName -q '.[0].tagName' 2>/dev/null || echo "v1.0.0")
           LATEST="${LATEST#v}"
           IFS='.' read -r MAJOR MINOR PATCH <<< "$LATEST"
           PATCH=$((PATCH + 1))
@@ -132,11 +135,9 @@ jobs:
             ASSETS="$ASSETS ${{ steps.patch.outputs.patch_file }}"
           fi
 
-          # Try to attach to existing release (may be created by desktop workflow)
           if gh release view "$TAG" &>/dev/null; then
             echo "Release $TAG exists, uploading APK..."
             gh release upload "$TAG" $ASSETS --clobber
-            # Append SHA to release notes
             NOTES="$(gh release view "$TAG" --json body -q .body)"
             gh release edit "$TAG" --notes "${NOTES}
           sha256:${{ steps.hash.outputs.sha256 }}"

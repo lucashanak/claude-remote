@@ -36,8 +36,10 @@ jobs:
 
       - name: Determine version
         id: version
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          LATEST=$(git describe --tags --abbrev=0 2>/dev/null || echo "v1.0.0")
+          LATEST=$(gh release list --limit 1 --json tagName -q '.[0].tagName' 2>/dev/null || echo "v1.0.0")
           LATEST="${LATEST#v}"
           IFS='.' read -r MAJOR MINOR PATCH <<< "$LATEST"
           PATCH=$((PATCH + 1))
@@ -92,8 +94,10 @@ jobs:
       - name: Determine version
         id: version
         shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          LATEST=$(git describe --tags --abbrev=0 2>/dev/null || echo "v1.0.0")
+          LATEST=$(gh release list --limit 1 --json tagName -q '.[0].tagName' 2>/dev/null || echo "v1.0.0")
           LATEST="${LATEST#v}"
           IFS='.' read -r MAJOR MINOR PATCH <<< "$LATEST"
           PATCH=$((PATCH + 1))
@@ -148,8 +152,10 @@ jobs:
 
       - name: Determine version
         id: version
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          LATEST=$(git describe --tags --abbrev=0 2>/dev/null || echo "v1.0.0")
+          LATEST=$(gh release list --limit 1 --json tagName -q '.[0].tagName' 2>/dev/null || echo "v1.0.0")
           LATEST="${LATEST#v}"
           IFS='.' read -r MAJOR MINOR PATCH <<< "$LATEST"
           PATCH=$((PATCH + 1))
@@ -197,7 +203,7 @@ jobs:
 
           if [ -z "$TAG" ]; then
             # Fallback: compute version from git tags
-            LATEST=$(git describe --tags --abbrev=0 2>/dev/null || echo "v1.0.0")
+            LATEST=$(gh release list --limit 1 --json tagName -q '.[0].tagName' 2>/dev/null || echo "v1.0.0")
             LATEST="${LATEST#v}"
             IFS='.' read -r MAJOR MINOR PATCH <<< "$LATEST"
             PATCH=$((PATCH + 1))
