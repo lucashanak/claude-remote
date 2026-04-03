@@ -237,9 +237,14 @@ fun App(
                             scope.launch {
                                 try {
                                     connectionError = null
+                                    // Parse folder from tmux session name (claude-server-folder)
+                                    val prefix = "claude-${remote.server.name}-"
+                                    val folderFromTmux = if (remote.tmuxSession.name.startsWith(prefix)) {
+                                        remote.tmuxSession.name.removePrefix(prefix)
+                                    } else remote.tmuxSession.name
                                     sessionOrchestrator.launchSession(
                                         server = remote.server,
-                                        folder = remote.server.defaultFolder,
+                                        folder = folderFromTmux,
                                         mode = remote.server.defaultClaudeMode,
                                         model = remote.server.defaultClaudeModel,
                                         connectionType = ConnectionType.SSH,
