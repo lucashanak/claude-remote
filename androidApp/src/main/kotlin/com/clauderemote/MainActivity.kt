@@ -232,6 +232,7 @@ class MainActivity : FragmentActivity() {
                         replayBuffer(buffer)
                     }
                 },
+                exitApp = { finishAffinity() },
                 terminalContent = { modifier ->
                     TerminalWebView(modifier = modifier)
                 }

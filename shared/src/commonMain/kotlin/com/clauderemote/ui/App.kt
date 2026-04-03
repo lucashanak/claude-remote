@@ -45,6 +45,7 @@ fun App(
     onPickKeyFile: ((callback: (String) -> Unit) -> Unit)? = null,
     onImportServers: (() -> Unit)? = null,
     onPickFile: ((callback: (ByteArray, String) -> Unit) -> Unit)? = null,
+    exitApp: (() -> Unit)? = null,
     terminalContent: @Composable (modifier: Modifier) -> Unit
 ) {
     val scope = rememberCoroutineScope()
@@ -88,8 +89,30 @@ fun App(
     }
 
     // Back handler (Android only, no-op on desktop)
-    PlatformBackHandler(enabled = currentScreen != Screen.LAUNCHER) {
-        currentScreen = Screen.LAUNCHER
+    var showExitConfirm by remember { mutableStateOf(false) }
+    PlatformBackHandler(enabled = true) {
+        if (currentScreen != Screen.LAUNCHER) {
+            currentScreen = Screen.LAUNCHER
+        } else {
+            showExitConfirm = true
+        }
+    }
+    if (showExitConfirm) {
+        AlertDialog(
+            onDismissRequest = { showExitConfirm = false },
+            title = { Text("Exit app?") },
+            text = { Text("Active sessions will continue running in tmux.") },
+            confirmButton = {
+                TextButton(onClick = {
+                    showExitConfirm = false
+                    // Let the system handle the back press (exit)
+                    exitApp?.invoke()
+                }) { Text("Exit") }
+            },
+            dismissButton = {
+                TextButton(onClick = { showExitConfirm = false }) { Text("Cancel") }
+            }
+        )
     }
 
     fun refreshServers() {

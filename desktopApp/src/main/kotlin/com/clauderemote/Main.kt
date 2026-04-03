@@ -84,6 +84,7 @@ fun main() = application {
                     replayBuffer(buffer)
                 }
             },
+            exitApp = ::exitApplication,
             terminalContent = { modifier ->
                 DesktopTerminalWebView(
                     modifier = modifier,
