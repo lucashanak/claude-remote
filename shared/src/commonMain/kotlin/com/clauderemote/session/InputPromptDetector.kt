@@ -62,17 +62,9 @@ class InputPromptDetector {
             return PromptType.PERMISSION_PROMPT
         }
 
-        // Check for Claude's input prompt character near the end of output
-        val trimmed = stripped.trimEnd()
-        if (trimmed.length <= 30) {
-            if (trimmed.contains('\u276F')) { // ❯
-                return PromptType.INPUT_PROMPT
-            }
-        } else {
-            val tail = trimmed.substring(trimmed.length - 30)
-            if (tail.contains('\u276F')) {
-                return PromptType.INPUT_PROMPT
-            }
+        // Check for Claude's input prompt: ❯ anywhere in the last 50 chars or last line
+        if (stripped.contains('\u276F')) { // ❯
+            return PromptType.INPUT_PROMPT
         }
 
         return null
@@ -85,11 +77,11 @@ class InputPromptDetector {
     }
 
     companion object {
-        private val ANSI_REGEX = Regex("\u001B(?:\\[[0-9;]*[a-zA-Z]|\\][^\u0007]*\u0007|\\[[0-9;]*m)")
+        // Matches: CSI sequences (including private modes like ?25h), OSC sequences, SGR
+        private val ANSI_REGEX = Regex("\u001B(?:\\[\\??[0-9;]*[a-zA-Z]|\\][^\u0007]*\u0007)")
 
         fun stripAnsi(text: String): String = ANSI_REGEX.replace(text, "")
 
-        // Expect/actual not needed — System.currentTimeMillis() works on JVM targets
         private fun currentTimeMillis(): Long = System.currentTimeMillis()
     }
 }

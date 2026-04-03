@@ -234,6 +234,7 @@ class SessionOrchestrator(
     }
 
     fun sendBytes(sessionId: String, data: ByteArray) {
+        promptDetector.onUserInput(sessionId)
         connections[sessionId]?.sendBytes(data)
     }
 
@@ -248,6 +249,7 @@ class SessionOrchestrator(
             return
         }
         FileLogger.log(TAG, "sendClaudeCommand: ${command.length} bytes to $sessionId")
+        promptDetector.onUserInput(sessionId)
         conn.sendInput(command)
     }
 
