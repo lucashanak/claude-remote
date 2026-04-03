@@ -200,7 +200,7 @@ private fun ActiveSessionCard(session: ClaudeSession, onClick: () -> Unit) {
                     style = MaterialTheme.typography.titleSmall
                 )
                 Text(
-                    session.folder,
+                    session.folder.ifBlank { session.tmuxSessionName },
                     style = MaterialTheme.typography.bodySmall
                 )
                 Text(

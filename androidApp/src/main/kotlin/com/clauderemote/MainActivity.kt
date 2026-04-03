@@ -188,6 +188,7 @@ class MainActivity : FragmentActivity() {
         sessionOrchestrator.onClaudeNeedsInput = { sessionId, hint, isActiveTab ->
             val tab = tabManager.getTab(sessionId)
             val title = tab?.tabTitle ?: "Session"
+            FileLogger.log("Notify", "Claude needs input: '$hint' fg=$isAppInForeground activeTab=$isActiveTab keepAlive=${KeepAliveService.isRunning} notif=${appSettings.notificationsEnabled}")
             KeepAliveService.updateDescription("$title: $hint")
 
             // Send alert notification when app is backgrounded or tab is inactive
