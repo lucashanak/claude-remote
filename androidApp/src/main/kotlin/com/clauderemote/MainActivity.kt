@@ -113,47 +113,40 @@ class MainActivity : FragmentActivity() {
         }
     }
 
-    private fun checkBiometricAndInit() {
-        val prefs = getSharedPreferences("claude_remote", MODE_PRIVATE)
-        if (!prefs.getBoolean("biometric_lock_enabled", false)) {
-            initApp()
-            return
-        }
-
-        // Show blank screen until authenticated
-        setContent {}
-
-        val executor = androidx.core.content.ContextCompat.getMainExecutor(this)
-        val biometricPrompt = androidx.biometric.BiometricPrompt(this, executor,
-            object : androidx.biometric.BiometricPrompt.AuthenticationCallback() {
-                override fun onAuthenticationSucceeded(result: androidx.biometric.BiometricPrompt.AuthenticationResult) {
-                    initApp()
-                }
-                override fun onAuthenticationError(errorCode: Int, errString: CharSequence) {
-                    if (errorCode == androidx.biometric.BiometricPrompt.ERROR_USER_CANCELED ||
-                        errorCode == androidx.biometric.BiometricPrompt.ERROR_NEGATIVE_BUTTON) {
-                        finishAffinity()
-                    }
-                }
-            })
-
-        val promptInfo = androidx.biometric.BiometricPrompt.PromptInfo.Builder()
-            .setTitle("Claude Remote")
-            .setSubtitle("Authenticate to access")
-            .setAllowedAuthenticators(
-                androidx.biometric.BiometricManager.Authenticators.BIOMETRIC_STRONG or
-                androidx.biometric.BiometricManager.Authenticators.DEVICE_CREDENTIAL
-            )
-            .build()
-
-        biometricPrompt.authenticate(promptInfo)
-    }
-
     override fun onCreate(savedInstanceState: Bundle?) {
         enableEdgeToEdge()
         super.onCreate(savedInstanceState)
 
-        checkBiometricAndInit()
+        // Always init app first, then check biometric
+        initApp()
+
+        val prefs = getSharedPreferences("claude_remote", MODE_PRIVATE)
+        if (prefs.getBoolean("biometric_lock_enabled", false)) {
+            val executor = androidx.core.content.ContextCompat.getMainExecutor(this)
+            val biometricPrompt = androidx.biometric.BiometricPrompt(this, executor,
+                object : androidx.biometric.BiometricPrompt.AuthenticationCallback() {
+                    override fun onAuthenticationSucceeded(result: androidx.biometric.BiometricPrompt.AuthenticationResult) {
+                        // Already initialized, nothing to do
+                    }
+                    override fun onAuthenticationError(errorCode: Int, errString: CharSequence) {
+                        if (errorCode == androidx.biometric.BiometricPrompt.ERROR_USER_CANCELED ||
+                            errorCode == androidx.biometric.BiometricPrompt.ERROR_NEGATIVE_BUTTON) {
+                            finishAffinity()
+                        }
+                    }
+                })
+
+            val promptInfo = androidx.biometric.BiometricPrompt.PromptInfo.Builder()
+                .setTitle("Claude Remote")
+                .setSubtitle("Authenticate to access")
+                .setAllowedAuthenticators(
+                    androidx.biometric.BiometricManager.Authenticators.BIOMETRIC_STRONG or
+                    androidx.biometric.BiometricManager.Authenticators.DEVICE_CREDENTIAL
+                )
+                .build()
+
+            biometricPrompt.authenticate(promptInfo)
+        }
     }
 
     private fun initApp() {
