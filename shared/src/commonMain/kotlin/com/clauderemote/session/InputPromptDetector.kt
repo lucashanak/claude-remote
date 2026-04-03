@@ -24,6 +24,9 @@ class InputPromptDetector {
 
         val type = detectPromptType(stripped) ?: return null
 
+        // Don't notify on startup prompts — only after user has interacted at least once
+        if (!state.userHasInteracted && type == PromptType.INPUT_PROMPT) return null
+
         // Debounce: don't fire again if already waiting
         if (state.waitingForInput) return null
 
@@ -41,7 +44,9 @@ class InputPromptDetector {
      * so the next prompt will trigger a new notification.
      */
     fun onUserInput(sessionId: String) {
-        sessionStates[sessionId]?.waitingForInput = false
+        val state = sessionStates[sessionId] ?: return
+        state.waitingForInput = false
+        state.userHasInteracted = true
     }
 
     fun removeSession(sessionId: String) {
@@ -76,6 +81,7 @@ class InputPromptDetector {
     private class SessionState {
         var waitingForInput = false
         var lastNotificationTime = 0L
+        var userHasInteracted = false // Only notify after user has sent at least one input
     }
 
     companion object {
