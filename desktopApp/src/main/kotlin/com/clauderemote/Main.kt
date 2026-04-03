@@ -117,7 +117,7 @@ private fun DesktopTerminalWebView(
                         }
                     }
 
-                    val url = DesktopTerminalWebView::class.java.getResource("/terminal/terminal.html")?.toExternalForm()
+                    val url = DesktopTerminalBridge::class.java.getResource("/terminal/terminal.html")?.toExternalForm()
                     if (url != null) {
                         engine.load(url)
                     }
