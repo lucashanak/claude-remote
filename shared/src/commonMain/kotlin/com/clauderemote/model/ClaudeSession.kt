@@ -11,7 +11,10 @@ data class ClaudeSession(
     val status: SessionStatus = SessionStatus.CONNECTING,
     val connectedAt: Long = System.currentTimeMillis()
 ) {
-    val tabTitle: String get() = "${server.name}:${folder.substringAfterLast('/')}"
+    val tabTitle: String get() {
+        val name = folder.trimEnd('/').substringAfterLast('/').ifBlank { folder }
+        return "${server.name}:$name"
+    }
 
     val durationText: String get() {
         val elapsed = (System.currentTimeMillis() - connectedAt) / 1000
