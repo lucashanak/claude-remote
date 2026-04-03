@@ -232,9 +232,7 @@ class MainActivity : FragmentActivity() {
                 },
                 onPickFile = { callback ->
                     attachFileCallback = { bytes, name ->
-                        if (bytes.isNotEmpty() && name.isNotEmpty()) {
-                            callback(bytes, name)
-                        }
+                        callback(bytes, name)
                     }
                     attachFilePicker.launch("*/*")
                 },

@@ -449,6 +449,7 @@ fun App(
                                 onPickFile { bytes, name -> deferred.complete(bytes to name) }
                                 val result = deferred.await() ?: return@attachFile null
                                 val (bytes, name) = result
+                                if (bytes.isEmpty() || name.isEmpty()) return@attachFile null
                                 try {
                                     withContext(Dispatchers.IO) {
                                         sessionOrchestrator.uploadFile(id, bytes, name)
