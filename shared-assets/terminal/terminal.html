@@ -301,7 +301,10 @@ function applyColorScheme(name) {
 }
 
 // ======================== INIT ========================
-if (A) { setTimeout(() => { fitAddon.fit(); A.onTerminalReady(term.cols, term.rows); }, 100); }
+if (A) {
+  setTimeout(() => { fitAddon.fit(); A.onTerminalReady(term.cols, term.rows); }, 200);
+  setTimeout(() => { fitAddon.fit(); A.onTerminalResize(term.cols, term.rows); }, 800);
+}
 </script>
 </body>
 </html>

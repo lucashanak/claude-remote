@@ -244,6 +244,8 @@ class MainActivity : FragmentActivity() {
                     val buffer = sessionOrchestrator.getBuffer(activeId)
                     if (buffer.isNotEmpty()) {
                         replayBuffer(buffer)
+                    } else {
+                        fitTerminal()
                     }
                 },
                 exitApp = { finishAffinity() },
@@ -314,7 +316,17 @@ class MainActivity : FragmentActivity() {
             if (bufferedOutput.isNotEmpty()) {
                 writeToTerminal(bufferedOutput)
             }
+            fitTerminal()
         }, 150)
+    }
+
+    private fun fitTerminal() {
+        val wv = terminalWebView ?: return
+        // Fit immediately and again after layout settles
+        wv.post { wv.evaluateJavascript("fitAddon.fit();if(A)A.onTerminalResize(term.cols,term.rows)", null) }
+        wv.postDelayed({
+            wv.evaluateJavascript("fitAddon.fit();if(A)A.onTerminalResize(term.cols,term.rows)", null)
+        }, 500)
     }
 
     @SuppressLint("SetJavaScriptEnabled", "ClickableViewAccessibility")
