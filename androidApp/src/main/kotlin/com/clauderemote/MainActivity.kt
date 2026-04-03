@@ -101,7 +101,6 @@ class MainActivity : FragmentActivity() {
     }
 
     private var isAppInForeground = false
-    private var biometricUnlocked = false
 
     private fun requestNotificationPermission() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
@@ -114,19 +113,21 @@ class MainActivity : FragmentActivity() {
         }
     }
 
-    private fun checkBiometric() {
+    private fun checkBiometricAndInit() {
         val prefs = getSharedPreferences("claude_remote", MODE_PRIVATE)
         if (!prefs.getBoolean("biometric_lock_enabled", false)) {
-            biometricUnlocked = true
+            initApp()
             return
         }
+
+        // Show blank screen until authenticated
+        setContent {}
 
         val executor = androidx.core.content.ContextCompat.getMainExecutor(this)
         val biometricPrompt = androidx.biometric.BiometricPrompt(this, executor,
             object : androidx.biometric.BiometricPrompt.AuthenticationCallback() {
                 override fun onAuthenticationSucceeded(result: androidx.biometric.BiometricPrompt.AuthenticationResult) {
-                    biometricUnlocked = true
-                    recreate()
+                    initApp()
                 }
                 override fun onAuthenticationError(errorCode: Int, errString: CharSequence) {
                     if (errorCode == androidx.biometric.BiometricPrompt.ERROR_USER_CANCELED ||
@@ -152,9 +153,10 @@ class MainActivity : FragmentActivity() {
         enableEdgeToEdge()
         super.onCreate(savedInstanceState)
 
-        if (!biometricUnlocked) {
-            checkBiometric()
-        }
+        checkBiometricAndInit()
+    }
+
+    private fun initApp() {
 
         requestNotificationPermission()
 
