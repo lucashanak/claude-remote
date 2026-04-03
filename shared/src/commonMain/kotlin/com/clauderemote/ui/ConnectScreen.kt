@@ -33,16 +33,21 @@ fun ConnectScreen(
     var selectedMode by remember { mutableStateOf(appSettings.defaultClaudeMode) }
     var selectedModel by remember { mutableStateOf(appSettings.defaultClaudeModel) }
     var connectionType by remember { mutableStateOf(ConnectionType.SSH) }
-    var tmuxSessionName by remember { mutableStateOf("claude-${server.name}-${server.defaultFolder.substringAfterLast('/')}") }
+    var tmuxSessionName by remember {
+        val folderPart = server.defaultFolder.substringAfterLast('/').ifBlank { server.defaultFolder }
+        val yoloSuffix = if (appSettings.defaultClaudeMode == ClaudeMode.YOLO) "-yolo" else ""
+        mutableStateOf("claude-${server.name}-${folderPart}${yoloSuffix}".take(32))
+    }
     var useExistingTmux by remember { mutableStateOf(false) }
     var browseFolders by remember { mutableStateOf<List<String>>(emptyList()) }
     var browseLoading by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
-    // Auto-update tmux name when folder changes
-    LaunchedEffect(folder) {
+    // Auto-update tmux name when folder or mode changes
+    LaunchedEffect(folder, selectedMode) {
         if (!useExistingTmux) {
             val folderName = folder.substringAfterLast('/').ifBlank { folder.trimEnd('/').substringAfterLast('/') }
-            tmuxSessionName = "claude-${server.name}-${folderName}".take(32)
+            val yoloSuffix = if (selectedMode == ClaudeMode.YOLO) "-yolo" else ""
+            tmuxSessionName = "claude-${server.name}-${folderName}${yoloSuffix}".take(32)
         }
     }
     var modelExpanded by remember { mutableStateOf(false) }

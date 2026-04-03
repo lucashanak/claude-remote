@@ -237,15 +237,20 @@ fun App(
                             scope.launch {
                                 try {
                                     connectionError = null
-                                    // Parse folder from tmux session name (claude-server-folder)
+                                    // Parse folder and mode from tmux session name
+                                    // Format: claude-{server}-{folder}[-yolo]
                                     val prefix = "claude-${remote.server.name}-"
-                                    val folderFromTmux = if (remote.tmuxSession.name.startsWith(prefix)) {
+                                    var remainder = if (remote.tmuxSession.name.startsWith(prefix)) {
                                         remote.tmuxSession.name.removePrefix(prefix)
                                     } else remote.tmuxSession.name
+                                    val isYolo = remainder.endsWith("-yolo")
+                                    if (isYolo) remainder = remainder.removeSuffix("-yolo")
+                                    val folderFromTmux = remainder.ifBlank { remote.server.defaultFolder }
+                                    val modeFromTmux = if (isYolo) ClaudeMode.YOLO else remote.server.defaultClaudeMode
                                     sessionOrchestrator.launchSession(
                                         server = remote.server,
                                         folder = folderFromTmux,
-                                        mode = remote.server.defaultClaudeMode,
+                                        mode = modeFromTmux,
                                         model = remote.server.defaultClaudeModel,
                                         connectionType = ConnectionType.SSH,
                                         tmuxSessionName = remote.tmuxSession.name,
@@ -262,13 +267,14 @@ fun App(
                             scope.launch {
                                 try {
                                     connectionError = null
+                                    val yoloSuffix = if (server.defaultClaudeMode == ClaudeMode.YOLO) "-yolo" else ""
                                     sessionOrchestrator.launchSession(
                                         server = server,
                                         folder = server.defaultFolder,
                                         mode = server.defaultClaudeMode,
                                         model = server.defaultClaudeModel,
                                         connectionType = ConnectionType.SSH,
-                                        tmuxSessionName = "claude-${server.name}",
+                                        tmuxSessionName = "claude-${server.name}${yoloSuffix}",
                                         isNewTmuxSession = true
                                     )
                                     currentScreen = Screen.TERMINAL
