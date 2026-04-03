@@ -19,6 +19,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
+import androidx.compose.runtime.saveable.rememberSaveable
 import com.clauderemote.model.ClaudeModel
 import com.clauderemote.model.ClaudeSession
 import com.clauderemote.model.SessionStatus
@@ -249,7 +250,7 @@ private fun PromptInputBar(
     onSendCommand: (String) -> Unit,
     onAttachFile: (suspend () -> String?)? = null
 ) {
-    var text by remember { mutableStateOf("") }
+    var text by rememberSaveable { mutableStateOf("") }
     var uploading by remember { mutableStateOf(false) }
     val promptScope = rememberCoroutineScope()
     // Show inline suggestions when text starts with /
