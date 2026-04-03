@@ -10,7 +10,7 @@ Mobile and desktop app for remotely controlling [Claude Code](https://docs.anthr
 
 | Launcher | Terminal | Expanded Input | Settings |
 |----------|----------|----------------|----------|
-| Server list with active sessions | xterm.js terminal with Claude Code | Multi-line editor with templates & history | Terminal, Claude defaults, connection config |
+| ![Launcher](docs/screenshots/launcher.jpeg) | ![Terminal](docs/screenshots/terminal.jpeg) | ![Input](docs/screenshots/input.jpeg) | ![Settings](docs/screenshots/settings.jpeg) |
 
 ## Features
 
