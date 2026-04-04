@@ -22,7 +22,21 @@ import javafx.scene.web.WebEngine
 import javafx.scene.web.WebView
 import netscape.javascript.JSObject
 import java.awt.BorderLayout
+import java.io.File
 import javax.swing.JPanel
+
+/** Extract terminal assets from jar to temp directory for reliable WebView loading */
+private fun extractTerminalAssets(): File {
+    val dir = File(System.getProperty("java.io.tmpdir"), "claude-remote-terminal")
+    dir.mkdirs()
+    val assets = listOf("terminal.html", "xterm.js", "xterm.css", "xterm-addon-fit.js", "xterm-addon-search.js", "xterm-addon-web-links.js")
+    for (name in assets) {
+        val stream = object {}.javaClass.getResourceAsStream("/terminal/$name") ?: continue
+        val target = File(dir, name)
+        stream.use { input -> target.outputStream().use { output -> input.copyTo(output) } }
+    }
+    return dir
+}
 
 /** Reference to the JavaFX WebEngine for terminal I/O */
 private var webEngine: WebEngine? = null
@@ -146,10 +160,9 @@ private fun DesktopTerminalWebView(
                         }
                     }
 
-                    val url = DesktopTerminalBridge::class.java.getResource("/terminal/terminal.html")?.toExternalForm()
-                    if (url != null) {
-                        engine.load(url)
-                    }
+                    val terminalDir = extractTerminalAssets()
+                    val htmlFile = File(terminalDir, "terminal.html")
+                    engine.load(htmlFile.toURI().toString())
 
                     jfxPanel.scene = Scene(webView)
                 }
