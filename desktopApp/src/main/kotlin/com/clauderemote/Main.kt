@@ -123,6 +123,9 @@ private fun DesktopTerminalWebView(
                     webEngine = engine
 
                     engine.loadWorker.stateProperty().addListener { _, _, newState ->
+                        if (newState == Worker.State.FAILED) {
+                            FileLogger.error("Desktop", "WebView load failed: ${engine.loadWorker.exception?.message}", engine.loadWorker.exception)
+                        }
                         if (newState == Worker.State.SUCCEEDED) {
                             // Inject the bridge as window.Android (same name as Android app)
                             val window = engine.executeScript("window") as JSObject
