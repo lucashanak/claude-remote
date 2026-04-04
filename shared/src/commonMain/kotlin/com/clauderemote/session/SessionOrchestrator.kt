@@ -132,12 +132,12 @@ class SessionOrchestrator(
         )
 
         // Wait for shell prompt
-        kotlinx.coroutines.delay(500)
+        kotlinx.coroutines.delay(800)
 
         // Startup command
         if (session.server.startupCommand.isNotBlank()) {
             sshManager.sendInput(session.server.startupCommand + "\n")
-            kotlinx.coroutines.delay(300)
+            kotlinx.coroutines.delay(500)
         }
 
         // Tmux
@@ -188,8 +188,13 @@ class SessionOrchestrator(
                     }
                 )
 
-                // Wait for shell, then reattach tmux
-                kotlinx.coroutines.delay(500)
+                // Wait for shell prompt to be ready
+                kotlinx.coroutines.delay(800)
+                // Clear any garbage in the shell input (DA responses etc.)
+                sshManager.sendInput("\u0003") // Ctrl-C
+                kotlinx.coroutines.delay(200)
+                sshManager.sendInput("\n")     // blank Enter to get clean prompt
+                kotlinx.coroutines.delay(300)
                 sendTmuxCommand(sshManager, session, false) // always attach existing
 
                 tabManager.updateTabStatus(session.id, SessionStatus.ACTIVE)

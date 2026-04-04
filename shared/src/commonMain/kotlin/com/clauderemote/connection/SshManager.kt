@@ -49,8 +49,8 @@ class SshManager(
         ioScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
         FileLogger.log(TAG, "Connecting to ${server.host}:${server.port} as ${server.username}")
 
-        // Reset xterm state
-        onOutput("\u001b[?1049l\u001b[?1002l\u001b[?1003l\u001b[?1006l")
+        // Note: xterm reset sequences removed — they caused DA response
+        // (0;276;0c) to leak into SSH shell as text input
 
         val jsch = JSch()
         if (server.authMethod == AuthMethod.KEY && server.privateKey != null) {
