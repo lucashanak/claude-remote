@@ -25,15 +25,24 @@ import java.awt.BorderLayout
 import java.io.File
 import javax.swing.JPanel
 
-/** Extract terminal assets from jar to temp directory for reliable WebView loading */
+/** Extract terminal assets from jar to app cache directory for reliable WebView loading */
 private fun extractTerminalAssets(): File {
-    val dir = File(System.getProperty("java.io.tmpdir"), "claude-remote-terminal")
+    val dir = File(System.getProperty("user.home"), ".claude-remote/terminal")
     dir.mkdirs()
     val assets = listOf("terminal.html", "xterm.js", "xterm.css", "xterm-addon-fit.js", "xterm-addon-search.js", "xterm-addon-web-links.js")
     for (name in assets) {
-        val stream = object {}.javaClass.getResourceAsStream("/terminal/$name") ?: continue
+        val stream = object {}.javaClass.getResourceAsStream("/terminal/$name")
+        if (stream == null) {
+            FileLogger.error("Desktop", "Asset not found in JAR: /terminal/$name", null)
+            continue
+        }
         val target = File(dir, name)
-        stream.use { input -> target.outputStream().use { output -> input.copyTo(output) } }
+        try {
+            stream.use { input -> target.outputStream().use { output -> input.copyTo(output) } }
+            FileLogger.log("Desktop", "Extracted: $name (${target.length()} bytes)")
+        } catch (e: Exception) {
+            FileLogger.error("Desktop", "Failed to extract $name", e)
+        }
     }
     return dir
 }
@@ -136,6 +145,14 @@ private fun DesktopTerminalWebView(
                     val engine = webView.engine
                     webEngine = engine
 
+                    // Capture JavaScript console messages
+                    engine.setOnAlert { event ->
+                        FileLogger.log("WebView-JS", event.data)
+                    }
+                    engine.loadWorker.exceptionProperty().addListener { _, _, ex ->
+                        if (ex != null) FileLogger.error("Desktop", "WebView exception: ${ex.message}", ex)
+                    }
+
                     engine.loadWorker.stateProperty().addListener { _, _, newState ->
                         if (newState == Worker.State.FAILED) {
                             FileLogger.error("Desktop", "WebView load failed: ${engine.loadWorker.exception?.message}", engine.loadWorker.exception)
@@ -162,7 +179,9 @@ private fun DesktopTerminalWebView(
 
                     val terminalDir = extractTerminalAssets()
                     val htmlFile = File(terminalDir, "terminal.html")
-                    engine.load(htmlFile.toURI().toString())
+                    val loadUrl = htmlFile.toURI().toString()
+                    FileLogger.log("Desktop", "Loading WebView: $loadUrl (exists=${htmlFile.exists()}, size=${htmlFile.length()})")
+                    engine.load(loadUrl)
 
                     jfxPanel.scene = Scene(webView)
                 }

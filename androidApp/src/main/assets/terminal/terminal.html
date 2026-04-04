@@ -61,6 +61,12 @@ html, body { background:#1E1E1E; overflow:hidden; width:100%; height:100%; displ
 <script>
 'use strict';
 
+// Log errors for debugging (visible via JavaFX console bridge)
+window.onerror = function(msg, url, line, col, err) {
+    document.body.style.background = '#300';
+    document.body.innerHTML = '<pre style="color:#f88;padding:20px">JS Error: ' + msg + '\nat ' + url + ':' + line + ':' + col + '\n' + (err ? err.stack : '') + '</pre>';
+};
+
 const A = window.Android;
 
 function showToast(msg, ms) {
