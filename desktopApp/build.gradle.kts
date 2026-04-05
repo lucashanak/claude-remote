@@ -30,8 +30,8 @@ dependencies {
     implementation(compose.material3)
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-swing:1.9.0")
 
-    // JavaFX WebView for terminal rendering
-    for (module in listOf("base", "graphics", "controls", "web", "swing")) {
+    // JavaFX WebView for terminal rendering (media needed for WebKit on macOS)
+    for (module in listOf("base", "graphics", "controls", "media", "web", "swing")) {
         implementation("org.openjfx:javafx-$module:$javafxVersion:$javafxClassifier")
     }
 }

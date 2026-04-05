@@ -99,7 +99,7 @@ fun main() = application {
             appSettings = appSettings,
             tabManager = tabManager,
             sessionOrchestrator = sessionOrchestrator,
-            appVersion = "1.0.0",
+            appVersion = System.getProperty("jpackage.app-version") ?: "dev",
             onTerminalScreenVisible = {
                 val activeId = tabManager.activeTabId.value ?: return@App
                 val buffer = sessionOrchestrator.getBuffer(activeId)
@@ -136,6 +136,9 @@ private fun DesktopTerminalWebView(
         modifier = modifier,
         factory = {
             JPanel(BorderLayout()).also { panel ->
+                panel.background = java.awt.Color(0x1E, 0x1E, 0x1E)
+
+                try {
                 val jfxPanel = JFXPanel() // This initializes the JavaFX toolkit
                 panel.add(jfxPanel, BorderLayout.CENTER)
 
@@ -145,15 +148,19 @@ private fun DesktopTerminalWebView(
                     val engine = webView.engine
                     webEngine = engine
 
-                    // Capture JavaScript console messages
+                    // Capture JavaScript console/error messages
                     engine.setOnAlert { event ->
                         FileLogger.log("WebView-JS", event.data)
+                    }
+                    engine.setOnError { event ->
+                        FileLogger.error("Desktop", "WebView error: ${event.message}", null)
                     }
                     engine.loadWorker.exceptionProperty().addListener { _, _, ex ->
                         if (ex != null) FileLogger.error("Desktop", "WebView exception: ${ex.message}", ex)
                     }
 
                     engine.loadWorker.stateProperty().addListener { _, _, newState ->
+                        FileLogger.log("Desktop", "WebView state: $newState")
                         if (newState == Worker.State.FAILED) {
                             FileLogger.error("Desktop", "WebView load failed: ${engine.loadWorker.exception?.message}", engine.loadWorker.exception)
                         }
@@ -184,6 +191,15 @@ private fun DesktopTerminalWebView(
                     engine.load(loadUrl)
 
                     jfxPanel.scene = Scene(webView)
+                }
+                } catch (e: Exception) {
+                    FileLogger.error("Desktop", "JavaFX init failed: ${e.message}", e)
+                    val label = javax.swing.JLabel(
+                        "<html><center>Terminal failed to initialize.<br>${e.message}</center></html>"
+                    )
+                    label.foreground = java.awt.Color.WHITE
+                    label.horizontalAlignment = javax.swing.SwingConstants.CENTER
+                    panel.add(label, BorderLayout.CENTER)
                 }
             }
         }
