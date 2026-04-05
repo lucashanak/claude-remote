@@ -52,24 +52,41 @@ private fun extractTerminalAssets(): File {
 // Global CEF state
 private var cefApp: CefApp? = null
 private var cefBrowser: CefBrowser? = null
+@Volatile private var cefInitializing = false
+@Volatile private var cefError: String? = null
 
-private fun initCef(): CefApp {
-    cefApp?.let { return it }
-    val installDir = File(System.getProperty("user.home"), ".claude-remote/jcef")
-    installDir.mkdirs()
-    val builder = CefAppBuilder()
-    builder.setInstallDir(installDir)
-    builder.setAppHandler(object : MavenCefAppHandlerAdapter() {})
-    builder.cefSettings.windowless_rendering_enabled = false
-    builder.cefSettings.log_severity = org.cef.CefSettings.LogSeverity.LOGSEVERITY_ERROR
-    builder.addJcefArgs("--allow-file-access-from-files")
-    builder.addJcefArgs("--disable-web-security")
-    val app = builder.build()
-    cefApp = app
-    return app
+/** Initialize CEF on a background thread. Call early in app lifecycle. */
+private fun initCefAsync(onReady: () -> Unit = {}) {
+    if (cefApp != null) { onReady(); return }
+    if (cefInitializing) return
+    cefInitializing = true
+    Thread {
+        try {
+            val installDir = File(System.getProperty("user.home"), ".claude-remote/jcef")
+            installDir.mkdirs()
+            val builder = CefAppBuilder()
+            builder.setInstallDir(installDir)
+            builder.setAppHandler(object : MavenCefAppHandlerAdapter() {})
+            builder.cefSettings.windowless_rendering_enabled = false
+            builder.cefSettings.log_severity = org.cef.CefSettings.LogSeverity.LOGSEVERITY_ERROR
+            builder.addJcefArgs("--allow-file-access-from-files")
+            builder.addJcefArgs("--disable-web-security")
+            cefApp = builder.build()
+            cefInitializing = false
+            FileLogger.log("Desktop", "CEF initialized")
+            javax.swing.SwingUtilities.invokeLater { onReady() }
+        } catch (e: Exception) {
+            cefError = e.message
+            cefInitializing = false
+            FileLogger.error("Desktop", "CEF init failed: ${e.message}", e)
+        }
+    }.start()
 }
 
 fun main() = application {
+    // Start CEF download/init early in background
+    initCefAsync()
+
     val prefs = PlatformPreferences()
     val serverStorage = ServerStorage(prefs)
     val appSettings = AppSettings(prefs)
@@ -156,8 +173,18 @@ private fun DesktopTerminalWebView(
             JPanel(BorderLayout()).also { panel ->
                 panel.background = java.awt.Color(0x1E, 0x1E, 0x1E)
 
+                fun setupBrowser(panel: JPanel) {
                 try {
-                    val app = initCef()
+                    val app = cefApp ?: run {
+                        // CEF not ready yet — wait and retry
+                        initCefAsync { setupBrowser(panel) }
+                        val label = javax.swing.JLabel("Initializing terminal engine...")
+                        label.foreground = java.awt.Color.GRAY
+                        label.horizontalAlignment = javax.swing.SwingConstants.CENTER
+                        panel.add(label, BorderLayout.CENTER)
+                        return
+                    }
+                    panel.removeAll()
                     val client = app.createClient()
 
                     // Message router for JS → Kotlin calls
@@ -293,6 +320,7 @@ private fun DesktopTerminalWebView(
 
                 } catch (e: Exception) {
                     FileLogger.error("Desktop", "CEF init failed: ${e.message}", e)
+                    panel.removeAll()
                     val label = javax.swing.JLabel(
                         "<html><center style='color:white'>Terminal failed to initialize.<br>${e.message}</center></html>"
                     )
@@ -300,6 +328,9 @@ private fun DesktopTerminalWebView(
                     label.horizontalAlignment = javax.swing.SwingConstants.CENTER
                     panel.add(label, BorderLayout.CENTER)
                 }
+                } // end setupBrowser
+
+                setupBrowser(panel)
             }
         }
     )
