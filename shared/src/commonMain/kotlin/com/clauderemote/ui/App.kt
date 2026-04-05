@@ -2,8 +2,10 @@ package com.clauderemote.ui
 
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.WindowInsetsSides
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.ime
+import androidx.compose.foundation.layout.only
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.systemBars
 import androidx.compose.foundation.layout.union
@@ -213,7 +215,8 @@ fun App(
 
     ClaudeRemoteTheme(darkTheme = darkTheme) {
         val insets = if (currentScreen == Screen.TERMINAL) {
-            WindowInsets.ime
+            WindowInsets.systemBars.only(WindowInsetsSides.Top + WindowInsetsSides.Horizontal)
+                .union(WindowInsets.ime)
         } else {
             WindowInsets.systemBars.union(WindowInsets.ime)
         }
