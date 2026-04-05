@@ -52,14 +52,19 @@ private fun extractTerminalAssets(): File {
 // Global CEF state
 private var cefApp: CefApp? = null
 private var cefBrowser: CefBrowser? = null
-@Volatile private var cefInitializing = false
 @Volatile private var cefError: String? = null
+private val cefReadyCallbacks = mutableListOf<() -> Unit>()
+private var cefInitStarted = false
 
 /** Initialize CEF on a background thread. Call early in app lifecycle. */
-private fun initCefAsync(onReady: () -> Unit = {}) {
-    if (cefApp != null) { onReady(); return }
-    if (cefInitializing) return
-    cefInitializing = true
+@Synchronized
+private fun initCefAsync(onReady: (() -> Unit)? = null) {
+    if (onReady != null) {
+        if (cefApp != null) { javax.swing.SwingUtilities.invokeLater(onReady); return }
+        cefReadyCallbacks.add(onReady)
+    }
+    if (cefInitStarted) return
+    cefInitStarted = true
     Thread {
         try {
             val installDir = File(System.getProperty("user.home"), ".claude-remote/jcef")
@@ -72,12 +77,15 @@ private fun initCefAsync(onReady: () -> Unit = {}) {
             builder.addJcefArgs("--allow-file-access-from-files")
             builder.addJcefArgs("--disable-web-security")
             cefApp = builder.build()
-            cefInitializing = false
             FileLogger.log("Desktop", "CEF initialized")
-            javax.swing.SwingUtilities.invokeLater { onReady() }
+            javax.swing.SwingUtilities.invokeLater {
+                synchronized(cefReadyCallbacks) {
+                    cefReadyCallbacks.forEach { it() }
+                    cefReadyCallbacks.clear()
+                }
+            }
         } catch (e: Exception) {
             cefError = e.message
-            cefInitializing = false
             FileLogger.error("Desktop", "CEF init failed: ${e.message}", e)
         }
     }.start()
