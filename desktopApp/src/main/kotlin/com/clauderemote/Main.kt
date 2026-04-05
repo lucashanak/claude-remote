@@ -237,10 +237,10 @@ private fun DesktopTerminalWebView(
                     // Log JS console errors
                     client.addDisplayHandler(object : CefDisplayHandlerAdapter() {
                         override fun onConsoleMessage(
-                            browser: CefBrowser?, level: org.cef.handler.CefDisplayHandler.LogSeverity?,
+                            browser: CefBrowser?, level: org.cef.CefSettings.LogSeverity?,
                             message: String?, source: String?, line: Int
                         ): Boolean {
-                            if (level == org.cef.handler.CefDisplayHandler.LogSeverity.LOGSEVERITY_ERROR) {
+                            if (level == org.cef.CefSettings.LogSeverity.LOGSEVERITY_ERROR) {
                                 FileLogger.error("CEF-JS", "$message ($source:$line)", null)
                             }
                             return false
@@ -250,19 +250,17 @@ private fun DesktopTerminalWebView(
                     // On load complete: inject bridge and init
                     client.addLoadHandler(object : CefLoadHandlerAdapter() {
                         override fun onLoadEnd(browser: CefBrowser?, frame: org.cef.browser.CefFrame?, httpStatusCode: Int) {
-                            if (frame?.isMain != true) return
+                            if (frame?.isMain != true || browser == null) return
+                            val url = browser.url ?: ""
                             // Inject bridge shim that mimics window.Android interface
-                            browser?.executeJavaScript("""
+                            browser.executeJavaScript("""
                                 window.Android = {
                                     onTerminalInput: function(data) { window.cefQuery({request: 'onTerminalInput:' + data}); },
                                     onTerminalReady: function(cols, rows) { window.cefQuery({request: 'onTerminalReady:' + cols + ',' + rows}); },
                                     onTerminalResize: function(cols, rows) { window.cefQuery({request: 'onTerminalResize:' + cols + ',' + rows}); },
                                     copyToClipboard: function(text) { window.cefQuery({request: 'copyToClipboard:' + text}); },
-                                    getClipboard: function() {
-                                        // Sync not possible via cefQuery, return empty
-                                        return '';
-                                    },
-                                    openUrl: function(url) { window.cefQuery({request: 'openUrl:' + url}); },
+                                    getClipboard: function() { return ''; },
+                                    openUrl: function(u) { window.cefQuery({request: 'openUrl:' + u}); },
                                     exportScrollback: function(c) { window.cefQuery({request: 'exportScrollback:' + c}); },
                                     haptic: function() {},
                                     setHandleDrag: function(a) {}
@@ -271,16 +269,16 @@ private fun DesktopTerminalWebView(
                                 if (typeof fitAddon !== 'undefined') {
                                     setTimeout(function() { fitAddon.fit(); A.onTerminalReady(term.cols, term.rows); }, 100);
                                 }
-                            """.trimIndent(), browser.url, 0)
+                            """.trimIndent(), url, 0)
 
                             // Apply saved settings
                             val fontSize = appSettings.terminalFontSize
                             if (fontSize != 14) {
-                                browser.executeJavaScript("setFontSize($fontSize)", browser.url, 0)
+                                browser.executeJavaScript("setFontSize($fontSize)", url, 0)
                             }
                             val scheme = appSettings.terminalColorScheme
                             if (scheme != "default") {
-                                browser.executeJavaScript("applyColorScheme('$scheme')", browser.url, 0)
+                                browser.executeJavaScript("applyColorScheme('$scheme')", url, 0)
                             }
                         }
                     })
