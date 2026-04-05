@@ -155,7 +155,7 @@ class SessionOrchestrator(
             sshManager.sendInput(command + "\n")
         } else {
             val escaped = session.tmuxSessionName.replace("'", "\\'")
-            val command = "tmux attach-session -d -t '$escaped' 2>/dev/null || tmux new-session -A -s '$escaped' \\; set-option -g mouse on"
+            val command = "tmux attach-session -t '$escaped' 2>/dev/null || tmux new-session -A -s '$escaped' \\; set-option -g mouse on"
             FileLogger.log(TAG, "Attaching to tmux: $command")
             sshManager.sendInput(command + "\n")
         }
