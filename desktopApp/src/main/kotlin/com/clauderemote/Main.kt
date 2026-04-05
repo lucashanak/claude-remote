@@ -14,18 +14,21 @@ import com.clauderemote.storage.PlatformPreferences
 import com.clauderemote.storage.ServerStorage
 import com.clauderemote.ui.App
 import com.clauderemote.util.FileLogger
-import javafx.application.Platform
-import javafx.concurrent.Worker
-import javafx.embed.swing.JFXPanel
-import javafx.scene.Scene
-import javafx.scene.web.WebEngine
-import javafx.scene.web.WebView
-import netscape.javascript.JSObject
+import me.friwi.jcefmaven.CefAppBuilder
+import me.friwi.jcefmaven.MavenCefAppHandlerAdapter
+import org.cef.CefApp
+import org.cef.CefClient
+import org.cef.browser.CefBrowser
+import org.cef.browser.CefMessageRouter
+import org.cef.callback.CefQueryCallback
+import org.cef.handler.CefDisplayHandlerAdapter
+import org.cef.handler.CefLoadHandlerAdapter
+import org.cef.handler.CefMessageRouterHandlerAdapter
 import java.awt.BorderLayout
 import java.io.File
 import javax.swing.JPanel
 
-/** Extract terminal assets from jar to app cache directory for reliable WebView loading */
+/** Extract terminal assets from jar to app cache directory */
 private fun extractTerminalAssets(): File {
     val dir = File(System.getProperty("user.home"), ".claude-remote/terminal")
     dir.mkdirs()
@@ -39,7 +42,6 @@ private fun extractTerminalAssets(): File {
         val target = File(dir, name)
         try {
             stream.use { input -> target.outputStream().use { output -> input.copyTo(output) } }
-            FileLogger.log("Desktop", "Extracted: $name (${target.length()} bytes)")
         } catch (e: Exception) {
             FileLogger.error("Desktop", "Failed to extract $name", e)
         }
@@ -47,8 +49,25 @@ private fun extractTerminalAssets(): File {
     return dir
 }
 
-/** Reference to the JavaFX WebEngine for terminal I/O */
-private var webEngine: WebEngine? = null
+// Global CEF state
+private var cefApp: CefApp? = null
+private var cefBrowser: CefBrowser? = null
+
+private fun initCef(): CefApp {
+    cefApp?.let { return it }
+    val installDir = File(System.getProperty("user.home"), ".claude-remote/jcef")
+    installDir.mkdirs()
+    val builder = CefAppBuilder()
+    builder.setInstallDir(installDir)
+    builder.setAppHandler(object : MavenCefAppHandlerAdapter() {})
+    builder.cefSettings.windowless_rendering_enabled = false
+    builder.cefSettings.log_severity = org.cef.CefSettings.LogSeverity.LOGSEVERITY_ERROR
+    builder.addJcefArgs("--allow-file-access-from-files")
+    builder.addJcefArgs("--disable-web-security")
+    val app = builder.build()
+    cefApp = app
+    return app
+}
 
 fun main() = application {
     val prefs = PlatformPreferences()
@@ -90,7 +109,11 @@ fun main() = application {
     }
 
     Window(
-        onCloseRequest = ::exitApplication,
+        onCloseRequest = {
+            cefBrowser?.close(true)
+            cefApp?.dispose()
+            exitApplication()
+        },
         title = "Claude Remote",
         state = rememberWindowState(width = 1000.dp, height = 700.dp)
     ) {
@@ -127,11 +150,6 @@ private fun DesktopTerminalWebView(
     sessionOrchestrator: SessionOrchestrator,
     appSettings: AppSettings
 ) {
-    // Keep strong reference so GC doesn't collect the bridge (JSObject uses weak refs)
-    val bridge = remember {
-        DesktopTerminalBridge(tabManager, sessionOrchestrator, appSettings)
-    }
-
     SwingPanel(
         modifier = modifier,
         factory = {
@@ -139,63 +157,146 @@ private fun DesktopTerminalWebView(
                 panel.background = java.awt.Color(0x1E, 0x1E, 0x1E)
 
                 try {
-                val jfxPanel = JFXPanel() // This initializes the JavaFX toolkit
-                panel.add(jfxPanel, BorderLayout.CENTER)
+                    val app = initCef()
+                    val client = app.createClient()
 
-                Platform.setImplicitExit(false)
-                Platform.runLater {
-                    val webView = WebView()
-                    val engine = webView.engine
-                    webEngine = engine
+                    // Message router for JS → Kotlin calls
+                    val routerConfig = CefMessageRouter.CefMessageRouterConfig()
+                    routerConfig.jsQueryFunction = "cefQuery"
+                    routerConfig.jsCancelFunction = "cefQueryCancel"
+                    val msgRouter = CefMessageRouter.create(routerConfig)
 
-                    // Capture JavaScript console/error messages
-                    engine.setOnAlert { event ->
-                        FileLogger.log("WebView-JS", event.data)
-                    }
-                    engine.setOnError { event ->
-                        FileLogger.error("Desktop", "WebView error: ${event.message}", null)
-                    }
-                    engine.loadWorker.exceptionProperty().addListener { _, _, ex ->
-                        if (ex != null) FileLogger.error("Desktop", "WebView exception: ${ex.message}", ex)
-                    }
+                    msgRouter.addHandler(object : CefMessageRouterHandlerAdapter() {
+                        override fun onQuery(
+                            browser: CefBrowser?, frame: org.cef.browser.CefFrame?, queryId: Long,
+                            request: String?, persistent: Boolean, callback: CefQueryCallback?
+                        ): Boolean {
+                            if (request == null) return false
+                            // Protocol: "method:data"
+                            val colonIdx = request.indexOf(':')
+                            if (colonIdx < 0) return false
+                            val method = request.substring(0, colonIdx)
+                            val data = request.substring(colonIdx + 1)
 
-                    engine.loadWorker.stateProperty().addListener { _, _, newState ->
-                        FileLogger.log("Desktop", "WebView state: $newState")
-                        if (newState == Worker.State.FAILED) {
-                            FileLogger.error("Desktop", "WebView load failed: ${engine.loadWorker.exception?.message}", engine.loadWorker.exception)
+                            when (method) {
+                                "onTerminalInput" -> {
+                                    tabManager.activeTabId.value?.let { id ->
+                                        sessionOrchestrator.sendInput(id, data)
+                                    }
+                                }
+                                "onTerminalReady" -> {
+                                    val parts = data.split(",")
+                                    if (parts.size == 2) {
+                                        val cols = parts[0].toIntOrNull() ?: return false
+                                        val rows = parts[1].toIntOrNull() ?: return false
+                                        tabManager.activeTabId.value?.let { id ->
+                                            sessionOrchestrator.resize(id, cols, rows)
+                                        }
+                                    }
+                                }
+                                "onTerminalResize" -> {
+                                    val parts = data.split(",")
+                                    if (parts.size == 2) {
+                                        val cols = parts[0].toIntOrNull() ?: return false
+                                        val rows = parts[1].toIntOrNull() ?: return false
+                                        tabManager.activeTabId.value?.let { id ->
+                                            sessionOrchestrator.resize(id, cols, rows)
+                                        }
+                                    }
+                                }
+                                "copyToClipboard" -> {
+                                    val clipboard = java.awt.Toolkit.getDefaultToolkit().systemClipboard
+                                    clipboard.setContents(java.awt.datatransfer.StringSelection(data), null)
+                                }
+                                "getClipboard" -> {
+                                    val text = try {
+                                        val clipboard = java.awt.Toolkit.getDefaultToolkit().systemClipboard
+                                        clipboard.getData(java.awt.datatransfer.DataFlavor.stringFlavor) as? String ?: ""
+                                    } catch (_: Exception) { "" }
+                                    callback?.success(text)
+                                    return true
+                                }
+                                "openUrl" -> {
+                                    try { java.awt.Desktop.getDesktop().browse(java.net.URI(data)) } catch (_: Exception) {}
+                                }
+                                "exportScrollback" -> {
+                                    try {
+                                        val tmpFile = File.createTempFile("terminal_", ".log")
+                                        tmpFile.writeText(data)
+                                        java.awt.Desktop.getDesktop().open(tmpFile)
+                                    } catch (_: Exception) {}
+                                }
+                            }
+                            callback?.success("")
+                            return true
                         }
-                        if (newState == Worker.State.SUCCEEDED) {
-                            // Inject the bridge as window.Android (same name as Android app)
-                            val window = engine.executeScript("window") as JSObject
-                            window.setMember("Android", bridge)
-                            // Re-assign the cached `A` variable and trigger init
-                            engine.executeScript(
-                                "A = window.Android; if(A) { setTimeout(function() { fitAddon.fit(); A.onTerminalReady(term.cols, term.rows); }, 50); }"
-                            )
+                    }, true)
+
+                    client.addMessageRouter(msgRouter)
+
+                    // Log JS console errors
+                    client.addDisplayHandler(object : CefDisplayHandlerAdapter() {
+                        override fun onConsoleMessage(
+                            browser: CefBrowser?, level: org.cef.handler.CefDisplayHandler.LogSeverity?,
+                            message: String?, source: String?, line: Int
+                        ): Boolean {
+                            if (level == org.cef.handler.CefDisplayHandler.LogSeverity.LOGSEVERITY_ERROR) {
+                                FileLogger.error("CEF-JS", "$message ($source:$line)", null)
+                            }
+                            return false
+                        }
+                    })
+
+                    // On load complete: inject bridge and init
+                    client.addLoadHandler(object : CefLoadHandlerAdapter() {
+                        override fun onLoadEnd(browser: CefBrowser?, frame: org.cef.browser.CefFrame?, httpStatusCode: Int) {
+                            if (frame?.isMain != true) return
+                            // Inject bridge shim that mimics window.Android interface
+                            browser?.executeJavaScript("""
+                                window.Android = {
+                                    onTerminalInput: function(data) { window.cefQuery({request: 'onTerminalInput:' + data}); },
+                                    onTerminalReady: function(cols, rows) { window.cefQuery({request: 'onTerminalReady:' + cols + ',' + rows}); },
+                                    onTerminalResize: function(cols, rows) { window.cefQuery({request: 'onTerminalResize:' + cols + ',' + rows}); },
+                                    copyToClipboard: function(text) { window.cefQuery({request: 'copyToClipboard:' + text}); },
+                                    getClipboard: function() {
+                                        // Sync not possible via cefQuery, return empty
+                                        return '';
+                                    },
+                                    openUrl: function(url) { window.cefQuery({request: 'openUrl:' + url}); },
+                                    exportScrollback: function(c) { window.cefQuery({request: 'exportScrollback:' + c}); },
+                                    haptic: function() {},
+                                    setHandleDrag: function(a) {}
+                                };
+                                A = window.Android;
+                                if (typeof fitAddon !== 'undefined') {
+                                    setTimeout(function() { fitAddon.fit(); A.onTerminalReady(term.cols, term.rows); }, 100);
+                                }
+                            """.trimIndent(), browser.url, 0)
+
                             // Apply saved settings
                             val fontSize = appSettings.terminalFontSize
                             if (fontSize != 14) {
-                                engine.executeScript("setFontSize($fontSize)")
+                                browser.executeJavaScript("setFontSize($fontSize)", browser.url, 0)
                             }
                             val scheme = appSettings.terminalColorScheme
                             if (scheme != "default") {
-                                engine.executeScript("applyColorScheme('$scheme')")
+                                browser.executeJavaScript("applyColorScheme('$scheme')", browser.url, 0)
                             }
                         }
-                    }
+                    })
 
                     val terminalDir = extractTerminalAssets()
                     val htmlFile = File(terminalDir, "terminal.html")
-                    val loadUrl = htmlFile.toURI().toString()
-                    FileLogger.log("Desktop", "Loading WebView: $loadUrl (exists=${htmlFile.exists()}, size=${htmlFile.length()})")
-                    engine.load(loadUrl)
+                    val url = htmlFile.toURI().toString()
 
-                    jfxPanel.scene = Scene(webView)
-                }
+                    val browser = client.createBrowser(url, false, false)
+                    cefBrowser = browser
+                    panel.add(browser.uiComponent, BorderLayout.CENTER)
+
                 } catch (e: Exception) {
-                    FileLogger.error("Desktop", "JavaFX init failed: ${e.message}", e)
+                    FileLogger.error("Desktop", "CEF init failed: ${e.message}", e)
                     val label = javax.swing.JLabel(
-                        "<html><center>Terminal failed to initialize.<br>${e.message}</center></html>"
+                        "<html><center style='color:white'>Terminal failed to initialize.<br>${e.message}</center></html>"
                     )
                     label.foreground = java.awt.Color.WHITE
                     label.horizontalAlignment = javax.swing.SwingConstants.CENTER
@@ -204,64 +305,6 @@ private fun DesktopTerminalWebView(
             }
         }
     )
-}
-
-/**
- * JavaScript bridge exposed to terminal.html as `window.Android`.
- * Method signatures must match what the HTML expects.
- */
-class DesktopTerminalBridge(
-    private val tabManager: TabManager,
-    private val sessionOrchestrator: SessionOrchestrator,
-    private val appSettings: AppSettings
-) {
-    fun onTerminalInput(data: String) {
-        tabManager.activeTabId.value?.let { id ->
-            sessionOrchestrator.sendInput(id, data)
-        }
-    }
-
-    fun onTerminalReady(cols: Int, rows: Int) {
-        tabManager.activeTabId.value?.let { id ->
-            sessionOrchestrator.resize(id, cols, rows)
-        }
-    }
-
-    fun onTerminalResize(cols: Int, rows: Int) {
-        tabManager.activeTabId.value?.let { id ->
-            sessionOrchestrator.resize(id, cols, rows)
-        }
-    }
-
-    fun copyToClipboard(text: String) {
-        val clipboard = java.awt.Toolkit.getDefaultToolkit().systemClipboard
-        clipboard.setContents(java.awt.datatransfer.StringSelection(text), null)
-    }
-
-    fun getClipboard(): String {
-        return try {
-            val clipboard = java.awt.Toolkit.getDefaultToolkit().systemClipboard
-            clipboard.getData(java.awt.datatransfer.DataFlavor.stringFlavor) as? String ?: ""
-        } catch (_: Exception) { "" }
-    }
-
-    fun openUrl(url: String) {
-        try {
-            java.awt.Desktop.getDesktop().browse(java.net.URI(url))
-        } catch (_: Exception) {}
-    }
-
-    fun exportScrollback(content: String) {
-        try {
-            val tmpFile = java.io.File.createTempFile("terminal_", ".log")
-            tmpFile.writeText(content)
-            java.awt.Desktop.getDesktop().open(tmpFile)
-        } catch (_: Exception) {}
-    }
-
-    fun haptic() { /* no-op on desktop */ }
-
-    fun setHandleDrag(active: Boolean) { /* no-op on desktop */ }
 }
 
 // ── Terminal I/O helpers ──
@@ -284,40 +327,22 @@ private fun jsonQuote(s: String): String {
 }
 
 private fun writeToTerminal(data: String) {
-    val engine = webEngine ?: return
+    val browser = cefBrowser ?: return
     val safe = jsonQuote(data)
-    Platform.runLater {
-        try {
-            engine.executeScript("writeOutput($safe)")
-        } catch (_: Exception) {}
-    }
+    browser.executeJavaScript("if(typeof writeOutput==='function')writeOutput($safe)", browser.url, 0)
 }
 
 private fun clearTerminal() {
-    val engine = webEngine ?: return
-    Platform.runLater {
-        try {
-            engine.executeScript("clearTerminal()")
-        } catch (_: Exception) {}
-    }
+    val browser = cefBrowser ?: return
+    browser.executeJavaScript("if(typeof clearTerminal==='function')clearTerminal()", browser.url, 0)
 }
 
 private fun replayBuffer(bufferedOutput: String) {
-    val engine = webEngine ?: return
-    // Delay to ensure WebView is visible (mirrors Android's 150ms delay)
-    Platform.runLater {
-        val timer = javax.swing.Timer(150) {
-            Platform.runLater {
-                try {
-                    engine.executeScript("clearTerminal()")
-                    if (bufferedOutput.isNotEmpty()) {
-                        val safe = jsonQuote(bufferedOutput)
-                        engine.executeScript("writeOutput($safe)")
-                    }
-                } catch (_: Exception) {}
-            }
+    val browser = cefBrowser ?: return
+    javax.swing.Timer(150) {
+        clearTerminal()
+        if (bufferedOutput.isNotEmpty()) {
+            writeToTerminal(bufferedOutput)
         }
-        timer.isRepeats = false
-        timer.start()
-    }
+    }.apply { isRepeats = false; start() }
 }

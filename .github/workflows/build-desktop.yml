@@ -52,7 +52,7 @@ jobs:
           sed -i '' "s/packageVersion = .*/packageVersion = \"$VER\"/" desktopApp/build.gradle.kts
 
       - name: Build DMG
-        run: ./gradlew :desktopApp:packageDmg
+        run: ./gradlew :desktopApp:packageDmg -Dorg.gradle.jvmargs="-Xmx4g"
 
       - name: Rename DMG
         run: |
