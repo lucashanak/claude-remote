@@ -212,10 +212,15 @@ fun App(
     }
 
     ClaudeRemoteTheme(darkTheme = darkTheme) {
+        val insets = if (currentScreen == Screen.TERMINAL) {
+            WindowInsets.ime
+        } else {
+            WindowInsets.systemBars.union(WindowInsets.ime)
+        }
         Column(
             modifier = Modifier
                 .fillMaxSize()
-                .windowInsetsPadding(WindowInsets.systemBars.union(WindowInsets.ime))
+                .windowInsetsPadding(insets)
         ) {
             // Update banner at top
             UpdateBanner(
