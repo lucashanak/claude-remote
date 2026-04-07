@@ -112,14 +112,11 @@ fun main() = application {
     sessionOrchestrator.onTerminalOutput = { _, data ->
         connector.feedOutput(data)
     }
-    sessionOrchestrator.onTabSwitched = { _, bufferedOutput ->
-        // Clear and replay buffer
-        val widget = termWidget ?: return@onTabSwitched
+    sessionOrchestrator.onTabSwitched = tabSwitched@{ _, bufferedOutput ->
+        val widget = termWidget ?: return@tabSwitched
         javax.swing.SwingUtilities.invokeLater {
             widget.terminalPanel.clearBuffer()
-            if (bufferedOutput.isNotEmpty()) {
-                connector.feedOutput(bufferedOutput)
-            }
+            if (bufferedOutput.isNotEmpty()) connector.feedOutput(bufferedOutput)
         }
     }
 
@@ -203,13 +200,6 @@ private fun DesktopTerminalView(
 
                         override fun getBufferMaxLinesCount(): Int =
                             appSettings.terminalScrollback
-
-                        override fun defaultStyle(): com.jediterm.terminal.TextStyle {
-                            return com.jediterm.terminal.TextStyle(
-                                com.jediterm.terminal.TerminalColor { java.awt.Color(0xCC, 0xCC, 0xCC) },
-                                com.jediterm.terminal.TerminalColor { java.awt.Color(0x1E, 0x1E, 0x1E) }
-                            )
-                        }
 
                         override fun useAntialiasing(): Boolean = true
                     }
