@@ -378,7 +378,17 @@ private fun DesktopTerminalWebView(
 
                     val browser = client.createBrowser(url, false, false)
                     cefBrowser = browser
-                    panel.add(browser.uiComponent, BorderLayout.CENTER)
+                    val ui = browser.uiComponent
+                    FileLogger.log("Desktop", "Browser UI component: ${ui.javaClass.name} (${ui.preferredSize})")
+                    panel.add(ui, BorderLayout.CENTER)
+                    panel.revalidate()
+                    panel.repaint()
+                    // Force layout after a delay (macOS SwingPanel rendering quirk)
+                    javax.swing.Timer(500) {
+                        panel.revalidate()
+                        panel.repaint()
+                        ui.requestFocusInWindow()
+                    }.apply { isRepeats = false; start() }
 
                 } catch (e: Exception) {
                     FileLogger.error("Desktop", "CEF init failed: ${e.message}", e)
