@@ -170,6 +170,19 @@ fun main() = application {
             tabManager = tabManager,
             sessionOrchestrator = sessionOrchestrator,
             appVersion = System.getProperty("jpackage.app-version") ?: "dev",
+            onInstallUpdate = { bytes, info ->
+                try {
+                    val tmpDir = File(System.getProperty("java.io.tmpdir"), "claude-remote-update")
+                    tmpDir.mkdirs()
+                    val ext = if (info.dmgUrl.isNotBlank()) ".dmg" else ".apk"
+                    val updateFile = File(tmpDir, "ClaudeRemote-${info.version}$ext")
+                    updateFile.writeBytes(bytes)
+                    java.awt.Desktop.getDesktop().open(updateFile)
+                    FileLogger.log("Desktop", "Update saved and opened: ${updateFile.absolutePath}")
+                } catch (e: Exception) {
+                    FileLogger.error("Desktop", "Failed to install update: ${e.message}", e)
+                }
+            },
             onTerminalScreenVisible = {
                 val activeId = tabManager.activeTabId.value ?: return@App
                 val buffer = sessionOrchestrator.getBuffer(activeId)

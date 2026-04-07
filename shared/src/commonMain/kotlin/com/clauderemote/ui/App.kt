@@ -175,18 +175,24 @@ fun App(
     fun downloadUpdate(info: UpdateInfo) {
         scope.launch {
             try {
+                // Choose platform-appropriate asset URL
+                val downloadUrl = info.dmgUrl.ifBlank { info.apkUrl }
+                if (downloadUrl.isBlank()) {
+                    updateState = updateState.copy(error = "No update available for this platform")
+                    return@launch
+                }
+
                 updateState = updateState.copy(downloading = true, error = null, statusText = "Downloading...")
 
-                // Always download full APK (delta patching needs platform APK access)
-                val apkBytes = UpdateChecker.downloadFile(info.apkUrl) { progress, dl, total ->
+                val bytes = UpdateChecker.downloadFile(downloadUrl) { progress, dl, total ->
                     updateState = updateState.copy(
                         progress = progress,
                         statusText = "Downloading ${UpdateChecker.formatBytes(dl)} / ${UpdateChecker.formatBytes(total)}"
                     )
                 }
 
-                if (info.apkSha256 != null) {
-                    val actualHash = UpdateChecker.sha256(apkBytes)
+                if (info.apkSha256 != null && downloadUrl == info.apkUrl) {
+                    val actualHash = UpdateChecker.sha256(bytes)
                     if (actualHash != info.apkSha256) {
                         updateState = updateState.copy(
                             downloading = false,
@@ -197,7 +203,7 @@ fun App(
                 }
 
                 updateState = updateState.copy(statusText = "Installing v${info.version}...", progress = 100)
-                onInstallUpdate?.invoke(apkBytes, info)
+                onInstallUpdate?.invoke(bytes, info)
             } catch (e: Exception) {
                 updateState = updateState.copy(
                     downloading = false,

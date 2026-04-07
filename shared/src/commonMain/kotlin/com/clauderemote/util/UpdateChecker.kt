@@ -18,7 +18,9 @@ data class UpdateInfo(
     val apkUrl: String,
     val apkSize: Long,
     val patchChain: List<PatchStep>,
-    val apkSha256: String?
+    val apkSha256: String?,
+    val dmgUrl: String = "",
+    val dmgSize: Long = 0
 ) {
     val totalPatchSize: Long get() = patchChain.sumOf { it.size }
     val hasPatch: Boolean get() = patchChain.isNotEmpty()
@@ -53,18 +55,23 @@ object UpdateChecker {
             if (latestVer.isBlank() || latestVer == currentVersion) return@withContext null
             if (!isNewer(latestVer, currentVersion)) return@withContext null
 
-            // Find APK asset in latest release
+            // Find assets in latest release
             var apkUrl = ""
             var apkSize = 0L
+            var dmgUrl = ""
+            var dmgSize = 0L
             val latestAssets = latest.optJSONArray("assets") ?: return@withContext null
             for (i in 0 until latestAssets.length()) {
                 val a = latestAssets.getJSONObject(i)
-                if (a.optString("name", "").endsWith(".apk")) {
-                    apkUrl = a.optString("browser_download_url", "")
-                    apkSize = a.optLong("size", 0)
+                val name = a.optString("name", "")
+                val url = a.optString("browser_download_url", "")
+                val size = a.optLong("size", 0)
+                when {
+                    name.endsWith(".apk") -> { apkUrl = url; apkSize = size }
+                    name.endsWith(".dmg") -> { dmgUrl = url; dmgSize = size }
                 }
             }
-            if (apkUrl.isBlank()) return@withContext null
+            if (apkUrl.isBlank() && dmgUrl.isBlank()) return@withContext null
 
             // Extract SHA-256 from release body
             val body = latest.optString("body", "")
@@ -102,7 +109,7 @@ object UpdateChecker {
             }
             val validChain = if (ver == latestVer) chain else emptyList()
 
-            UpdateInfo(latestVer, apkUrl, apkSize, validChain, sha256)
+            UpdateInfo(latestVer, apkUrl, apkSize, validChain, sha256, dmgUrl, dmgSize)
         } catch (e: Exception) {
             FileLogger.error("UpdateChecker", "Check failed", e)
             null
