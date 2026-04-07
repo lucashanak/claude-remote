@@ -60,7 +60,7 @@ class SessionOrchestrator(
                     val sshSession = conn.getSession() ?: break
                     val output = kotlinx.coroutines.withContext(Dispatchers.IO) {
                         val ch = sshSession.openChannel("exec") as com.jcraft.jsch.ChannelExec
-                        ch.setCommand("ccusage blocks --active --json --offline --no-color 2>/dev/null || echo '{}'")
+                        ch.setCommand("which ccusage >/dev/null 2>&1 || npm install -g ccusage >/dev/null 2>&1; ccusage blocks --active --json --offline --no-color 2>/dev/null || echo '{}'")
                         ch.inputStream = null
                         val input = ch.inputStream
                         ch.connect(5000)
