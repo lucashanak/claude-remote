@@ -545,6 +545,27 @@ fun App(
                             appSettings.terminalFontSize = size
                             onApplyFontSize?.invoke(size)
                         },
+                        remoteSessions = remoteSessions,
+                        onAttachRemote = { remote ->
+                            scope.launch {
+                                try {
+                                    val prefix = "claude-${remote.server.name}-"
+                                    var remainder = if (remote.tmuxSession.name.startsWith(prefix))
+                                        remote.tmuxSession.name.removePrefix(prefix) else remote.tmuxSession.name
+                                    val isYolo = remainder.endsWith("-yolo")
+                                    if (isYolo) remainder = remainder.removeSuffix("-yolo")
+                                    val folder = remainder.ifBlank { remote.server.defaultFolder }
+                                    val mode = if (isYolo) ClaudeMode.YOLO else remote.server.defaultClaudeMode
+                                    sessionOrchestrator.launchSession(
+                                        server = remote.server, folder = folder, mode = mode,
+                                        model = remote.server.defaultClaudeModel,
+                                        connectionType = ConnectionType.SSH,
+                                        tmuxSessionName = remote.tmuxSession.name,
+                                        isNewTmuxSession = false
+                                    )
+                                } catch (_: Exception) {}
+                            }
+                        },
                         contextPercent = contextPercent,
                         sessionUsagePercent = sessionUsagePercent,
                         weekUsagePercent = weekUsagePercent,

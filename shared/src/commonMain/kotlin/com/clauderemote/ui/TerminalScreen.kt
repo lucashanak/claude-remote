@@ -51,6 +51,8 @@ fun TerminalScreen(
     onFetchClaudeMd: (suspend () -> String)? = null,
     onFetchCommands: (suspend () -> List<SlashCommand>)? = null,
     onFontSizeChange: ((Int) -> Unit)? = null,
+    onAttachRemote: ((com.clauderemote.model.RemoteSession) -> Unit)? = null,
+    remoteSessions: List<com.clauderemote.model.RemoteSession> = emptyList(),
     contextPercent: Int? = null,
     sessionUsagePercent: Int? = null,
     weekUsagePercent: Int? = null,
@@ -85,6 +87,8 @@ fun TerminalScreen(
                     onTabClose = onTabClose,
                     onNewTab = onNewTab,
                     onMenuOpen = onMenuOpen,
+                    remoteSessions = remoteSessions,
+                    onAttachRemote = onAttachRemote,
                     modifier = Modifier.width(200.dp).fillMaxHeight()
                 )
             }
@@ -179,6 +183,36 @@ fun TerminalScreen(
                                         ) {
                                             Icon(Icons.Default.Close, "Close", modifier = Modifier.size(14.dp))
                                         }
+                                    }
+                                )
+                            }
+                        }
+                        // Remote sessions (not yet connected)
+                        val connectedTmux = tabs.map { it.tmuxSessionName }.toSet()
+                        val unconnected = remoteSessions.filter { it.tmuxSession.name !in connectedTmux }
+                        if (unconnected.isNotEmpty()) {
+                            HorizontalDivider()
+                            Text(
+                                "Remote",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp)
+                            )
+                            unconnected.forEach { remote ->
+                                DropdownMenuItem(
+                                    text = {
+                                        Row(verticalAlignment = Alignment.CenterVertically) {
+                                            Box(modifier = Modifier.size(8.dp).background(Color(0xFF666666), shape = CircleShape))
+                                            Spacer(Modifier.width(8.dp))
+                                            Text(
+                                                remote.tmuxSession.name,
+                                                style = MaterialTheme.typography.bodySmall
+                                            )
+                                        }
+                                    },
+                                    onClick = {
+                                        sessionDropdown = false
+                                        onAttachRemote?.invoke(remote)
                                     }
                                 )
                             }
@@ -425,6 +459,8 @@ private fun SessionSidePanel(
     onTabClose: (String) -> Unit,
     onNewTab: () -> Unit,
     onMenuOpen: () -> Unit,
+    remoteSessions: List<com.clauderemote.model.RemoteSession> = emptyList(),
+    onAttachRemote: ((com.clauderemote.model.RemoteSession) -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
     Surface(
@@ -489,6 +525,40 @@ private fun SessionSidePanel(
                                 ) {
                                     Icon(Icons.Default.Close, "Close", modifier = Modifier.size(12.dp))
                                 }
+                            }
+                        }
+                    }
+                }
+                // Remote (unconnected) sessions
+                val connectedTmux = groupedTabs.values.flatten().map { it.tmuxSessionName }.toSet()
+                val unconnected = remoteSessions.filter { it.tmuxSession.name !in connectedTmux }
+                if (unconnected.isNotEmpty()) {
+                    HorizontalDivider(modifier = Modifier.padding(vertical = 4.dp))
+                    Text(
+                        "Remote",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp)
+                    )
+                    unconnected.forEach { remote ->
+                        Surface(
+                            color = Color.Transparent,
+                            modifier = Modifier.fillMaxWidth().clickable {
+                                onAttachRemote?.invoke(remote)
+                            }
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Box(modifier = Modifier.size(8.dp).background(Color(0xFF666666), shape = CircleShape))
+                                Spacer(Modifier.width(8.dp))
+                                Text(
+                                    remote.tmuxSession.name,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    modifier = Modifier.weight(1f),
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
                             }
                         }
                     }
