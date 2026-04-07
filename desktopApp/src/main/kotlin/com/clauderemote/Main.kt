@@ -24,8 +24,10 @@ import org.cef.callback.CefQueryCallback
 import org.cef.handler.CefDisplayHandlerAdapter
 import org.cef.handler.CefLoadHandlerAdapter
 import org.cef.handler.CefMessageRouterHandlerAdapter
+import com.sun.net.httpserver.HttpServer
 import java.awt.BorderLayout
 import java.io.File
+import java.net.InetSocketAddress
 import javax.swing.JPanel
 
 /** Extract terminal assets from jar to app cache directory */
@@ -47,6 +49,37 @@ private fun extractTerminalAssets(): File {
         }
     }
     return dir
+}
+
+/** Start a local HTTP server to serve terminal assets (avoids file:// cross-origin issues) */
+private var localServerPort = 0
+private fun startLocalServer(dir: File): Int {
+    if (localServerPort > 0) return localServerPort
+    val server = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
+    server.createContext("/") { exchange ->
+        val path = exchange.requestURI.path.trimStart('/')
+        val file = File(dir, if (path.isEmpty()) "terminal.html" else path)
+        if (file.exists() && file.canonicalPath.startsWith(dir.canonicalPath)) {
+            val contentType = when (file.extension) {
+                "html" -> "text/html"
+                "js" -> "application/javascript"
+                "css" -> "text/css"
+                else -> "application/octet-stream"
+            }
+            val bytes = file.readBytes()
+            exchange.responseHeaders["Content-Type"] = listOf(contentType)
+            exchange.sendResponseHeaders(200, bytes.size.toLong())
+            exchange.responseBody.use { it.write(bytes) }
+        } else {
+            exchange.sendResponseHeaders(404, 0)
+            exchange.responseBody.close()
+        }
+    }
+    server.executor = null
+    server.start()
+    localServerPort = server.address.port
+    FileLogger.log("Desktop", "Local HTTP server on port $localServerPort")
+    return localServerPort
 }
 
 // Global CEF state
@@ -74,8 +107,7 @@ private fun initCefAsync(onReady: (() -> Unit)? = null) {
             builder.setAppHandler(object : MavenCefAppHandlerAdapter() {})
             builder.cefSettings.windowless_rendering_enabled = false
             builder.cefSettings.log_severity = org.cef.CefSettings.LogSeverity.LOGSEVERITY_ERROR
-            builder.addJcefArgs("--allow-file-access-from-files")
-            builder.addJcefArgs("--disable-web-security")
+            // No longer need file:// flags — serving via localhost HTTP
             cefApp = builder.build()
             FileLogger.log("Desktop", "CEF initialized")
             javax.swing.SwingUtilities.invokeLater {
@@ -319,8 +351,8 @@ private fun DesktopTerminalWebView(
                     })
 
                     val terminalDir = extractTerminalAssets()
-                    val htmlFile = File(terminalDir, "terminal.html")
-                    val url = htmlFile.toURI().toString()
+                    val port = startLocalServer(terminalDir)
+                    val url = "http://127.0.0.1:$port/terminal.html"
 
                     val browser = client.createBrowser(url, false, false)
                     cefBrowser = browser
