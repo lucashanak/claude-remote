@@ -4,6 +4,8 @@ import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.*
+import androidx.compose.material3.pulltorefresh.PullToRefreshBox
+import androidx.compose.material3.pulltorefresh.rememberPullToRefreshState
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
@@ -62,10 +64,14 @@ fun LauncherScreen(
             }
         }
     ) { padding ->
+        PullToRefreshBox(
+            isRefreshing = remoteSessionsLoading,
+            onRefresh = { onRefreshRemote?.invoke() },
+            modifier = Modifier.fillMaxSize().padding(padding)
+        ) {
         LazyColumn(
             modifier = Modifier
                 .fillMaxSize()
-                .padding(padding)
                 .padding(horizontal = 16.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp)
         ) {
@@ -154,6 +160,7 @@ fun LauncherScreen(
 
             item { Spacer(Modifier.height(80.dp)) }
         }
+        } // end PullToRefreshBox
     }
 }
 
