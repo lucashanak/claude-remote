@@ -10,6 +10,7 @@ repositories {
     google()
     mavenCentral()
     maven("https://maven.pkg.jetbrains.space/public/p/compose/dev")
+    maven("https://packages.jetbrains.team/maven/p/ij/intellij-dependencies")
 }
 
 dependencies {
@@ -19,8 +20,8 @@ dependencies {
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-swing:1.9.0")
 
     // JediTerm — pure Swing terminal emulator (no WebView needed)
-    implementation("org.jetbrains.jediterm:jediterm-core:3.7")
-    implementation("org.jetbrains.jediterm:jediterm-ui:3.7")
+    implementation("org.jetbrains.jediterm:jediterm-core:3.64")
+    implementation("org.jetbrains.jediterm:jediterm-ui:3.64")
 }
 
 compose.desktop {
