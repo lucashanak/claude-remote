@@ -248,6 +248,11 @@ class MainActivity : FragmentActivity() {
                         fitTerminal()
                     }
                 },
+                onApplyFontSize = { size ->
+                    terminalWebView?.post {
+                        terminalWebView?.evaluateJavascript("setFontSize($size)", null)
+                    }
+                },
                 exitApp = { finishAffinity() },
                 terminalContent = { modifier ->
                     TerminalWebView(modifier = modifier)

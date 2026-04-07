@@ -49,6 +49,7 @@ fun App(
     onPickKeyFile: ((callback: (String) -> Unit) -> Unit)? = null,
     onImportServers: (() -> Unit)? = null,
     onPickFile: ((callback: (ByteArray, String) -> Unit) -> Unit)? = null,
+    onApplyFontSize: ((Int) -> Unit)? = null,
     exitApp: (() -> Unit)? = null,
     terminalContent: @Composable (modifier: Modifier) -> Unit
 ) {
@@ -62,6 +63,12 @@ fun App(
     var tmuxLoading by remember { mutableStateOf(false) }
     var connectionError by remember { mutableStateOf<String?>(null) }
     var tabCloseConfirmId by remember { mutableStateOf<String?>(null) }
+    var contextPercent by remember { mutableStateOf<Int?>(null) }
+
+    // Wire context updates
+    LaunchedEffect(Unit) {
+        sessionOrchestrator.onContextUpdate = { _, pct -> contextPercent = pct }
+    }
 
     var serverList by remember { mutableStateOf(serverStorage.loadServers()) }
     val tabs by tabManager.tabs.collectAsState()
@@ -528,6 +535,11 @@ fun App(
                                 com.clauderemote.session.CommandFetcher.getCachedOrFallback()
                             }
                         },
+                        onFontSizeChange = { size ->
+                            appSettings.terminalFontSize = size
+                            onApplyFontSize?.invoke(size)
+                        },
+                        contextPercent = contextPercent,
                         terminalContent = terminalContent
                     )
                 }

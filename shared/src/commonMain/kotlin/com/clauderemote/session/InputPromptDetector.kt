@@ -76,9 +76,52 @@ class InputPromptDetector {
         var userHasInteracted = false // Only notify after user has sent at least one input
     }
 
+    /**
+     * Parse context window usage from Claude Code terminal output.
+     * Claude Code displays patterns like "132.9k tokens remaining" or "X% context".
+     * Returns percentage used (0-100), or null if no context info found.
+     */
+    fun parseContextPercent(text: String): Int? {
+        val stripped = stripAnsi(text)
+
+        // Pattern: "XX.Xk/YYYk tokens" or similar ratio
+        CONTEXT_RATIO_REGEX.find(stripped)?.let { match ->
+            val used = parseTokenCount(match.groupValues[1])
+            val total = parseTokenCount(match.groupValues[2])
+            if (total > 0) return ((used / total) * 100).toInt().coerceIn(0, 100)
+        }
+
+        // Pattern: "XX% context" or "context: XX%"
+        CONTEXT_PERCENT_REGEX.find(stripped)?.let { match ->
+            return match.groupValues[1].toIntOrNull()?.coerceIn(0, 100)
+        }
+
+        // Pattern: "XXXk tokens remaining" with known total (200k default)
+        TOKENS_REMAINING_REGEX.find(stripped)?.let { match ->
+            val remaining = parseTokenCount(match.groupValues[1])
+            val total = 200.0 // assume 200k default context
+            if (remaining in 0.0..total) {
+                return ((1.0 - remaining / total) * 100).toInt().coerceIn(0, 100)
+            }
+        }
+
+        return null
+    }
+
+    private fun parseTokenCount(s: String): Double {
+        val clean = s.replace(",", "").trim()
+        return when {
+            clean.endsWith("k", ignoreCase = true) -> clean.dropLast(1).toDoubleOrNull()?.times(1.0) ?: 0.0
+            clean.endsWith("m", ignoreCase = true) -> clean.dropLast(1).toDoubleOrNull()?.times(1000.0) ?: 0.0
+            else -> clean.toDoubleOrNull()?.div(1000.0) ?: 0.0
+        }
+    }
+
     companion object {
-        // Matches: CSI sequences (including private modes like ?25h), OSC sequences, SGR
         private val ANSI_REGEX = Regex("\u001B(?:\\[\\??[0-9;]*[a-zA-Z]|\\][^\u0007]*\u0007)")
+        private val CONTEXT_RATIO_REGEX = Regex("([\\d,.]+[km]?)\\s*/\\s*([\\d,.]+[km]?)\\s*tokens", RegexOption.IGNORE_CASE)
+        private val CONTEXT_PERCENT_REGEX = Regex("(\\d{1,3})%\\s*context|context[:\\s]+(\\d{1,3})%", RegexOption.IGNORE_CASE)
+        private val TOKENS_REMAINING_REGEX = Regex("([\\d,.]+[km]?)\\s*tokens?\\s*remaining", RegexOption.IGNORE_CASE)
 
         fun stripAnsi(text: String): String = ANSI_REGEX.replace(text, "")
 

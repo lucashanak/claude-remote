@@ -41,6 +41,9 @@ class SessionOrchestrator(
     // Notification callback when Claude needs attention
     var onClaudeNeedsInput: ((sessionId: String, hint: String, isActiveTab: Boolean) -> Unit)? = null
 
+    // Context window usage callback (0-100 percent)
+    var onContextUpdate: ((sessionId: String, percent: Int) -> Unit)? = null
+
     suspend fun launchSession(
         server: SshServer,
         folder: String,
@@ -116,6 +119,10 @@ class SessionOrchestrator(
             val detection = promptDetector.onOutput(session.id, text)
             if (detection != null) {
                 onClaudeNeedsInput?.invoke(session.id, detection.type.displayHint, isActive)
+            }
+            // Parse context usage
+            promptDetector.parseContextPercent(text)?.let { pct ->
+                onContextUpdate?.invoke(session.id, pct)
             }
         }
 

@@ -50,11 +50,14 @@ fun TerminalScreen(
     onAttachFile: (suspend () -> String?)? = null,
     onFetchClaudeMd: (suspend () -> String)? = null,
     onFetchCommands: (suspend () -> List<SlashCommand>)? = null,
+    onFontSizeChange: ((Int) -> Unit)? = null,
+    contextPercent: Int? = null,
     terminalContent: @Composable (Modifier) -> Unit
 ) {
     var showControlBar by remember { mutableStateOf(true) }
-    var compactMode by remember { mutableStateOf(false) } // hides prompt+controls for max terminal
+    var compactMode by remember { mutableStateOf(false) }
     var showCommandPicker by remember { mutableStateOf(false) }
+    var currentFontSize by remember { mutableStateOf(14) }
     val inputFocusRequester = remember { FocusRequester() }
     var showClaudeMd by remember { mutableStateOf(false) }
     var claudeMdContent by remember { mutableStateOf("") }
@@ -192,6 +195,33 @@ fun TerminalScreen(
                     }
                     } // end !wideMode dropdown
                 }
+                // Context usage bar
+                if (contextPercent != null) {
+                    Spacer(Modifier.width(8.dp))
+                    Box(
+                        modifier = Modifier.width(60.dp).height(6.dp)
+                            .background(MaterialTheme.colorScheme.surfaceVariant, CircleShape)
+                    ) {
+                        val pct = contextPercent.coerceIn(0, 100)
+                        val color = when {
+                            pct < 50 -> Color(0xFF4CAF50)
+                            pct < 80 -> Color(0xFFFF9800)
+                            else -> Color(0xFFF44336)
+                        }
+                        Box(
+                            modifier = Modifier
+                                .fillMaxHeight()
+                                .fillMaxWidth(pct / 100f)
+                                .background(color, CircleShape)
+                        )
+                    }
+                    Text(
+                        "${contextPercent}%",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+
                 // Compact/Full toggle
                 TextButton(onClick = { compactMode = !compactMode }) {
                     Text(if (compactMode) "Full" else "Min", style = MaterialTheme.typography.bodySmall)
@@ -224,8 +254,37 @@ fun TerminalScreen(
                             text = { Text("Reset terminal") },
                             onClick = {
                                 moreMenu = false
-                                onSendCommand("\u001Bc") // ESC c = full terminal reset
+                                onSendCommand("\u001Bc")
                             }
+                        )
+                        HorizontalDivider()
+                        // Font size controls
+                        DropdownMenuItem(
+                            text = {
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Text("Font: ", style = MaterialTheme.typography.bodySmall)
+                                    FilledTonalButton(
+                                        onClick = {
+                                            currentFontSize = (currentFontSize - 1).coerceIn(8, 32)
+                                            onFontSizeChange?.invoke(currentFontSize)
+                                        },
+                                        modifier = Modifier.size(28.dp),
+                                        contentPadding = PaddingValues(0.dp)
+                                    ) { Text("A-", style = MaterialTheme.typography.labelSmall) }
+                                    Spacer(Modifier.width(8.dp))
+                                    Text("$currentFontSize", style = MaterialTheme.typography.bodyMedium)
+                                    Spacer(Modifier.width(8.dp))
+                                    FilledTonalButton(
+                                        onClick = {
+                                            currentFontSize = (currentFontSize + 1).coerceIn(8, 32)
+                                            onFontSizeChange?.invoke(currentFontSize)
+                                        },
+                                        modifier = Modifier.size(28.dp),
+                                        contentPadding = PaddingValues(0.dp)
+                                    ) { Text("A+", style = MaterialTheme.typography.labelSmall) }
+                                }
+                            },
+                            onClick = {}
                         )
                     }
                 }
