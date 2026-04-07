@@ -194,8 +194,8 @@ private fun DesktopTerminalView(
                 panel.background = java.awt.Color(0x1E, 0x1E, 0x1E)
 
                 try {
-                    val darkFg = com.jediterm.core.Color(0xCC, 0xCC, 0xCC)
-                    val darkBg = com.jediterm.core.Color(0x1E, 0x1E, 0x1E)
+                    val darkFg = com.jediterm.terminal.TerminalColor(com.jediterm.core.Color(0xCC, 0xCC, 0xCC))
+                    val darkBg = com.jediterm.terminal.TerminalColor(com.jediterm.core.Color(0x1E, 0x1E, 0x1E))
                     val settings = object : DefaultSettingsProvider() {
                         override fun getTerminalFontSize(): Float =
                             appSettings.terminalFontSize.toFloat()
@@ -205,8 +205,8 @@ private fun DesktopTerminalView(
 
                         override fun useAntialiasing(): Boolean = true
 
-                        override fun getDefaultForeground(): com.jediterm.core.Color = darkFg
-                        override fun getDefaultBackground(): com.jediterm.core.Color = darkBg
+                        override fun getDefaultForeground(): com.jediterm.terminal.TerminalColor = darkFg
+                        override fun getDefaultBackground(): com.jediterm.terminal.TerminalColor = darkBg
                     }
 
                     val widget = JediTermWidget(settings)
