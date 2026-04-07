@@ -384,11 +384,12 @@ private fun DesktopTerminalWebView(
                     panel.add(ui, BorderLayout.CENTER)
                     panel.revalidate()
                     panel.repaint()
-                    // Track panel resize → update browser size
+                    // Track panel resize → update browser component size
                     panel.addComponentListener(object : java.awt.event.ComponentAdapter() {
                         override fun componentResized(e: java.awt.event.ComponentEvent?) {
                             ui.size = panel.size
-                            browser.wasResized(panel.width, panel.height)
+                            ui.revalidate()
+                            ui.repaint()
                         }
                     })
                     FileLogger.log("Desktop", "Browser created: ${ui.javaClass.name}, panel=${panel.width}x${panel.height}")
