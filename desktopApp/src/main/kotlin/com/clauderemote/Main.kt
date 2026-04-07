@@ -25,44 +25,44 @@ import javax.swing.JPanel
 
 /**
  * TtyConnector that bridges JediTerm to our SessionOrchestrator.
- * Reads SSH output from a pipe, writes user input via orchestrator.
+ * Uses PipedStream at byte level with proper UTF-8 decoding via CharsetDecoder
+ * which correctly handles incomplete multi-byte sequences at chunk boundaries.
  */
 class SshTtyConnector(
     private val sessionOrchestrator: SessionOrchestrator,
     private val tabManager: TabManager
 ) : TtyConnector {
-    // Thread-safe queue for SSH output chunks → JediTerm reader
-    private val queue = java.util.concurrent.LinkedBlockingQueue<CharArray>()
-    private var pending: CharArray? = null
-    private var pendingOffset = 0
+    private val byteOut = java.io.PipedOutputStream()
+    private val byteIn = java.io.PipedInputStream(byteOut, 512 * 1024)
+    // CharsetDecoder handles incomplete UTF-8 sequences across chunks
+    private val decoder = StandardCharsets.UTF_8.newDecoder()
+        .onMalformedInput(java.nio.charset.CodingErrorAction.REPLACE)
+        .onUnmappableCharacter(java.nio.charset.CodingErrorAction.REPLACE)
+    private val readBuf = ByteArray(8192)
+    private val decodeBuf = java.nio.CharBuffer.allocate(8192)
     @Volatile private var connected = true
 
-    /** Called by SessionOrchestrator.onTerminalOutput to feed data to JediTerm */
+    /** Called by SessionOrchestrator.onTerminalOutput — receives raw SSH string chunks */
     fun feedOutput(data: String) {
-        if (data.isNotEmpty()) {
-            queue.offer(data.toCharArray())
-        }
+        try {
+            val bytes = data.toByteArray(StandardCharsets.UTF_8)
+            synchronized(byteOut) {
+                byteOut.write(bytes)
+                byteOut.flush()
+            }
+        } catch (_: Exception) {}
     }
 
     override fun read(buf: CharArray, offset: Int, length: Int): Int {
-        // Serve from pending leftover first
-        var src = pending
-        var srcOff = pendingOffset
-        if (src == null || srcOff >= src.size) {
-            // Block until data available
-            src = queue.take()
-            srcOff = 0
-        }
-        val available = src.size - srcOff
-        val count = minOf(available, length)
-        System.arraycopy(src, srcOff, buf, offset, count)
-        if (srcOff + count < src.size) {
-            pending = src
-            pendingOffset = srcOff + count
-        } else {
-            pending = null
-            pendingOffset = 0
-        }
+        // Read raw bytes then decode to chars with stateful decoder
+        val n = byteIn.read(readBuf, 0, minOf(readBuf.size, length))
+        if (n <= 0) return n
+        val byteBuf = java.nio.ByteBuffer.wrap(readBuf, 0, n)
+        decodeBuf.clear()
+        decoder.decode(byteBuf, decodeBuf, false)
+        decodeBuf.flip()
+        val count = minOf(decodeBuf.remaining(), length)
+        decodeBuf.get(buf, offset, count)
         return count
     }
 
@@ -85,13 +85,16 @@ class SshTtyConnector(
         return 0
     }
 
-    override fun ready(): Boolean = queue.isNotEmpty() || (pending != null && pendingOffset < (pending?.size ?: 0))
+    override fun ready(): Boolean {
+        return try { byteIn.available() > 0 } catch (_: Exception) { false }
+    }
 
     override fun getName(): String = "SSH"
 
     override fun close() {
         connected = false
-        queue.offer(charArrayOf()) // unblock reader
+        try { byteOut.close() } catch (_: Exception) {}
+        try { byteIn.close() } catch (_: Exception) {}
     }
 
     override fun resize(termSize: com.jediterm.core.util.TermSize) {

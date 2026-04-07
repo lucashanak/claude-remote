@@ -176,7 +176,9 @@ fun App(
         scope.launch {
             try {
                 // Choose platform-appropriate asset URL
-                val downloadUrl = info.dmgUrl.ifBlank { info.apkUrl }
+                // Android: always APK. Desktop: prefer DMG, fallback to APK.
+                val onAndroid = try { Class.forName("android.os.Build"); true } catch (_: Exception) { false }
+                val downloadUrl = if (onAndroid) info.apkUrl else info.dmgUrl.ifBlank { info.apkUrl }
                 if (downloadUrl.isBlank()) {
                     updateState = updateState.copy(error = "No update available for this platform")
                     return@launch
