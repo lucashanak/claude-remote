@@ -9,7 +9,6 @@ plugins {
 repositories {
     google()
     mavenCentral()
-    maven("https://jogamp.org/deployment/maven")
     maven("https://maven.pkg.jetbrains.space/public/p/compose/dev")
 }
 
@@ -19,28 +18,14 @@ dependencies {
     implementation(compose.material3)
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-swing:1.9.0")
 
-    // JCEF (Chromium) for terminal WebView — works on macOS/Windows/Linux
-    implementation("me.friwi:jcefmaven:122.1.10")
+    // JediTerm — pure Swing terminal emulator (no WebView needed)
+    implementation("org.jetbrains.jediterm:jediterm-core:3.7")
+    implementation("org.jetbrains.jediterm:jediterm-ui:3.7")
 }
-
-// Copy shared terminal assets before build
-tasks.register<Copy>("copySharedAssets") {
-    from("${rootProject.projectDir}/shared-assets/terminal")
-    into("src/main/resources/terminal")
-}
-tasks.named("processResources") { dependsOn("copySharedAssets") }
 
 compose.desktop {
     application {
         mainClass = "com.clauderemote.MainKt"
-
-        // Required by JCEF on macOS for AWT internal access
-        jvmArgs += listOf(
-            "--add-opens", "java.desktop/sun.awt=ALL-UNNAMED",
-            "--add-opens", "java.desktop/sun.lwawt=ALL-UNNAMED",
-            "--add-opens", "java.desktop/sun.lwawt.macosx=ALL-UNNAMED",
-            "--add-opens", "java.desktop/java.awt.peer=ALL-UNNAMED"
-        )
 
         nativeDistributions {
             targetFormats(TargetFormat.Dmg, TargetFormat.Deb, TargetFormat.Msi)
