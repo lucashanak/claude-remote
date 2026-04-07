@@ -63,13 +63,11 @@ fun App(
     var tmuxLoading by remember { mutableStateOf(false) }
     var connectionError by remember { mutableStateOf<String?>(null) }
     var tabCloseConfirmId by remember { mutableStateOf<String?>(null) }
-    var contextPercent by remember { mutableStateOf<Int?>(null) }
     var sessionUsagePercent by remember { mutableStateOf<Int?>(null) }
     var weekUsagePercent by remember { mutableStateOf<Int?>(null) }
 
-    // Wire context and usage updates
+    // Wire usage updates (parsed from /usage command output)
     LaunchedEffect(Unit) {
-        sessionOrchestrator.onContextUpdate = { _, pct -> contextPercent = pct }
         sessionOrchestrator.onUsageUpdate = { session, week ->
             if (session != null) sessionUsagePercent = session
             if (week != null) weekUsagePercent = week
@@ -566,7 +564,6 @@ fun App(
                                 } catch (_: Exception) {}
                             }
                         },
-                        contextPercent = contextPercent,
                         sessionUsagePercent = sessionUsagePercent,
                         weekUsagePercent = weekUsagePercent,
                         terminalContent = terminalContent

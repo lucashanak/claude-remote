@@ -233,11 +233,11 @@ fun TerminalScreen(
                     } // end !wideMode dropdown
                 }
                 // Usage/context bars
-                if (contextPercent != null || sessionUsagePercent != null || weekUsagePercent != null) {
+                if (sessionUsagePercent != null || weekUsagePercent != null) {
                     Spacer(Modifier.width(4.dp))
                     Column(verticalArrangement = Arrangement.spacedBy(1.dp)) {
-                        if (contextPercent != null) {
-                            MiniBar("Ctx", contextPercent)
+                        if (sessionUsagePercent != null) {
+                            MiniBar("5h", sessionUsagePercent)
                         }
                         if (weekUsagePercent != null) {
                             MiniBar("Wk", weekUsagePercent)

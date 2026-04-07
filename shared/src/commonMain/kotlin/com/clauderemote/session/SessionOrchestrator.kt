@@ -125,11 +125,7 @@ class SessionOrchestrator(
             }
             // Feed buffer for multi-chunk parsing
             promptDetector.feedRecentOutput(session.id, text)
-            // Parse context usage
-            promptDetector.parseContextPercent(session.id, text)?.let { pct ->
-                onContextUpdate?.invoke(session.id, pct)
-            }
-            // Parse usage stats
+            // Parse usage stats (from /usage command output)
             promptDetector.parseUsage(session.id, text)?.let { usage ->
                 onUsageUpdate?.invoke(usage["session"], usage["week"])
             }
