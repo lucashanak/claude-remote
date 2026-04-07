@@ -23,6 +23,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.key.*
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.unit.dp
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -486,7 +487,14 @@ private fun PromptInputBar(
                     value = text,
                     onValueChange = { text = it },
                     modifier = Modifier.fillMaxWidth().heightIn(min = 100.dp, max = 280.dp)
-                        .padding(horizontal = 8.dp),
+                        .padding(horizontal = 8.dp)
+                        .onPreviewKeyEvent { event ->
+                            if (event.type == KeyEventType.KeyDown &&
+                                event.key == Key.Enter &&
+                                (event.isCtrlPressed || event.isMetaPressed)) {
+                                buildAndSend(); true
+                            } else false
+                        },
                     textStyle = MaterialTheme.typography.bodyMedium.copy(
                         color = MaterialTheme.colorScheme.onSurface
                     ),
@@ -604,7 +612,14 @@ private fun PromptInputBar(
                     value = text,
                     onValueChange = { text = it },
                     modifier = Modifier.weight(1f).padding(horizontal = 4.dp)
-                        .then(if (inputFocusRequester != null) Modifier.focusRequester(inputFocusRequester) else Modifier),
+                        .then(if (inputFocusRequester != null) Modifier.focusRequester(inputFocusRequester) else Modifier)
+                        .onPreviewKeyEvent { event ->
+                            if (event.type == KeyEventType.KeyDown &&
+                                event.key == Key.Enter &&
+                                (event.isCtrlPressed || event.isMetaPressed)) {
+                                buildAndSend(); true
+                            } else false
+                        },
                     textStyle = MaterialTheme.typography.bodySmall.copy(
                         color = MaterialTheme.colorScheme.onSurface
                     ),

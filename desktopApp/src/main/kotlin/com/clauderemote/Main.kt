@@ -194,6 +194,8 @@ private fun DesktopTerminalView(
                 panel.background = java.awt.Color(0x1E, 0x1E, 0x1E)
 
                 try {
+                    val darkFg = com.jediterm.core.Color(0xCC, 0xCC, 0xCC)
+                    val darkBg = com.jediterm.core.Color(0x1E, 0x1E, 0x1E)
                     val settings = object : DefaultSettingsProvider() {
                         override fun getTerminalFontSize(): Float =
                             appSettings.terminalFontSize.toFloat()
@@ -202,11 +204,13 @@ private fun DesktopTerminalView(
                             appSettings.terminalScrollback
 
                         override fun useAntialiasing(): Boolean = true
+
+                        override fun getDefaultForeground(): com.jediterm.core.Color = darkFg
+                        override fun getDefaultBackground(): com.jediterm.core.Color = darkBg
                     }
 
                     val widget = JediTermWidget(settings)
                     widget.setTtyConnector(connector)
-                    widget.preferredSize = Dimension(1000, 600)
 
                     // Track resize → notify SSH
                     widget.terminalPanel.addComponentListener(object : java.awt.event.ComponentAdapter() {
