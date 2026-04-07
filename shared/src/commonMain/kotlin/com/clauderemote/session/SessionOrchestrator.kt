@@ -47,6 +47,52 @@ class SessionOrchestrator(
     // Usage stats callback (session%, week%)
     var onUsageUpdate: ((sessionPercent: Int?, weekPercent: Int?) -> Unit)? = null
 
+    // Periodic usage polling via SSH exec channel
+    private var usagePollingJob: kotlinx.coroutines.Job? = null
+
+    private fun startUsagePolling(sessionId: String) {
+        usagePollingJob?.cancel()
+        usagePollingJob = reconnectScope.launch {
+            kotlinx.coroutines.delay(5000) // initial delay
+            while (isActive) {
+                try {
+                    val conn = connections[sessionId] ?: break
+                    val sshSession = conn.getSession() ?: break
+                    val output = kotlinx.coroutines.withContext(Dispatchers.IO) {
+                        val ch = sshSession.openChannel("exec") as com.jcraft.jsch.ChannelExec
+                        ch.setCommand("ccusage blocks --active --json --offline --no-color 2>/dev/null || echo '{}'")
+                        ch.inputStream = null
+                        val input = ch.inputStream
+                        ch.connect(5000)
+                        val result = input.bufferedReader().readText()
+                        ch.disconnect()
+                        result
+                    }
+                    parseUsageJson(output)
+                } catch (_: Exception) {}
+                kotlinx.coroutines.delay(30_000) // poll every 30s
+            }
+        }
+    }
+
+    private fun parseUsageJson(json: String) {
+        try {
+            // ccusage blocks --active --json output contains blocks array
+            // Parse percentage from token counts
+            if (json.isBlank() || json.trim() == "{}") return
+            // Simple parsing: look for "total_tokens" and capacity patterns
+            val totalTokensRegex = Regex("\"total_tokens\"\\s*:\\s*(\\d+)")
+            val totalMatch = totalTokensRegex.find(json)
+            val totalTokens = totalMatch?.groupValues?.get(1)?.toLongOrNull() ?: return
+
+            // 5h window: Claude Max default ~5M tokens per 5h window
+            // This is approximate — actual limits vary by plan
+            val fiveHourLimit = 5_000_000L
+            val fiveHourPct = ((totalTokens.toDouble() / fiveHourLimit) * 100).toInt().coerceIn(0, 100)
+            onUsageUpdate?.invoke(fiveHourPct, null)
+        } catch (_: Exception) {}
+    }
+
     suspend fun launchSession(
         server: SshServer,
         folder: String,
@@ -83,6 +129,7 @@ class SessionOrchestrator(
             tabManager.updateTabStatus(sessionId, SessionStatus.ACTIVE)
             FileLogger.log(TAG, "Session active: $sessionId")
             onSessionActive?.invoke(session)
+            startUsagePolling(sessionId)
             session.copy(status = SessionStatus.ACTIVE)
         } catch (e: Exception) {
             FileLogger.error(TAG, "Session launch failed", e)
@@ -125,10 +172,6 @@ class SessionOrchestrator(
             }
             // Feed buffer for multi-chunk parsing
             promptDetector.feedRecentOutput(session.id, text)
-            // Parse usage stats (from /usage command output)
-            promptDetector.parseUsage(session.id, text)?.let { usage ->
-                onUsageUpdate?.invoke(usage["session"], usage["week"])
-            }
         }
 
         sshManager.connect(
@@ -325,6 +368,7 @@ class SessionOrchestrator(
     }
 
     suspend fun disconnectSession(sessionId: String) {
+        usagePollingJob?.cancel()
         connections[sessionId]?.disconnect()
         connections.remove(sessionId)
         outputBuffers.remove(sessionId)
