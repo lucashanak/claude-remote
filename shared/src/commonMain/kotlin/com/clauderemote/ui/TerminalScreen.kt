@@ -352,6 +352,11 @@ private fun PromptInputBar(
     onAttachFile: (suspend () -> String?)? = null,
     inputFocusRequester: FocusRequester? = null
 ) {
+    // Auto-focus input when first shown
+    LaunchedEffect(Unit) {
+        try { inputFocusRequester?.requestFocus() } catch (_: Exception) {}
+    }
+
     var text by rememberSaveable { mutableStateOf("") }
     var attachedFilesRaw by rememberSaveable { mutableStateOf("") }
     val attachedFiles: List<String> = if (attachedFilesRaw.isBlank()) emptyList() else attachedFilesRaw.split('\n')

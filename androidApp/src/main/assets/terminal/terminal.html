@@ -111,7 +111,6 @@ function posToCell(px, py) {
 }
 
 // ======================== SMART SCROLL ========================
-let _scrollExitTimer = null;
 function scrollTerminal(lines) {
     if (lines === 0) return;
     const isAlt = term.buffer.active.type === 'alternate';
@@ -120,9 +119,6 @@ function scrollTerminal(lines) {
         const btn = lines < 0 ? 64 : 65, count = Math.min(Math.abs(lines), 15);
         const seq = '\x1b[<' + btn + ';1;1M';
         for (let i = 0; i < count; i++) A.onTerminalInput(seq);
-        // Auto-exit tmux copy mode after 1.5s of no scrolling
-        clearTimeout(_scrollExitTimer);
-        _scrollExitTimer = setTimeout(() => { A.onTerminalInput('q'); }, 1500);
     } else { term.scrollLines(lines); }
 }
 
