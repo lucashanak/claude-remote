@@ -63,25 +63,47 @@ fun TerminalScreen(
     val activeSession = tabs.find { it.id == activeTabId }
     val scope = rememberCoroutineScope()
 
-    Column(modifier = Modifier.fillMaxSize()) {
+    val groupedTabs = remember(tabs) {
+        tabs.groupBy { it.server.name }.toSortedMap()
+    }
+
+    BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
+        val wideMode = maxWidth > 700.dp && tabs.size > 1
+
+        Row(modifier = Modifier.fillMaxSize()) {
+            // Side panel on wide displays
+            if (wideMode) {
+                SessionSidePanel(
+                    groupedTabs = groupedTabs,
+                    activeTabId = activeTabId,
+                    onTabSwitch = onTabSwitch,
+                    onTabClose = onTabClose,
+                    onNewTab = onNewTab,
+                    onMenuOpen = onMenuOpen,
+                    modifier = Modifier.width(200.dp).fillMaxHeight()
+                )
+            }
+
+    Column(modifier = Modifier.weight(1f).fillMaxHeight()) {
         // Top bar
         Surface(color = MaterialTheme.colorScheme.surfaceVariant, tonalElevation = 2.dp) {
             Row(
                 modifier = Modifier.fillMaxWidth().padding(horizontal = 4.dp, vertical = 2.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                IconButton(onClick = onMenuOpen, modifier = Modifier.size(36.dp)) {
-                    Icon(Icons.Default.Menu, "Menu", modifier = Modifier.size(20.dp))
+                if (!wideMode) {
+                    IconButton(onClick = onMenuOpen, modifier = Modifier.size(36.dp)) {
+                        Icon(Icons.Default.Menu, "Menu", modifier = Modifier.size(20.dp))
+                    }
                 }
 
-                // Session dropdown (replaces tab bar)
+                // Session dropdown (narrow mode only)
                 var sessionDropdown by remember { mutableStateOf(false) }
                 Box(modifier = Modifier.weight(1f)) {
                     Row(
-                        modifier = Modifier.clickable { if (tabs.size > 1) sessionDropdown = true },
+                        modifier = Modifier.clickable { if (tabs.size > 1 && !wideMode) sessionDropdown = true },
                         verticalAlignment = Alignment.CenterVertically
                     ) {
-                        // Status dot
                         if (activeSession != null) {
                             val dotColor = when (activeSession.status) {
                                 SessionStatus.ACTIVE -> Color(0xFF4CAF50)
@@ -95,54 +117,66 @@ fun TerminalScreen(
                             activeSession?.tabTitle ?: "",
                             style = MaterialTheme.typography.bodyMedium
                         )
-                        if (tabs.size > 1) {
+                        if (tabs.size > 1 && !wideMode) {
                             Text(
                                 " (${tabs.size})",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
-                            Text(" \u25BE", style = MaterialTheme.typography.bodySmall) // ▾
+                            Text(" \u25BE", style = MaterialTheme.typography.bodySmall)
                         }
                     }
+                    if (!wideMode) {
                     DropdownMenu(
                         expanded = sessionDropdown,
                         onDismissRequest = { sessionDropdown = false }
                     ) {
-                        tabs.forEach { tab ->
-                            val isActive = tab.id == activeTabId
-                            val dotColor = when (tab.status) {
-                                SessionStatus.ACTIVE -> Color(0xFF4CAF50)
-                                SessionStatus.CONNECTING -> Color(0xFFFF9800)
-                                SessionStatus.DISCONNECTED, SessionStatus.ERROR -> Color(0xFFF44336)
+                        groupedTabs.forEach { (serverName, serverTabs) ->
+                            if (groupedTabs.size > 1) {
+                                Text(
+                                    serverName,
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp)
+                                )
                             }
-                            DropdownMenuItem(
-                                text = {
-                                    Row(verticalAlignment = Alignment.CenterVertically) {
-                                        Box(modifier = Modifier.size(8.dp).background(dotColor, shape = CircleShape))
-                                        Spacer(Modifier.width(8.dp))
-                                        Text(
-                                            tab.tabTitle,
-                                            style = if (isActive) MaterialTheme.typography.bodyMedium
-                                                   else MaterialTheme.typography.bodySmall
-                                        )
-                                    }
-                                },
-                                onClick = {
-                                    sessionDropdown = false
-                                    onTabSwitch(tab.id)
-                                },
-                                trailingIcon = {
-                                    IconButton(
-                                        onClick = {
-                                            sessionDropdown = false
-                                            onTabClose(tab.id)
-                                        },
-                                        modifier = Modifier.size(24.dp)
-                                    ) {
-                                        Icon(Icons.Default.Close, "Close", modifier = Modifier.size(14.dp))
-                                    }
+                            serverTabs.forEach { tab ->
+                                val isActive = tab.id == activeTabId
+                                val dotColor = when (tab.status) {
+                                    SessionStatus.ACTIVE -> Color(0xFF4CAF50)
+                                    SessionStatus.CONNECTING -> Color(0xFFFF9800)
+                                    SessionStatus.DISCONNECTED, SessionStatus.ERROR -> Color(0xFFF44336)
                                 }
-                            )
+                                DropdownMenuItem(
+                                    text = {
+                                        Row(verticalAlignment = Alignment.CenterVertically) {
+                                            Box(modifier = Modifier.size(8.dp).background(dotColor, shape = CircleShape))
+                                            Spacer(Modifier.width(8.dp))
+                                            val folderName = tab.folder.trimEnd('/').substringAfterLast('/').ifBlank { tab.folder }
+                                            Text(
+                                                folderName,
+                                                style = if (isActive) MaterialTheme.typography.bodyMedium
+                                                       else MaterialTheme.typography.bodySmall
+                                            )
+                                        }
+                                    },
+                                    onClick = {
+                                        sessionDropdown = false
+                                        onTabSwitch(tab.id)
+                                    },
+                                    trailingIcon = {
+                                        IconButton(
+                                            onClick = {
+                                                sessionDropdown = false
+                                                onTabClose(tab.id)
+                                            },
+                                            modifier = Modifier.size(24.dp)
+                                        ) {
+                                            Icon(Icons.Default.Close, "Close", modifier = Modifier.size(14.dp))
+                                        }
+                                    }
+                                )
+                            }
                         }
                         HorizontalDivider()
                         DropdownMenuItem(
@@ -156,6 +190,7 @@ fun TerminalScreen(
                             onClick = { sessionDropdown = false; onNewTab() }
                         )
                     }
+                    } // end !wideMode dropdown
                 }
                 // Compact/Full toggle
                 TextButton(onClick = { compactMode = !compactMode }) {
@@ -328,6 +363,91 @@ fun TerminalScreen(
             )
         }
 
+    } // end Column
+    } // end Row
+    } // end BoxWithConstraints
+}
+
+// ======================== SESSION SIDE PANEL ========================
+
+@Composable
+private fun SessionSidePanel(
+    groupedTabs: Map<String, List<com.clauderemote.model.ClaudeSession>>,
+    activeTabId: String?,
+    onTabSwitch: (String) -> Unit,
+    onTabClose: (String) -> Unit,
+    onNewTab: () -> Unit,
+    onMenuOpen: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    Surface(
+        color = MaterialTheme.colorScheme.surfaceVariant,
+        tonalElevation = 4.dp,
+        modifier = modifier
+    ) {
+        Column(modifier = Modifier.fillMaxSize()) {
+            // Header
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(8.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                IconButton(onClick = onMenuOpen, modifier = Modifier.size(32.dp)) {
+                    Icon(Icons.Default.Menu, "Menu", modifier = Modifier.size(18.dp))
+                }
+                Text("Sessions", style = MaterialTheme.typography.titleSmall, modifier = Modifier.weight(1f))
+                IconButton(onClick = onNewTab, modifier = Modifier.size(32.dp)) {
+                    Icon(Icons.Default.Add, "New", modifier = Modifier.size(18.dp))
+                }
+            }
+            HorizontalDivider()
+
+            // Grouped session list
+            Column(
+                modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState())
+            ) {
+                groupedTabs.forEach { (serverName, serverTabs) ->
+                    Text(
+                        serverName,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp)
+                    )
+                    serverTabs.forEach { tab ->
+                        val isActive = tab.id == activeTabId
+                        val dotColor = when (tab.status) {
+                            SessionStatus.ACTIVE -> Color(0xFF4CAF50)
+                            SessionStatus.CONNECTING -> Color(0xFFFF9800)
+                            SessionStatus.DISCONNECTED, SessionStatus.ERROR -> Color(0xFFF44336)
+                        }
+                        Surface(
+                            color = if (isActive) MaterialTheme.colorScheme.primaryContainer
+                                   else Color.Transparent,
+                            modifier = Modifier.fillMaxWidth().clickable { onTabSwitch(tab.id) }
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Box(modifier = Modifier.size(8.dp).background(dotColor, shape = CircleShape))
+                                Spacer(Modifier.width(8.dp))
+                                val folderName = tab.folder.trimEnd('/').substringAfterLast('/').ifBlank { tab.folder }
+                                Text(
+                                    folderName,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    modifier = Modifier.weight(1f)
+                                )
+                                IconButton(
+                                    onClick = { onTabClose(tab.id) },
+                                    modifier = Modifier.size(20.dp)
+                                ) {
+                                    Icon(Icons.Default.Close, "Close", modifier = Modifier.size(12.dp))
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 }
 
