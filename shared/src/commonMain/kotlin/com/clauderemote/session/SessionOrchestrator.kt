@@ -123,12 +123,14 @@ class SessionOrchestrator(
             if (detection != null) {
                 onClaudeNeedsInput?.invoke(session.id, detection.type.displayHint, isActive)
             }
+            // Feed buffer for multi-chunk parsing
+            promptDetector.feedRecentOutput(session.id, text)
             // Parse context usage
-            promptDetector.parseContextPercent(text)?.let { pct ->
+            promptDetector.parseContextPercent(session.id, text)?.let { pct ->
                 onContextUpdate?.invoke(session.id, pct)
             }
             // Parse usage stats
-            promptDetector.parseUsage(text)?.let { usage ->
+            promptDetector.parseUsage(session.id, text)?.let { usage ->
                 onUsageUpdate?.invoke(usage["session"], usage["week"])
             }
         }

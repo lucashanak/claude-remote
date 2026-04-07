@@ -75,7 +75,8 @@ fun TerminalScreen(
     }
 
     BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
-        val wideMode = maxWidth > 700.dp && tabs.size > 1
+        val hasMultiple = tabs.size > 1 || remoteSessions.any { r -> tabs.none { it.tmuxSessionName == r.tmuxSession.name } }
+        val wideMode = maxWidth > 700.dp && hasMultiple
 
         Row(modifier = Modifier.fillMaxSize()) {
             // Side panel on wide displays
@@ -110,7 +111,7 @@ fun TerminalScreen(
                 var sessionDropdown by remember { mutableStateOf(false) }
                 Box(modifier = Modifier.weight(1f)) {
                     Row(
-                        modifier = Modifier.clickable { if (tabs.size > 1 && !wideMode) sessionDropdown = true },
+                        modifier = Modifier.clickable { if (hasMultiple && !wideMode) sessionDropdown = true },
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         if (activeSession != null) {
@@ -126,7 +127,7 @@ fun TerminalScreen(
                             activeSession?.tabTitle ?: "",
                             style = MaterialTheme.typography.bodyMedium
                         )
-                        if (tabs.size > 1 && !wideMode) {
+                        if (hasMultiple && !wideMode) {
                             Text(
                                 " (${tabs.size})",
                                 style = MaterialTheme.typography.bodySmall,

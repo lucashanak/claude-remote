@@ -7,6 +7,8 @@ package com.clauderemote.session
 class InputPromptDetector {
 
     private val sessionStates = mutableMapOf<String, SessionState>()
+    // Buffer recent output for multi-chunk pattern matching (usage/context)
+    private val recentOutput = mutableMapOf<String, StringBuilder>()
 
     /** Set true during buffer replays (tab switch, reconnect) to suppress false positives. */
     var suppressDetection = false
@@ -51,6 +53,7 @@ class InputPromptDetector {
 
     fun removeSession(sessionId: String) {
         sessionStates.remove(sessionId)
+        recentOutput.remove(sessionId)
     }
 
     private fun detectPromptType(stripped: String): PromptType? {
@@ -81,8 +84,16 @@ class InputPromptDetector {
      * Claude Code displays patterns like "132.9k tokens remaining" or "X% context".
      * Returns percentage used (0-100), or null if no context info found.
      */
-    fun parseContextPercent(text: String): Int? {
-        val stripped = stripAnsi(text)
+    /** Feed output to the recent buffer for multi-chunk matching */
+    fun feedRecentOutput(sessionId: String, text: String) {
+        val buf = recentOutput.getOrPut(sessionId) { StringBuilder() }
+        buf.append(stripAnsi(text))
+        // Keep last 2KB
+        if (buf.length > 2048) buf.delete(0, buf.length - 2048)
+    }
+
+    fun parseContextPercent(sessionId: String, text: String): Int? {
+        val stripped = recentOutput[sessionId]?.toString() ?: stripAnsi(text)
 
         // Pattern: "XX.Xk/YYYk tokens" or similar ratio
         CONTEXT_RATIO_REGEX.find(stripped)?.let { match ->
@@ -121,8 +132,8 @@ class InputPromptDetector {
      * Parse usage data from Claude Code /usage command output.
      * Returns map of label→percentage, e.g. {"session" to 5, "week" to 16}
      */
-    fun parseUsage(text: String): Map<String, Int>? {
-        val stripped = stripAnsi(text)
+    fun parseUsage(sessionId: String, text: String): Map<String, Int>? {
+        val stripped = recentOutput[sessionId]?.toString() ?: stripAnsi(text)
         val result = mutableMapOf<String, Int>()
 
         // "Current session" → "XX% used"
