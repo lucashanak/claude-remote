@@ -24,10 +24,9 @@ import org.cef.callback.CefQueryCallback
 import org.cef.handler.CefDisplayHandlerAdapter
 import org.cef.handler.CefLoadHandlerAdapter
 import org.cef.handler.CefMessageRouterHandlerAdapter
-import com.sun.net.httpserver.HttpServer
 import java.awt.BorderLayout
 import java.io.File
-import java.net.InetSocketAddress
+import java.net.ServerSocket
 import javax.swing.JPanel
 
 /** Extract terminal assets from jar to app cache directory */
@@ -51,34 +50,51 @@ private fun extractTerminalAssets(): File {
     return dir
 }
 
-/** Start a local HTTP server to serve terminal assets (avoids file:// cross-origin issues) */
+/** Start a minimal HTTP server using raw sockets (no com.sun dependency) */
 private var localServerPort = 0
 private fun startLocalServer(dir: File): Int {
     if (localServerPort > 0) return localServerPort
-    val server = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
-    server.createContext("/") { exchange ->
-        val path = exchange.requestURI.path.trimStart('/')
-        val file = File(dir, if (path.isEmpty()) "terminal.html" else path)
-        if (file.exists() && file.canonicalPath.startsWith(dir.canonicalPath)) {
-            val contentType = when (file.extension) {
-                "html" -> "text/html"
-                "js" -> "application/javascript"
-                "css" -> "text/css"
-                else -> "application/octet-stream"
-            }
-            val bytes = file.readBytes()
-            exchange.responseHeaders["Content-Type"] = listOf(contentType)
-            exchange.sendResponseHeaders(200, bytes.size.toLong())
-            exchange.responseBody.use { it.write(bytes) }
-        } else {
-            exchange.sendResponseHeaders(404, 0)
-            exchange.responseBody.close()
-        }
-    }
-    server.executor = null
-    server.start()
-    localServerPort = server.address.port
+    val serverSocket = ServerSocket(0, 10, java.net.InetAddress.getByName("127.0.0.1"))
+    localServerPort = serverSocket.localPort
     FileLogger.log("Desktop", "Local HTTP server on port $localServerPort")
+    Thread(null, {
+        while (!serverSocket.isClosed) {
+            try {
+                val client = serverSocket.accept()
+                Thread {
+                    try {
+                        val reader = client.getInputStream().bufferedReader()
+                        val requestLine = reader.readLine() ?: return@Thread
+                        // Parse: GET /path HTTP/1.1
+                        val path = requestLine.split(" ").getOrNull(1)?.trimStart('/') ?: ""
+                        // Consume headers
+                        while (reader.readLine().let { it != null && it.isNotEmpty() }) {}
+
+                        val fileName = if (path.isEmpty()) "terminal.html" else path
+                        val file = File(dir, fileName)
+                        val out = client.getOutputStream()
+                        if (file.exists() && file.canonicalPath.startsWith(dir.canonicalPath)) {
+                            val contentType = when (file.extension) {
+                                "html" -> "text/html; charset=utf-8"
+                                "js" -> "application/javascript; charset=utf-8"
+                                "css" -> "text/css; charset=utf-8"
+                                else -> "application/octet-stream"
+                            }
+                            val bytes = file.readBytes()
+                            out.write("HTTP/1.1 200 OK\r\nContent-Type: $contentType\r\nContent-Length: ${bytes.size}\r\nConnection: close\r\n\r\n".toByteArray())
+                            out.write(bytes)
+                        } else {
+                            out.write("HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n".toByteArray())
+                        }
+                        out.flush()
+                        client.close()
+                    } catch (_: Exception) {
+                        try { client.close() } catch (_: Exception) {}
+                    }
+                }.start()
+            } catch (_: Exception) {}
+        }
+    }, "terminal-http", 0).apply { isDaemon = true; start() }
     return localServerPort
 }
 
