@@ -54,10 +54,11 @@ html, body { background:#1E1E1E; overflow:hidden; width:100%; height:100%; displ
     <button class="ctx-item" id="searchNext" style="padding:4px 8px;">&#9660;</button>
     <button class="ctx-item" id="searchClose" style="padding:4px 8px;">&#10005;</button>
 </div>
-<script src="xterm.js" crossorigin="anonymous"></script>
-<script src="xterm-addon-fit.js" crossorigin="anonymous"></script>
-<script src="xterm-addon-search.js" crossorigin="anonymous"></script>
-<script src="xterm-addon-web-links.js" crossorigin="anonymous"></script>
+<script>function _loadErr(name){document.body.style.background='#300';document.body.innerHTML='<pre style=\"color:#f88;padding:20px\">Failed to load: '+name+'</pre>';}</script>
+<script src="xterm.js" crossorigin="anonymous" onerror="_loadErr('xterm.js')"></script>
+<script src="xterm-addon-fit.js" crossorigin="anonymous" onerror="_loadErr('xterm-addon-fit.js')"></script>
+<script src="xterm-addon-search.js" crossorigin="anonymous" onerror="_loadErr('xterm-addon-search.js')"></script>
+<script src="xterm-addon-web-links.js" crossorigin="anonymous" onerror="_loadErr('xterm-addon-web-links.js')"></script>
 <script>
 'use strict';
 

@@ -73,6 +73,7 @@ private fun startLocalServer(dir: File): Int {
                         val fileName = if (path.isEmpty()) "terminal.html" else path
                         val file = File(dir, fileName)
                         val out = client.getOutputStream()
+                        FileLogger.log("HTTP", "$requestLine → ${file.name} (exists=${file.exists()}, ${file.length()}b)")
                         if (file.exists() && file.canonicalPath.startsWith(dir.canonicalPath)) {
                             val contentType = when (file.extension) {
                                 "html" -> "text/html; charset=utf-8"
@@ -140,6 +141,11 @@ private fun initCefAsync(onReady: (() -> Unit)? = null) {
 }
 
 fun main() = application {
+    // Init logging
+    val logDir = File(System.getProperty("user.home"), ".claude-remote")
+    logDir.mkdirs()
+    FileLogger.init(logDir, System.getProperty("jpackage.app-version") ?: "dev")
+
     // Start CEF download/init early in background
     initCefAsync()
 
