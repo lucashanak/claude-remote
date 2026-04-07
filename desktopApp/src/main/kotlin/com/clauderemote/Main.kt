@@ -83,9 +83,14 @@ class SshTtyConnector(
     }
 
     fun resize(cols: Int, rows: Int) {
+        FileLogger.log("SSH", "resize: ${cols}x${rows}")
         tabManager.activeTabId.value?.let { id ->
             sessionOrchestrator.resize(id, cols, rows)
         }
+    }
+
+    override fun resize(termSize: com.jediterm.core.util.TermSize) {
+        resize(termSize.columns, termSize.rows)
     }
 }
 
@@ -171,10 +176,12 @@ fun main() = application {
             },
             onPickFile = { callback ->
                 javax.swing.SwingUtilities.invokeLater {
-                    val chooser = javax.swing.JFileChooser()
-                    val result = chooser.showOpenDialog(null)
-                    if (result == javax.swing.JFileChooser.APPROVE_OPTION) {
-                        val file = chooser.selectedFile
+                    val dialog = java.awt.FileDialog(null as java.awt.Frame?, "Attach File", java.awt.FileDialog.LOAD)
+                    dialog.isVisible = true
+                    val dir = dialog.directory
+                    val name = dialog.file
+                    if (dir != null && name != null) {
+                        val file = File(dir, name)
                         callback(file.readBytes(), file.name)
                     } else {
                         callback(ByteArray(0), "")
@@ -227,19 +234,6 @@ private fun DesktopTerminalView(
                     termWidget = widget
 
                     panel.add(widget, BorderLayout.CENTER)
-
-                    // Track resize → resize terminal + notify SSH
-                    panel.addComponentListener(object : java.awt.event.ComponentAdapter() {
-                        override fun componentResized(e: java.awt.event.ComponentEvent?) {
-                            widget.size = panel.size
-                            widget.revalidate()
-                            // Delay to let JediTerm recalculate dimensions
-                            javax.swing.SwingUtilities.invokeLater {
-                                val term = widget.terminal
-                                connector.resize(term.terminalWidth, term.terminalHeight)
-                            }
-                        }
-                    })
                     FileLogger.log("Desktop", "JediTerm widget created")
                 } catch (e: Exception) {
                     FileLogger.error("Desktop", "JediTerm init failed: ${e.message}", e)
