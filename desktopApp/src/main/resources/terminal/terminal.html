@@ -54,18 +54,22 @@ html, body { background:#1E1E1E; overflow:hidden; width:100%; height:100%; displ
     <button class="ctx-item" id="searchNext" style="padding:4px 8px;">&#9660;</button>
     <button class="ctx-item" id="searchClose" style="padding:4px 8px;">&#10005;</button>
 </div>
-<script src="xterm.js"></script>
-<script src="xterm-addon-fit.js"></script>
-<script src="xterm-addon-search.js"></script>
-<script src="xterm-addon-web-links.js"></script>
+<script src="xterm.js" crossorigin="anonymous"></script>
+<script src="xterm-addon-fit.js" crossorigin="anonymous"></script>
+<script src="xterm-addon-search.js" crossorigin="anonymous"></script>
+<script src="xterm-addon-web-links.js" crossorigin="anonymous"></script>
 <script>
 'use strict';
 
-// Log errors for debugging (visible via JavaFX console bridge)
+// Log errors for debugging
 window.onerror = function(msg, url, line, col, err) {
+    var detail = 'JS Error: ' + msg + '\nat ' + url + ':' + line + ':' + col;
+    if (err && err.stack) detail += '\n' + err.stack;
     document.body.style.background = '#300';
-    document.body.innerHTML = '<pre style="color:#f88;padding:20px">JS Error: ' + msg + '\nat ' + url + ':' + line + ':' + col + '\n' + (err ? err.stack : '') + '</pre>';
+    document.body.innerHTML = '<pre style="color:#f88;padding:20px;white-space:pre-wrap">' + detail + '</pre>';
 };
+
+try {
 
 const A = window.Android;
 
@@ -314,6 +318,11 @@ function applyColorScheme(name) {
 if (A) {
   setTimeout(() => { fitAddon.fit(); A.onTerminalReady(term.cols, term.rows); }, 200);
   setTimeout(() => { fitAddon.fit(); A.onTerminalResize(term.cols, term.rows); }, 800);
+}
+
+} catch(initError) {
+  document.body.style.background = '#300';
+  document.body.innerHTML = '<pre style="color:#f88;padding:20px;white-space:pre-wrap">Init Error: ' + initError.message + '\n' + (initError.stack || '') + '</pre>';
 }
 </script>
 </body>

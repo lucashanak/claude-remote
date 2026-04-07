@@ -81,7 +81,7 @@ private fun startLocalServer(dir: File): Int {
                                 else -> "application/octet-stream"
                             }
                             val bytes = file.readBytes()
-                            out.write("HTTP/1.1 200 OK\r\nContent-Type: $contentType\r\nContent-Length: ${bytes.size}\r\nConnection: close\r\n\r\n".toByteArray())
+                            out.write("HTTP/1.1 200 OK\r\nContent-Type: $contentType\r\nContent-Length: ${bytes.size}\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n".toByteArray())
                             out.write(bytes)
                         } else {
                             out.write("HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n".toByteArray())
