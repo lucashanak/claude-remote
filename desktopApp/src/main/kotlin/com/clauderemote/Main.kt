@@ -20,7 +20,6 @@ import com.jediterm.terminal.ui.settings.DefaultSettingsProvider
 import java.awt.BorderLayout
 import java.awt.Dimension
 import java.io.File
-import java.io.InputStreamReader
 import java.nio.charset.StandardCharsets
 import javax.swing.JPanel
 
@@ -32,28 +31,44 @@ class SshTtyConnector(
     private val sessionOrchestrator: SessionOrchestrator,
     private val tabManager: TabManager
 ) : TtyConnector {
-    // Pipe: orchestrator writes SSH output here → JediTerm reads from it
-    private val pipe = java.io.PipedOutputStream()
-    private val pipeIn = java.io.PipedInputStream(pipe, 256 * 1024) // 256KB buffer
-    private val reader = InputStreamReader(pipeIn, StandardCharsets.UTF_8)
+    // Thread-safe queue for SSH output chunks → JediTerm reader
+    private val queue = java.util.concurrent.LinkedBlockingQueue<CharArray>()
+    private var pending: CharArray? = null
+    private var pendingOffset = 0
     @Volatile private var connected = true
 
     /** Called by SessionOrchestrator.onTerminalOutput to feed data to JediTerm */
     fun feedOutput(data: String) {
-        try {
-            pipe.write(data.toByteArray(StandardCharsets.UTF_8))
-            pipe.flush()
-        } catch (_: Exception) {}
+        if (data.isNotEmpty()) {
+            queue.offer(data.toCharArray())
+        }
     }
 
     override fun read(buf: CharArray, offset: Int, length: Int): Int {
-        return reader.read(buf, offset, length)
+        // Serve from pending leftover first
+        var src = pending
+        var srcOff = pendingOffset
+        if (src == null || srcOff >= src.size) {
+            // Block until data available
+            src = queue.take()
+            srcOff = 0
+        }
+        val available = src.size - srcOff
+        val count = minOf(available, length)
+        System.arraycopy(src, srcOff, buf, offset, count)
+        if (srcOff + count < src.size) {
+            pending = src
+            pendingOffset = srcOff + count
+        } else {
+            pending = null
+            pendingOffset = 0
+        }
+        return count
     }
 
     override fun write(bytes: ByteArray) {
-        val data = String(bytes, StandardCharsets.UTF_8)
         tabManager.activeTabId.value?.let { id ->
-            sessionOrchestrator.sendInput(id, data)
+            sessionOrchestrator.sendInput(id, String(bytes, StandardCharsets.UTF_8))
         }
     }
 
@@ -70,27 +85,19 @@ class SshTtyConnector(
         return 0
     }
 
-    override fun ready(): Boolean {
-        return try { reader.ready() } catch (_: Exception) { false }
-    }
+    override fun ready(): Boolean = queue.isNotEmpty() || (pending != null && pendingOffset < (pending?.size ?: 0))
 
     override fun getName(): String = "SSH"
 
     override fun close() {
         connected = false
-        try { pipe.close() } catch (_: Exception) {}
-        try { pipeIn.close() } catch (_: Exception) {}
-    }
-
-    fun resize(cols: Int, rows: Int) {
-        FileLogger.log("SSH", "resize: ${cols}x${rows}")
-        tabManager.activeTabId.value?.let { id ->
-            sessionOrchestrator.resize(id, cols, rows)
-        }
+        queue.offer(charArrayOf()) // unblock reader
     }
 
     override fun resize(termSize: com.jediterm.core.util.TermSize) {
-        resize(termSize.columns, termSize.rows)
+        tabManager.activeTabId.value?.let { id ->
+            sessionOrchestrator.resize(id, termSize.columns, termSize.rows)
+        }
     }
 }
 
