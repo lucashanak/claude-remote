@@ -169,6 +169,18 @@ fun main() = application {
                     }
                 }
             },
+            onPickFile = { callback ->
+                javax.swing.SwingUtilities.invokeLater {
+                    val chooser = javax.swing.JFileChooser()
+                    val result = chooser.showOpenDialog(null)
+                    if (result == javax.swing.JFileChooser.APPROVE_OPTION) {
+                        val file = chooser.selectedFile
+                        callback(file.readBytes(), file.name)
+                    } else {
+                        callback(ByteArray(0), "")
+                    }
+                }
+            },
             exitApp = ::exitApplication,
             terminalContent = { modifier ->
                 DesktopTerminalView(
@@ -211,19 +223,23 @@ private fun DesktopTerminalView(
 
                     val widget = JediTermWidget(settings)
                     widget.setTtyConnector(connector)
-
-                    // Track resize → notify SSH
-                    widget.terminalPanel.addComponentListener(object : java.awt.event.ComponentAdapter() {
-                        override fun componentResized(e: java.awt.event.ComponentEvent?) {
-                            val term = widget.terminal
-                            connector.resize(term.terminalWidth, term.terminalHeight)
-                        }
-                    })
-
                     widget.start()
                     termWidget = widget
 
                     panel.add(widget, BorderLayout.CENTER)
+
+                    // Track resize → resize terminal + notify SSH
+                    panel.addComponentListener(object : java.awt.event.ComponentAdapter() {
+                        override fun componentResized(e: java.awt.event.ComponentEvent?) {
+                            widget.size = panel.size
+                            widget.revalidate()
+                            // Delay to let JediTerm recalculate dimensions
+                            javax.swing.SwingUtilities.invokeLater {
+                                val term = widget.terminal
+                                connector.resize(term.terminalWidth, term.terminalHeight)
+                            }
+                        }
+                    })
                     FileLogger.log("Desktop", "JediTerm widget created")
                 } catch (e: Exception) {
                     FileLogger.error("Desktop", "JediTerm init failed: ${e.message}", e)
