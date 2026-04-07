@@ -376,19 +376,22 @@ private fun DesktopTerminalWebView(
                     val port = startLocalServer(terminalDir)
                     val url = "http://127.0.0.1:$port/terminal.html"
 
-                    val browser = client.createBrowser(url, false, false)
+                    // macOS forces OSR mode — create browser and set proper size
+                    val browser = client.createBrowser(url, true, false)
                     cefBrowser = browser
                     val ui = browser.uiComponent
-                    FileLogger.log("Desktop", "Browser UI component: ${ui.javaClass.name} (${ui.preferredSize})")
+                    ui.preferredSize = panel.size.takeIf { it.width > 0 } ?: java.awt.Dimension(1000, 600)
                     panel.add(ui, BorderLayout.CENTER)
                     panel.revalidate()
                     panel.repaint()
-                    // Force layout after a delay (macOS SwingPanel rendering quirk)
-                    javax.swing.Timer(500) {
-                        panel.revalidate()
-                        panel.repaint()
-                        ui.requestFocusInWindow()
-                    }.apply { isRepeats = false; start() }
+                    // Track panel resize → update browser size
+                    panel.addComponentListener(object : java.awt.event.ComponentAdapter() {
+                        override fun componentResized(e: java.awt.event.ComponentEvent?) {
+                            ui.size = panel.size
+                            browser.wasResized(panel.width, panel.height)
+                        }
+                    })
+                    FileLogger.log("Desktop", "Browser created: ${ui.javaClass.name}, panel=${panel.width}x${panel.height}")
 
                 } catch (e: Exception) {
                     FileLogger.error("Desktop", "CEF init failed: ${e.message}", e)
