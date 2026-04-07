@@ -78,27 +78,34 @@ class MainActivity : FragmentActivity() {
     }
 
     private val attachFilePicker = registerForActivityResult(
-        androidx.activity.result.contract.ActivityResultContracts.GetContent()
-    ) { uri ->
-        if (uri != null) {
+        androidx.activity.result.contract.ActivityResultContracts.OpenMultipleDocuments()
+    ) { uris ->
+        if (uris.isNotEmpty()) {
+            // Callback for the first file (others queued via multiFileQueue)
+            val first = uris.first()
             try {
-                val bytes = contentResolver.openInputStream(uri)?.readBytes() ?: ByteArray(0)
-                val name = uri.lastPathSegment
+                val bytes = contentResolver.openInputStream(first)?.readBytes() ?: ByteArray(0)
+                val name = first.lastPathSegment
                     ?.substringAfterLast('/')
                     ?.substringAfterLast(':')
                     ?: "file_${System.currentTimeMillis()}"
-                val ext = contentResolver.getType(uri)?.substringAfter('/')?.let { ".$it" } ?: ""
+                val ext = contentResolver.getType(first)?.substringAfter('/')?.let { ".$it" } ?: ""
                 val fileName = if (name.contains('.')) name else "$name$ext"
                 attachFileCallback?.invoke(bytes, fileName)
             } catch (e: Exception) {
                 FileLogger.error("MainActivity", "Failed to read attached file", e)
                 attachFileCallback?.invoke(ByteArray(0), "")
             }
+            // Queue remaining files for subsequent uploads
+            if (uris.size > 1) {
+                multiFileQueue.addAll(uris.drop(1))
+            }
         } else {
             attachFileCallback?.invoke(ByteArray(0), "")
         }
         attachFileCallback = null
     }
+    private val multiFileQueue = mutableListOf<android.net.Uri>()
 
     @Volatile private var isAppInForeground = false
 
@@ -235,8 +242,20 @@ class MainActivity : FragmentActivity() {
                 onPickFile = { callback ->
                     attachFileCallback = { bytes, name ->
                         callback(bytes, name)
+                        // Process queued files from multi-select
+                        while (multiFileQueue.isNotEmpty()) {
+                            val uri = multiFileQueue.removeFirst()
+                            try {
+                                val b = contentResolver.openInputStream(uri)?.readBytes() ?: continue
+                                val n = uri.lastPathSegment?.substringAfterLast('/')?.substringAfterLast(':')
+                                    ?: "file_${System.currentTimeMillis()}"
+                                val ext = contentResolver.getType(uri)?.substringAfter('/')?.let { ".$it" } ?: ""
+                                val fn = if (n.contains('.')) n else "$n$ext"
+                                callback(b, fn)
+                            } catch (_: Exception) {}
+                        }
                     }
-                    attachFilePicker.launch("*/*")
+                    attachFilePicker.launch(arrayOf("*/*"))
                 },
                 onTerminalScreenVisible = {
                     // When terminal screen becomes visible, replay active tab buffer

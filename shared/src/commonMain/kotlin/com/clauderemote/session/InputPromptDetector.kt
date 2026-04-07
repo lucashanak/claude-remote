@@ -153,8 +153,8 @@ class InputPromptDetector {
         private val CONTEXT_RATIO_REGEX = Regex("([\\d,.]+[km]?)\\s*/\\s*([\\d,.]+[km]?)\\s*tokens", RegexOption.IGNORE_CASE)
         private val CONTEXT_PERCENT_REGEX = Regex("(\\d{1,3})%\\s*context|context[:\\s]+(\\d{1,3})%", RegexOption.IGNORE_CASE)
         private val TOKENS_REMAINING_REGEX = Regex("([\\d,.]+[km]?)\\s*tokens?\\s*remaining", RegexOption.IGNORE_CASE)
-        private val SESSION_USAGE_REGEX = Regex("Current session[^\\d]*(\\d{1,3})%\\s*used", RegexOption.IGNORE_CASE)
-        private val WEEK_USAGE_REGEX = Regex("Current week \\(all models\\)[^\\d]*(\\d{1,3})%\\s*used", RegexOption.IGNORE_CASE)
+        private val SESSION_USAGE_REGEX = Regex("Current session[\\s\\S]{0,50}?(\\d{1,3})%\\s*used", RegexOption.IGNORE_CASE)
+        private val WEEK_USAGE_REGEX = Regex("Current week[\\s\\S]{0,60}?(\\d{1,3})%\\s*used", RegexOption.IGNORE_CASE)
 
         fun stripAnsi(text: String): String = ANSI_REGEX.replace(text, "")
 
