@@ -117,11 +117,33 @@ class InputPromptDetector {
         }
     }
 
+    /**
+     * Parse usage data from Claude Code /usage command output.
+     * Returns map of label→percentage, e.g. {"session" to 5, "week" to 16}
+     */
+    fun parseUsage(text: String): Map<String, Int>? {
+        val stripped = stripAnsi(text)
+        val result = mutableMapOf<String, Int>()
+
+        // "Current session" → "XX% used"
+        SESSION_USAGE_REGEX.find(stripped)?.let {
+            it.groupValues[1].toIntOrNull()?.let { pct -> result["session"] = pct }
+        }
+        // "Current week (all models)" → "XX% used"
+        WEEK_USAGE_REGEX.find(stripped)?.let {
+            it.groupValues[1].toIntOrNull()?.let { pct -> result["week"] = pct }
+        }
+
+        return result.ifEmpty { null }
+    }
+
     companion object {
         private val ANSI_REGEX = Regex("\u001B(?:\\[\\??[0-9;]*[a-zA-Z]|\\][^\u0007]*\u0007)")
         private val CONTEXT_RATIO_REGEX = Regex("([\\d,.]+[km]?)\\s*/\\s*([\\d,.]+[km]?)\\s*tokens", RegexOption.IGNORE_CASE)
         private val CONTEXT_PERCENT_REGEX = Regex("(\\d{1,3})%\\s*context|context[:\\s]+(\\d{1,3})%", RegexOption.IGNORE_CASE)
         private val TOKENS_REMAINING_REGEX = Regex("([\\d,.]+[km]?)\\s*tokens?\\s*remaining", RegexOption.IGNORE_CASE)
+        private val SESSION_USAGE_REGEX = Regex("Current session[^\\d]*(\\d{1,3})%\\s*used", RegexOption.IGNORE_CASE)
+        private val WEEK_USAGE_REGEX = Regex("Current week \\(all models\\)[^\\d]*(\\d{1,3})%\\s*used", RegexOption.IGNORE_CASE)
 
         fun stripAnsi(text: String): String = ANSI_REGEX.replace(text, "")
 

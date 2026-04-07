@@ -52,6 +52,8 @@ fun TerminalScreen(
     onFetchCommands: (suspend () -> List<SlashCommand>)? = null,
     onFontSizeChange: ((Int) -> Unit)? = null,
     contextPercent: Int? = null,
+    sessionUsagePercent: Int? = null,
+    weekUsagePercent: Int? = null,
     terminalContent: @Composable (Modifier) -> Unit
 ) {
     var showControlBar by remember { mutableStateOf(true) }
@@ -195,31 +197,17 @@ fun TerminalScreen(
                     }
                     } // end !wideMode dropdown
                 }
-                // Context usage bar
-                if (contextPercent != null) {
-                    Spacer(Modifier.width(8.dp))
-                    Box(
-                        modifier = Modifier.width(60.dp).height(6.dp)
-                            .background(MaterialTheme.colorScheme.surfaceVariant, CircleShape)
-                    ) {
-                        val pct = contextPercent.coerceIn(0, 100)
-                        val color = when {
-                            pct < 50 -> Color(0xFF4CAF50)
-                            pct < 80 -> Color(0xFFFF9800)
-                            else -> Color(0xFFF44336)
+                // Usage/context bars
+                if (contextPercent != null || sessionUsagePercent != null || weekUsagePercent != null) {
+                    Spacer(Modifier.width(4.dp))
+                    Column(verticalArrangement = Arrangement.spacedBy(1.dp)) {
+                        if (contextPercent != null) {
+                            MiniBar("Ctx", contextPercent)
                         }
-                        Box(
-                            modifier = Modifier
-                                .fillMaxHeight()
-                                .fillMaxWidth(pct / 100f)
-                                .background(color, CircleShape)
-                        )
+                        if (weekUsagePercent != null) {
+                            MiniBar("Wk", weekUsagePercent)
+                        }
                     }
-                    Text(
-                        "${contextPercent}%",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
                 }
 
                 // Compact/Full toggle
@@ -991,6 +979,30 @@ private fun ClaudeControlBar(
             CtrlButton("y") { onSendCommand("y\r") }
             CtrlButton("n") { onSendCommand("n\r") }
         }
+    }
+}
+
+@Composable
+private fun MiniBar(label: String, percent: Int) {
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Text(label, style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.width(20.dp))
+        Box(
+            modifier = Modifier.width(40.dp).height(4.dp)
+                .background(MaterialTheme.colorScheme.surface.copy(alpha = 0.3f), CircleShape)
+        ) {
+            val pct = percent.coerceIn(0, 100)
+            val color = when {
+                pct < 50 -> Color(0xFF4CAF50)
+                pct < 80 -> Color(0xFFFF9800)
+                else -> Color(0xFFF44336)
+            }
+            Box(modifier = Modifier.fillMaxHeight().fillMaxWidth(pct / 100f).background(color, CircleShape))
+        }
+        Text("${percent}%", style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.padding(start = 2.dp))
     }
 }
 

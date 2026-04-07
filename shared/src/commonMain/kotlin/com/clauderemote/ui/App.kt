@@ -64,10 +64,16 @@ fun App(
     var connectionError by remember { mutableStateOf<String?>(null) }
     var tabCloseConfirmId by remember { mutableStateOf<String?>(null) }
     var contextPercent by remember { mutableStateOf<Int?>(null) }
+    var sessionUsagePercent by remember { mutableStateOf<Int?>(null) }
+    var weekUsagePercent by remember { mutableStateOf<Int?>(null) }
 
-    // Wire context updates
+    // Wire context and usage updates
     LaunchedEffect(Unit) {
         sessionOrchestrator.onContextUpdate = { _, pct -> contextPercent = pct }
+        sessionOrchestrator.onUsageUpdate = { session, week ->
+            if (session != null) sessionUsagePercent = session
+            if (week != null) weekUsagePercent = week
+        }
     }
 
     var serverList by remember { mutableStateOf(serverStorage.loadServers()) }
@@ -540,6 +546,8 @@ fun App(
                             onApplyFontSize?.invoke(size)
                         },
                         contextPercent = contextPercent,
+                        sessionUsagePercent = sessionUsagePercent,
+                        weekUsagePercent = weekUsagePercent,
                         terminalContent = terminalContent
                     )
                 }

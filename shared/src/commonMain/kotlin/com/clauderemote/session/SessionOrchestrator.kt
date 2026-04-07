@@ -44,6 +44,9 @@ class SessionOrchestrator(
     // Context window usage callback (0-100 percent)
     var onContextUpdate: ((sessionId: String, percent: Int) -> Unit)? = null
 
+    // Usage stats callback (session%, week%)
+    var onUsageUpdate: ((sessionPercent: Int?, weekPercent: Int?) -> Unit)? = null
+
     suspend fun launchSession(
         server: SshServer,
         folder: String,
@@ -123,6 +126,10 @@ class SessionOrchestrator(
             // Parse context usage
             promptDetector.parseContextPercent(text)?.let { pct ->
                 onContextUpdate?.invoke(session.id, pct)
+            }
+            // Parse usage stats
+            promptDetector.parseUsage(text)?.let { usage ->
+                onUsageUpdate?.invoke(usage["session"], usage["week"])
             }
         }
 
