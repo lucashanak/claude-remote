@@ -89,8 +89,11 @@ fun TerminalScreen(
             return f.ifBlank { "~" }
         }
         val activeSessions = tabs.map { tab ->
-            val label = tab.folder.trimEnd('/').substringAfterLast('/').ifBlank { tab.folder }
+            val rawName = tab.folder.trimEnd('/').substringAfterLast('/').ifBlank { tab.folder }
             val folder = parseFolder(tab.folder)
+            // Short label: mode suffix only if folder matches group
+            val isYolo = tab.mode == com.clauderemote.model.ClaudeMode.YOLO
+            val label = if (isYolo) "$rawName \u26A1" else rawName
             SessionItem(tab.id, label, folder, true, tab.status, tab, null)
         }
         val remoteItems = remoteSessions.filter { it.tmuxSession.name !in connectedTmux }.map { remote ->
@@ -98,7 +101,10 @@ fun TerminalScreen(
             val name = if (remote.tmuxSession.name.startsWith(prefix))
                 remote.tmuxSession.name.removePrefix(prefix) else remote.tmuxSession.name
             val folder = parseFolder(name)
-            SessionItem(remote.tmuxSession.name, name.ifBlank { remote.tmuxSession.name }, folder, false, null, null, remote)
+            val isYolo = name.contains("-yolo", ignoreCase = true)
+            val shortName = name.replace(Regex("-yolo\\d*$"), "").ifBlank { name }
+            val label = (if (shortName == folder) shortName else shortName) + if (isYolo) " \u26A1" else ""
+            SessionItem(remote.tmuxSession.name, label, folder, false, null, null, remote)
         }
         (activeSessions + remoteItems).groupBy { it.folder }.toSortedMap()
     }
@@ -191,7 +197,7 @@ fun TerminalScreen(
                                             Box(modifier = Modifier.size(8.dp).background(dotColor, shape = CircleShape))
                                             Spacer(Modifier.width(8.dp))
                                             Text(
-                                                item.label + if (!item.isConnected) " (remote)" else "",
+                                                item.label,
                                                 style = if (item.tab?.id == activeTabId) MaterialTheme.typography.bodyMedium
                                                        else MaterialTheme.typography.bodySmall
                                             )
