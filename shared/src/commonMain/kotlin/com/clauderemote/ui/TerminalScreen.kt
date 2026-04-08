@@ -82,16 +82,22 @@ fun TerminalScreen(
     // Unified session list: active tabs + remote (unconnected) sessions, grouped by folder
     val allSessions = remember(tabs, remoteSessions) {
         val connectedTmux = tabs.map { it.tmuxSessionName }.toSet()
+        fun parseFolder(raw: String): String {
+            var f = raw.trimEnd('/').substringAfterLast('/').ifBlank { raw }
+            // Strip yolo/yolo2/etc. suffix for grouping
+            f = f.replace(Regex("-yolo\\d*$"), "")
+            return f.ifBlank { "~" }
+        }
         val activeSessions = tabs.map { tab ->
-            val folder = tab.folder.trimEnd('/').substringAfterLast('/').ifBlank { tab.folder }
-            SessionItem(tab.id, folder, folder, true, tab.status, tab, null)
+            val label = tab.folder.trimEnd('/').substringAfterLast('/').ifBlank { tab.folder }
+            val folder = parseFolder(tab.folder)
+            SessionItem(tab.id, label, folder, true, tab.status, tab, null)
         }
         val remoteItems = remoteSessions.filter { it.tmuxSession.name !in connectedTmux }.map { remote ->
             val prefix = "claude-${remote.server.name}-"
-            var name = if (remote.tmuxSession.name.startsWith(prefix))
+            val name = if (remote.tmuxSession.name.startsWith(prefix))
                 remote.tmuxSession.name.removePrefix(prefix) else remote.tmuxSession.name
-            if (name.endsWith("-yolo")) name = name.removeSuffix("-yolo")
-            val folder = name.ifBlank { "~" }
+            val folder = parseFolder(name)
             SessionItem(remote.tmuxSession.name, name.ifBlank { remote.tmuxSession.name }, folder, false, null, null, remote)
         }
         (activeSessions + remoteItems).groupBy { it.folder }.toSortedMap()
