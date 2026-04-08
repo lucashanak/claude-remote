@@ -257,6 +257,24 @@ private fun DesktopTerminalView(
                     termWidget = widget
 
                     panel.add(widget, BorderLayout.CENTER)
+
+                    // Force layout after panel is shown (macOS needs explicit sizing)
+                    panel.addComponentListener(object : java.awt.event.ComponentAdapter() {
+                        override fun componentResized(e: java.awt.event.ComponentEvent?) {
+                            widget.size = panel.size
+                            widget.revalidate()
+                        }
+                        override fun componentShown(e: java.awt.event.ComponentEvent?) {
+                            widget.size = panel.size
+                            widget.revalidate()
+                        }
+                    })
+                    // Also force after a short delay for initial display
+                    javax.swing.SwingUtilities.invokeLater {
+                        widget.size = panel.size
+                        widget.revalidate()
+                    }
+
                     FileLogger.log("Desktop", "JediTerm widget created")
                 } catch (e: Exception) {
                     FileLogger.error("Desktop", "JediTerm init failed: ${e.message}", e)
