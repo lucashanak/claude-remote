@@ -338,61 +338,59 @@ fun TerminalScreen(
             }
         }
 
+        // Command picker as dialog (works over SwingPanel on desktop)
+        if (showCommandPicker) {
+            AlertDialog(
+                onDismissRequest = {
+                    showCommandPicker = false
+                    commandFilter = ""
+                    try { inputFocusRequester.requestFocus() } catch (_: Exception) {}
+                },
+                confirmButton = {},
+                text = {
+                    CommandPicker(
+                        commands = commands,
+                        filter = commandFilter,
+                        onFilterChange = { commandFilter = it },
+                        onSelect = { cmd ->
+                            showCommandPicker = false
+                            commandFilter = ""
+                            onSendCommand(cmd.command + "\r")
+                        },
+                        onDismiss = {
+                            showCommandPicker = false
+                            commandFilter = ""
+                            try { inputFocusRequester.requestFocus() } catch (_: Exception) {}
+                        }
+                    )
+                }
+            )
+        }
+
+        // CLAUDE.md viewer as dialog (works over SwingPanel on desktop)
+        if (showClaudeMd) {
+            AlertDialog(
+                onDismissRequest = { showClaudeMd = false },
+                confirmButton = {
+                    TextButton(onClick = { showClaudeMd = false }) { Text("Close") }
+                },
+                title = { Text("CLAUDE.md") },
+                text = {
+                    androidx.compose.foundation.text.selection.SelectionContainer {
+                        Text(
+                            text = claudeMdContent.ifBlank { "(not found)" },
+                            modifier = Modifier.heightIn(max = 400.dp).verticalScroll(rememberScrollState()),
+                            style = MaterialTheme.typography.bodySmall,
+                            fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace
+                        )
+                    }
+                }
+            )
+        }
+
         // Terminal content
         Box(modifier = Modifier.fillMaxWidth().weight(1f)) {
             terminalContent(Modifier.fillMaxSize())
-
-            if (showCommandPicker) {
-                CommandPicker(
-                    commands = commands,
-                    filter = commandFilter,
-                    onFilterChange = { commandFilter = it },
-                    onSelect = { cmd ->
-                        showCommandPicker = false
-                        commandFilter = ""
-                        onSendCommand(cmd.command + "\r")
-                    },
-                    onDismiss = {
-                        showCommandPicker = false
-                        commandFilter = ""
-                        try { inputFocusRequester.requestFocus() } catch (_: Exception) {}
-                    }
-                )
-            }
-
-            // CLAUDE.md viewer overlay
-            if (showClaudeMd) {
-                Surface(
-                    modifier = Modifier.fillMaxWidth().fillMaxHeight(0.7f).padding(8.dp),
-                    shape = MaterialTheme.shapes.medium,
-                    tonalElevation = 8.dp,
-                    shadowElevation = 8.dp
-                ) {
-                    Column(modifier = Modifier.fillMaxSize()) {
-                        Row(
-                            modifier = Modifier.fillMaxWidth().padding(8.dp),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Text("CLAUDE.md", style = MaterialTheme.typography.titleSmall)
-                            IconButton(onClick = { showClaudeMd = false }) {
-                                Icon(Icons.Default.Close, "Close")
-                            }
-                        }
-                        androidx.compose.foundation.text.selection.SelectionContainer {
-                            Text(
-                                text = claudeMdContent.ifBlank { "(not found)" },
-                                modifier = Modifier
-                                    .fillMaxSize()
-                                    .verticalScroll(rememberScrollState())
-                                    .padding(8.dp),
-                                style = MaterialTheme.typography.bodySmall,
-                                fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace
-                            )
-                        }
-                    }
-                }
-            }
         }
 
         if (!compactMode) {
