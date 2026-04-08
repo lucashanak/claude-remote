@@ -8,6 +8,8 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.ui.graphics.SolidColor
@@ -980,6 +982,9 @@ private fun CommandPicker(
         it.command.contains(filter, ignoreCase = true) ||
         it.description.contains(filter, ignoreCase = true)
     }
+    var selectedIndex by remember { mutableStateOf(0) }
+    // Reset selection when filter changes
+    LaunchedEffect(filter) { selectedIndex = 0 }
 
     Surface(
         modifier = Modifier.fillMaxWidth().fillMaxHeight(0.6f).padding(8.dp),
@@ -998,7 +1003,30 @@ private fun CommandPicker(
                     value = filter,
                     onValueChange = onFilterChange,
                     placeholder = { Text("Filter commands...") },
-                    modifier = Modifier.weight(1f).focusRequester(filterFocus),
+                    modifier = Modifier.weight(1f)
+                        .focusRequester(filterFocus)
+                        .onPreviewKeyEvent { event ->
+                            if (event.type == KeyEventType.KeyDown) {
+                                when (event.key) {
+                                    Key.DirectionDown -> {
+                                        selectedIndex = (selectedIndex + 1).coerceAtMost(filtered.size - 1)
+                                        true
+                                    }
+                                    Key.DirectionUp -> {
+                                        selectedIndex = (selectedIndex - 1).coerceAtLeast(0)
+                                        true
+                                    }
+                                    Key.Enter -> {
+                                        if (filtered.isNotEmpty() && selectedIndex in filtered.indices) {
+                                            onSelect(filtered[selectedIndex])
+                                        }
+                                        true
+                                    }
+                                    Key.Escape -> { onDismiss(); true }
+                                    else -> false
+                                }
+                            } else false
+                        },
                     singleLine = true,
                     textStyle = MaterialTheme.typography.bodyMedium
                 )
@@ -1006,17 +1034,32 @@ private fun CommandPicker(
                 IconButton(onClick = onDismiss) { Icon(Icons.Default.Close, "Close") }
             }
 
-            LazyColumn(modifier = Modifier.fillMaxSize()) {
-                items(filtered) { cmd ->
+            val listState = rememberLazyListState()
+            LaunchedEffect(selectedIndex) {
+                if (selectedIndex in filtered.indices) {
+                    listState.animateScrollToItem(selectedIndex)
+                }
+            }
+
+            LazyColumn(modifier = Modifier.fillMaxSize(), state = listState) {
+                itemsIndexed(filtered) { index, cmd ->
+                    val isSelected = index == selectedIndex
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
+                            .background(
+                                if (isSelected) MaterialTheme.colorScheme.primaryContainer
+                                else Color.Transparent
+                            )
                             .clickable { onSelect(cmd) }
                             .padding(horizontal = 16.dp, vertical = 10.dp),
                         horizontalArrangement = Arrangement.SpaceBetween
                     ) {
-                        Text(cmd.command, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.primary)
-                        Text(cmd.description, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Text(cmd.command, style = MaterialTheme.typography.bodyMedium,
+                            color = if (isSelected) MaterialTheme.colorScheme.onPrimaryContainer
+                                   else MaterialTheme.colorScheme.primary)
+                        Text(cmd.description, style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
                     HorizontalDivider()
                 }

@@ -78,20 +78,41 @@ class SessionOrchestrator(
 
     private fun parseUsageJson(json: String) {
         try {
-            // ccusage blocks --active --json output contains blocks array
-            // Parse percentage from token counts
             if (json.isBlank() || json.trim() == "{}") return
-            // Simple parsing: look for "total_tokens" and capacity patterns
-            val totalTokensRegex = Regex("\"total_tokens\"\\s*:\\s*(\\d+)")
-            val totalMatch = totalTokensRegex.find(json)
-            val totalTokens = totalMatch?.groupValues?.get(1)?.toLongOrNull() ?: return
+            // Parse token counts from ccusage blocks JSON
+            // Sum all token types for real usage
+            val inputTokens = Regex("\"inputTokens\"\\s*:\\s*(\\d+)").find(json)
+                ?.groupValues?.get(1)?.toLongOrNull() ?: 0L
+            val outputTokens = Regex("\"outputTokens\"\\s*:\\s*(\\d+)").find(json)
+                ?.groupValues?.get(1)?.toLongOrNull() ?: 0L
+            val cacheCreation = Regex("\"cacheCreationInputTokens\"\\s*:\\s*(\\d+)").find(json)
+                ?.groupValues?.get(1)?.toLongOrNull() ?: 0L
+            val cacheRead = Regex("\"cacheReadInputTokens\"\\s*:\\s*(\\d+)").find(json)
+                ?.groupValues?.get(1)?.toLongOrNull() ?: 0L
 
-            // 5h window: Claude Max default ~5M tokens per 5h window
-            // This is approximate — actual limits vary by plan
-            val fiveHourLimit = 5_000_000L
-            val fiveHourPct = ((totalTokens.toDouble() / fiveHourLimit) * 100).toInt().coerceIn(0, 100)
-            onUsageUpdate?.invoke(fiveHourPct, null)
-        } catch (_: Exception) {}
+            val totalUsed = inputTokens + outputTokens + cacheCreation + cacheRead
+            if (totalUsed == 0L) return
+
+            // Parse remaining minutes from projection
+            val remaining = Regex("\"remainingMinutes\"\\s*:\\s*(\\d+)").find(json)
+                ?.groupValues?.get(1)?.toIntOrNull()
+
+            // Estimate percentage: remaining/300min (5h) = remaining fraction
+            val pct = if (remaining != null && remaining < 300) {
+                ((1.0 - remaining.toDouble() / 300.0) * 100).toInt().coerceIn(0, 100)
+            } else {
+                // Fallback: burn rate based
+                val burnRate = Regex("\"tokensPerMinute\"\\s*:\\s*([\\d.]+)").find(json)
+                    ?.groupValues?.get(1)?.toDoubleOrNull() ?: return
+                if (burnRate <= 0) return
+                val estimatedTotal = burnRate * 300 // 5h in minutes
+                ((totalUsed.toDouble() / estimatedTotal) * 100).toInt().coerceIn(0, 100)
+            }
+            FileLogger.log(TAG, "Usage: ${totalUsed} tokens, ${remaining}min remaining, ${pct}%")
+            onUsageUpdate?.invoke(pct, null)
+        } catch (e: Exception) {
+            FileLogger.error(TAG, "Usage parse failed: ${e.message}", e)
+        }
     }
 
     suspend fun launchSession(
