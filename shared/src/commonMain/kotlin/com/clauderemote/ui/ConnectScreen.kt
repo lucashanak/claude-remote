@@ -1,5 +1,6 @@
 package com.clauderemote.ui
 
+import com.clauderemote.model.TmuxNameParser
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.selection.selectable
@@ -33,21 +34,20 @@ fun ConnectScreen(
     var selectedMode by remember { mutableStateOf(appSettings.defaultClaudeMode) }
     var selectedModel by remember { mutableStateOf(appSettings.defaultClaudeModel) }
     var connectionType by remember { mutableStateOf(ConnectionType.SSH) }
+    var sessionAlias by remember { mutableStateOf("") }
     var tmuxSessionName by remember {
-        val folderPart = server.defaultFolder.substringAfterLast('/').ifBlank { server.defaultFolder }
-        val yoloSuffix = if (appSettings.defaultClaudeMode == ClaudeMode.YOLO) "-yolo" else ""
-        mutableStateOf("claude-${server.name}-${folderPart}${yoloSuffix}".take(32))
+        mutableStateOf(TmuxNameParser.build(server.name, server.defaultFolder, appSettings.defaultClaudeMode == ClaudeMode.YOLO))
     }
     var useExistingTmux by remember { mutableStateOf(false) }
     var browseFolders by remember { mutableStateOf<List<String>>(emptyList()) }
     var browseLoading by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
-    // Auto-update tmux name when folder or mode changes
-    LaunchedEffect(folder, selectedMode) {
+    // Auto-update tmux name when folder, mode, or alias changes
+    LaunchedEffect(folder, selectedMode, sessionAlias) {
         if (!useExistingTmux) {
-            val folderName = folder.substringAfterLast('/').ifBlank { folder.trimEnd('/').substringAfterLast('/') }
-            val yoloSuffix = if (selectedMode == ClaudeMode.YOLO) "-yolo" else ""
-            tmuxSessionName = "claude-${server.name}-${folderName}${yoloSuffix}".take(32)
+            tmuxSessionName = TmuxNameParser.build(
+                server.name, folder, selectedMode == ClaudeMode.YOLO, sessionAlias
+            )
         }
     }
     var modelExpanded by remember { mutableStateOf(false) }
@@ -260,6 +260,16 @@ fun ConnectScreen(
                     }
 
                     if (!useExistingTmux) {
+                        OutlinedTextField(
+                            value = sessionAlias,
+                            onValueChange = { sessionAlias = it },
+                            label = { Text("Alias (optional)") },
+                            placeholder = { Text("e.g. bugfix, refactor...") },
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(start = 40.dp),
+                            singleLine = true
+                        )
                         OutlinedTextField(
                             value = tmuxSessionName,
                             onValueChange = { tmuxSessionName = it },

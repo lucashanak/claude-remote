@@ -89,21 +89,21 @@ fun TerminalScreen(
             return f.ifBlank { "~" }
         }
         val activeSessions = tabs.map { tab ->
-            val rawName = tab.folder.trimEnd('/').substringAfterLast('/').ifBlank { tab.folder }
+            val parsed = com.clauderemote.model.TmuxNameParser.parse(tab.tmuxSessionName, tab.server.name)
+            val alias = tab.alias.ifBlank { parsed.alias }
             val folder = parseFolder(tab.folder)
-            // Short label: mode suffix only if folder matches group
-            val isYolo = tab.mode == com.clauderemote.model.ClaudeMode.YOLO
-            val label = if (isYolo) "$rawName \u26A1" else rawName
+            val label = alias.ifBlank {
+                val rawName = tab.folder.trimEnd('/').substringAfterLast('/').ifBlank { tab.folder }
+                if (parsed.isYolo || tab.mode == com.clauderemote.model.ClaudeMode.YOLO) "$rawName \u26A1" else rawName
+            }
             SessionItem(tab.id, label, folder, true, tab.status, tab, null)
         }
         val remoteItems = remoteSessions.filter { it.tmuxSession.name !in connectedTmux }.map { remote ->
-            val prefix = "claude-${remote.server.name}-"
-            val name = if (remote.tmuxSession.name.startsWith(prefix))
-                remote.tmuxSession.name.removePrefix(prefix) else remote.tmuxSession.name
-            val folder = parseFolder(name)
-            val isYolo = name.contains("-yolo", ignoreCase = true)
-            val shortName = name.replace(Regex("-yolo\\d*$"), "").ifBlank { name }
-            val label = (if (shortName == folder) shortName else shortName) + if (isYolo) " \u26A1" else ""
+            val parsed = com.clauderemote.model.TmuxNameParser.parse(remote.tmuxSession.name, remote.server.name)
+            val folder = parseFolder(parsed.folder)
+            val label = parsed.alias.ifBlank {
+                if (parsed.isYolo) "${parsed.folder} \u26A1" else parsed.folder
+            }
             SessionItem(remote.tmuxSession.name, label, folder, false, null, null, remote)
         }
         (activeSessions + remoteItems).groupBy { it.folder }.toSortedMap()

@@ -264,20 +264,11 @@ fun App(
                             scope.launch {
                                 try {
                                     connectionError = null
-                                    // Parse folder and mode from tmux session name
-                                    // Format: claude-{server}-{folder}[-yolo]
-                                    val prefix = "claude-${remote.server.name}-"
-                                    var remainder = if (remote.tmuxSession.name.startsWith(prefix)) {
-                                        remote.tmuxSession.name.removePrefix(prefix)
-                                    } else remote.tmuxSession.name
-                                    val isYolo = remainder.endsWith("-yolo")
-                                    if (isYolo) remainder = remainder.removeSuffix("-yolo")
-                                    val folderFromTmux = remainder.ifBlank { remote.server.defaultFolder }
-                                    val modeFromTmux = if (isYolo) ClaudeMode.YOLO else remote.server.defaultClaudeMode
+                                    val parsed = TmuxNameParser.parse(remote.tmuxSession.name, remote.server.name)
                                     sessionOrchestrator.launchSession(
                                         server = remote.server,
-                                        folder = folderFromTmux,
-                                        mode = modeFromTmux,
+                                        folder = parsed.folder,
+                                        mode = if (parsed.isYolo) ClaudeMode.YOLO else remote.server.defaultClaudeMode,
                                         model = remote.server.defaultClaudeModel,
                                         connectionType = ConnectionType.SSH,
                                         tmuxSessionName = remote.tmuxSession.name,
@@ -294,14 +285,13 @@ fun App(
                             scope.launch {
                                 try {
                                     connectionError = null
-                                    val yoloSuffix = if (server.defaultClaudeMode == ClaudeMode.YOLO) "-yolo" else ""
                                     sessionOrchestrator.launchSession(
                                         server = server,
                                         folder = server.defaultFolder,
                                         mode = server.defaultClaudeMode,
                                         model = server.defaultClaudeModel,
                                         connectionType = ConnectionType.SSH,
-                                        tmuxSessionName = "claude-${server.name}${yoloSuffix}",
+                                        tmuxSessionName = TmuxNameParser.build(server.name, server.defaultFolder, server.defaultClaudeMode == ClaudeMode.YOLO),
                                         isNewTmuxSession = true
                                     )
                                     currentScreen = Screen.TERMINAL
@@ -547,15 +537,10 @@ fun App(
                         onAttachRemote = { remote ->
                             scope.launch {
                                 try {
-                                    val prefix = "claude-${remote.server.name}-"
-                                    var remainder = if (remote.tmuxSession.name.startsWith(prefix))
-                                        remote.tmuxSession.name.removePrefix(prefix) else remote.tmuxSession.name
-                                    val isYolo = remainder.endsWith("-yolo")
-                                    if (isYolo) remainder = remainder.removeSuffix("-yolo")
-                                    val folder = remainder.ifBlank { remote.server.defaultFolder }
-                                    val mode = if (isYolo) ClaudeMode.YOLO else remote.server.defaultClaudeMode
+                                    val parsed = TmuxNameParser.parse(remote.tmuxSession.name, remote.server.name)
                                     sessionOrchestrator.launchSession(
-                                        server = remote.server, folder = folder, mode = mode,
+                                        server = remote.server, folder = parsed.folder,
+                                        mode = if (parsed.isYolo) ClaudeMode.YOLO else remote.server.defaultClaudeMode,
                                         model = remote.server.defaultClaudeModel,
                                         connectionType = ConnectionType.SSH,
                                         tmuxSessionName = remote.tmuxSession.name,
