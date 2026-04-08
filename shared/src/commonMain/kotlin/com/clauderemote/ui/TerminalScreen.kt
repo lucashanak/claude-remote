@@ -36,6 +36,13 @@ import com.clauderemote.session.CommandFetcher
 import com.clauderemote.session.SlashCommand
 import kotlinx.coroutines.launch
 
+private data class SessionItem(
+    val id: String, val label: String, val folder: String,
+    val isConnected: Boolean,
+    val status: SessionStatus?, val tab: ClaudeSession?,
+    val remote: com.clauderemote.model.RemoteSession?
+)
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun TerminalScreen(
@@ -72,8 +79,22 @@ fun TerminalScreen(
     val activeSession = tabs.find { it.id == activeTabId }
     val scope = rememberCoroutineScope()
 
-    val groupedTabs = remember(tabs) {
-        tabs.groupBy { it.server.name }.toSortedMap()
+    // Unified session list: active tabs + remote (unconnected) sessions, grouped by folder
+    val allSessions = remember(tabs, remoteSessions) {
+        val connectedTmux = tabs.map { it.tmuxSessionName }.toSet()
+        val activeSessions = tabs.map { tab ->
+            val folder = tab.folder.trimEnd('/').substringAfterLast('/').ifBlank { tab.folder }
+            SessionItem(tab.id, folder, folder, true, tab.status, tab, null)
+        }
+        val remoteItems = remoteSessions.filter { it.tmuxSession.name !in connectedTmux }.map { remote ->
+            val prefix = "claude-${remote.server.name}-"
+            var name = if (remote.tmuxSession.name.startsWith(prefix))
+                remote.tmuxSession.name.removePrefix(prefix) else remote.tmuxSession.name
+            if (name.endsWith("-yolo")) name = name.removeSuffix("-yolo")
+            val folder = name.ifBlank { "~" }
+            SessionItem(remote.tmuxSession.name, name.ifBlank { remote.tmuxSession.name }, folder, false, null, null, remote)
+        }
+        (activeSessions + remoteItems).groupBy { it.folder }.toSortedMap()
     }
 
     BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
@@ -84,13 +105,12 @@ fun TerminalScreen(
             // Side panel on wide displays
             if (wideMode) {
                 SessionSidePanel(
-                    groupedTabs = groupedTabs,
+                    allSessions = allSessions,
                     activeTabId = activeTabId,
                     onTabSwitch = onTabSwitch,
                     onTabClose = onTabClose,
                     onNewTab = onNewTab,
                     onMenuOpen = onMenuOpen,
-                    remoteSessions = remoteSessions,
                     onAttachRemote = onAttachRemote,
                     modifier = Modifier.width(200.dp).fillMaxHeight()
                 )
@@ -143,80 +163,48 @@ fun TerminalScreen(
                         expanded = sessionDropdown,
                         onDismissRequest = { sessionDropdown = false }
                     ) {
-                        groupedTabs.forEach { (serverName, serverTabs) ->
-                            if (groupedTabs.size > 1) {
+                        allSessions.forEach { (folder, items) ->
+                            if (allSessions.size > 1) {
                                 Text(
-                                    serverName,
+                                    folder,
                                     style = MaterialTheme.typography.labelSmall,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                                     modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp)
                                 )
                             }
-                            serverTabs.forEach { tab ->
-                                val isActive = tab.id == activeTabId
-                                val dotColor = when (tab.status) {
-                                    SessionStatus.ACTIVE -> Color(0xFF4CAF50)
-                                    SessionStatus.CONNECTING -> Color(0xFFFF9800)
-                                    SessionStatus.DISCONNECTED, SessionStatus.ERROR -> Color(0xFFF44336)
+                            items.forEach { item ->
+                                val dotColor = when {
+                                    !item.isConnected -> Color(0xFF666666)
+                                    item.status == SessionStatus.ACTIVE -> Color(0xFF4CAF50)
+                                    item.status == SessionStatus.CONNECTING -> Color(0xFFFF9800)
+                                    else -> Color(0xFFF44336)
                                 }
                                 DropdownMenuItem(
                                     text = {
                                         Row(verticalAlignment = Alignment.CenterVertically) {
                                             Box(modifier = Modifier.size(8.dp).background(dotColor, shape = CircleShape))
                                             Spacer(Modifier.width(8.dp))
-                                            val folderName = tab.folder.trimEnd('/').substringAfterLast('/').ifBlank { tab.folder }
                                             Text(
-                                                folderName,
-                                                style = if (isActive) MaterialTheme.typography.bodyMedium
+                                                item.label + if (!item.isConnected) " (remote)" else "",
+                                                style = if (item.tab?.id == activeTabId) MaterialTheme.typography.bodyMedium
                                                        else MaterialTheme.typography.bodySmall
                                             )
                                         }
                                     },
                                     onClick = {
                                         sessionDropdown = false
-                                        onTabSwitch(tab.id)
+                                        if (item.isConnected && item.tab != null) {
+                                            onTabSwitch(item.tab.id)
+                                        } else if (item.remote != null) {
+                                            onAttachRemote?.invoke(item.remote)
+                                        }
                                     },
-                                    trailingIcon = {
+                                    trailingIcon = if (item.isConnected) { {
                                         IconButton(
-                                            onClick = {
-                                                sessionDropdown = false
-                                                onTabClose(tab.id)
-                                            },
+                                            onClick = { sessionDropdown = false; item.tab?.let { onTabClose(it.id) } },
                                             modifier = Modifier.size(24.dp)
-                                        ) {
-                                            Icon(Icons.Default.Close, "Close", modifier = Modifier.size(14.dp))
-                                        }
-                                    }
-                                )
-                            }
-                        }
-                        // Remote sessions (not yet connected)
-                        val connectedTmux = tabs.map { it.tmuxSessionName }.toSet()
-                        val unconnected = remoteSessions.filter { it.tmuxSession.name !in connectedTmux }
-                        if (unconnected.isNotEmpty()) {
-                            HorizontalDivider()
-                            Text(
-                                "Remote",
-                                style = MaterialTheme.typography.labelSmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp)
-                            )
-                            unconnected.forEach { remote ->
-                                DropdownMenuItem(
-                                    text = {
-                                        Row(verticalAlignment = Alignment.CenterVertically) {
-                                            Box(modifier = Modifier.size(8.dp).background(Color(0xFF666666), shape = CircleShape))
-                                            Spacer(Modifier.width(8.dp))
-                                            Text(
-                                                remote.tmuxSession.name,
-                                                style = MaterialTheme.typography.bodySmall
-                                            )
-                                        }
-                                    },
-                                    onClick = {
-                                        sessionDropdown = false
-                                        onAttachRemote?.invoke(remote)
-                                    }
+                                        ) { Icon(Icons.Default.Close, "Close", modifier = Modifier.size(14.dp)) }
+                                    } } else null
                                 )
                             }
                         }
@@ -454,14 +442,13 @@ fun TerminalScreen(
 
 @Composable
 private fun SessionSidePanel(
-    groupedTabs: Map<String, List<com.clauderemote.model.ClaudeSession>>,
+    allSessions: Map<String, List<SessionItem>>,
     activeTabId: String?,
     onTabSwitch: (String) -> Unit,
     onTabClose: (String) -> Unit,
     onNewTab: () -> Unit,
     onMenuOpen: () -> Unit,
-    remoteSessions: List<com.clauderemote.model.RemoteSession> = emptyList(),
-    onAttachRemote: ((com.clauderemote.model.RemoteSession) -> Unit)? = null,
+    onAttachRemote: ((com.clauderemote.model.RemoteSession) -> Unit)?,
     modifier: Modifier = Modifier
 ) {
     Surface(
@@ -470,7 +457,6 @@ private fun SessionSidePanel(
         modifier = modifier
     ) {
         Column(modifier = Modifier.fillMaxSize()) {
-            // Header
             Row(
                 modifier = Modifier.fillMaxWidth().padding(8.dp),
                 verticalAlignment = Alignment.CenterVertically
@@ -485,28 +471,28 @@ private fun SessionSidePanel(
             }
             HorizontalDivider()
 
-            // Grouped session list
-            Column(
-                modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState())
-            ) {
-                groupedTabs.forEach { (serverName, serverTabs) ->
+            Column(modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState())) {
+                allSessions.forEach { (folder, items) ->
                     Text(
-                        serverName,
+                        folder,
                         style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp)
                     )
-                    serverTabs.forEach { tab ->
-                        val isActive = tab.id == activeTabId
-                        val dotColor = when (tab.status) {
-                            SessionStatus.ACTIVE -> Color(0xFF4CAF50)
-                            SessionStatus.CONNECTING -> Color(0xFFFF9800)
-                            SessionStatus.DISCONNECTED, SessionStatus.ERROR -> Color(0xFFF44336)
+                    items.forEach { item ->
+                        val dotColor = when {
+                            !item.isConnected -> Color(0xFF666666)
+                            item.status == SessionStatus.ACTIVE -> Color(0xFF4CAF50)
+                            item.status == SessionStatus.CONNECTING -> Color(0xFFFF9800)
+                            else -> Color(0xFFF44336)
                         }
                         Surface(
-                            color = if (isActive) MaterialTheme.colorScheme.primaryContainer
+                            color = if (item.tab?.id == activeTabId) MaterialTheme.colorScheme.primaryContainer
                                    else Color.Transparent,
-                            modifier = Modifier.fillMaxWidth().clickable { onTabSwitch(tab.id) }
+                            modifier = Modifier.fillMaxWidth().clickable {
+                                if (item.isConnected && item.tab != null) onTabSwitch(item.tab.id)
+                                else if (item.remote != null) onAttachRemote?.invoke(item.remote)
+                            }
                         ) {
                             Row(
                                 modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
@@ -514,52 +500,17 @@ private fun SessionSidePanel(
                             ) {
                                 Box(modifier = Modifier.size(8.dp).background(dotColor, shape = CircleShape))
                                 Spacer(Modifier.width(8.dp))
-                                val folderName = tab.folder.trimEnd('/').substringAfterLast('/').ifBlank { tab.folder }
                                 Text(
-                                    folderName,
+                                    item.label + if (!item.isConnected) " (remote)" else "",
                                     style = MaterialTheme.typography.bodySmall,
                                     modifier = Modifier.weight(1f)
                                 )
-                                IconButton(
-                                    onClick = { onTabClose(tab.id) },
-                                    modifier = Modifier.size(20.dp)
-                                ) {
-                                    Icon(Icons.Default.Close, "Close", modifier = Modifier.size(12.dp))
+                                if (item.isConnected) {
+                                    IconButton(
+                                        onClick = { item.tab?.let { onTabClose(it.id) } },
+                                        modifier = Modifier.size(20.dp)
+                                    ) { Icon(Icons.Default.Close, "Close", modifier = Modifier.size(12.dp)) }
                                 }
-                            }
-                        }
-                    }
-                }
-                // Remote (unconnected) sessions
-                val connectedTmux = groupedTabs.values.flatten().map { it.tmuxSessionName }.toSet()
-                val unconnected = remoteSessions.filter { it.tmuxSession.name !in connectedTmux }
-                if (unconnected.isNotEmpty()) {
-                    HorizontalDivider(modifier = Modifier.padding(vertical = 4.dp))
-                    Text(
-                        "Remote",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp)
-                    )
-                    unconnected.forEach { remote ->
-                        Surface(
-                            color = Color.Transparent,
-                            modifier = Modifier.fillMaxWidth().clickable {
-                                onAttachRemote?.invoke(remote)
-                            }
-                        ) {
-                            Row(
-                                modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                Box(modifier = Modifier.size(8.dp).background(Color(0xFF666666), shape = CircleShape))
-                                Spacer(Modifier.width(8.dp))
-                                Text(
-                                    remote.tmuxSession.name,
-                                    style = MaterialTheme.typography.bodySmall,
-                                    modifier = Modifier.weight(1f),
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                                )
                             }
                         }
                     }
