@@ -87,6 +87,7 @@ fun TerminalScreen(
     // Unified session list: active tabs + remote (unconnected) sessions, grouped by folder
     val allSessions = remember(tabs, remoteSessions) {
         val connectedTmux = tabs.map { it.tmuxSessionName }.toSet()
+        val connectedFolders = tabs.map { "${it.server.id}:${it.folder.trimEnd('/').substringAfterLast('/')}" }.toSet()
         fun parseFolder(raw: String): String {
             var f = raw.trimEnd('/').substringAfterLast('/').ifBlank { raw }
             // Strip yolo/yolo2/etc. suffix for grouping
@@ -103,7 +104,14 @@ fun TerminalScreen(
             }
             SessionItem(tab.id, label, folder, true, tab.status, tab, null)
         }
-        val remoteItems = remoteSessions.filter { it.tmuxSession.name !in connectedTmux }.map { remote ->
+        val remoteItems = remoteSessions.filter { remote ->
+            // Filter out sessions that are already connected (by tmux name OR by server+folder match)
+            if (remote.tmuxSession.name in connectedTmux) return@filter false
+            val parsed = com.clauderemote.model.TmuxNameParser.parse(remote.tmuxSession.name, remote.server.name)
+            val folderKey = "${remote.server.id}:${parsed.folder}"
+            if (folderKey in connectedFolders) return@filter false
+            true
+        }.map { remote ->
             val parsed = com.clauderemote.model.TmuxNameParser.parse(remote.tmuxSession.name, remote.server.name)
             val folder = parseFolder(parsed.folder)
             val label = parsed.alias.ifBlank {
