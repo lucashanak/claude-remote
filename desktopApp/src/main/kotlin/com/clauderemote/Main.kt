@@ -305,10 +305,31 @@ fun main() = application {
                     popup.add(javax.swing.JMenuItem("Rename session").apply {
                         addActionListener {
                             val activeId = tabManager.activeTabId.value ?: return@addActionListener
-                            val current = tabManager.getTab(activeId)?.alias ?: ""
+                            val tab = tabManager.getTab(activeId) ?: return@addActionListener
                             val parent = javax.swing.SwingUtilities.getWindowAncestor(termWidget)
-                            val newAlias = javax.swing.JOptionPane.showInputDialog(parent, "Session alias:", current)
-                            if (newAlias != null) tabManager.updateAlias(activeId, newAlias.trim())
+                            val newAlias = javax.swing.JOptionPane.showInputDialog(parent, "Session alias:", tab.alias) ?: return@addActionListener
+                            val trimmed = newAlias.trim()
+                            tabManager.updateAlias(activeId, trimmed)
+                            // Rename tmux session on server
+                            val newTmuxName = com.clauderemote.model.TmuxNameParser.build(
+                                tab.server.name, tab.folder,
+                                tab.mode == com.clauderemote.model.ClaudeMode.YOLO, trimmed
+                            )
+                            val conn = sessionOrchestrator.getConnection(activeId)?.getSession()
+                            if (conn != null) {
+                                Thread {
+                                    try {
+                                        val ch = conn.openChannel("exec") as com.jcraft.jsch.ChannelExec
+                                        ch.setCommand("tmux rename-session -t '${tab.tmuxSessionName.replace("'", "\\'")}' '${newTmuxName.replace("'", "\\'")}'")
+                                        ch.connect(5000)
+                                        ch.inputStream.bufferedReader().readText()
+                                        ch.disconnect()
+                                        FileLogger.log("Desktop", "Tmux renamed: ${tab.tmuxSessionName} → $newTmuxName")
+                                    } catch (e: Exception) {
+                                        FileLogger.error("Desktop", "Tmux rename failed", e)
+                                    }
+                                }.start()
+                            }
                         }
                     })
                     popup.add(javax.swing.JMenuItem("Close session").apply {
