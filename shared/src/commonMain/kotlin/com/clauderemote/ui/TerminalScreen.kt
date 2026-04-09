@@ -56,6 +56,7 @@ fun TerminalScreen(
     onSwitchModel: (ClaudeModel) -> Unit,
     onSendEscape: () -> Unit,
     onReconnect: ((String) -> Unit)? = null,
+    onRenameSession: ((sessionId: String, newAlias: String) -> Unit)? = null,
     onAttachFile: (suspend () -> String?)? = null,
     onFetchClaudeMd: (suspend () -> String)? = null,
     onFetchCommands: (suspend () -> List<SlashCommand>)? = null,
@@ -71,6 +72,8 @@ fun TerminalScreen(
     var compactMode by remember { mutableStateOf(false) }
     var showCommandPicker by remember { mutableStateOf(false) }
     var currentFontSize by remember { mutableStateOf(14) }
+    var showRenameDialog by remember { mutableStateOf(false) }
+    var renameText by remember { mutableStateOf("") }
     val inputFocusRequester = remember { FocusRequester() }
     var showClaudeMd by remember { mutableStateOf(false) }
     var claudeMdContent by remember { mutableStateOf("") }
@@ -311,6 +314,34 @@ fun TerminalScreen(
                             },
                             onClick = {}
                         )
+                        // Session actions
+                        if (activeSession != null) {
+                            HorizontalDivider()
+                            DropdownMenuItem(
+                                text = { Text("Rename session") },
+                                onClick = {
+                                    moreMenu = false
+                                    renameText = activeSession.alias.ifBlank { activeSession.displayLabel }
+                                    showRenameDialog = true
+                                }
+                            )
+                            if (activeSession.status == SessionStatus.DISCONNECTED || activeSession.status == SessionStatus.ERROR) {
+                                DropdownMenuItem(
+                                    text = { Text("Reconnect") },
+                                    onClick = {
+                                        moreMenu = false
+                                        onReconnect?.invoke(activeSession.id)
+                                    }
+                                )
+                            }
+                            DropdownMenuItem(
+                                text = { Text("Close session", color = MaterialTheme.colorScheme.error) },
+                                onClick = {
+                                    moreMenu = false
+                                    onTabClose(activeSession.id)
+                                }
+                            )
+                        }
                     }
                 }
             }
@@ -339,6 +370,32 @@ fun TerminalScreen(
         }
 
         // Command picker as dialog (works over SwingPanel on desktop)
+        // Rename session dialog
+        if (showRenameDialog && activeSession != null) {
+            AlertDialog(
+                onDismissRequest = { showRenameDialog = false },
+                title = { Text("Rename session") },
+                text = {
+                    OutlinedTextField(
+                        value = renameText,
+                        onValueChange = { renameText = it },
+                        label = { Text("Alias") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                },
+                confirmButton = {
+                    TextButton(onClick = {
+                        showRenameDialog = false
+                        onRenameSession?.invoke(activeSession.id, renameText.trim())
+                    }) { Text("Save") }
+                },
+                dismissButton = {
+                    TextButton(onClick = { showRenameDialog = false }) { Text("Cancel") }
+                }
+            )
+        }
+
         if (showCommandPicker) {
             AlertDialog(
                 onDismissRequest = {

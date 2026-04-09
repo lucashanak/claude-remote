@@ -45,5 +45,11 @@ class TabManager {
         }
     }
 
+    fun updateAlias(id: String, alias: String) {
+        _tabs.update { tabs ->
+            tabs.map { if (it.id == id) it.copy(alias = alias) else it }
+        }
+    }
+
     fun getTab(id: String): ClaudeSession? = _tabs.value.find { it.id == id }
 }

@@ -451,6 +451,9 @@ fun App(
                         tabs = tabs,
                         activeTabId = activeTabId,
                         onTabSwitch = { sessionOrchestrator.switchTab(it) },
+                        onRenameSession = { id, newAlias ->
+                            tabManager.updateAlias(id, newAlias)
+                        },
                         onReconnect = { id ->
                             scope.launch { sessionOrchestrator.reconnectSession(id) }
                         },
