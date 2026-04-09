@@ -408,6 +408,18 @@ class SessionOrchestrator(
 
     fun getConnection(sessionId: String): SshManager? = connections[sessionId]
 
+    suspend fun renameTmuxSession(sessionId: String, oldName: String, newName: String) {
+        withContext(Dispatchers.IO) {
+            try {
+                val sshSession = connections[sessionId]?.getSession() ?: return@withContext
+                com.clauderemote.connection.TmuxManager.renameSession(sshSession, oldName, newName)
+                FileLogger.log(TAG, "Tmux renamed: $oldName → $newName")
+            } catch (e: Exception) {
+                FileLogger.error(TAG, "Tmux rename failed", e)
+            }
+        }
+    }
+
     fun getBuffer(sessionId: String): String = outputBuffers[sessionId]?.toString() ?: ""
 
     private fun generateId(): String {

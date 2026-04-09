@@ -310,20 +310,14 @@ fun main() = application {
                             val newAlias = javax.swing.JOptionPane.showInputDialog(parent, "Session alias:", tab.alias) ?: return@addActionListener
                             val trimmed = newAlias.trim()
                             tabManager.updateAlias(activeId, trimmed)
-                            // Rename tmux session on server via shared TmuxManager
+                            // Rename tmux session on server
                             val newTmuxName = com.clauderemote.model.TmuxNameParser.build(
                                 tab.server.name, tab.folder,
                                 tab.mode == com.clauderemote.model.ClaudeMode.YOLO, trimmed
                             )
                             Thread {
-                                try {
-                                    val sshSession = sessionOrchestrator.getConnection(activeId)?.getSession()
-                                    if (sshSession != null) {
-                                        com.clauderemote.connection.TmuxManager.renameSession(sshSession, tab.tmuxSessionName, newTmuxName)
-                                        FileLogger.log("Desktop", "Tmux renamed: ${tab.tmuxSessionName} → $newTmuxName")
-                                    }
-                                } catch (e: Exception) {
-                                    FileLogger.error("Desktop", "Tmux rename failed", e)
+                                kotlinx.coroutines.runBlocking {
+                                    sessionOrchestrator.renameTmuxSession(activeId, tab.tmuxSessionName, newTmuxName)
                                 }
                             }.start()
                         }
