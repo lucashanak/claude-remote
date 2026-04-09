@@ -126,6 +126,7 @@ class SessionOrchestrator(
     ): ClaudeSession = withContext(Dispatchers.IO) {
         val sessionId = generateId()
 
+        val parsedAlias = com.clauderemote.model.TmuxNameParser.parse(tmuxSessionName, server.name).alias
         val session = ClaudeSession(
             id = sessionId,
             server = server,
@@ -134,7 +135,8 @@ class SessionOrchestrator(
             model = model,
             tmuxSessionName = tmuxSessionName,
             connectionType = connectionType,
-            status = SessionStatus.CONNECTING
+            status = SessionStatus.CONNECTING,
+            alias = parsedAlias
         )
 
         outputBuffers[sessionId] = StringBuilder()
