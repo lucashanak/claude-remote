@@ -306,7 +306,8 @@ fun main() = application {
                         addActionListener {
                             val activeId = tabManager.activeTabId.value ?: return@addActionListener
                             val current = tabManager.getTab(activeId)?.alias ?: ""
-                            val newAlias = javax.swing.JOptionPane.showInputDialog(null, "Session alias:", current)
+                            val parent = javax.swing.SwingUtilities.getWindowAncestor(termWidget)
+                            val newAlias = javax.swing.JOptionPane.showInputDialog(parent, "Session alias:", current)
                             if (newAlias != null) tabManager.updateAlias(activeId, newAlias.trim())
                         }
                     })
@@ -405,6 +406,14 @@ private fun DesktopTerminalView(
                     label.horizontalAlignment = javax.swing.SwingConstants.CENTER
                     panel.add(label, BorderLayout.CENTER)
                 }
+            }
+        },
+        update = { panel ->
+            // Called on recomposition — panel now has correct size from Compose layout
+            val widget = termWidget ?: return@SwingPanel
+            if (panel.width > 0 && panel.height > 0) {
+                widget.size = panel.size
+                widget.revalidate()
             }
         }
     )

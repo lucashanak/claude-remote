@@ -454,6 +454,31 @@ fun App(
                         onTabSwitch = { sessionOrchestrator.switchTab(it) },
                         onRenameSession = { id, newAlias ->
                             tabManager.updateAlias(id, newAlias)
+                            // Also rename tmux session on server for cross-device sync
+                            val tab = tabManager.getTab(id)
+                            if (tab != null) {
+                                val newTmuxName = TmuxNameParser.build(
+                                    tab.server.name,
+                                    tab.folder,
+                                    tab.mode == ClaudeMode.YOLO,
+                                    newAlias
+                                )
+                                scope.launch {
+                                    try {
+                                        val conn = sessionOrchestrator.getConnection(id)
+                                        val sess = conn?.getSession()
+                                        if (sess != null) {
+                                            kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                                                val ch = sess.openChannel("exec") as com.jcraft.jsch.ChannelExec
+                                                ch.setCommand("tmux rename-session -t '${tab.tmuxSessionName.replace("'", "\\'")}' '${newTmuxName.replace("'", "\\'")}'")
+                                                ch.connect(5000)
+                                                ch.inputStream.bufferedReader().readText()
+                                                ch.disconnect()
+                                            }
+                                        }
+                                    } catch (_: Exception) {}
+                                }
+                            }
                         },
                         onShowNativeMenu = onShowNativeMenu,
                         onReconnect = { id ->
