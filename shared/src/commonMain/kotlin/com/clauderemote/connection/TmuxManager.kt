@@ -52,6 +52,13 @@ object TmuxManager {
     }
 
     /**
+     * Rename a tmux session (blocking, call from IO thread).
+     */
+    fun renameSession(session: Session, oldName: String, newName: String) {
+        execCommand(session, "tmux rename-session -t '${oldName.replace("'", "\\'")}' '${newName.replace("'", "\\'")}'")
+    }
+
+    /**
      * Kill a tmux session.
      */
     suspend fun killSession(session: Session, sessionName: String): Boolean = withContext(Dispatchers.IO) {

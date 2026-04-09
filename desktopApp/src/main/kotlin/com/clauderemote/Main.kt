@@ -310,26 +310,22 @@ fun main() = application {
                             val newAlias = javax.swing.JOptionPane.showInputDialog(parent, "Session alias:", tab.alias) ?: return@addActionListener
                             val trimmed = newAlias.trim()
                             tabManager.updateAlias(activeId, trimmed)
-                            // Rename tmux session on server
+                            // Rename tmux session on server via shared TmuxManager
                             val newTmuxName = com.clauderemote.model.TmuxNameParser.build(
                                 tab.server.name, tab.folder,
                                 tab.mode == com.clauderemote.model.ClaudeMode.YOLO, trimmed
                             )
-                            val conn = sessionOrchestrator.getConnection(activeId)?.getSession()
-                            if (conn != null) {
-                                Thread {
-                                    try {
-                                        val ch = conn.openChannel("exec") as com.jcraft.jsch.ChannelExec
-                                        ch.setCommand("tmux rename-session -t '${tab.tmuxSessionName.replace("'", "\\'")}' '${newTmuxName.replace("'", "\\'")}'")
-                                        ch.connect(5000)
-                                        ch.inputStream.bufferedReader().readText()
-                                        ch.disconnect()
+                            Thread {
+                                try {
+                                    val sshSession = sessionOrchestrator.getConnection(activeId)?.getSession()
+                                    if (sshSession != null) {
+                                        com.clauderemote.connection.TmuxManager.renameSession(sshSession, tab.tmuxSessionName, newTmuxName)
                                         FileLogger.log("Desktop", "Tmux renamed: ${tab.tmuxSessionName} → $newTmuxName")
-                                    } catch (e: Exception) {
-                                        FileLogger.error("Desktop", "Tmux rename failed", e)
                                     }
-                                }.start()
-                            }
+                                } catch (e: Exception) {
+                                    FileLogger.error("Desktop", "Tmux rename failed", e)
+                                }
+                            }.start()
                         }
                     })
                     popup.add(javax.swing.JMenuItem("Close session").apply {
@@ -373,6 +369,15 @@ private fun DesktopTerminalView(
         factory = {
             JPanel(BorderLayout()).also { panel ->
                 panel.background = java.awt.Color(0x1E, 0x1E, 0x1E)
+
+                // Reuse existing widget if already created
+                val existing = termWidget
+                if (existing != null) {
+                    existing.parent?.remove(existing)
+                    panel.add(existing, BorderLayout.CENTER)
+                    FileLogger.log("Desktop", "JediTerm widget reused")
+                    return@also
+                }
 
                 try {
                     val darkFg = com.jediterm.terminal.TerminalColor(com.jediterm.core.Color(0xCC, 0xCC, 0xCC))
