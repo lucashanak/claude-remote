@@ -313,9 +313,11 @@ fun main() = application {
                     popup.add(javax.swing.JMenuItem("Close session").apply {
                         addActionListener {
                             tabManager.activeTabId.value?.let { id ->
-                                kotlinx.coroutines.GlobalScope.launch(kotlinx.coroutines.Dispatchers.IO) {
-                                    sessionOrchestrator.disconnectSession(id)
-                                }
+                                Thread {
+                                    kotlinx.coroutines.runBlocking {
+                                        try { sessionOrchestrator.disconnectSession(id) } catch (_: Exception) {}
+                                    }
+                                }.start()
                             }
                         }
                     })
