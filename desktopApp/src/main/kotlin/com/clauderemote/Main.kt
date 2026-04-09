@@ -32,37 +32,43 @@ class SshTtyConnector(
     private val sessionOrchestrator: SessionOrchestrator,
     private val tabManager: TabManager
 ) : TtyConnector {
-    private val byteOut = java.io.PipedOutputStream()
-    private val byteIn = java.io.PipedInputStream(byteOut, 512 * 1024)
-    // CharsetDecoder handles incomplete UTF-8 sequences across chunks
-    private val decoder = StandardCharsets.UTF_8.newDecoder()
-        .onMalformedInput(java.nio.charset.CodingErrorAction.REPLACE)
-        .onUnmappableCharacter(java.nio.charset.CodingErrorAction.REPLACE)
-    private val readBuf = ByteArray(8192)
-    private val decodeBuf = java.nio.CharBuffer.allocate(8192)
+    // Thread-safe queue: SSH output chunks → JediTerm reader (no PipedStream thread-death issues)
+    private val queue = java.util.concurrent.LinkedBlockingQueue<CharArray>()
+    private var pending: CharArray? = null
+    private var pendingOffset = 0
     @Volatile private var connected = true
+    // Last known terminal size — reapplied after SSH reconnect (fixes wrong size from previous device)
+    @Volatile private var lastTermSize: com.jediterm.core.util.TermSize? = null
 
-    /** Called by SessionOrchestrator.onTerminalOutput — receives raw SSH string chunks */
+    /** Called by SessionOrchestrator.onTerminalOutput — receives already-decoded SSH string chunks */
     fun feedOutput(data: String) {
-        try {
-            val bytes = data.toByteArray(StandardCharsets.UTF_8)
-            synchronized(byteOut) {
-                byteOut.write(bytes)
-                byteOut.flush()
-            }
-        } catch (_: Exception) {}
+        if (data.isNotEmpty()) queue.offer(data.toCharArray())
     }
 
     override fun read(buf: CharArray, offset: Int, length: Int): Int {
-        // Read raw bytes then decode to chars with stateful decoder
-        val n = byteIn.read(readBuf, 0, minOf(readBuf.size, length))
-        if (n <= 0) return n
-        val byteBuf = java.nio.ByteBuffer.wrap(readBuf, 0, n)
-        decodeBuf.clear()
-        decoder.decode(byteBuf, decodeBuf, false)
-        decodeBuf.flip()
-        val count = minOf(decodeBuf.remaining(), length)
-        decodeBuf.get(buf, offset, count)
+        var src = pending
+        var srcOff = pendingOffset
+        if (src == null || srcOff >= src.size) {
+            // Poll with timeout so close() can interrupt via connected flag
+            src = null
+            while (connected) {
+                src = queue.poll(500, java.util.concurrent.TimeUnit.MILLISECONDS)
+                if (src != null) break
+            }
+            if (src == null) return -1 // disconnected with no pending data
+            srcOff = 0
+        }
+        if (src!!.isEmpty()) return -1 // poison pill from close()
+        val available = src.size - srcOff
+        val count = minOf(available, length)
+        System.arraycopy(src, srcOff, buf, offset, count)
+        if (srcOff + count < src.size) {
+            pending = src
+            pendingOffset = srcOff + count
+        } else {
+            pending = null
+            pendingOffset = 0
+        }
         return count
     }
 
@@ -85,21 +91,30 @@ class SshTtyConnector(
         return 0
     }
 
-    override fun ready(): Boolean {
-        return try { byteIn.available() > 0 } catch (_: Exception) { false }
-    }
+    override fun ready(): Boolean = pending != null || queue.isNotEmpty()
 
     override fun getName(): String = "SSH"
 
     override fun close() {
         connected = false
-        try { byteOut.close() } catch (_: Exception) {}
-        try { byteIn.close() } catch (_: Exception) {}
+        queue.offer(CharArray(0)) // unblock any queue.poll() waiting in read()
     }
 
     override fun resize(termSize: com.jediterm.core.util.TermSize) {
+        lastTermSize = termSize
         tabManager.activeTabId.value?.let { id ->
             sessionOrchestrator.resize(id, termSize.columns, termSize.rows)
+        }
+    }
+
+    /** Re-sends the last known terminal size to the active session.
+     *  Call this after connecting to an existing tmux session to fix size mismatch
+     *  (e.g. session was previously used from Android with different terminal size). */
+    fun reapplySize() {
+        lastTermSize?.let { size ->
+            tabManager.activeTabId.value?.let { id ->
+                sessionOrchestrator.resize(id, size.columns, size.rows)
+            }
         }
     }
 }
@@ -177,21 +192,69 @@ fun main() = application {
                 try {
                     val tmpDir = File(System.getProperty("java.io.tmpdir"), "claude-remote-update")
                     tmpDir.mkdirs()
-                    val ext = if (info.dmgUrl.isNotBlank()) ".dmg" else ".apk"
-                    val updateFile = File(tmpDir, "ClaudeRemote-${info.version}$ext")
-                    updateFile.writeBytes(bytes)
-                    java.awt.Desktop.getDesktop().open(updateFile)
-                    FileLogger.log("Desktop", "Update saved and opened: ${updateFile.absolutePath}")
+                    if (info.dmgUrl.isNotBlank()) {
+                        val dmgFile = File(tmpDir, "ClaudeRemote-${info.version}.dmg")
+                        dmgFile.writeBytes(bytes)
+
+                        // Mount DMG silently
+                        val attachProc = ProcessBuilder("hdiutil", "attach", "-nobrowse", dmgFile.absolutePath)
+                            .redirectErrorStream(true)
+                            .start()
+                        val attachOutput = attachProc.inputStream.bufferedReader().readText()
+                        attachProc.waitFor()
+
+                        val mountPoint = attachOutput.lines()
+                            .lastOrNull { it.contains("/Volumes/") }
+                            ?.let { line -> line.substring(line.indexOf("/Volumes/")).trim() }
+                            ?: throw Exception("Could not determine DMG mount point.\nhdiutil output:\n$attachOutput")
+
+                        try {
+                            val appBundle = File(mountPoint).listFiles()
+                                ?.firstOrNull { it.name.endsWith(".app") }
+                                ?: throw Exception("No .app found in DMG at $mountPoint")
+                            val appDest = File("/Applications/${appBundle.name}")
+
+                            // Copy to /Applications (overwrites existing)
+                            ProcessBuilder("ditto", appBundle.absolutePath, appDest.absolutePath)
+                                .start().waitFor()
+
+                            // Remove quarantine
+                            ProcessBuilder("xattr", "-cr", appDest.absolutePath)
+                                .start().waitFor()
+
+                            // Launch relaunch script that waits for this process to exit, then opens the new app
+                            val pid = ProcessHandle.current().pid()
+                            val script = File(tmpDir, "relaunch.sh")
+                            script.writeText("#!/bin/bash\nwhile kill -0 $pid 2>/dev/null; do sleep 0.5; done\nopen '${appDest.absolutePath}'\n")
+                            script.setExecutable(true)
+                            ProcessBuilder("/bin/bash", script.absolutePath).start()
+
+                            FileLogger.log("Desktop", "macOS update installed: ${appDest.absolutePath}")
+                        } finally {
+                            ProcessBuilder("hdiutil", "detach", mountPoint, "-quiet").start()
+                        }
+
+                        kotlin.system.exitProcess(0)
+                    } else {
+                        val apkFile = File(tmpDir, "ClaudeRemote-${info.version}.apk")
+                        apkFile.writeBytes(bytes)
+                        java.awt.Desktop.getDesktop().open(apkFile)
+                        FileLogger.log("Desktop", "Update saved and opened: ${apkFile.absolutePath}")
+                    }
                 } catch (e: Exception) {
                     FileLogger.error("Desktop", "Failed to install update: ${e.message}", e)
+                    throw e
                 }
             },
             onTerminalScreenVisible = {
                 val activeId = tabManager.activeTabId.value ?: return@App
                 val buffer = sessionOrchestrator.getBuffer(activeId)
-                if (buffer.isNotEmpty()) {
-                    val widget = termWidget ?: return@App
-                    javax.swing.SwingUtilities.invokeLater {
+                val widget = termWidget
+                javax.swing.SwingUtilities.invokeLater {
+                    // Reapply terminal size — fixes green rectangle when reconnecting
+                    // from a different device (Android) that had a smaller terminal
+                    connector.reapplySize()
+                    if (widget != null && buffer.isNotEmpty()) {
                         widget.terminalPanel.clearBuffer()
                         connector.feedOutput(buffer)
                     }
@@ -200,15 +263,67 @@ fun main() = application {
             onPickFile = { callback ->
                 javax.swing.SwingUtilities.invokeLater {
                     val dialog = java.awt.FileDialog(null as java.awt.Frame?, "Attach File", java.awt.FileDialog.LOAD)
+                    dialog.isMultipleMode = true
                     dialog.isVisible = true
-                    val dir = dialog.directory
-                    val name = dialog.file
-                    if (dir != null && name != null) {
-                        val file = File(dir, name)
+                    val files = dialog.files
+                    if (files != null && files.isNotEmpty()) {
+                        val file = files.first()
                         callback(file.readBytes(), file.name)
+                        // Upload remaining files
+                        files.drop(1).forEach { f ->
+                            try { callback(f.readBytes(), f.name) } catch (_: Exception) {}
+                        }
                     } else {
                         callback(ByteArray(0), "")
                     }
+                }
+            },
+            onShowNativeMenu = {
+                javax.swing.SwingUtilities.invokeLater {
+                    val popup = javax.swing.JPopupMenu()
+                    popup.add(javax.swing.JMenuItem("Reset terminal").apply {
+                        addActionListener {
+                            tabManager.activeTabId.value?.let { sessionOrchestrator.sendClaudeCommand(it, "\u001Bc") }
+                        }
+                    })
+                    popup.addSeparator()
+                    // Font size
+                    val fontMenu = javax.swing.JMenu("Font size: ${appSettings.terminalFontSize}")
+                    fontMenu.add(javax.swing.JMenuItem("Increase").apply {
+                        addActionListener {
+                            appSettings.terminalFontSize = (appSettings.terminalFontSize + 1).coerceAtMost(32)
+                        }
+                    })
+                    fontMenu.add(javax.swing.JMenuItem("Decrease").apply {
+                        addActionListener {
+                            appSettings.terminalFontSize = (appSettings.terminalFontSize - 1).coerceAtLeast(8)
+                        }
+                    })
+                    popup.add(fontMenu)
+                    popup.addSeparator()
+                    // Rename
+                    popup.add(javax.swing.JMenuItem("Rename session").apply {
+                        addActionListener {
+                            val activeId = tabManager.activeTabId.value ?: return@addActionListener
+                            val current = tabManager.getTab(activeId)?.alias ?: ""
+                            val newAlias = javax.swing.JOptionPane.showInputDialog(null, "Session alias:", current)
+                            if (newAlias != null) tabManager.updateAlias(activeId, newAlias.trim())
+                        }
+                    })
+                    popup.add(javax.swing.JMenuItem("Close session").apply {
+                        addActionListener {
+                            tabManager.activeTabId.value?.let { id ->
+                                kotlinx.coroutines.GlobalScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+                                    sessionOrchestrator.disconnectSession(id)
+                                }
+                            }
+                        }
+                    })
+                    // Show popup at mouse position
+                    val mousePos = java.awt.MouseInfo.getPointerInfo().location
+                    val frame = javax.swing.SwingUtilities.getWindowAncestor(termWidget) ?: return@invokeLater
+                    val framePos = frame.locationOnScreen
+                    popup.show(frame, mousePos.x - framePos.x, mousePos.y - framePos.y)
                 }
             },
             exitApp = ::exitApplication,
@@ -259,20 +374,23 @@ private fun DesktopTerminalView(
                     panel.add(widget, BorderLayout.CENTER)
 
                     // Force layout after panel is shown (macOS needs explicit sizing)
+                    fun forceSize() {
+                        if (panel.size.width > 0 && panel.size.height > 0) {
+                            widget.size = panel.size
+                            widget.revalidate()
+                            widget.repaint()
+                            connector.reapplySize() // also push PTY size to SSH
+                        }
+                    }
                     panel.addComponentListener(object : java.awt.event.ComponentAdapter() {
-                        override fun componentResized(e: java.awt.event.ComponentEvent?) {
-                            widget.size = panel.size
-                            widget.revalidate()
-                        }
-                        override fun componentShown(e: java.awt.event.ComponentEvent?) {
-                            widget.size = panel.size
-                            widget.revalidate()
-                        }
+                        override fun componentResized(e: java.awt.event.ComponentEvent?) = forceSize()
+                        override fun componentShown(e: java.awt.event.ComponentEvent?) = forceSize()
                     })
-                    // Also force after a short delay for initial display
-                    javax.swing.SwingUtilities.invokeLater {
-                        widget.size = panel.size
-                        widget.revalidate()
+                    // Immediate attempt (panel may still be 0-sized here)
+                    javax.swing.SwingUtilities.invokeLater { forceSize() }
+                    // Multiple delayed attempts — macOS layout settles late
+                    for (delay in listOf(200, 500, 1000, 2000)) {
+                        javax.swing.Timer(delay) { forceSize() }.also { it.isRepeats = false }.start()
                     }
 
                     FileLogger.log("Desktop", "JediTerm widget created")

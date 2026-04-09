@@ -50,6 +50,7 @@ fun App(
     onImportServers: (() -> Unit)? = null,
     onPickFile: ((callback: (ByteArray, String) -> Unit) -> Unit)? = null,
     onApplyFontSize: ((Int) -> Unit)? = null,
+    onShowNativeMenu: (() -> Unit)? = null,
     exitApp: (() -> Unit)? = null,
     terminalContent: @Composable (modifier: Modifier) -> Unit
 ) {
@@ -454,6 +455,7 @@ fun App(
                         onRenameSession = { id, newAlias ->
                             tabManager.updateAlias(id, newAlias)
                         },
+                        onShowNativeMenu = onShowNativeMenu,
                         onReconnect = { id ->
                             scope.launch { sessionOrchestrator.reconnectSession(id) }
                         },

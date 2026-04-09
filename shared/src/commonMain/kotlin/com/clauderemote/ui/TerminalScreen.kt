@@ -61,6 +61,7 @@ fun TerminalScreen(
     onFetchClaudeMd: (suspend () -> String)? = null,
     onFetchCommands: (suspend () -> List<SlashCommand>)? = null,
     onFontSizeChange: ((Int) -> Unit)? = null,
+    onShowNativeMenu: (() -> Unit)? = null, // Desktop: show menu via Swing (bypasses SwingPanel z-order)
     onAttachRemote: ((com.clauderemote.model.RemoteSession) -> Unit)? = null,
     remoteSessions: List<com.clauderemote.model.RemoteSession> = emptyList(),
     contextPercent: Int? = null,
@@ -262,7 +263,10 @@ fun TerminalScreen(
                     }
                 }
                 // More menu button
-                IconButton(onClick = { moreMenu = true }, modifier = Modifier.size(36.dp)) {
+                IconButton(onClick = {
+                    if (onShowNativeMenu != null) onShowNativeMenu.invoke()
+                    else moreMenu = true
+                }, modifier = Modifier.size(36.dp)) {
                     Text("\u22EE", style = MaterialTheme.typography.titleMedium)
                 }
             }
