@@ -74,6 +74,7 @@ fun TerminalScreen(
     var currentFontSize by remember { mutableStateOf(14) }
     var showRenameDialog by remember { mutableStateOf(false) }
     var renameText by remember { mutableStateOf("") }
+    var moreMenu by remember { mutableStateOf(false) }
     val inputFocusRequester = remember { FocusRequester() }
     var showClaudeMd by remember { mutableStateOf(false) }
     var claudeMdContent by remember { mutableStateOf("") }
@@ -127,6 +128,7 @@ fun TerminalScreen(
                     onNewTab = onNewTab,
                     onMenuOpen = onMenuOpen,
                     onAttachRemote = onAttachRemote,
+                    onRenameSession = onRenameSession,
                     modifier = Modifier.width(200.dp).fillMaxHeight()
                 )
             }
@@ -259,92 +261,62 @@ fun TerminalScreen(
                         Text(if (showControlBar) "Hide" else "Ctrl", style = MaterialTheme.typography.bodySmall)
                     }
                 }
-                // More menu
-                var moreMenu by remember { mutableStateOf(false) }
-                Box {
-                    IconButton(onClick = { moreMenu = true }, modifier = Modifier.size(36.dp)) {
-                        Text("\u22EE", style = MaterialTheme.typography.titleMedium) // vertical ellipsis
-                    }
-                    DropdownMenu(expanded = moreMenu, onDismissRequest = { moreMenu = false }) {
+                // More menu button
+                IconButton(onClick = { moreMenu = true }, modifier = Modifier.size(36.dp)) {
+                    Text("\u22EE", style = MaterialTheme.typography.titleMedium)
+                }
+            }
+        }
+
+        if (moreMenu) {
+            AlertDialog(
+                onDismissRequest = { moreMenu = false },
+                confirmButton = {},
+                text = {
+                    Column {
                         if (onFetchClaudeMd != null) {
-                            DropdownMenuItem(
-                                text = { Text("View CLAUDE.md") },
-                                onClick = {
-                                    moreMenu = false
-                                    scope.launch {
-                                        claudeMdContent = onFetchClaudeMd.invoke()
-                                        showClaudeMd = true
-                                    }
-                                }
-                            )
-                        }
-                        DropdownMenuItem(
-                            text = { Text("Reset terminal") },
-                            onClick = {
+                            TextButton(onClick = {
                                 moreMenu = false
-                                onSendCommand("\u001Bc")
-                            }
-                        )
-                        HorizontalDivider()
-                        // Font size controls
-                        DropdownMenuItem(
-                            text = {
-                                Row(verticalAlignment = Alignment.CenterVertically) {
-                                    Text("Font: ", style = MaterialTheme.typography.bodySmall)
-                                    FilledTonalButton(
-                                        onClick = {
-                                            currentFontSize = (currentFontSize - 1).coerceIn(8, 32)
-                                            onFontSizeChange?.invoke(currentFontSize)
-                                        },
-                                        modifier = Modifier.size(28.dp),
-                                        contentPadding = PaddingValues(0.dp)
-                                    ) { Text("A-", style = MaterialTheme.typography.labelSmall) }
-                                    Spacer(Modifier.width(8.dp))
-                                    Text("$currentFontSize", style = MaterialTheme.typography.bodyMedium)
-                                    Spacer(Modifier.width(8.dp))
-                                    FilledTonalButton(
-                                        onClick = {
-                                            currentFontSize = (currentFontSize + 1).coerceIn(8, 32)
-                                            onFontSizeChange?.invoke(currentFontSize)
-                                        },
-                                        modifier = Modifier.size(28.dp),
-                                        contentPadding = PaddingValues(0.dp)
-                                    ) { Text("A+", style = MaterialTheme.typography.labelSmall) }
-                                }
-                            },
-                            onClick = {}
-                        )
-                        // Session actions
+                                scope.launch { claudeMdContent = onFetchClaudeMd.invoke(); showClaudeMd = true }
+                            }, modifier = Modifier.fillMaxWidth()) { Text("View CLAUDE.md") }
+                        }
+                        TextButton(onClick = { moreMenu = false; onSendCommand("\u001Bc") },
+                            modifier = Modifier.fillMaxWidth()) { Text("Reset terminal") }
+                        HorizontalDivider(modifier = Modifier.padding(vertical = 4.dp))
+                        // Font size
+                        Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp)) {
+                            Text("Font: ", style = MaterialTheme.typography.bodyMedium)
+                            FilledTonalButton(
+                                onClick = { currentFontSize = (currentFontSize - 1).coerceIn(8, 32); onFontSizeChange?.invoke(currentFontSize) },
+                                modifier = Modifier.size(32.dp), contentPadding = PaddingValues(0.dp)
+                            ) { Text("A-") }
+                            Spacer(Modifier.width(12.dp))
+                            Text("$currentFontSize", style = MaterialTheme.typography.titleMedium)
+                            Spacer(Modifier.width(12.dp))
+                            FilledTonalButton(
+                                onClick = { currentFontSize = (currentFontSize + 1).coerceIn(8, 32); onFontSizeChange?.invoke(currentFontSize) },
+                                modifier = Modifier.size(32.dp), contentPadding = PaddingValues(0.dp)
+                            ) { Text("A+") }
+                        }
                         if (activeSession != null) {
-                            HorizontalDivider()
-                            DropdownMenuItem(
-                                text = { Text("Rename session") },
-                                onClick = {
-                                    moreMenu = false
-                                    renameText = activeSession.alias.ifBlank { activeSession.displayLabel }
-                                    showRenameDialog = true
-                                }
-                            )
+                            HorizontalDivider(modifier = Modifier.padding(vertical = 4.dp))
+                            TextButton(onClick = {
+                                moreMenu = false
+                                renameText = activeSession.alias.ifBlank { activeSession.displayLabel }
+                                showRenameDialog = true
+                            }, modifier = Modifier.fillMaxWidth()) { Text("Rename session") }
                             if (activeSession.status == SessionStatus.DISCONNECTED || activeSession.status == SessionStatus.ERROR) {
-                                DropdownMenuItem(
-                                    text = { Text("Reconnect") },
-                                    onClick = {
-                                        moreMenu = false
-                                        onReconnect?.invoke(activeSession.id)
-                                    }
-                                )
+                                TextButton(onClick = { moreMenu = false; onReconnect?.invoke(activeSession.id) },
+                                    modifier = Modifier.fillMaxWidth()) { Text("Reconnect") }
                             }
-                            DropdownMenuItem(
-                                text = { Text("Close session", color = MaterialTheme.colorScheme.error) },
-                                onClick = {
-                                    moreMenu = false
-                                    onTabClose(activeSession.id)
-                                }
-                            )
+                            TextButton(onClick = { moreMenu = false; onTabClose(activeSession.id) },
+                                modifier = Modifier.fillMaxWidth()) {
+                                Text("Close session", color = MaterialTheme.colorScheme.error)
+                            }
                         }
                     }
                 }
-            }
+            )
         }
 
         // Disconnected banner
@@ -518,8 +490,38 @@ private fun SessionSidePanel(
     onNewTab: () -> Unit,
     onMenuOpen: () -> Unit,
     onAttachRemote: ((com.clauderemote.model.RemoteSession) -> Unit)?,
+    onRenameSession: ((sessionId: String, newAlias: String) -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
+    var renamingItem by remember { mutableStateOf<SessionItem?>(null) }
+    var renameText by remember { mutableStateOf("") }
+
+    // Rename dialog — uses AlertDialog which renders as a separate OS window,
+    // always visible above the JediTerm SwingPanel heavyweight component
+    renamingItem?.let { item ->
+        AlertDialog(
+            onDismissRequest = { renamingItem = null },
+            title = { Text("Rename session") },
+            text = {
+                OutlinedTextField(
+                    value = renameText,
+                    onValueChange = { renameText = it },
+                    label = { Text("Alias") },
+                    singleLine = true
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    item.tab?.let { onRenameSession?.invoke(it.id, renameText.trim()) }
+                    renamingItem = null
+                }) { Text("OK") }
+            },
+            dismissButton = {
+                TextButton(onClick = { renamingItem = null }) { Text("Cancel") }
+            }
+        )
+    }
+
     Surface(
         color = MaterialTheme.colorScheme.surfaceVariant,
         tonalElevation = 4.dp,
@@ -564,7 +566,7 @@ private fun SessionSidePanel(
                             }
                         ) {
                             Row(
-                                modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
+                                modifier = Modifier.padding(start = 12.dp, end = 4.dp, top = 6.dp, bottom = 6.dp),
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
                                 Box(modifier = Modifier.size(8.dp).background(dotColor, shape = CircleShape))
@@ -574,6 +576,15 @@ private fun SessionSidePanel(
                                     style = MaterialTheme.typography.bodySmall,
                                     modifier = Modifier.weight(1f)
                                 )
+                                if (item.isConnected && onRenameSession != null) {
+                                    IconButton(
+                                        onClick = {
+                                            renameText = item.label
+                                            renamingItem = item
+                                        },
+                                        modifier = Modifier.size(20.dp)
+                                    ) { Text("\u270E", style = MaterialTheme.typography.labelSmall) } // pencil
+                                }
                                 if (item.isConnected) {
                                     IconButton(
                                         onClick = { item.tab?.let { onTabClose(it.id) } },
