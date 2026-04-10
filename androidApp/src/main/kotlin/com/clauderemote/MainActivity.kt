@@ -666,21 +666,11 @@ class MainActivity : FragmentActivity() {
 
         @JavascriptInterface
         fun onImagePath(path: String) {
-            // Request image download via SFTP and show preview
             FileLogger.log("MainActivity", "Image path clicked: $path")
             val activeId = tabManager.activeTabId.value ?: return
             kotlinx.coroutines.MainScope().launch {
                 try {
-                    val conn = sessionOrchestrator.getConnection(activeId)
-                    val session = conn?.getSession() ?: return@launch
-                    val bytes = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
-                        val sftp = session.openChannel("sftp") as com.jcraft.jsch.ChannelSftp
-                        sftp.connect(5000)
-                        val out = java.io.ByteArrayOutputStream()
-                        sftp.get(path, out)
-                        sftp.disconnect()
-                        out.toByteArray()
-                    }
+                    val bytes = sessionOrchestrator.downloadFile(activeId, path) ?: return@launch
                     if (bytes.isNotEmpty()) {
                         val dir = java.io.File(cacheDir, "preview")
                         dir.mkdirs()

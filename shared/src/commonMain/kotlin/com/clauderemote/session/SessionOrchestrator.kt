@@ -571,6 +571,26 @@ class SessionOrchestrator(
         }
     }
 
+    /**
+     * Download a file from the remote server via SFTP.
+     * Returns the file bytes, or null on failure.
+     */
+    suspend fun downloadFile(sessionId: String, remotePath: String): ByteArray? = withContext(Dispatchers.IO) {
+        try {
+            val conn = connections[sessionId] ?: return@withContext null
+            val sshSession = conn.getSession() ?: return@withContext null
+            val sftp = sshSession.openChannel("sftp") as com.jcraft.jsch.ChannelSftp
+            sftp.connect(5000)
+            val out = java.io.ByteArrayOutputStream()
+            sftp.get(remotePath, out)
+            sftp.disconnect()
+            out.toByteArray()
+        } catch (e: Exception) {
+            FileLogger.error(TAG, "Download file failed: $remotePath", e)
+            null
+        }
+    }
+
     fun getBuffer(sessionId: String): String = outputBuffers[sessionId]?.toString() ?: ""
 
     private fun generateId(): String {
