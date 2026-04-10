@@ -367,6 +367,18 @@ private fun DesktopTerminalView(
                 if (existing != null) {
                     existing.parent?.remove(existing)
                     panel.add(existing, BorderLayout.CENTER)
+                    // Delayed resize — panel size not available yet
+                    panel.addComponentListener(object : java.awt.event.ComponentAdapter() {
+                        override fun componentResized(e: java.awt.event.ComponentEvent?) {
+                            existing.size = panel.size
+                            existing.revalidate()
+                        }
+                    })
+                    for (delay in listOf(100, 300, 800)) {
+                        javax.swing.Timer(delay) {
+                            if (panel.width > 0) { existing.size = panel.size; existing.revalidate() }
+                        }.also { it.isRepeats = false }.start()
+                    }
                     FileLogger.log("Desktop", "JediTerm widget reused")
                     return@also
                 }
