@@ -381,6 +381,17 @@ class MainActivity : FragmentActivity() {
                     loadUrl("file:///android_asset/terminal/terminal.html")
                     terminalWebView = this
                     FileLogger.log("MainActivity", "Terminal WebView created")
+
+                    // Re-fit terminal whenever Android changes the WebView's layout
+                    // (keyboard open/close, orientation change, Compose recomposition)
+                    var lastWidth = 0; var lastHeight = 0
+                    viewTreeObserver.addOnGlobalLayoutListener {
+                        val w = width; val h = height
+                        if (w != lastWidth || h != lastHeight) {
+                            lastWidth = w; lastHeight = h
+                            if (w > 0 && h > 0) fitTerminal()
+                        }
+                    }
                 }
             },
             modifier = modifier

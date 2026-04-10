@@ -281,8 +281,19 @@ document.getElementById('searchPrev')?.addEventListener('click', () => { if(sear
 document.getElementById('searchClose')?.addEventListener('click', toggleSearch);
 
 // ======================== RESIZE ========================
-const ro = new ResizeObserver(() => { fitAddon.fit(); if (A) A.onTerminalResize(term.cols, term.rows); });
+let fitTimer = null;
+function scheduleFit() {
+    clearTimeout(fitTimer);
+    fitTimer = setTimeout(() => {
+        fitAddon.fit();
+        if (A) A.onTerminalResize(term.cols, term.rows);
+    }, 50);
+}
+
+const ro = new ResizeObserver(scheduleFit);
 ro.observe(termEl);
+// Also listen for viewport changes (keyboard open/close, window resize from Android)
+window.addEventListener('resize', scheduleFit);
 
 // ======================== API ========================
 function writeOutput(text) { term.write(text); }
@@ -304,6 +315,7 @@ function applyColorScheme(name) {
 if (A) {
   setTimeout(() => { fitAddon.fit(); A.onTerminalReady(term.cols, term.rows); }, 200);
   setTimeout(() => { fitAddon.fit(); A.onTerminalResize(term.cols, term.rows); }, 800);
+  setTimeout(() => { fitAddon.fit(); A.onTerminalResize(term.cols, term.rows); }, 2000);
 }
 
 </script>
