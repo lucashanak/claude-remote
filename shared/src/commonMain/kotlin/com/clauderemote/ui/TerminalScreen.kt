@@ -59,6 +59,7 @@ fun TerminalScreen(
     onRenameSession: ((sessionId: String, newAlias: String) -> Unit)? = null,
     onAttachFile: (suspend () -> String?)? = null,
     onFetchClaudeMd: (suspend () -> String)? = null,
+    onSaveClaudeMd: (suspend (String) -> Unit)? = null,
     onFetchCommands: (suspend () -> List<SlashCommand>)? = null,
     onFontSizeChange: ((Int) -> Unit)? = null,
     onShowNativeMenu: (() -> Unit)? = null, // Desktop: show menu via Swing (bypasses SwingPanel z-order)
@@ -67,7 +68,14 @@ fun TerminalScreen(
     contextPercent: Int? = null,
     sessionUsagePercent: Int? = null,
     weekUsagePercent: Int? = null,
-    terminalContent: @Composable (Modifier) -> Unit
+    sessionActivities: Map<String, com.clauderemote.model.SessionActivity> = emptyMap(),
+    latencyMs: Long? = null,
+    pendingInputCount: Int = 0,
+    onClearPending: (() -> Unit)? = null,
+    onNavigate: ((String) -> Unit)? = null,
+    onSplitView: ((secondSessionId: String?) -> Unit)? = null,
+    terminalContent: @Composable (Modifier) -> Unit,
+    splitTerminalContent: (@Composable (Modifier) -> Unit)? = null
 ) {
     var showControlBar by remember { mutableStateOf(true) }
     var compactMode by remember { mutableStateOf(false) }
@@ -83,6 +91,8 @@ fun TerminalScreen(
     var commands by remember { mutableStateOf(CommandFetcher.getCachedOrFallback()) }
     val activeSession = tabs.find { it.id == activeTabId }
     val scope = rememberCoroutineScope()
+    var showPalette by remember { mutableStateOf(false) }
+    var splitActive by remember { mutableStateOf(false) }
 
     // Unified session list: active tabs + remote (unconnected) sessions, grouped by folder
     val allSessions = remember(tabs, remoteSessions) {
@@ -117,7 +127,33 @@ fun TerminalScreen(
         (activeSessions + remoteItems).groupBy { it.folder }.toSortedMap()
     }
 
-    BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
+    // Keyboard shortcut handler
+    fun handleShortcut(event: KeyEvent): Boolean {
+        if (event.type != KeyEventType.KeyDown) return false
+        if (event.isCtrlPressed || event.isMetaPressed) {
+            when (event.key) {
+                Key.K -> { showPalette = true; return true }
+                Key.Tab -> {
+                    if (tabs.size > 1) {
+                        val currentIdx = tabs.indexOfFirst { it.id == activeTabId }
+                        val nextIdx = if (event.isShiftPressed) {
+                            if (currentIdx <= 0) tabs.size - 1 else currentIdx - 1
+                        } else {
+                            if (currentIdx >= tabs.size - 1) 0 else currentIdx + 1
+                        }
+                        onTabSwitch(tabs[nextIdx].id)
+                    }
+                    return true
+                }
+                Key.W -> { activeTabId?.let { onTabClose(it) }; return true }
+                Key.N -> { onNewTab(); return true }
+                else -> {}
+            }
+        }
+        return false
+    }
+
+    BoxWithConstraints(modifier = Modifier.fillMaxSize().onPreviewKeyEvent { handleShortcut(it) }) {
         val hasMultiple = tabs.size > 1 || remoteSessions.any { r -> tabs.none { it.tmuxSessionName == r.tmuxSession.name } }
         val wideMode = maxWidth > 700.dp && hasMultiple
 
@@ -127,6 +163,7 @@ fun TerminalScreen(
                 SessionSidePanel(
                     allSessions = allSessions,
                     activeTabId = activeTabId,
+                    sessionActivities = sessionActivities,
                     onTabSwitch = onTabSwitch,
                     onTabClose = onTabClose,
                     onNewTab = onNewTab,
@@ -158,11 +195,8 @@ fun TerminalScreen(
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         if (activeSession != null) {
-                            val dotColor = when (activeSession.status) {
-                                SessionStatus.ACTIVE -> Color(0xFF4CAF50)
-                                SessionStatus.CONNECTING -> Color(0xFFFF9800)
-                                SessionStatus.DISCONNECTED, SessionStatus.ERROR -> Color(0xFFF44336)
-                            }
+                            val activity = sessionActivities[activeSession.id]
+                            val dotColor = activityDotColor(activity, activeSession.status)
                             Box(modifier = Modifier.size(8.dp).background(dotColor, shape = CircleShape))
                             Spacer(Modifier.width(6.dp))
                         }
@@ -243,10 +277,27 @@ fun TerminalScreen(
                     }
                     } // end !wideMode dropdown
                 }
-                // Usage/context bars
-                if (sessionUsagePercent != null || weekUsagePercent != null) {
+                // Latency indicator
+                if (latencyMs != null) {
+                    Spacer(Modifier.width(4.dp))
+                    val latColor = when {
+                        latencyMs < 100 -> Color(0xFF4CAF50)
+                        latencyMs < 300 -> Color(0xFFFF9800)
+                        else -> Color(0xFFF44336)
+                    }
+                    Text(
+                        "${latencyMs}ms",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = latColor
+                    )
+                }
+                // Context + usage bars
+                if (contextPercent != null || sessionUsagePercent != null || weekUsagePercent != null) {
                     Spacer(Modifier.width(4.dp))
                     Column(verticalArrangement = Arrangement.spacedBy(1.dp)) {
+                        if (contextPercent != null) {
+                            MiniBar("Ctx", contextPercent)
+                        }
                         if (sessionUsagePercent != null) {
                             MiniBar("5h", sessionUsagePercent)
                         }
@@ -281,6 +332,13 @@ fun TerminalScreen(
                 confirmButton = {},
                 text = {
                     Column {
+                        TextButton(onClick = {
+                            moreMenu = false
+                            showPalette = true
+                            if (onFetchCommands != null) {
+                                scope.launch { commands = onFetchCommands.invoke() }
+                            }
+                        }, modifier = Modifier.fillMaxWidth()) { Text("Command Palette") }
                         if (onFetchClaudeMd != null) {
                             TextButton(onClick = {
                                 moreMenu = false
@@ -289,6 +347,20 @@ fun TerminalScreen(
                         }
                         TextButton(onClick = { moreMenu = false; onSendCommand("\u001Bc") },
                             modifier = Modifier.fillMaxWidth()) { Text("Reset terminal") }
+                        if (splitTerminalContent != null && tabs.size > 1) {
+                            TextButton(onClick = {
+                                moreMenu = false
+                                splitActive = !splitActive
+                                if (splitActive) {
+                                    val otherId = tabs.firstOrNull { it.id != activeTabId }?.id
+                                    onSplitView?.invoke(otherId)
+                                } else {
+                                    onSplitView?.invoke(null)
+                                }
+                            }, modifier = Modifier.fillMaxWidth()) {
+                                Text(if (splitActive) "Close Split View" else "Split View")
+                            }
+                        }
                         HorizontalDivider(modifier = Modifier.padding(vertical = 4.dp))
                         // Font size
                         Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp)) {
@@ -403,30 +475,101 @@ fun TerminalScreen(
             )
         }
 
-        // CLAUDE.md viewer as dialog (works over SwingPanel on desktop)
+        // Command palette
+        if (showPalette) {
+            val paletteActions = remember(tabs, activeTabId, commands) {
+                buildPaletteActions(
+                    tabs = tabs,
+                    activeTabId = activeTabId,
+                    slashCommands = commands,
+                    onSendCommand = onSendCommand,
+                    onTabSwitch = onTabSwitch,
+                    onTabClose = onTabClose,
+                    onNewTab = onNewTab,
+                    onReconnect = onReconnect,
+                    onSwitchModel = onSwitchModel,
+                    onSendEscape = onSendEscape,
+                    onNavigate = { target -> onNavigate?.invoke(target) }
+                )
+            }
+            CommandPaletteDialog(
+                actions = paletteActions,
+                onDismiss = { showPalette = false }
+            )
+        }
+
+        // CLAUDE.md editor dialog
         if (showClaudeMd) {
+            var editMode by remember { mutableStateOf(false) }
+            var editText by remember(claudeMdContent) { mutableStateOf(claudeMdContent) }
+            var saving by remember { mutableStateOf(false) }
             AlertDialog(
-                onDismissRequest = { showClaudeMd = false },
+                onDismissRequest = { showClaudeMd = false; editMode = false },
                 confirmButton = {
-                    TextButton(onClick = { showClaudeMd = false }) { Text("Close") }
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        if (editMode) {
+                            TextButton(
+                                onClick = {
+                                    saving = true
+                                    scope.launch {
+                                        onSaveClaudeMd?.invoke(editText)
+                                        saving = false
+                                        editMode = false
+                                        claudeMdContent = editText
+                                    }
+                                },
+                                enabled = !saving
+                            ) { Text(if (saving) "Saving..." else "Save") }
+                            TextButton(onClick = { editMode = false; editText = claudeMdContent }) { Text("Cancel") }
+                        } else {
+                            if (claudeMdContent.isNotBlank() && claudeMdContent != "(no CLAUDE.md found)" && claudeMdContent != "(no connection)") {
+                                TextButton(onClick = { editMode = true }) { Text("Edit") }
+                            }
+                            TextButton(onClick = { showClaudeMd = false }) { Text("Close") }
+                        }
+                    }
                 },
-                title = { Text("CLAUDE.md") },
+                title = { Text(if (editMode) "Edit CLAUDE.md" else "CLAUDE.md") },
                 text = {
-                    androidx.compose.foundation.text.selection.SelectionContainer {
-                        Text(
-                            text = claudeMdContent.ifBlank { "(not found)" },
-                            modifier = Modifier.heightIn(max = 400.dp).verticalScroll(rememberScrollState()),
-                            style = MaterialTheme.typography.bodySmall,
-                            fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace
+                    if (editMode) {
+                        OutlinedTextField(
+                            value = editText,
+                            onValueChange = { editText = it },
+                            modifier = Modifier.fillMaxWidth().heightIn(min = 200.dp, max = 400.dp),
+                            textStyle = MaterialTheme.typography.bodySmall.copy(
+                                fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace
+                            ),
+                            maxLines = Int.MAX_VALUE
                         )
+                    } else {
+                        androidx.compose.foundation.text.selection.SelectionContainer {
+                            Text(
+                                text = claudeMdContent.ifBlank { "(not found)" },
+                                modifier = Modifier.heightIn(max = 400.dp).verticalScroll(rememberScrollState()),
+                                style = MaterialTheme.typography.bodySmall,
+                                fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace
+                            )
+                        }
                     }
                 }
             )
         }
 
-        // Terminal content
-        Box(modifier = Modifier.fillMaxWidth().weight(1f)) {
-            terminalContent(Modifier.fillMaxSize())
+        // Terminal content (with optional split view)
+        if (splitActive && splitTerminalContent != null && wideMode) {
+            Row(modifier = Modifier.fillMaxWidth().weight(1f)) {
+                Box(modifier = Modifier.weight(1f).fillMaxHeight()) {
+                    terminalContent(Modifier.fillMaxSize())
+                }
+                VerticalDivider(modifier = Modifier.fillMaxHeight().width(2.dp))
+                Box(modifier = Modifier.weight(1f).fillMaxHeight()) {
+                    splitTerminalContent(Modifier.fillMaxSize())
+                }
+            }
+        } else {
+            Box(modifier = Modifier.fillMaxWidth().weight(1f)) {
+                terminalContent(Modifier.fillMaxSize())
+            }
         }
 
         if (!compactMode) {
@@ -449,6 +592,28 @@ fun TerminalScreen(
                                 },
                                 modifier = Modifier.height(28.dp)
                             )
+                        }
+                    }
+                }
+            }
+
+            // Pending input queue indicator
+            if (pendingInputCount > 0) {
+                Surface(color = Color(0xFFFFF3E0)) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            "$pendingInputCount message(s) queued — will send on reconnect",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = Color(0xFFE65100)
+                        )
+                        if (onClearPending != null) {
+                            TextButton(onClick = onClearPending) {
+                                Text("Clear", style = MaterialTheme.typography.bodySmall)
+                            }
                         }
                     }
                 }
@@ -492,6 +657,7 @@ fun TerminalScreen(
 private fun SessionSidePanel(
     allSessions: Map<String, List<SessionItem>>,
     activeTabId: String?,
+    sessionActivities: Map<String, com.clauderemote.model.SessionActivity> = emptyMap(),
     onTabSwitch: (String) -> Unit,
     onTabClose: (String) -> Unit,
     onNewTab: () -> Unit,
@@ -558,12 +724,11 @@ private fun SessionSidePanel(
                         modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp)
                     )
                     items.forEach { item ->
-                        val dotColor = when {
-                            !item.isConnected -> Color(0xFF666666)
-                            item.status == SessionStatus.ACTIVE -> Color(0xFF4CAF50)
-                            item.status == SessionStatus.CONNECTING -> Color(0xFFFF9800)
-                            else -> Color(0xFFF44336)
-                        }
+                        val dotColor = if (!item.isConnected) Color(0xFF666666)
+                            else activityDotColor(
+                                sessionActivities[item.id],
+                                item.status ?: SessionStatus.ACTIVE
+                            )
                         Surface(
                             color = if (item.tab?.id == activeTabId) MaterialTheme.colorScheme.primaryContainer
                                    else Color.Transparent,
@@ -1169,6 +1334,26 @@ private fun CtrlButton(label: String, onClick: () -> Unit) {
         contentPadding = PaddingValues(horizontal = 10.dp)
     ) {
         Text(label, style = MaterialTheme.typography.bodySmall)
+    }
+}
+
+/**
+ * Map SessionActivity (or fallback to SessionStatus) to a dot color.
+ * Green=waiting/idle, Yellow=working, Blue=approval, Red=disconnected.
+ */
+private fun activityDotColor(
+    activity: com.clauderemote.model.SessionActivity?,
+    status: SessionStatus
+): Color = when (activity) {
+    com.clauderemote.model.SessionActivity.WAITING_FOR_INPUT -> Color(0xFF4CAF50) // green
+    com.clauderemote.model.SessionActivity.WORKING -> Color(0xFFFF9800)           // yellow/amber
+    com.clauderemote.model.SessionActivity.APPROVAL_NEEDED -> Color(0xFF2196F3)   // blue
+    com.clauderemote.model.SessionActivity.IDLE -> Color(0xFF4CAF50)              // green
+    com.clauderemote.model.SessionActivity.DISCONNECTED -> Color(0xFFF44336)      // red
+    null -> when (status) {
+        SessionStatus.ACTIVE -> Color(0xFF4CAF50)
+        SessionStatus.CONNECTING -> Color(0xFFFF9800)
+        SessionStatus.DISCONNECTED, SessionStatus.ERROR -> Color(0xFFF44336)
     }
 }
 

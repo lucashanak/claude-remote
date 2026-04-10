@@ -134,6 +134,7 @@ fun main() = application {
     val appSettings = AppSettings(prefs)
     val tabManager = TabManager()
     val sessionOrchestrator = SessionOrchestrator(serverStorage, tabManager)
+    val sshKeyManager = com.clauderemote.connection.SshKeyManager(prefs)
 
     // Create connector and wire SSH output → JediTerm
     val connector = SshTtyConnector(sessionOrchestrator, tabManager)
@@ -187,6 +188,7 @@ fun main() = application {
             appSettings = appSettings,
             tabManager = tabManager,
             sessionOrchestrator = sessionOrchestrator,
+            sshKeyManager = sshKeyManager,
             appVersion = System.getProperty("jpackage.app-version") ?: "dev",
             onInstallUpdate = { bytes, info ->
                 try {

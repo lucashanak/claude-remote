@@ -157,6 +157,7 @@ class MainActivity : FragmentActivity() {
         appSettings = AppSettings(prefs)
         tabManager = TabManager()
         sessionOrchestrator = SessionOrchestrator(serverStorage, tabManager)
+        val sshKeyManager = com.clauderemote.connection.SshKeyManager(prefs)
 
         // Wire SSH output → terminal WebView
         sessionOrchestrator.onTerminalOutput = { sessionId, data ->
@@ -214,6 +215,7 @@ class MainActivity : FragmentActivity() {
                 appSettings = appSettings,
                 tabManager = tabManager,
                 sessionOrchestrator = sessionOrchestrator,
+                sshKeyManager = sshKeyManager,
                 appVersion = appVersion,
                 onInstallUpdate = { apkBytes, info -> installUpdate(apkBytes, info) },
                 onShareLog = { log ->
@@ -645,6 +647,58 @@ class MainActivity : FragmentActivity() {
             } else {
                 @Suppress("DEPRECATION")
                 vibrator.vibrate(5)
+            }
+        }
+
+        @JavascriptInterface
+        fun onSwipeTab(direction: String) {
+            val tabs = tabManager.tabs.value
+            if (tabs.size < 2) return
+            val activeId = tabManager.activeTabId.value ?: return
+            val idx = tabs.indexOfFirst { it.id == activeId }
+            val nextIdx = if (direction == "right") {
+                if (idx <= 0) tabs.size - 1 else idx - 1
+            } else {
+                if (idx >= tabs.size - 1) 0 else idx + 1
+            }
+            runOnUiThread { sessionOrchestrator.switchTab(tabs[nextIdx].id) }
+        }
+
+        @JavascriptInterface
+        fun onImagePath(path: String) {
+            // Request image download via SFTP and show preview
+            FileLogger.log("MainActivity", "Image path clicked: $path")
+            val activeId = tabManager.activeTabId.value ?: return
+            kotlinx.coroutines.MainScope().launch {
+                try {
+                    val conn = sessionOrchestrator.getConnection(activeId)
+                    val session = conn?.getSession() ?: return@launch
+                    val bytes = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                        val sftp = session.openChannel("sftp") as com.jcraft.jsch.ChannelSftp
+                        sftp.connect(5000)
+                        val out = java.io.ByteArrayOutputStream()
+                        sftp.get(path, out)
+                        sftp.disconnect()
+                        out.toByteArray()
+                    }
+                    if (bytes.isNotEmpty()) {
+                        val dir = java.io.File(cacheDir, "preview")
+                        dir.mkdirs()
+                        val ext = path.substringAfterLast('.', "png")
+                        val file = java.io.File(dir, "preview_${System.currentTimeMillis()}.$ext")
+                        file.writeBytes(bytes)
+                        val uri = androidx.core.content.FileProvider.getUriForFile(
+                            this@MainActivity, "${packageName}.fileprovider", file
+                        )
+                        val intent = android.content.Intent(android.content.Intent.ACTION_VIEW).apply {
+                            setDataAndType(uri, "image/*")
+                            addFlags(android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                        }
+                        startActivity(intent)
+                    }
+                } catch (e: Exception) {
+                    FileLogger.error("MainActivity", "Image preview failed: ${e.message}", e)
+                }
             }
         }
     }

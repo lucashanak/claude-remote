@@ -92,6 +92,29 @@ const fitAddon = new FitAddon.FitAddon();
 term.loadAddon(fitAddon);
 
 try { const w = new WebLinksAddon.WebLinksAddon((e,u) => { if(A) A.openUrl(u); }); term.loadAddon(w); } catch(e) {}
+
+// Image file path detection — register a link provider for image paths
+term.registerLinkProvider({
+    provideLinks: (bufferLineNumber, callback) => {
+        const line = term.buffer.active.getLine(bufferLineNumber);
+        if (!line) { callback(undefined); return; }
+        const text = line.translateToString(true);
+        const imgRegex = /(\/[\w./_-]+\.(png|jpg|jpeg|gif|svg|webp|bmp))/gi;
+        const links = [];
+        let m;
+        while ((m = imgRegex.exec(text)) !== null) {
+            const startCol = m.index;
+            const matchText = m[0]; // capture before loop advances
+            links.push({
+                range: { start: { x: startCol + 1, y: bufferLineNumber + 1 }, end: { x: startCol + matchText.length + 1, y: bufferLineNumber + 1 } },
+                text: matchText,
+                activate: () => { if (A && A.onImagePath) A.onImagePath(matchText); }
+            });
+        }
+        callback(links.length > 0 ? links : undefined);
+    }
+});
+
 let searchAddon = null;
 try { searchAddon = new SearchAddon.SearchAddon(); term.loadAddon(searchAddon); } catch(e) {}
 
@@ -249,6 +272,26 @@ termEl.addEventListener('touchmove', e => { if (e.touches.length === 2) ctxTapMo
 termEl.addEventListener('touchend', e => {
     if (ctxTapStart > 0 && !ctxTapMoved && Date.now()-ctxTapStart < 400) showCtxMenu(ctxTapPos.x, ctxTapPos.y);
     if (e.touches.length === 0) ctxTapStart = 0;
+}, {passive:true});
+
+// 2-finger horizontal swipe → tab switch
+let swipeStartX = 0, swipeStartY = 0, swipeActive = false;
+termEl.addEventListener('touchstart', e => {
+    if (e.touches.length === 2) {
+        swipeStartX = (e.touches[0].clientX + e.touches[1].clientX) / 2;
+        swipeStartY = (e.touches[0].clientY + e.touches[1].clientY) / 2;
+        swipeActive = true;
+    }
+}, {passive:true});
+termEl.addEventListener('touchend', e => {
+    if (swipeActive && e.changedTouches.length > 0) {
+        const endX = e.changedTouches[0].clientX;
+        const dx = endX - swipeStartX;
+        if (Math.abs(dx) > 80) {
+            if (A && A.onSwipeTab) A.onSwipeTab(dx > 0 ? 'right' : 'left');
+        }
+        swipeActive = false;
+    }
 }, {passive:true});
 
 document.getElementById('ctxCopy').addEventListener('click', () => { hideCtxMenu(); const s=term.getSelection(); if(s&&A){A.copyToClipboard(s);showToast('Copied');} });

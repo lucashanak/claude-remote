@@ -5,6 +5,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -23,7 +24,8 @@ fun SettingsScreen(
     onBack: () -> Unit,
     onCheckUpdate: (() -> Unit)? = null,
     onExportServers: (() -> Unit)? = null,
-    onImportServers: (() -> Unit)? = null
+    onImportServers: (() -> Unit)? = null,
+    sshKeyManager: com.clauderemote.connection.SshKeyManager? = null
 ) {
     var fontSize by remember { mutableStateOf(settings.terminalFontSize) }
     var scrollback by remember { mutableStateOf(settings.terminalScrollback) }
@@ -162,6 +164,13 @@ fun SettingsScreen(
                 onCheckedChange = { notifications = it; settings.notificationsEnabled = it }
             )
 
+            var notifyTaskComplete by remember { mutableStateOf(settings.notifyOnTaskComplete) }
+            SettingsSwitch(
+                label = "Notify on task complete",
+                checked = notifyTaskComplete,
+                onCheckedChange = { notifyTaskComplete = it; settings.notifyOnTaskComplete = it }
+            )
+
             SettingsSlider(
                 label = "Connect timeout (seconds)",
                 value = connectTimeout,
@@ -170,6 +179,101 @@ fun SettingsScreen(
             )
 
             HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
+
+            // SSH Keys
+            if (sshKeyManager != null) {
+                HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
+                Text("SSH Keys", style = MaterialTheme.typography.titleMedium)
+
+                var keys by remember { mutableStateOf(sshKeyManager.loadKeys()) }
+                var showGenDialog by remember { mutableStateOf(false) }
+                var genName by remember { mutableStateOf("") }
+                var genType by remember { mutableStateOf("ed25519") }
+
+                if (keys.isEmpty()) {
+                    Text("No managed keys", style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant)
+                } else {
+                    keys.forEach { key ->
+                        Row(
+                            modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(key.name, style = MaterialTheme.typography.bodyMedium)
+                                Text(
+                                    "${key.type.uppercase()} - ${key.fingerprint}",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                            IconButton(onClick = {
+                                sshKeyManager.deleteKey(key.id)
+                                keys = sshKeyManager.loadKeys()
+                            }) {
+                                Icon(Icons.Default.Delete, "Delete")
+                            }
+                        }
+                    }
+                }
+
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Button(onClick = { showGenDialog = true }) { Text("Generate Key") }
+                }
+
+                if (showGenDialog) {
+                    AlertDialog(
+                        onDismissRequest = { showGenDialog = false },
+                        title = { Text("Generate SSH Key") },
+                        text = {
+                            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                                OutlinedTextField(
+                                    value = genName,
+                                    onValueChange = { genName = it },
+                                    label = { Text("Key name") },
+                                    singleLine = true,
+                                    modifier = Modifier.fillMaxWidth()
+                                )
+                                Text("Key type", style = MaterialTheme.typography.bodyMedium)
+                                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                    listOf("ed25519", "rsa").forEach { type ->
+                                        FilterChip(
+                                            selected = genType == type,
+                                            onClick = { genType = type },
+                                            label = { Text(type.uppercase()) }
+                                        )
+                                    }
+                                }
+                            }
+                        },
+                        confirmButton = {
+                            TextButton(
+                                onClick = {
+                                    if (genName.isNotBlank()) {
+                                        sshKeyManager.generateKey(genName, genType)
+                                        keys = sshKeyManager.loadKeys()
+                                        showGenDialog = false
+                                        genName = ""
+                                    }
+                                }
+                            ) { Text("Generate") }
+                        },
+                        dismissButton = {
+                            TextButton(onClick = { showGenDialog = false }) { Text("Cancel") }
+                        }
+                    )
+                }
+            }
+
+            // Keyboard Shortcuts
+            HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
+            Text("Keyboard Shortcuts", style = MaterialTheme.typography.titleMedium)
+            Text(
+                "Ctrl+K: Command Palette  |  Ctrl+Tab: Next Tab\nCtrl+Shift+Tab: Prev Tab  |  Ctrl+W: Close Tab\nCtrl+N: New Session",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
 
             // Security
             Text("Security", style = MaterialTheme.typography.titleMedium)

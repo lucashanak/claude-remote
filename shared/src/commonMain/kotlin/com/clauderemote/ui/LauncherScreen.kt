@@ -41,7 +41,8 @@ fun LauncherScreen(
     onToggleFavorite: ((SshServer) -> Unit)? = null,
     onResumeSession: (ClaudeSession) -> Unit,
     onSettings: () -> Unit,
-    onViewLog: () -> Unit = {}
+    onViewLog: () -> Unit = {},
+    onUsageDashboard: (() -> Unit)? = null
 ) {
     val sortedServers = servers.sortedByDescending { it.favorite }
     Scaffold(
@@ -49,6 +50,11 @@ fun LauncherScreen(
             TopAppBar(
                 title = { Text("Claude Remote") },
                 actions = {
+                    if (onUsageDashboard != null) {
+                        TextButton(onClick = onUsageDashboard) {
+                            Text("Usage")
+                        }
+                    }
                     TextButton(onClick = onViewLog) {
                         Text("Log")
                     }

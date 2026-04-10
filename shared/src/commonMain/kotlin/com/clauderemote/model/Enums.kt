@@ -36,3 +36,15 @@ enum class SessionStatus {
     DISCONNECTED,
     ERROR
 }
+
+/**
+ * Fine-grained activity state derived from prompt detection + connection status.
+ * Used for colored health dots in the UI.
+ */
+enum class SessionActivity(val displayName: String) {
+    WORKING("Working"),           // Claude is processing (no prompt detected)
+    WAITING_FOR_INPUT("Ready"),   // Claude prompt detected (❯)
+    APPROVAL_NEEDED("Approval"),  // [Y/n] or permission prompt
+    IDLE("Idle"),                 // Connected but no recent output
+    DISCONNECTED("Disconnected")  // Connection lost
+}

@@ -75,6 +75,16 @@ class AppSettings(private val prefs: PlatformPreferences) {
         get() = prefs.getBoolean("notifications_enabled", true)
         set(value) = prefs.putBoolean("notifications_enabled", value)
 
+    // Keyboard shortcuts (custom bindings, format: "actionId=shortcut;...")
+    var customShortcuts: String
+        get() = prefs.getString("custom_shortcuts", "")
+        set(value) = prefs.putString("custom_shortcuts", value)
+
+    // Notifications - task complete
+    var notifyOnTaskComplete: Boolean
+        get() = prefs.getBoolean("notify_on_task_complete", true)
+        set(value) = prefs.putBoolean("notify_on_task_complete", value)
+
     // Security
     var biometricLockEnabled: Boolean
         get() = prefs.getBoolean("biometric_lock_enabled", false)

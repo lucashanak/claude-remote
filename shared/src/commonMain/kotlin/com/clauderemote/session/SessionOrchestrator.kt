@@ -2,6 +2,9 @@ package com.clauderemote.session
 
 import com.clauderemote.connection.SshManager
 import com.clauderemote.model.*
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.update
 import com.clauderemote.storage.ServerStorage
 import com.clauderemote.util.FileLogger
 import kotlinx.coroutines.Dispatchers
@@ -27,6 +30,35 @@ class SessionOrchestrator(
     // Prompt detection for notifications
     private val promptDetector = InputPromptDetector()
 
+    // Per-session activity state (for health indicator dots)
+    private val _sessionActivities = kotlinx.coroutines.flow.MutableStateFlow<Map<String, SessionActivity>>(emptyMap())
+    val sessionActivities: kotlinx.coroutines.flow.StateFlow<Map<String, SessionActivity>> = _sessionActivities
+
+    // Per-session context window usage (0-100)
+    private val _contextPercents = kotlinx.coroutines.flow.MutableStateFlow<Map<String, Int>>(emptyMap())
+    val contextPercents: kotlinx.coroutines.flow.StateFlow<Map<String, Int>> = _contextPercents
+
+    // Per-session SSH latency (ms)
+    private val _latencies = kotlinx.coroutines.flow.MutableStateFlow<Map<String, Long>>(emptyMap())
+    val latencies: kotlinx.coroutines.flow.StateFlow<Map<String, Long>> = _latencies
+
+    // Pending input queue per session (for offline queue feature)
+    private val pendingInputs = java.util.concurrent.ConcurrentHashMap<String, MutableList<String>>()
+    private val _pendingCounts = kotlinx.coroutines.flow.MutableStateFlow<Map<String, Int>>(emptyMap())
+    val pendingCounts: kotlinx.coroutines.flow.StateFlow<Map<String, Int>> = _pendingCounts
+
+    private fun updateActivity(sessionId: String, activity: SessionActivity) {
+        _sessionActivities.update { it + (sessionId to activity) }
+    }
+
+    private fun updateContextPercent(sessionId: String, percent: Int) {
+        _contextPercents.update { it + (sessionId to percent) }
+    }
+
+    // Last parsed usage tokens (for dashboard)
+    private val _usageTokens = MutableStateFlow<CostCalculator.UsageTokens?>(null)
+    val usageTokens: StateFlow<CostCalculator.UsageTokens?> = _usageTokens
+
     // Terminal output callback — set by the platform (Android WebView, Desktop terminal)
     var onTerminalOutput: ((sessionId: String, data: String) -> Unit)? = null
 
@@ -48,8 +80,9 @@ class SessionOrchestrator(
     // Usage stats callback (session%, week%)
     var onUsageUpdate: ((sessionPercent: Int?, weekPercent: Int?) -> Unit)? = null
 
-    // Periodic usage polling via SSH exec channel
-    private var usagePollingJob: kotlinx.coroutines.Job? = null
+    // Per-session periodic polling jobs
+    private val usagePollingJobs = mutableMapOf<String, kotlinx.coroutines.Job>()
+    private val latencyPollingJobs = mutableMapOf<String, kotlinx.coroutines.Job>()
     @Volatile private var isInBackground = false
 
     /** Call from onPause/onResume to pause heavy background work and save battery. */
@@ -58,8 +91,8 @@ class SessionOrchestrator(
     }
 
     private fun startUsagePolling(sessionId: String) {
-        usagePollingJob?.cancel()
-        usagePollingJob = reconnectScope.launch {
+        usagePollingJobs[sessionId]?.cancel()
+        usagePollingJobs[sessionId] = reconnectScope.launch {
             kotlinx.coroutines.delay(5000) // initial delay
             while (isActive) {
                 // Skip poll when app is in background — user can't see usage bar anyway
@@ -85,6 +118,38 @@ class SessionOrchestrator(
         }
     }
 
+    private fun startLatencyPolling(sessionId: String) {
+        latencyPollingJobs[sessionId]?.cancel()
+        latencyPollingJobs[sessionId] = reconnectScope.launch {
+            kotlinx.coroutines.delay(3000)
+            val recentLatencies = mutableListOf<Long>()
+            while (isActive) {
+                if (!isInBackground) {
+                    try {
+                        val conn = connections[sessionId] ?: break
+                        val sshSession = conn.getSession() ?: break
+                        val latency = kotlinx.coroutines.withContext(Dispatchers.IO) {
+                            val start = System.currentTimeMillis()
+                            val ch = sshSession.openChannel("exec") as com.jcraft.jsch.ChannelExec
+                            ch.setCommand("echo pong")
+                            ch.inputStream = null
+                            val input = ch.inputStream
+                            ch.connect(5000)
+                            input.bufferedReader().readText()
+                            ch.disconnect()
+                            System.currentTimeMillis() - start
+                        }
+                        recentLatencies.add(latency)
+                        if (recentLatencies.size > 5) recentLatencies.removeAt(0)
+                        val avg = recentLatencies.average().toLong()
+                        _latencies.update { it + (sessionId to avg) }
+                    } catch (_: Exception) {}
+                }
+                kotlinx.coroutines.delay(15_000) // every 15s
+            }
+        }
+    }
+
     private fun parseUsageJson(json: String) {
         try {
             if (json.isBlank() || json.trim() == "{}") return
@@ -101,6 +166,14 @@ class SessionOrchestrator(
 
             val totalUsed = inputTokens + outputTokens + cacheCreation + cacheRead
             if (totalUsed == 0L) return
+
+            // Store for dashboard
+            _usageTokens.value = CostCalculator.UsageTokens(
+                inputTokens = inputTokens,
+                outputTokens = outputTokens,
+                cacheCreationTokens = cacheCreation,
+                cacheReadTokens = cacheRead
+            )
 
             // Parse remaining minutes from projection
             val remaining = Regex("\"remainingMinutes\"\\s*:\\s*(\\d+)").find(json)
@@ -161,8 +234,10 @@ class SessionOrchestrator(
             serverStorage.updateServer(server.withRecentFolder(folder))
             tabManager.updateTabStatus(sessionId, SessionStatus.ACTIVE)
             FileLogger.log(TAG, "Session active: $sessionId")
+            updateActivity(sessionId, SessionActivity.WAITING_FOR_INPUT)
             onSessionActive?.invoke(session)
             startUsagePolling(sessionId)
+            startLatencyPolling(sessionId)
             session.copy(status = SessionStatus.ACTIVE)
         } catch (e: Exception) {
             FileLogger.error(TAG, "Session launch failed", e)
@@ -201,9 +276,21 @@ class SessionOrchestrator(
             val detection = promptDetector.onOutput(session.id, text)
             if (detection != null) {
                 onClaudeNeedsInput?.invoke(session.id, detection.type.displayHint, isActive)
+                // Update activity based on prompt type
+                val activity = when (detection.type) {
+                    PromptType.INPUT_PROMPT -> SessionActivity.WAITING_FOR_INPUT
+                    PromptType.APPROVAL_NEEDED, PromptType.PERMISSION_PROMPT -> SessionActivity.APPROVAL_NEEDED
+                }
+                updateActivity(session.id, activity)
             }
             // Feed buffer for multi-chunk parsing
             promptDetector.feedRecentOutput(session.id, text)
+            // Parse context window usage
+            val ctx = promptDetector.parseContextPercent(session.id, text)
+            if (ctx != null) {
+                updateContextPercent(session.id, ctx)
+                onContextUpdate?.invoke(session.id, ctx)
+            }
         }
 
         sshManager.connect(
@@ -212,6 +299,7 @@ class SessionOrchestrator(
             onConnectionLost = {
                 // Auto-reconnect with tmux reattach
                 tabManager.updateTabStatus(session.id, SessionStatus.DISCONNECTED)
+                updateActivity(session.id, SessionActivity.DISCONNECTED)
                 reconnectScope.launch {
                     autoReconnect(session, ::emit)
                 }
@@ -287,9 +375,11 @@ class SessionOrchestrator(
                 promptDetector.suppressFor(3000) // suppress during tmux screen redraw after reconnect
 
                 tabManager.updateTabStatus(session.id, SessionStatus.ACTIVE)
+                updateActivity(session.id, SessionActivity.WAITING_FOR_INPUT)
                 onSessionActive?.invoke(session)
                 emit("\r\n\u001B[32mReconnected!\u001B[0m\r\n")
                 FileLogger.log(TAG, "Auto-reconnect succeeded for ${session.id}")
+                flushPendingInputs(session.id)
                 return
             } catch (e: Exception) {
                 FileLogger.error(TAG, "Auto-reconnect attempt $attempt failed", e)
@@ -333,15 +423,56 @@ class SessionOrchestrator(
     fun sendInput(sessionId: String, data: String) {
         promptDetector.onUserInput(sessionId)
         val conn = connections[sessionId]
-        if (conn == null) { warnNoConnection(sessionId); return }
+        if (conn == null || !conn.isConnected) {
+            queueInput(sessionId, data)
+            return
+        }
+        updateActivity(sessionId, SessionActivity.WORKING)
         conn.sendInput(data)
     }
 
     fun sendBytes(sessionId: String, data: ByteArray) {
         promptDetector.onUserInput(sessionId)
         val conn = connections[sessionId]
-        if (conn == null) { warnNoConnection(sessionId); return }
+        if (conn == null || !conn.isConnected) { warnNoConnection(sessionId); return }
+        updateActivity(sessionId, SessionActivity.WORKING)
         conn.sendBytes(data)
+    }
+
+    // ---- Offline input queue ----
+
+    private fun queueInput(sessionId: String, data: String) {
+        val queue = pendingInputs.getOrPut(sessionId) { mutableListOf() }
+        queue.add(data)
+        _pendingCounts.update { it + (sessionId to queue.size) }
+        val msg = "\r\n\u001B[33mQueued (${queue.size} pending) — will send on reconnect\u001B[0m\r\n"
+        appendToBuffer(sessionId, msg)
+        if (tabManager.activeTabId.value == sessionId) {
+            onTerminalOutput?.invoke(sessionId, msg)
+        }
+    }
+
+    fun clearPendingInputs(sessionId: String) {
+        pendingInputs.remove(sessionId)
+        _pendingCounts.update { it - sessionId }
+    }
+
+    private fun flushPendingInputs(sessionId: String) {
+        val queue = pendingInputs.remove(sessionId) ?: return
+        _pendingCounts.update { it - sessionId }
+        if (queue.isEmpty()) return
+        val conn = connections[sessionId] ?: return
+        reconnectScope.launch {
+            for (input in queue) {
+                conn.sendInput(input)
+                kotlinx.coroutines.delay(300) // small delay between queued messages
+            }
+            val msg = "\r\n\u001B[32mFlushed ${queue.size} queued message(s)\u001B[0m\r\n"
+            appendToBuffer(sessionId, msg)
+            if (tabManager.activeTabId.value == sessionId) {
+                onTerminalOutput?.invoke(sessionId, msg)
+            }
+        }
     }
 
     fun resize(sessionId: String, cols: Int, rows: Int) {
@@ -350,9 +481,13 @@ class SessionOrchestrator(
 
     fun sendClaudeCommand(sessionId: String, command: String) {
         val conn = connections[sessionId]
-        if (conn == null) { warnNoConnection(sessionId); return }
+        if (conn == null || !conn.isConnected) {
+            queueInput(sessionId, command)
+            return
+        }
         FileLogger.log(TAG, "sendClaudeCommand: ${command.length} bytes to $sessionId")
         promptDetector.onUserInput(sessionId)
+        updateActivity(sessionId, SessionActivity.WORKING)
         conn.sendInput(command)
     }
 
@@ -402,11 +537,17 @@ class SessionOrchestrator(
     }
 
     suspend fun disconnectSession(sessionId: String) {
-        usagePollingJob?.cancel()
+        usagePollingJobs.remove(sessionId)?.cancel()
+        latencyPollingJobs.remove(sessionId)?.cancel()
         connections[sessionId]?.disconnect()
         connections.remove(sessionId)
         outputBuffers.remove(sessionId)
         promptDetector.removeSession(sessionId)
+        pendingInputs.remove(sessionId)
+        _sessionActivities.update { it - sessionId }
+        _contextPercents.update { it - sessionId }
+        _latencies.update { it - sessionId }
+        _pendingCounts.update { it - sessionId }
         tabManager.removeTab(sessionId)
     }
 

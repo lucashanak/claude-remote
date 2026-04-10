@@ -33,7 +33,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 enum class Screen {
-    LAUNCHER, CONNECT, TERMINAL, SETTINGS, LOG_VIEWER
+    LAUNCHER, CONNECT, TERMINAL, SETTINGS, LOG_VIEWER, USAGE_DASHBOARD
 }
 
 @Composable
@@ -51,6 +51,7 @@ fun App(
     onPickFile: ((callback: (List<Pair<ByteArray, String>>) -> Unit) -> Unit)? = null,
     onApplyFontSize: ((Int) -> Unit)? = null,
     onShowNativeMenu: (() -> Unit)? = null,
+    sshKeyManager: com.clauderemote.connection.SshKeyManager? = null,
     exitApp: (() -> Unit)? = null,
     terminalContent: @Composable (modifier: Modifier) -> Unit
 ) {
@@ -66,6 +67,12 @@ fun App(
     var tabCloseConfirmId by remember { mutableStateOf<String?>(null) }
     var sessionUsagePercent by remember { mutableStateOf<Int?>(null) }
     var weekUsagePercent by remember { mutableStateOf<Int?>(null) }
+
+    // Collect new StateFlows from orchestrator
+    val sessionActivities by sessionOrchestrator.sessionActivities.collectAsState()
+    val contextPercents by sessionOrchestrator.contextPercents.collectAsState()
+    val latencies by sessionOrchestrator.latencies.collectAsState()
+    val pendingCounts by sessionOrchestrator.pendingCounts.collectAsState()
 
     // Wire usage updates (parsed from /usage command output)
     LaunchedEffect(Unit) {
@@ -358,7 +365,8 @@ fun App(
                             currentScreen = Screen.TERMINAL
                         },
                         onSettings = { currentScreen = Screen.SETTINGS },
-                        onViewLog = { currentScreen = Screen.LOG_VIEWER }
+                        onViewLog = { currentScreen = Screen.LOG_VIEWER },
+                        onUsageDashboard = { currentScreen = Screen.USAGE_DASHBOARD }
                     )
                 }
 
@@ -545,6 +553,25 @@ fun App(
                                 } else "(no connection)"
                             } else "(no active tab)"
                         },
+                        onSaveClaudeMd = { content ->
+                            val id = activeTabId
+                            if (id != null) {
+                                val conn = sessionOrchestrator.getConnection(id)
+                                val sess = conn?.getSession()
+                                if (sess != null) {
+                                    val folder = tabManager.getTab(id)?.folder ?: "~"
+                                    kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                                        val sftp = sess.openChannel("sftp") as com.jcraft.jsch.ChannelSftp
+                                        sftp.connect(5000)
+                                        try {
+                                            sftp.put(content.toByteArray(Charsets.UTF_8).inputStream(), "$folder/CLAUDE.md")
+                                        } finally {
+                                            sftp.disconnect()
+                                        }
+                                    }
+                                }
+                            }
+                        },
                         onSendEscape = {
                             activeTabId?.let { sessionOrchestrator.sendEscape(it) }
                         },
@@ -583,6 +610,22 @@ fun App(
                         },
                         sessionUsagePercent = sessionUsagePercent,
                         weekUsagePercent = weekUsagePercent,
+                        sessionActivities = sessionActivities,
+                        contextPercent = activeTabId?.let { contextPercents[it] },
+                        latencyMs = activeTabId?.let { latencies[it] },
+                        pendingInputCount = activeTabId?.let { pendingCounts[it] } ?: 0,
+                        onClearPending = activeTabId?.let { id ->
+                            { sessionOrchestrator.clearPendingInputs(id) }
+                        },
+                        onNavigate = { target ->
+                            currentScreen = when (target) {
+                                "settings" -> Screen.SETTINGS
+                                "dashboard" -> Screen.USAGE_DASHBOARD
+                                "logs" -> Screen.LOG_VIEWER
+                                "launcher" -> Screen.LAUNCHER
+                                else -> Screen.LAUNCHER
+                            }
+                        },
                         terminalContent = terminalContent
                     )
                 }
@@ -591,6 +634,7 @@ fun App(
                     SettingsScreen(
                         settings = appSettings,
                         appVersion = appVersion,
+                        sshKeyManager = sshKeyManager,
                         onBack = { currentScreen = Screen.LAUNCHER },
                         onCheckUpdate = { checkForUpdate() },
                         onExportServers = {
@@ -608,6 +652,19 @@ fun App(
                     LogViewerScreen(
                         onBack = { currentScreen = Screen.LAUNCHER },
                         onShare = onShareLog
+                    )
+                }
+
+                Screen.USAGE_DASHBOARD -> {
+                    val usageTokensState by sessionOrchestrator.usageTokens.collectAsState()
+                    UsageDashboardScreen(
+                        sessions = tabs,
+                        sessionActivities = sessionActivities,
+                        contextPercents = contextPercents,
+                        sessionUsagePercent = sessionUsagePercent,
+                        weekUsagePercent = weekUsagePercent,
+                        usageTokens = usageTokensState,
+                        onBack = { currentScreen = Screen.LAUNCHER }
                     )
                 }
             }
