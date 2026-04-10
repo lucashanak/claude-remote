@@ -53,7 +53,6 @@ class SshKeyManager(private val prefs: PlatformPreferences) {
         val keyType = when (type.lowercase()) {
             "rsa" -> KeyPair.RSA
             "ed25519" -> KeyPair.ED25519
-            "ecdsa" -> KeyPair.ECDSA256
             else -> KeyPair.ED25519
         }
         val kpair = KeyPair.genKeyPair(jsch, keyType, bits)
