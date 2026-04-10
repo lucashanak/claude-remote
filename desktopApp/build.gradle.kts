@@ -36,7 +36,7 @@ compose.desktop {
             vendor = "Claude Remote"
             macOS {
                 bundleID = "com.clauderemote.desktop"
-                iconFile.set(project.file("src/main/resources/icon.png"))
+                iconFile.set(project.file("src/main/resources/icon.icns"))
             }
 
             windows {
