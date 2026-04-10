@@ -267,14 +267,12 @@ fun main() = application {
                     dialog.isVisible = true
                     val files = dialog.files
                     if (files != null && files.isNotEmpty()) {
-                        val file = files.first()
-                        callback(file.readBytes(), file.name)
-                        // Upload remaining files
-                        files.drop(1).forEach { f ->
-                            try { callback(f.readBytes(), f.name) } catch (_: Exception) {}
+                        val pairs = files.mapNotNull { f ->
+                            try { f.readBytes() to f.name } catch (_: Exception) { null }
                         }
+                        callback(pairs)
                     } else {
-                        callback(ByteArray(0), "")
+                        callback(emptyList())
                     }
                 }
             },
