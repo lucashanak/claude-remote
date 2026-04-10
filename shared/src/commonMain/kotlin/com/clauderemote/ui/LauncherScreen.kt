@@ -216,6 +216,14 @@ private fun ActiveSessionCard(session: ClaudeSession, onClick: () -> Unit) {
                     session.displayLabel,
                     style = MaterialTheme.typography.bodySmall
                 )
+                if (session.alias.isNotBlank()) {
+                    val folderLabel = session.folder.trimEnd('/').substringAfterLast('/').ifBlank { session.folder }
+                    Text(
+                        folderLabel,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
                 Text(
                     "claude (${session.mode.displayName.lowercase()}) \u2022 ${session.durationText}",
                     style = MaterialTheme.typography.bodySmall,
