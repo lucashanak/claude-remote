@@ -175,12 +175,38 @@ fun main() = application {
         }
     }
 
+    val appIcon = remember {
+        try {
+            val stream = object {}.javaClass.getResourceAsStream("/icon.png")
+            if (stream != null) {
+                val image = javax.imageio.ImageIO.read(stream)
+                stream.close()
+                androidx.compose.ui.res.loadImageBitmap(object {}.javaClass.getResourceAsStream("/icon.png")!!)
+            } else null
+        } catch (_: Exception) { null }
+    }
+
+    // Set Dock icon on macOS
+    LaunchedEffect(Unit) {
+        try {
+            val stream = object {}.javaClass.getResourceAsStream("/icon.png")
+            if (stream != null) {
+                val image = javax.imageio.ImageIO.read(stream)
+                stream.close()
+                if (java.awt.Taskbar.isTaskbarSupported()) {
+                    java.awt.Taskbar.getTaskbar().iconImage = image
+                }
+            }
+        } catch (_: Exception) {}
+    }
+
     Window(
         onCloseRequest = {
             sshConnector?.close()
             exitApplication()
         },
         title = "Claude Remote",
+        icon = appIcon?.let { androidx.compose.ui.graphics.painter.BitmapPainter(it) },
         state = rememberWindowState(width = 1000.dp, height = 700.dp)
     ) {
         App(
