@@ -12,6 +12,12 @@ class InputPromptDetector {
 
     /** Set true during buffer replays (tab switch, reconnect) to suppress false positives. */
     var suppressDetection = false
+    @Volatile private var suppressUntil = 0L
+
+    /** Suppress all detections for [millis] ms — use after reconnect/attach while tmux redraws. */
+    fun suppressFor(millis: Long) {
+        suppressUntil = currentTimeMillis() + millis
+    }
 
     /**
      * Analyze a chunk of terminal output. Returns a [PromptDetection] if Claude
@@ -19,6 +25,7 @@ class InputPromptDetector {
      */
     fun onOutput(sessionId: String, text: String): PromptDetection? {
         if (suppressDetection) return null
+        if (currentTimeMillis() < suppressUntil) return null
 
         val state = sessionStates.getOrPut(sessionId) { SessionState() }
         val stripped = stripAnsi(text)
@@ -61,7 +68,7 @@ class InputPromptDetector {
         if (stripped.contains("[Y/n]") || stripped.contains("[y/N]")) {
             return PromptType.APPROVAL_NEEDED
         }
-        if (stripped.contains("Do you want to") || stripped.contains("permission")) {
+        if (stripped.contains("Do you want to") || stripped.contains("Allow ") || stripped.contains("Grant ")) {
             return PromptType.PERMISSION_PROMPT
         }
 

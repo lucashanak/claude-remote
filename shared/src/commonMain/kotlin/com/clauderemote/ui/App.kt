@@ -48,7 +48,7 @@ fun App(
     onTerminalScreenVisible: (() -> Unit)? = null,
     onPickKeyFile: ((callback: (String) -> Unit) -> Unit)? = null,
     onImportServers: (() -> Unit)? = null,
-    onPickFile: ((callback: (ByteArray, String) -> Unit) -> Unit)? = null,
+    onPickFile: ((callback: (List<Pair<ByteArray, String>>) -> Unit) -> Unit)? = null,
     onApplyFontSize: ((Int) -> Unit)? = null,
     onShowNativeMenu: (() -> Unit)? = null,
     exitApp: (() -> Unit)? = null,
@@ -121,11 +121,10 @@ fun App(
         }
     }
 
-    // Scan remote sessions when launcher is shown
+    // Scan remote sessions on startup and whenever launcher is shown
+    LaunchedEffect(Unit) { scanRemoteSessions() }
     LaunchedEffect(currentScreen) {
-        if (currentScreen == Screen.LAUNCHER) {
-            scanRemoteSessions()
-        }
+        if (currentScreen == Screen.LAUNCHER) scanRemoteSessions()
     }
 
     // Update state
@@ -503,19 +502,22 @@ fun App(
                         onAttachFile = if (onPickFile != null) {
                             suspend attachFile@{
                                 val id = activeTabId ?: return@attachFile null
-                                val deferred = CompletableDeferred<Pair<ByteArray, String>?>()
-                                onPickFile { bytes, name -> deferred.complete(bytes to name) }
-                                val result = deferred.await() ?: return@attachFile null
-                                val (bytes, name) = result
-                                if (bytes.isEmpty() || name.isEmpty()) return@attachFile null
-                                try {
-                                    withContext(Dispatchers.IO) {
-                                        sessionOrchestrator.uploadFile(id, bytes, name)
+                                val deferred = CompletableDeferred<List<Pair<ByteArray, String>>>()
+                                onPickFile { files -> deferred.complete(files) }
+                                val files = deferred.await()
+                                if (files.isEmpty()) return@attachFile null
+                                val paths = files.mapNotNull { (bytes, name) ->
+                                    if (bytes.isEmpty() || name.isEmpty()) return@mapNotNull null
+                                    try {
+                                        withContext(Dispatchers.IO) {
+                                            sessionOrchestrator.uploadFile(id, bytes, name)
+                                        }
+                                    } catch (e: Exception) {
+                                        FileLogger.error("App", "File upload failed: $name", e)
+                                        null
                                     }
-                                } catch (e: Exception) {
-                                    FileLogger.error("App", "File upload failed", e)
-                                    null
                                 }
+                                if (paths.isEmpty()) null else paths.joinToString("\n")
                             }
                         } else null,
                         onSwitchModel = { model ->

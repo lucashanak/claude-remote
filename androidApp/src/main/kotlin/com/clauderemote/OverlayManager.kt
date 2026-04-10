@@ -25,6 +25,8 @@ class OverlayManager(
     var isVisible = false
         private set
 
+    private var clipboardListener: android.content.ClipboardManager.OnPrimaryClipChangedListener? = null
+
     @SuppressLint("SetJavaScriptEnabled")
     fun setup() {
         overlayWebView.settings.apply {
@@ -36,6 +38,33 @@ class OverlayManager(
         overlayWebView.setBackgroundColor(0xFF1E1E1E.toInt())
         overlayWebView.addJavascriptInterface(JSInterface(), "Android")
         overlayWebView.loadUrl("file:///android_asset/overlay-ui/overlay.html")
+        registerClipboardListener()
+    }
+
+    /** Replace JS setInterval clipboard polling with a proper Android listener.
+     *  Fires only on actual clipboard changes — zero battery cost at idle. */
+    private fun registerClipboardListener() {
+        val cm = overlayWebView.context.getSystemService(android.content.Context.CLIPBOARD_SERVICE)
+            as android.content.ClipboardManager
+        val listener = android.content.ClipboardManager.OnPrimaryClipChangedListener {
+            if (!isVisible) return@OnPrimaryClipChangedListener
+            val text = cm.primaryClip?.getItemAt(0)?.text?.toString() ?: return@OnPrimaryClipChangedListener
+            val json = org.json.JSONObject.quote(text)
+            overlayWebView.post {
+                overlayWebView.evaluateJavascript("onNativeClipboardChange($json)", null)
+            }
+        }
+        cm.addPrimaryClipChangedListener(listener)
+        clipboardListener = listener
+    }
+
+    fun destroy() {
+        clipboardListener?.let {
+            val cm = overlayWebView.context.getSystemService(android.content.Context.CLIPBOARD_SERVICE)
+                as android.content.ClipboardManager
+            cm.removePrimaryClipChangedListener(it)
+            clipboardListener = null
+        }
     }
 
     fun show() {

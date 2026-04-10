@@ -43,7 +43,7 @@ class MainActivity : FragmentActivity() {
     private var terminalWebView: WebView? = null
     @Volatile var handleDragActive = false // set by JS when dragging selection handles
     private var keyFileCallback: ((String) -> Unit)? = null
-    private var attachFileCallback: ((ByteArray, String) -> Unit)? = null
+    private var attachFileCallback: ((List<Pair<ByteArray, String>>) -> Unit)? = null
 
     private val keyFilePicker = registerForActivityResult(
         androidx.activity.result.contract.ActivityResultContracts.GetContent()
@@ -80,32 +80,24 @@ class MainActivity : FragmentActivity() {
     private val attachFilePicker = registerForActivityResult(
         androidx.activity.result.contract.ActivityResultContracts.OpenMultipleDocuments()
     ) { uris ->
-        if (uris.isNotEmpty()) {
-            // Callback for the first file (others queued via multiFileQueue)
-            val first = uris.first()
+        val files = uris.mapNotNull { uri ->
             try {
-                val bytes = contentResolver.openInputStream(first)?.readBytes() ?: ByteArray(0)
-                val name = first.lastPathSegment
+                val bytes = contentResolver.openInputStream(uri)?.readBytes() ?: return@mapNotNull null
+                val name = uri.lastPathSegment
                     ?.substringAfterLast('/')
                     ?.substringAfterLast(':')
                     ?: "file_${System.currentTimeMillis()}"
-                val ext = contentResolver.getType(first)?.substringAfter('/')?.let { ".$it" } ?: ""
+                val ext = contentResolver.getType(uri)?.substringAfter('/')?.let { ".$it" } ?: ""
                 val fileName = if (name.contains('.')) name else "$name$ext"
-                attachFileCallback?.invoke(bytes, fileName)
+                bytes to fileName
             } catch (e: Exception) {
                 FileLogger.error("MainActivity", "Failed to read attached file", e)
-                attachFileCallback?.invoke(ByteArray(0), "")
+                null
             }
-            // Queue remaining files for subsequent uploads
-            if (uris.size > 1) {
-                multiFileQueue.addAll(uris.drop(1))
-            }
-        } else {
-            attachFileCallback?.invoke(ByteArray(0), "")
         }
+        attachFileCallback?.invoke(files)
         attachFileCallback = null
     }
-    private val multiFileQueue = mutableListOf<android.net.Uri>()
 
     @Volatile private var isAppInForeground = false
 
@@ -197,7 +189,7 @@ class MainActivity : FragmentActivity() {
             val title = tab?.tabTitle ?: "Session"
             val fg = isAppInForeground
             FileLogger.log("Notify", "Claude needs input: '$hint' fg=$fg activeTab=$isActiveTab keepAlive=${KeepAliveService.isRunning} notif=${appSettings.notificationsEnabled}")
-            KeepAliveService.updateDescription("$title: $hint")
+            KeepAliveService.updateDescription(title)
 
             // Send alert notification when app is backgrounded or tab is inactive
             if ((!fg || !isActiveTab) && appSettings.notificationsEnabled) {
@@ -240,21 +232,7 @@ class MainActivity : FragmentActivity() {
                     importFilePicker.launch("application/json")
                 },
                 onPickFile = { callback ->
-                    attachFileCallback = { bytes, name ->
-                        callback(bytes, name)
-                        // Process queued files from multi-select
-                        while (multiFileQueue.isNotEmpty()) {
-                            val uri = multiFileQueue.removeFirst()
-                            try {
-                                val b = contentResolver.openInputStream(uri)?.readBytes() ?: continue
-                                val n = uri.lastPathSegment?.substringAfterLast('/')?.substringAfterLast(':')
-                                    ?: "file_${System.currentTimeMillis()}"
-                                val ext = contentResolver.getType(uri)?.substringAfter('/')?.let { ".$it" } ?: ""
-                                val fn = if (n.contains('.')) n else "$n$ext"
-                                callback(b, fn)
-                            } catch (_: Exception) {}
-                        }
-                    }
+                    attachFileCallback = callback
                     attachFilePicker.launch(arrayOf("*/*"))
                 },
                 onTerminalScreenVisible = {
@@ -283,6 +261,9 @@ class MainActivity : FragmentActivity() {
     override fun onResume() {
         super.onResume()
         isAppInForeground = true
+        // Screen is on — release wake lock (CPU already awake)
+        KeepAliveService.onAppForeground()
+        sessionOrchestrator.setBackgroundMode(false)
         // Clear alerts for active tab when app comes to foreground
         tabManager.activeTabId.value?.let { KeepAliveService.clearAlert(it) }
     }
@@ -290,6 +271,9 @@ class MainActivity : FragmentActivity() {
     override fun onPause() {
         super.onPause()
         isAppInForeground = false
+        // Going to background — acquire wake lock to keep SSH alive
+        KeepAliveService.onAppBackground()
+        sessionOrchestrator.setBackgroundMode(true)
     }
 
     override fun onNewIntent(intent: Intent) {

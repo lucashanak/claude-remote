@@ -50,28 +50,37 @@ class SessionOrchestrator(
 
     // Periodic usage polling via SSH exec channel
     private var usagePollingJob: kotlinx.coroutines.Job? = null
+    @Volatile private var isInBackground = false
+
+    /** Call from onPause/onResume to pause heavy background work and save battery. */
+    fun setBackgroundMode(background: Boolean) {
+        isInBackground = background
+    }
 
     private fun startUsagePolling(sessionId: String) {
         usagePollingJob?.cancel()
         usagePollingJob = reconnectScope.launch {
             kotlinx.coroutines.delay(5000) // initial delay
             while (isActive) {
-                try {
-                    val conn = connections[sessionId] ?: break
-                    val sshSession = conn.getSession() ?: break
-                    val output = kotlinx.coroutines.withContext(Dispatchers.IO) {
-                        val ch = sshSession.openChannel("exec") as com.jcraft.jsch.ChannelExec
-                        ch.setCommand("which ccusage >/dev/null 2>&1 || npm install -g ccusage >/dev/null 2>&1; ccusage blocks --active --json --offline --no-color 2>/dev/null || echo '{}'")
-                        ch.inputStream = null
-                        val input = ch.inputStream
-                        ch.connect(5000)
-                        val result = input.bufferedReader().readText()
-                        ch.disconnect()
-                        result
-                    }
-                    parseUsageJson(output)
-                } catch (_: Exception) {}
-                kotlinx.coroutines.delay(30_000) // poll every 30s
+                // Skip poll when app is in background — user can't see usage bar anyway
+                if (!isInBackground) {
+                    try {
+                        val conn = connections[sessionId] ?: break
+                        val sshSession = conn.getSession() ?: break
+                        val output = kotlinx.coroutines.withContext(Dispatchers.IO) {
+                            val ch = sshSession.openChannel("exec") as com.jcraft.jsch.ChannelExec
+                            ch.setCommand("which ccusage >/dev/null 2>&1 || npm install -g ccusage >/dev/null 2>&1; ccusage blocks --active --json --offline --no-color 2>/dev/null || echo '{}'")
+                            ch.inputStream = null
+                            val input = ch.inputStream
+                            ch.connect(5000)
+                            val result = input.bufferedReader().readText()
+                            ch.disconnect()
+                            result
+                        }
+                        parseUsageJson(output)
+                    } catch (_: Exception) {}
+                }
+                kotlinx.coroutines.delay(120_000) // poll every 2 min (was 30s)
             }
         }
     }
@@ -170,9 +179,8 @@ class SessionOrchestrator(
         promptDetector.onUserInput(id) // Clear waiting state on tab focus
         val buffer = outputBuffers[id]?.toString() ?: ""
         FileLogger.log(TAG, "Switching to tab $id (buffer: ${buffer.length} chars)")
-        promptDetector.suppressDetection = true
+        promptDetector.suppressFor(3000)
         onTabSwitched?.invoke(id, buffer)
-        promptDetector.suppressDetection = false
     }
 
     private val reconnectScope = kotlinx.coroutines.CoroutineScope(
@@ -221,6 +229,7 @@ class SessionOrchestrator(
 
         // Tmux
         sendTmuxCommand(sshManager, session, isNewTmuxSession)
+        promptDetector.suppressFor(3000) // suppress during tmux screen redraw
     }
 
     private fun sendTmuxCommand(sshManager: SshManager, session: ClaudeSession, isNew: Boolean) {
@@ -275,6 +284,7 @@ class SessionOrchestrator(
                 sshManager.sendInput("\n")     // blank Enter to get clean prompt
                 kotlinx.coroutines.delay(300)
                 sendTmuxCommand(sshManager, session, false) // always attach existing
+                promptDetector.suppressFor(3000) // suppress during tmux screen redraw after reconnect
 
                 tabManager.updateTabStatus(session.id, SessionStatus.ACTIVE)
                 onSessionActive?.invoke(session)

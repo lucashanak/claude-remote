@@ -828,7 +828,7 @@ private fun PromptInputBar(
                                         uploading = true
                                         promptScope.launch {
                                             val path = onAttachFile.invoke()
-                                            if (path != null) attachedFilesRaw = (attachedFiles + path).joinToString("\n")
+                                            if (path != null) attachedFilesRaw = (attachedFiles + path.split('\n').filter { it.isNotEmpty() }).joinToString("\n")
                                             uploading = false
                                         }
                                     }

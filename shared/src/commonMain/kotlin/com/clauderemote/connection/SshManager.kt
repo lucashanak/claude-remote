@@ -62,7 +62,7 @@ class SshManager(
             sess.setPassword(server.password)
         }
         sess.setConfig("StrictHostKeyChecking", "no")
-        sess.setConfig("ServerAliveInterval", "15")
+        sess.setConfig("ServerAliveInterval", "30")
         sess.setConfig("ServerAliveCountMax", "3")
         sess.userInfo = TofuUserInfo(server.host, serverStorage)
         sess.timeout = connectTimeout
@@ -101,11 +101,20 @@ class SshManager(
         readJob = ioScope.launch {
             try {
                 val buf = ByteArray(8192)
+                // Stateful decoder: preserves incomplete UTF-8 sequences across chunk boundaries
+                val decoder = java.nio.charset.StandardCharsets.UTF_8.newDecoder()
+                    .onMalformedInput(java.nio.charset.CodingErrorAction.REPLACE)
+                    .onUnmappableCharacter(java.nio.charset.CodingErrorAction.REPLACE)
+                val charBuf = java.nio.CharBuffer.allocate(8192 + 4)
                 while (isActive && ch.isConnected) {
                     val n = inputStream.read(buf)
                     if (n < 0) break
                     if (n == 0) { delay(50); if (ch.isClosed) break; continue }
-                    onOutput(String(buf, 0, n))
+                    val byteBuf = java.nio.ByteBuffer.wrap(buf, 0, n)
+                    charBuf.clear()
+                    decoder.decode(byteBuf, charBuf, false)
+                    charBuf.flip()
+                    if (charBuf.hasRemaining()) onOutput(charBuf.toString())
                 }
             } catch (_: Exception) {
             } finally {

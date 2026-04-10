@@ -254,14 +254,17 @@ const A = window.Android || {
     getClipboard(){ return ''; }
 };
 
-// Poll clipboard for changes (to populate history when user copies from VS Code)
+// Clipboard history — populated via Android listener (no polling)
 let lastClip = '';
-setInterval(() => {
-    try {
-        const c = A.getClipboard();
-        if (c && c !== lastClip) { lastClip = c; addToClipHistory(c); }
-    } catch(_){}
-}, 2000);
+// Called by Android ClipboardManager.OnPrimaryClipChangedListener (zero battery cost)
+function onNativeClipboardChange(text) {
+    if (text && text !== lastClip) { lastClip = text; addToClipHistory(text); }
+}
+// Load current clipboard once on init
+try {
+    const c = A.getClipboard();
+    if (c) { lastClip = c; addToClipHistory(c); }
+} catch(_) {}
 
 // ======================== KEY HELPERS ========================
 function esc(s) { return s.replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }

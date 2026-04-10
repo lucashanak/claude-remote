@@ -59,9 +59,15 @@ fun UpdateBanner(
                                 style = MaterialTheme.typography.bodyMedium
                             )
                         } else if (info != null) {
-                            val dlSize = if (info.hasPatch) info.totalPatchSize else info.apkSize
+                            val onAndroid = try { Class.forName("android.os.Build"); true } catch (_: Exception) { false }
+                            val dlSize = when {
+                                onAndroid && info.hasPatch -> info.totalPatchSize
+                                onAndroid -> info.apkSize
+                                info.dmgSize > 0 -> info.dmgSize
+                                else -> info.apkSize
+                            }
                             val sizeStr = UpdateChecker.formatBytes(dlSize)
-                            val patchInfo = if (info.hasPatch) " (${info.patchChain.size}x patch)" else ""
+                            val patchInfo = if (onAndroid && info.hasPatch) " (${info.patchChain.size}x patch)" else ""
                             Text(
                                 "Update v${info.version} available ($sizeStr$patchInfo)",
                                 color = Color.White,

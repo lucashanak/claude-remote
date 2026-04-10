@@ -49,6 +49,12 @@ class KeepAliveService : Service() {
             instance?.dismissAlert(sessionId)
         }
 
+        /** Call from onResume — screen is on, CPU is awake, no wake lock needed */
+        fun onAppForeground() { instance?.setWakeLockEnabled(false) }
+
+        /** Call from onPause — going to background, need wake lock to receive SSH data */
+        fun onAppBackground() { instance?.setWakeLockEnabled(true) }
+
         val isRunning: Boolean get() = instance != null
     }
 
@@ -163,17 +169,23 @@ class KeepAliveService : Service() {
     @Suppress("DEPRECATION")
     private fun acquireWakeLock() {
         val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
-        wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "clauderemote:keepalive").apply {
-            acquire(4 * 60 * 60 * 1000L) // 4 hour safety timeout
+        if (wakeLock == null) {
+            wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "clauderemote:keepalive")
         }
+        wakeLock?.let { if (!it.isHeld) it.acquire(30 * 60 * 1000L) } // 30 min safety timeout
         FileLogger.log(TAG, "WakeLock acquired")
     }
 
     private fun releaseWakeLock() {
-        wakeLock?.let {
-            if (it.isHeld) it.release()
-        }
-        wakeLock = null
+        wakeLock?.let { if (it.isHeld) it.release() }
         FileLogger.log(TAG, "WakeLock released")
+    }
+
+    /** Switch wake lock on/off based on app visibility.
+     *  When app is in foreground the screen is already on — no wake lock needed.
+     *  When app goes to background we need it to keep receiving SSH data. */
+    fun setWakeLockEnabled(enabled: Boolean) {
+        if (enabled) acquireWakeLock() else releaseWakeLock()
+        FileLogger.log(TAG, "WakeLock enabled=$enabled")
     }
 }
