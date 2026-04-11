@@ -157,6 +157,7 @@ class MainActivity : FragmentActivity() {
         appSettings = AppSettings(prefs)
         tabManager = TabManager()
         sessionOrchestrator = SessionOrchestrator(serverStorage, tabManager)
+        com.clauderemote.connection.MoshManager.init(this)
         val sshKeyManager = com.clauderemote.connection.SshKeyManager(prefs)
 
         // Wire SSH output → terminal WebView

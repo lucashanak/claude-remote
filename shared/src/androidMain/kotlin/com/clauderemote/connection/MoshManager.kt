@@ -113,5 +113,14 @@ actual class MoshManager {
 
     companion object {
         var moshBinaryPath: String? = null
+
+        /** Initialize from Android Context — finds the bundled mosh-client binary */
+        fun init(context: android.content.Context) {
+            val nativeLibDir = context.applicationInfo.nativeLibraryDir
+            val binary = java.io.File(nativeLibDir, "libmosh.so")
+            if (binary.exists() && binary.canExecute()) {
+                moshBinaryPath = binary.absolutePath
+            }
+        }
     }
 }
