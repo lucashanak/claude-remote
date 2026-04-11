@@ -77,7 +77,7 @@ class CloudflareProxy(
         }
 
         val latch = java.util.concurrent.CountDownLatch(1)
-        @Volatile var connectError: String? = null
+        var connectError: String? = null // guarded by latch happens-before
 
         val ws = okClient.newWebSocket(requestBuilder.build(), object : WebSocketListener() {
             override fun onOpen(webSocket: WebSocket, response: Response) {
