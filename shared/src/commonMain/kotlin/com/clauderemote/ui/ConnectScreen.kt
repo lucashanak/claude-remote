@@ -229,8 +229,7 @@ fun ConnectScreen(
                         FilterChip(
                             selected = connectionType == ConnectionType.MOSH,
                             onClick = { connectionType = ConnectionType.MOSH },
-                            label = { Text("Mosh (not yet)") },
-                            enabled = false
+                            label = { Text("Mosh") }
                         )
                     }
                 }

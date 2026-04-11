@@ -23,6 +23,7 @@ class SessionOrchestrator(
     private val tabManager: TabManager
 ) {
     private val connections = mutableMapOf<String, SshManager>()
+    private val moshConnections = mutableMapOf<String, com.clauderemote.connection.MoshManager>()
 
     // Per-session terminal output buffer (ring buffer, capped at MAX_BUFFER)
     private val outputBuffers = mutableMapOf<String, StringBuilder>()
@@ -391,11 +392,56 @@ class SessionOrchestrator(
     }
 
     private suspend fun connectMosh(session: ClaudeSession, isNewTmuxSession: Boolean) {
-        FileLogger.log(TAG, "Mosh not yet implemented, falling back to SSH for ${session.server.name}")
-        val warning = "\r\n[Warning: Mosh not yet implemented, using SSH]\r\n"
-        appendToBuffer("", warning)
-        onTerminalOutput?.invoke("", warning)
-        connectSsh(session, isNewTmuxSession)
+        FileLogger.log(TAG, "Connecting via Mosh to ${session.server.name}")
+        val moshManager = com.clauderemote.connection.MoshManager()
+
+        // Build tmux command as mosh startup command
+        val tmuxCmd = if (isNewTmuxSession) {
+            ClaudeConfig.buildTmuxLaunchCommand(
+                tmuxSessionName = session.tmuxSessionName,
+                folder = session.folder,
+                mode = session.mode,
+                model = session.model
+            )
+        } else {
+            val escaped = session.tmuxSessionName.replace("'", "\\'")
+            "tmux set-option -g window-size latest 2>/dev/null; tmux attach-session -t '$escaped' 2>/dev/null || tmux new-session -A -s '$escaped' \\; set-option -g mouse on"
+        }
+
+        fun emit(text: String) {
+            appendToBuffer(session.id, text)
+            val isActive = tabManager.activeTabId.value == session.id
+            if (isActive) {
+                onTerminalOutput?.invoke(session.id, text)
+            }
+            promptDetector.feedRecentOutput(session.id, text)
+            val detection = promptDetector.onOutput(session.id, text)
+            if (detection != null) {
+                onClaudeNeedsInput?.invoke(session.id, detection.type.displayHint, isActive)
+            }
+        }
+
+        val success = moshManager.connect(
+            session.server,
+            startupCommand = tmuxCmd,
+            onOutput = { data -> emit(data) },
+            onDisconnect = {
+                tabManager.updateTabStatus(session.id, SessionStatus.DISCONNECTED)
+                onSessionDisconnect?.invoke(session.id)
+            }
+        )
+
+        if (!success) {
+            emit("\r\n\u001B[33mMosh connection failed. Falling back to SSH...\u001B[0m\r\n")
+            FileLogger.log(TAG, "Mosh failed, falling back to SSH")
+            connectSsh(session, isNewTmuxSession)
+            return
+        }
+
+        // Store mosh as connection (wrap in a pseudo SshManager interface won't work,
+        // so store separately and handle sendInput/sendBytes via mosh)
+        moshConnections[session.id] = moshManager
+        FileLogger.log(TAG, "Mosh connected for ${session.id}")
     }
 
     private fun appendToBuffer(sessionId: String, data: String) {
@@ -422,6 +468,13 @@ class SessionOrchestrator(
 
     fun sendInput(sessionId: String, data: String) {
         promptDetector.onUserInput(sessionId)
+        // Try mosh first, then SSH
+        val mosh = moshConnections[sessionId]
+        if (mosh != null && mosh.isConnected) {
+            updateActivity(sessionId, SessionActivity.WORKING)
+            mosh.sendInput(data)
+            return
+        }
         val conn = connections[sessionId]
         if (conn == null || !conn.isConnected) {
             queueInput(sessionId, data)
@@ -433,6 +486,12 @@ class SessionOrchestrator(
 
     fun sendBytes(sessionId: String, data: ByteArray) {
         promptDetector.onUserInput(sessionId)
+        val mosh = moshConnections[sessionId]
+        if (mosh != null && mosh.isConnected) {
+            updateActivity(sessionId, SessionActivity.WORKING)
+            mosh.sendBytes(data)
+            return
+        }
         val conn = connections[sessionId]
         if (conn == null || !conn.isConnected) { warnNoConnection(sessionId); return }
         updateActivity(sessionId, SessionActivity.WORKING)
@@ -541,6 +600,8 @@ class SessionOrchestrator(
         latencyPollingJobs.remove(sessionId)?.cancel()
         connections[sessionId]?.disconnect()
         connections.remove(sessionId)
+        moshConnections[sessionId]?.disconnect()
+        moshConnections.remove(sessionId)
         outputBuffers.remove(sessionId)
         promptDetector.removeSession(sessionId)
         pendingInputs.remove(sessionId)
