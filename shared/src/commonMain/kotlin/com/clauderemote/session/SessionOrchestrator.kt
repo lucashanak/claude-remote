@@ -392,6 +392,16 @@ class SessionOrchestrator(
     }
 
     private suspend fun connectMosh(session: ClaudeSession, isNewTmuxSession: Boolean) {
+        // Mosh requires direct UDP — can't work over Cloudflare tunnel
+        if (session.server.useCloudflareProxy) {
+            FileLogger.log(TAG, "Mosh not compatible with Cloudflare tunnel, using SSH")
+            val warning = "\r\n\u001B[33mMosh requires direct UDP — falling back to SSH (Cloudflare tunnel)\u001B[0m\r\n"
+            appendToBuffer(session.id, warning)
+            onTerminalOutput?.invoke(session.id, warning)
+            connectSsh(session, isNewTmuxSession)
+            return
+        }
+
         FileLogger.log(TAG, "Connecting via Mosh to ${session.server.name}")
         val moshManager = com.clauderemote.connection.MoshManager()
 

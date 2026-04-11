@@ -229,7 +229,8 @@ fun ConnectScreen(
                         FilterChip(
                             selected = connectionType == ConnectionType.MOSH,
                             onClick = { connectionType = ConnectionType.MOSH },
-                            label = { Text("Mosh") }
+                            label = { Text("Mosh") },
+                            enabled = !server.useCloudflareProxy
                         )
                     }
                 }
