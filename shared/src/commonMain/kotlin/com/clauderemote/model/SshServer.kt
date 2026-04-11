@@ -30,7 +30,9 @@ data class SshServer(
     val portForwards: List<PortForward> = emptyList(),
     val favorite: Boolean = false,
     val startupCommand: String = "",
-    val snippets: List<String> = emptyList()
+    val snippets: List<String> = emptyList(),
+    val useCloudflareProxy: Boolean = false,
+    val cloudflareToken: String = ""
 ) {
     val displayAddress: String get() = "$username@$host${if (port != 22) ":$port" else ""}"
 

@@ -100,20 +100,9 @@ fun App(
                     servers.map { server ->
                         async {
                             try {
-                                val jsch = com.jcraft.jsch.JSch()
-                                if (server.authMethod == AuthMethod.KEY && server.privateKey != null) {
-                                    jsch.addIdentity("key", server.privateKey.toByteArray(), null, null)
+                                com.clauderemote.connection.SshSessionHelper.withSession(server, 5000) { sess ->
+                                    TmuxManager.listSessions(sess).map { RemoteSession(server, it) }
                                 }
-                                val sess = jsch.getSession(server.username, server.host, server.port)
-                                if (server.authMethod == AuthMethod.PASSWORD && server.password != null) {
-                                    sess.setPassword(server.password)
-                                }
-                                sess.setConfig("StrictHostKeyChecking", "no")
-                                sess.timeout = 5000
-                                sess.connect(5000)
-                                val sessions = TmuxManager.listSessions(sess)
-                                sess.disconnect()
-                                sessions.map { RemoteSession(server, it) }
                             } catch (_: Exception) {
                                 emptyList()
                             }
@@ -314,20 +303,8 @@ fun App(
                             scope.launch {
                                 tmuxLoading = true
                                 try {
-                                    withContext(Dispatchers.IO) {
-                                        val jsch = com.jcraft.jsch.JSch()
-                                        if (server.authMethod == AuthMethod.KEY && server.privateKey != null) {
-                                            jsch.addIdentity("key", server.privateKey.toByteArray(), null, null)
-                                        }
-                                        val sess = jsch.getSession(server.username, server.host, server.port)
-                                        if (server.authMethod == AuthMethod.PASSWORD && server.password != null) {
-                                            sess.setPassword(server.password)
-                                        }
-                                        sess.setConfig("StrictHostKeyChecking", "no")
-                                        sess.timeout = 10000
-                                        sess.connect(10000)
-                                        tmuxSessions = TmuxManager.listSessions(sess)
-                                        sess.disconnect()
+                                    tmuxSessions = com.clauderemote.connection.SshSessionHelper.withSession(server) { sess ->
+                                        TmuxManager.listSessions(sess)
                                     }
                                 } catch (_: Exception) {
                                     tmuxSessions = emptyList()
@@ -378,19 +355,8 @@ fun App(
                             appSettings = appSettings,
                             onBack = { currentScreen = Screen.LAUNCHER },
                             onBrowseFolders = { path ->
-                                withContext(Dispatchers.IO) {
-                                    try {
-                                        val jsch = com.jcraft.jsch.JSch()
-                                        if (server.authMethod == AuthMethod.KEY && server.privateKey != null) {
-                                            jsch.addIdentity("key", server.privateKey.toByteArray(), null, null)
-                                        }
-                                        val sess = jsch.getSession(server.username, server.host, server.port)
-                                        if (server.authMethod == AuthMethod.PASSWORD && server.password != null) {
-                                            sess.setPassword(server.password)
-                                        }
-                                        sess.setConfig("StrictHostKeyChecking", "no")
-                                        sess.timeout = 10000
-                                        sess.connect(10000)
+                                try {
+                                    com.clauderemote.connection.SshSessionHelper.withSession(server) { sess ->
                                         val ch = sess.openChannel("exec") as com.jcraft.jsch.ChannelExec
                                         ch.setCommand("ls -1d ${path.trimEnd('/')}/*/ 2>/dev/null | head -50")
                                         ch.inputStream = null
@@ -398,31 +364,18 @@ fun App(
                                         ch.connect(5000)
                                         val output = input.bufferedReader().readText()
                                         ch.disconnect()
-                                        sess.disconnect()
                                         output.lines().filter { it.isNotBlank() }.map { it.trimEnd('/') }
-                                    } catch (_: Exception) {
-                                        emptyList()
                                     }
+                                } catch (_: Exception) {
+                                    emptyList()
                                 }
                             },
                             onKillTmux = { sessionName ->
                                 scope.launch {
                                     try {
-                                        withContext(Dispatchers.IO) {
-                                            val jsch = com.jcraft.jsch.JSch()
-                                            if (server.authMethod == AuthMethod.KEY && server.privateKey != null) {
-                                                jsch.addIdentity("key", server.privateKey.toByteArray(), null, null)
-                                            }
-                                            val sess = jsch.getSession(server.username, server.host, server.port)
-                                            if (server.authMethod == AuthMethod.PASSWORD && server.password != null) {
-                                                sess.setPassword(server.password)
-                                            }
-                                            sess.setConfig("StrictHostKeyChecking", "no")
-                                            sess.timeout = 10000
-                                            sess.connect(10000)
+                                        tmuxSessions = com.clauderemote.connection.SshSessionHelper.withSession(server) { sess ->
                                             TmuxManager.killSession(sess, sessionName)
-                                            tmuxSessions = TmuxManager.listSessions(sess)
-                                            sess.disconnect()
+                                            TmuxManager.listSessions(sess)
                                         }
                                     } catch (_: Exception) {}
                                 }

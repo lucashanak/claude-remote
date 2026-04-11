@@ -67,6 +67,12 @@ class SshManager(
         sess.userInfo = TofuUserInfo(server.host, serverStorage)
         sess.timeout = connectTimeout
 
+        // Cloudflare Tunnel: route SSH over WebSocket instead of direct TCP
+        if (server.useCloudflareProxy) {
+            FileLogger.log(TAG, "Using Cloudflare tunnel proxy for ${server.host}")
+            sess.setProxy(CloudflareProxy(server.host, server.cloudflareToken))
+        }
+
         sess.connect(connectTimeout)
         session = sess
         FileLogger.log(TAG, "SSH session connected")

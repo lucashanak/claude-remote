@@ -35,6 +35,8 @@ fun ServerEditDialog(
     var portForwards by remember { mutableStateOf(server?.portForwards ?: emptyList()) }
     var newPfLocal by remember { mutableStateOf("") }
     var newPfRemote by remember { mutableStateOf("") }
+    var useCloudflareProxy by remember { mutableStateOf(server?.useCloudflareProxy ?: false) }
+    var cloudflareToken by remember { mutableStateOf(server?.cloudflareToken ?: "") }
 
     val isNew = server == null
     val isValid = name.isNotBlank() && host.isNotBlank() && username.isNotBlank()
@@ -192,6 +194,31 @@ fun ServerEditDialog(
                     Text("Prefer Mosh connection")
                 }
 
+                // Cloudflare Tunnel
+                Row(verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
+                    Checkbox(
+                        checked = useCloudflareProxy,
+                        onCheckedChange = { useCloudflareProxy = it }
+                    )
+                    Text("Cloudflare Tunnel (SSH over WebSocket)")
+                }
+                if (useCloudflareProxy) {
+                    Text(
+                        "Host field above is used as the tunnel hostname (e.g. ssh.example.com). " +
+                        "Requires cloudflared daemon on the server with tcp:// service type.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    OutlinedTextField(
+                        value = cloudflareToken,
+                        onValueChange = { cloudflareToken = it },
+                        label = { Text("CF Access Token (optional)") },
+                        placeholder = { Text("JWT for Zero Trust") },
+                        modifier = Modifier.fillMaxWidth(),
+                        singleLine = true
+                    )
+                }
+
                 // Port forwarding
                 Text("Port Forwards", style = MaterialTheme.typography.bodyMedium,
                     modifier = Modifier.padding(top = 8.dp))
@@ -259,7 +286,9 @@ fun ServerEditDialog(
                         defaultClaudeModel = server?.defaultClaudeModel ?: com.clauderemote.model.ClaudeModel.DEFAULT,
                         portForwards = portForwards,
                         startupCommand = startupCommand.trim(),
-                        snippets = snippets
+                        snippets = snippets,
+                        useCloudflareProxy = useCloudflareProxy,
+                        cloudflareToken = cloudflareToken.trim()
                     )
                     onSave(saved)
                 },
