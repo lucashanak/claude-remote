@@ -705,10 +705,30 @@ class MainActivity : FragmentActivity() {
         }
     }
 
+    // Batch terminal writes — buffer incoming chunks and flush at most every 16ms
+    private val terminalWriteBuffer = StringBuilder()
+    private var terminalFlushPending = false
+
     private fun writeToTerminal(data: String) {
         val wv = terminalWebView ?: return
-        val safe = JSONObject.quote(data)
-        wv.post { wv.evaluateJavascript("writeOutput($safe)", null) }
+        synchronized(terminalWriteBuffer) {
+            terminalWriteBuffer.append(data)
+        }
+        if (!terminalFlushPending) {
+            terminalFlushPending = true
+            wv.postDelayed({
+                val batch: String
+                synchronized(terminalWriteBuffer) {
+                    batch = terminalWriteBuffer.toString()
+                    terminalWriteBuffer.clear()
+                }
+                terminalFlushPending = false
+                if (batch.isNotEmpty()) {
+                    val safe = JSONObject.quote(batch)
+                    wv.evaluateJavascript("writeOutput($safe)", null)
+                }
+            }, 16) // ~60fps
+        }
     }
 
     private fun clearTerminal() {
