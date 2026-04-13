@@ -252,13 +252,23 @@ class SessionOrchestrator(
      */
     fun switchTab(id: String) {
         tabManager.switchTab(id)
-        promptDetector.onUserInput(id) // Clear waiting state on tab focus
-        val fullBuffer = outputBuffers[id]?.toString() ?: ""
-        // Only replay last ~8KB for fast tab switch — full history is in tmux scrollback
-        val buffer = if (fullBuffer.length > 8192) fullBuffer.substring(fullBuffer.length - 8192) else fullBuffer
-        FileLogger.log(TAG, "Switching to tab $id (buffer: ${fullBuffer.length} chars, replaying: ${buffer.length})")
-        promptDetector.suppressFor(3000)
-        onTabSwitched?.invoke(id, buffer)
+        promptDetector.onUserInput(id)
+        FileLogger.log(TAG, "Switching to tab $id")
+        promptDetector.suppressFor(2000)
+        // Clear terminal, then force tmux to redraw by toggling PTY size
+        onTabSwitched?.invoke(id, "")
+        reconnectScope.launch {
+            kotlinx.coroutines.delay(50)
+            try {
+                val conn = connections[id]
+                if (conn != null) {
+                    // Shrink then restore — forces tmux to resend entire screen
+                    conn.resize(2, 2)
+                    kotlinx.coroutines.delay(30)
+                    conn.resize(conn.lastCols, conn.lastRows)
+                }
+            } catch (_: Exception) {}
+        }
     }
 
     private val reconnectScope = kotlinx.coroutines.CoroutineScope(
@@ -696,10 +706,18 @@ class SessionOrchestrator(
         }
     }
 
-    fun getBuffer(sessionId: String): String {
-        val full = outputBuffers[sessionId]?.toString() ?: ""
-        // Return last ~8KB for fast display
-        return if (full.length > 8192) full.substring(full.length - 8192) else full
+    fun getBuffer(sessionId: String): String = ""
+
+    /** Force tmux to redraw by toggling PTY size */
+    fun forceRedraw(sessionId: String) {
+        reconnectScope.launch {
+            try {
+                val conn = connections[sessionId] ?: return@launch
+                conn.resize(2, 2)
+                kotlinx.coroutines.delay(30)
+                conn.resize(conn.lastCols, conn.lastRows)
+            } catch (_: Exception) {}
+        }
     }
 
     private fun generateId(): String {

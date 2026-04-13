@@ -203,7 +203,11 @@ class SshManager(
         }
     }
 
+    var lastCols = 80; private set
+    var lastRows = 24; private set
+
     fun resize(cols: Int, rows: Int) {
+        lastCols = cols; lastRows = rows
         try { channel?.setPtySize(cols, rows, cols * 8, rows * 16) } catch (_: Exception) {}
     }
 
