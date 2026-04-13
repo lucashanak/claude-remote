@@ -101,8 +101,21 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          # Wait for Android workflow to create the release
-          sleep 60
+          # Get current latest before waiting
+          BEFORE=$(gh release list --limit 1 --json tagName -q '.[0].tagName' 2>/dev/null || echo "")
+          echo "Current latest: $BEFORE"
+
+          # Wait for Android workflow to create a NEW release (up to 5min)
+          for i in $(seq 1 15); do
+            sleep 20
+            TAG=$(gh release list --limit 1 --json tagName -q '.[0].tagName' 2>/dev/null || echo "")
+            if [ -n "$TAG" ] && [ "$TAG" != "$BEFORE" ]; then
+              echo "New release found: $TAG"
+              break
+            fi
+            echo "Waiting for new release... ($i/15, current: $TAG)"
+          done
+
           TAG=$(gh release list --limit 1 --json tagName -q '.[0].tagName' 2>/dev/null || echo "")
           if [ -z "$TAG" ]; then
             LATEST=$(gh release list --limit 1 --json tagName -q '.[0].tagName' 2>/dev/null || echo "v1.0.0")
