@@ -103,25 +103,51 @@ class SshManager(
         channel = ch
         FileLogger.log(TAG, "Shell channel opened")
 
-        // Read loop — calls onConnectionLost when stream ends
+        // Read loop — batches SSH data and delivers to onOutput at ~30fps
         readJob = ioScope.launch {
             try {
-                val buf = ByteArray(8192)
-                // Stateful decoder: preserves incomplete UTF-8 sequences across chunk boundaries
+                val buf = ByteArray(16384) // larger read buffer
                 val decoder = java.nio.charset.StandardCharsets.UTF_8.newDecoder()
                     .onMalformedInput(java.nio.charset.CodingErrorAction.REPLACE)
                     .onUnmappableCharacter(java.nio.charset.CodingErrorAction.REPLACE)
-                val charBuf = java.nio.CharBuffer.allocate(8192 + 4)
+                val charBuf = java.nio.CharBuffer.allocate(16384 + 4)
+                val batch = StringBuilder()
+                var lastFlush = System.currentTimeMillis()
+
                 while (isActive && ch.isConnected) {
-                    val n = inputStream.read(buf)
+                    val available = inputStream.available()
+                    val n = if (available > 0) {
+                        inputStream.read(buf, 0, minOf(buf.size, available))
+                    } else {
+                        // No data available — flush batch and wait
+                        if (batch.isNotEmpty()) {
+                            onOutput(batch.toString())
+                            batch.clear()
+                            lastFlush = System.currentTimeMillis()
+                        }
+                        inputStream.read(buf) // blocks until data
+                    }
                     if (n < 0) break
-                    if (n == 0) { delay(50); if (ch.isClosed) break; continue }
+                    if (n == 0) { delay(10); if (ch.isClosed) break; continue }
+
                     val byteBuf = java.nio.ByteBuffer.wrap(buf, 0, n)
                     charBuf.clear()
                     decoder.decode(byteBuf, charBuf, false)
                     charBuf.flip()
-                    if (charBuf.hasRemaining()) onOutput(charBuf.toString())
+                    if (charBuf.hasRemaining()) batch.append(charBuf)
+
+                    // Flush batch every 33ms (~30fps) or if batch is large
+                    val now = System.currentTimeMillis()
+                    if (now - lastFlush >= 33 || batch.length > 32768) {
+                        if (batch.isNotEmpty()) {
+                            onOutput(batch.toString())
+                            batch.clear()
+                        }
+                        lastFlush = now
+                    }
                 }
+                // Flush remaining
+                if (batch.isNotEmpty()) onOutput(batch.toString())
             } catch (_: Exception) {
             } finally {
                 if (!disconnected) {
