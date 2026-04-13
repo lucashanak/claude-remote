@@ -327,13 +327,13 @@ class SessionOrchestrator(
             }
         )
 
-        // Wait for shell prompt
-        kotlinx.coroutines.delay(800)
+        // Wait for shell prompt (detect $ or # or >, max 3s)
+        waitForShellPrompt(session.id, 3000)
 
         // Startup command
         if (session.server.startupCommand.isNotBlank()) {
             sshManager.sendInput(session.server.startupCommand + "\n")
-            kotlinx.coroutines.delay(500)
+            waitForShellPrompt(session.id, 3000)
         }
 
         // Tmux
@@ -385,14 +385,11 @@ class SessionOrchestrator(
                     }
                 )
 
-                // Wait for shell prompt to be ready
-                kotlinx.coroutines.delay(800)
-                // Clear any garbage in the shell input (DA responses etc.)
-                sshManager.sendInput("\u0003") // Ctrl-C
-                kotlinx.coroutines.delay(200)
-                sshManager.sendInput("\n")     // blank Enter to get clean prompt
-                kotlinx.coroutines.delay(300)
-                sendTmuxCommand(sshManager, session, false) // always attach existing
+                // Wait for shell prompt, clear garbage, then attach tmux
+                waitForShellPrompt(session.id, 3000)
+                sshManager.sendInput("\u0003\n") // Ctrl-C + Enter to clear
+                kotlinx.coroutines.delay(100)
+                sendTmuxCommand(sshManager, session, false)
                 promptDetector.suppressFor(3000) // suppress during tmux screen redraw after reconnect
 
                 tabManager.updateTabStatus(session.id, SessionStatus.ACTIVE)
@@ -472,6 +469,23 @@ class SessionOrchestrator(
         // so store separately and handle sendInput/sendBytes via mosh)
         moshConnections[session.id] = moshManager
         FileLogger.log(TAG, "Mosh connected for ${session.id}")
+    }
+
+    /**
+     * Wait for shell prompt by watching output buffer for prompt chars ($ # > %).
+     * Returns as soon as prompt detected or after maxWait ms.
+     */
+    private suspend fun waitForShellPrompt(sessionId: String, maxWait: Long) {
+        val start = System.currentTimeMillis()
+        val promptChars = setOf('$', '#', '>', '%')
+        while (System.currentTimeMillis() - start < maxWait) {
+            val buf = outputBuffers[sessionId]?.toString() ?: ""
+            if (buf.isNotEmpty()) {
+                val lastLine = buf.trimEnd().takeLast(80)
+                if (lastLine.any { it in promptChars }) return
+            }
+            kotlinx.coroutines.delay(50)
+        }
     }
 
     private fun appendToBuffer(sessionId: String, data: String) {
