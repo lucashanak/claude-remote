@@ -253,22 +253,11 @@ class SessionOrchestrator(
     fun switchTab(id: String) {
         tabManager.switchTab(id)
         promptDetector.onUserInput(id)
-        FileLogger.log(TAG, "Switching to tab $id")
+        // Replay last 2KB of buffer — just enough for current screen
+        val full = outputBuffers[id]?.toString() ?: ""
+        val tail = if (full.length > 2048) full.substring(full.length - 2048) else full
         promptDetector.suppressFor(2000)
-        // Clear terminal, then force tmux to redraw by toggling PTY size
-        onTabSwitched?.invoke(id, "")
-        reconnectScope.launch {
-            kotlinx.coroutines.delay(50)
-            try {
-                val conn = connections[id]
-                if (conn != null) {
-                    // Shrink then restore — forces tmux to resend entire screen
-                    conn.resize(2, 2)
-                    kotlinx.coroutines.delay(30)
-                    conn.resize(conn.lastCols, conn.lastRows)
-                }
-            } catch (_: Exception) {}
-        }
+        onTabSwitched?.invoke(id, tail)
     }
 
     private val reconnectScope = kotlinx.coroutines.CoroutineScope(
@@ -706,18 +695,9 @@ class SessionOrchestrator(
         }
     }
 
-    fun getBuffer(sessionId: String): String = ""
-
-    /** Force tmux to redraw by toggling PTY size */
-    fun forceRedraw(sessionId: String) {
-        reconnectScope.launch {
-            try {
-                val conn = connections[sessionId] ?: return@launch
-                conn.resize(2, 2)
-                kotlinx.coroutines.delay(30)
-                conn.resize(conn.lastCols, conn.lastRows)
-            } catch (_: Exception) {}
-        }
+    fun getBuffer(sessionId: String): String {
+        val full = outputBuffers[sessionId]?.toString() ?: ""
+        return if (full.length > 2048) full.substring(full.length - 2048) else full
     }
 
     private fun generateId(): String {
