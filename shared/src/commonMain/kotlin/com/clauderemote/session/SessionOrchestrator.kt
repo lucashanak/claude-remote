@@ -267,12 +267,30 @@ class SessionOrchestrator(
         val sshManager = SshManager(serverStorage)
         connections[session.id] = sshManager
 
+        // Track last output time for burst detection
+        var lastOutputTime = 0L
+        var burstMode = true // Start in burst mode (tmux attach sends lots of data)
+
         fun emit(text: String) {
             appendToBuffer(session.id, text)
             val isActive = tabManager.activeTabId.value == session.id
             if (isActive) {
                 onTerminalOutput?.invoke(session.id, text)
             }
+
+            // Skip expensive processing during data bursts (tmux attach/scrollback)
+            val now = System.currentTimeMillis()
+            if (now - lastOutputTime < 50) {
+                burstMode = true
+                lastOutputTime = now
+                return // Skip prompt detection, activity tracking during burst
+            }
+            if (burstMode && now - lastOutputTime >= 200) {
+                burstMode = false // Burst ended, resume processing
+            }
+            lastOutputTime = now
+            if (burstMode) return
+
             // Detect prompts for all sessions (active and background)
             val detection = promptDetector.onOutput(session.id, text)
             if (detection != null) {
