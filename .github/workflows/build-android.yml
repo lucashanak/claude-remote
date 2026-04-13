@@ -184,9 +184,7 @@ jobs:
           if gh release view "$TAG" &>/dev/null; then
             echo "Release $TAG exists, uploading APK..."
             gh release upload "$TAG" $ASSETS --clobber
-            NOTES="$(gh release view "$TAG" --json body -q .body)"
-            gh release edit "$TAG" --notes "${NOTES}
-          sha256:${{ steps.hash.outputs.sha256 }}"
+            gh release edit "$TAG" --notes "sha256:${{ steps.hash.outputs.sha256 }}"
           else
             echo "Creating release $TAG..."
             gh release create "$TAG" $ASSETS \

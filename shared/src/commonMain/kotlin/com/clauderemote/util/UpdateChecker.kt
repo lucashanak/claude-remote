@@ -75,7 +75,8 @@ object UpdateChecker {
 
             // Extract SHA-256 from release body
             val body = latest.optString("body", "")
-            val sha256 = Regex("sha256:([a-f0-9]{64})").find(body)?.groupValues?.get(1)
+            // Use last SHA — CI appends new hash when overwriting APK
+            val sha256 = Regex("sha256:([a-f0-9]{64})").findAll(body).lastOrNull()?.groupValues?.get(1)
 
             // Build patch chain across releases
             val patchMap = mutableMapOf<String, PatchStep>()
