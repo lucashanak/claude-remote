@@ -328,7 +328,16 @@ const ro = new ResizeObserver(() => { fitAddon.fit(); if (A) A.onTerminalResize(
 ro.observe(termEl);
 
 // ======================== API ========================
-function writeOutput(text) { term.write(text); }
+let _writeBuf = '', _writeRaf = 0;
+function writeOutput(text) {
+    _writeBuf += text;
+    if (!_writeRaf) {
+        _writeRaf = requestAnimationFrame(() => {
+            _writeRaf = 0;
+            if (_writeBuf) { term.write(_writeBuf); _writeBuf = ''; }
+        });
+    }
+}
 function clearTerminal() { term.reset(); }
 function setFontSize(size) { term.options.fontSize = size; fitAddon.fit(); }
 function setScrollback(lines) { term.options.scrollback = lines; }
