@@ -253,8 +253,10 @@ class SessionOrchestrator(
     fun switchTab(id: String) {
         tabManager.switchTab(id)
         promptDetector.onUserInput(id) // Clear waiting state on tab focus
-        val buffer = outputBuffers[id]?.toString() ?: ""
-        FileLogger.log(TAG, "Switching to tab $id (buffer: ${buffer.length} chars)")
+        val fullBuffer = outputBuffers[id]?.toString() ?: ""
+        // Only replay last ~8KB for fast tab switch — full history is in tmux scrollback
+        val buffer = if (fullBuffer.length > 8192) fullBuffer.substring(fullBuffer.length - 8192) else fullBuffer
+        FileLogger.log(TAG, "Switching to tab $id (buffer: ${fullBuffer.length} chars, replaying: ${buffer.length})")
         promptDetector.suppressFor(3000)
         onTabSwitched?.invoke(id, buffer)
     }
@@ -680,7 +682,11 @@ class SessionOrchestrator(
         }
     }
 
-    fun getBuffer(sessionId: String): String = outputBuffers[sessionId]?.toString() ?: ""
+    fun getBuffer(sessionId: String): String {
+        val full = outputBuffers[sessionId]?.toString() ?: ""
+        // Return last ~8KB for fast display
+        return if (full.length > 8192) full.substring(full.length - 8192) else full
+    }
 
     private fun generateId(): String {
         val bytes = Random.nextBytes(16)
@@ -689,6 +695,6 @@ class SessionOrchestrator(
 
     companion object {
         private const val TAG = "SessionOrchestrator"
-        private const val MAX_BUFFER = 256 * 1024 // 256KB per session
+        private const val MAX_BUFFER = 64 * 1024 // 64KB per session
     }
 }
