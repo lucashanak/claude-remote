@@ -404,11 +404,11 @@ class MainActivity : FragmentActivity() {
         var twoFingerActive = false
         var twoFingerStartY = 0f
         var twoFingerStartDist = 0f
-        var startFontSize = 14
+        var startFontSize = appSettings.terminalFontSize
         var mode: String? = null
         var scrollAccum2f = 0f
 
-        var oneFingerFontSize = 14
+        var oneFingerFontSize = appSettings.terminalFontSize
         var oneFingerStartX = 0f
         var oneFingerStartY = 0f
         var oneFingerLastY = 0f
@@ -432,9 +432,7 @@ class MainActivity : FragmentActivity() {
                     oneFingerScrolling = false
                     longPressHandled = false
                     scrollAccum1f = 0f
-                    webView.evaluateJavascript(
-                        "typeof term!=='undefined'?term.options.fontSize:14"
-                    ) { r -> oneFingerFontSize = r?.toIntOrNull() ?: 14 }
+                    oneFingerFontSize = appSettings.terminalFontSize
 
                     longPressRunnable?.let { handler.removeCallbacks(it) }
                     val cssX = event.x / density
@@ -459,9 +457,7 @@ class MainActivity : FragmentActivity() {
                         twoFingerStartY = (event.getY(0) + event.getY(1)) / 2f
                         mode = null
                         scrollAccum2f = 0f
-                        webView.evaluateJavascript(
-                            "typeof term!=='undefined'?term.options.fontSize:14"
-                        ) { r -> startFontSize = r?.toIntOrNull() ?: 14 }
+                        startFontSize = appSettings.terminalFontSize
                     }
                     false
                 }

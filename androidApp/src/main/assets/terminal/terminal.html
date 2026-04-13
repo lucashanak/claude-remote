@@ -139,11 +139,9 @@ function scrollTerminal(lines) {
     const isAlt = term.buffer.active.type === 'alternate';
     const mouseMode = (term.modes && term.modes.mouseTrackingMode) || 'none';
     if (isAlt && mouseMode !== 'none' && A) {
-        // Send scroll events immediately — one call per scroll gesture
-        const dir = lines < 0 ? 64 : 65;
-        const count = Math.min(Math.abs(lines), 5);
-        const seq = '\x1b[<' + dir + ';1;1M';
-        A.onTerminalInput(seq.repeat(count));
+        const btn = lines < 0 ? 64 : 65, count = Math.min(Math.abs(lines), 15);
+        const seq = '\x1b[<' + btn + ';1;1M';
+        for (let i = 0; i < count; i++) A.onTerminalInput(seq);
         return;
     } else { term.scrollLines(lines); }
 }
