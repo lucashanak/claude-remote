@@ -134,26 +134,16 @@ function posToCell(px, py) {
 }
 
 // ======================== SMART SCROLL ========================
-let _scrollTimer = 0, _scrollAccum = 0;
 function scrollTerminal(lines) {
     if (lines === 0) return;
     const isAlt = term.buffer.active.type === 'alternate';
     const mouseMode = (term.modes && term.modes.mouseTrackingMode) || 'none';
     if (isAlt && mouseMode !== 'none' && A) {
-        // Accumulate scroll lines and send in batches every 100ms
-        _scrollAccum += lines;
-        if (!_scrollTimer) {
-            _scrollTimer = setTimeout(() => {
-                _scrollTimer = 0;
-                if (_scrollAccum === 0) return;
-                const dir = _scrollAccum < 0 ? 64 : 65;
-                const count = Math.min(Math.abs(_scrollAccum), 30);
-                _scrollAccum = 0;
-                // Send all scroll events as one string
-                const seq = '\x1b[<' + dir + ';1;1M';
-                A.onTerminalInput(seq.repeat(count));
-            }, 100);
-        }
+        // Send scroll events immediately — one call per scroll gesture
+        const dir = lines < 0 ? 64 : 65;
+        const count = Math.min(Math.abs(lines), 5);
+        const seq = '\x1b[<' + dir + ';1;1M';
+        A.onTerminalInput(seq.repeat(count));
         return;
     } else { term.scrollLines(lines); }
 }

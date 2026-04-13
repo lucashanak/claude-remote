@@ -103,51 +103,24 @@ class SshManager(
         channel = ch
         FileLogger.log(TAG, "Shell channel opened")
 
-        // Read loop — batches SSH data and delivers to onOutput at ~30fps
+        // Read loop — delivers SSH data immediately to onOutput
         readJob = ioScope.launch {
             try {
-                val buf = ByteArray(16384) // larger read buffer
+                val buf = ByteArray(16384)
                 val decoder = java.nio.charset.StandardCharsets.UTF_8.newDecoder()
                     .onMalformedInput(java.nio.charset.CodingErrorAction.REPLACE)
                     .onUnmappableCharacter(java.nio.charset.CodingErrorAction.REPLACE)
                 val charBuf = java.nio.CharBuffer.allocate(16384 + 4)
-                val batch = StringBuilder()
-                var lastFlush = System.currentTimeMillis()
-
                 while (isActive && ch.isConnected) {
-                    val available = inputStream.available()
-                    val n = if (available > 0) {
-                        inputStream.read(buf, 0, minOf(buf.size, available))
-                    } else {
-                        // No data available — flush batch and wait
-                        if (batch.isNotEmpty()) {
-                            onOutput(batch.toString())
-                            batch.clear()
-                            lastFlush = System.currentTimeMillis()
-                        }
-                        inputStream.read(buf) // blocks until data
-                    }
+                    val n = inputStream.read(buf)
                     if (n < 0) break
                     if (n == 0) { delay(10); if (ch.isClosed) break; continue }
-
                     val byteBuf = java.nio.ByteBuffer.wrap(buf, 0, n)
                     charBuf.clear()
                     decoder.decode(byteBuf, charBuf, false)
                     charBuf.flip()
-                    if (charBuf.hasRemaining()) batch.append(charBuf)
-
-                    // Flush batch every 33ms (~30fps) or if batch is large
-                    val now = System.currentTimeMillis()
-                    if (now - lastFlush >= 33 || batch.length > 32768) {
-                        if (batch.isNotEmpty()) {
-                            onOutput(batch.toString())
-                            batch.clear()
-                        }
-                        lastFlush = now
-                    }
+                    if (charBuf.hasRemaining()) onOutput(charBuf.toString())
                 }
-                // Flush remaining
-                if (batch.isNotEmpty()) onOutput(batch.toString())
             } catch (_: Exception) {
             } finally {
                 if (!disconnected) {
