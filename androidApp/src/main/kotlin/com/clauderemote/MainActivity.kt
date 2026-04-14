@@ -1,37 +1,29 @@
 package com.clauderemote
 
 import android.Manifest
-import android.annotation.SuppressLint
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
-import android.view.MotionEvent
-import android.webkit.JavascriptInterface
-import android.webkit.WebSettings
-import android.webkit.WebView
-import android.webkit.WebViewClient
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import androidx.fragment.app.FragmentActivity
-import androidx.compose.runtime.*
-import androidx.compose.ui.Modifier
-import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.FileProvider
 import com.clauderemote.session.SessionOrchestrator
 import com.clauderemote.session.TabManager
 import com.clauderemote.storage.AppSettings
 import com.clauderemote.storage.PlatformPreferences
 import com.clauderemote.storage.ServerStorage
+import com.clauderemote.terminal.SshTerminal
+import com.clauderemote.terminal.SshTerminalHandle
 import com.clauderemote.ui.App
 import com.clauderemote.util.FileLogger
 import com.clauderemote.util.UpdateInfo
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.GlobalScope
 import kotlinx.coroutines.launch
-import org.json.JSONObject
 import java.io.File
 
 class MainActivity : FragmentActivity() {
@@ -40,8 +32,7 @@ class MainActivity : FragmentActivity() {
     private lateinit var appSettings: AppSettings
     private lateinit var tabManager: TabManager
     private lateinit var sessionOrchestrator: SessionOrchestrator
-    private var terminalWebView: WebView? = null
-    @Volatile var handleDragActive = false // set by JS when dragging selection handles
+    @Volatile private var terminalHandle: SshTerminalHandle? = null
     private var keyFileCallback: ((String) -> Unit)? = null
     private var attachFileCallback: ((List<Pair<ByteArray, String>>) -> Unit)? = null
 
@@ -57,7 +48,6 @@ class MainActivity : FragmentActivity() {
             }
         }
         keyFileCallback = null
-
     }
 
     private val importFilePicker = registerForActivityResult(
@@ -115,8 +105,6 @@ class MainActivity : FragmentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         enableEdgeToEdge()
         super.onCreate(savedInstanceState)
-
-        // Always init app first, then check biometric
         initApp()
 
         val prefs = getSharedPreferences("claude_remote", MODE_PRIVATE)
@@ -124,9 +112,7 @@ class MainActivity : FragmentActivity() {
             val executor = androidx.core.content.ContextCompat.getMainExecutor(this)
             val biometricPrompt = androidx.biometric.BiometricPrompt(this, executor,
                 object : androidx.biometric.BiometricPrompt.AuthenticationCallback() {
-                    override fun onAuthenticationSucceeded(result: androidx.biometric.BiometricPrompt.AuthenticationResult) {
-                        // Already initialized, nothing to do
-                    }
+                    override fun onAuthenticationSucceeded(result: androidx.biometric.BiometricPrompt.AuthenticationResult) {}
                     override fun onAuthenticationError(errorCode: Int, errString: CharSequence) {
                         if (errorCode == androidx.biometric.BiometricPrompt.ERROR_USER_CANCELED ||
                             errorCode == androidx.biometric.BiometricPrompt.ERROR_NEGATIVE_BUTTON) {
@@ -149,7 +135,6 @@ class MainActivity : FragmentActivity() {
     }
 
     private fun initApp() {
-
         requestNotificationPermission()
 
         val prefs = PlatformPreferences(this)
@@ -160,50 +145,46 @@ class MainActivity : FragmentActivity() {
         com.clauderemote.connection.MoshManager.init(this)
         val sshKeyManager = com.clauderemote.connection.SshKeyManager(prefs)
 
-        // Wire SSH output → terminal WebView
-        sessionOrchestrator.onTerminalOutput = { sessionId, data ->
-            writeToTerminal(data)
+        // Wire SSH output → native TerminalView.
+        // String is converted to UTF-8 bytes at this boundary; SshManager's
+        // stateful UTF-8 decoder handles partial chars, so valid UTF-8 round-trips
+        // byte-accurately. Legacy X10/X11 mouse modes with coordinates > 0x7F are
+        // the one known edge case where the REPLACE decoder corrupts bytes.
+        sessionOrchestrator.onTerminalOutput = { _, data ->
+            terminalHandle?.feedSshBytes(data.toByteArray(Charsets.UTF_8))
         }
 
         sessionOrchestrator.onTabSwitched = { sessionId, bufferedOutput ->
             FileLogger.log("MainActivity", "Tab switched to $sessionId, buffer: ${bufferedOutput.length} chars")
-            replayBuffer(bufferedOutput)
+            terminalHandle?.replay(bufferedOutput.toByteArray(Charsets.UTF_8))
         }
 
         sessionOrchestrator.onSessionDisconnect = { sessionId ->
             FileLogger.log("MainActivity", "Session disconnected: $sessionId")
-            // Stop keep-alive when no active sessions remain
             if (tabManager.tabs.value.none { it.status == com.clauderemote.model.SessionStatus.ACTIVE }) {
                 KeepAliveService.stop(this)
             }
         }
 
-        // Start/update keep-alive when sessions change
         sessionOrchestrator.onSessionActive = { session ->
             if (appSettings.keepAliveEnabled) {
                 KeepAliveService.start(this, "${session.server.name}: ${session.folder}")
             }
         }
 
-        // Notification when Claude needs input
         sessionOrchestrator.onClaudeNeedsInput = { sessionId, hint, isActiveTab ->
             val tab = tabManager.getTab(sessionId)
             val title = tab?.tabTitle ?: "Session"
             val fg = isAppInForeground
             FileLogger.log("Notify", "Claude needs input: '$hint' fg=$fg activeTab=$isActiveTab keepAlive=${KeepAliveService.isRunning} notif=${appSettings.notificationsEnabled}")
             KeepAliveService.updateDescription(title)
-
-            // Send alert notification when app is backgrounded or tab is inactive
             if ((!fg || !isActiveTab) && appSettings.notificationsEnabled) {
                 FileLogger.log("Notify", "Sending alert for '$title'")
                 KeepAliveService.sendAlert(sessionId, title, hint)
             }
         }
 
-        // Handle notification tap intent
         handleSessionIntent(intent)
-
-        // Network change detection — reconnect disconnected sessions
         registerNetworkCallback()
 
         val appVersion = try {
@@ -239,23 +220,48 @@ class MainActivity : FragmentActivity() {
                     attachFilePicker.launch(arrayOf("*/*"))
                 },
                 onTerminalScreenVisible = {
-                    // When terminal screen becomes visible, replay active tab buffer
                     val activeId = tabManager.activeTabId.value ?: return@App
                     val buffer = sessionOrchestrator.getBuffer(activeId)
                     if (buffer.isNotEmpty()) {
-                        replayBuffer(buffer)
-                    } else {
-                        fitTerminal()
+                        terminalHandle?.replay(buffer.toByteArray(Charsets.UTF_8))
                     }
                 },
                 onApplyFontSize = { size ->
-                    terminalWebView?.post {
-                        terminalWebView?.evaluateJavascript("setFontSize($size)", null)
-                    }
+                    terminalHandle?.applyFontSize(size)
                 },
                 exitApp = { finishAffinity() },
                 terminalContent = { modifier ->
-                    TerminalWebView(modifier = modifier)
+                    SshTerminal(
+                        fontSizeDp = appSettings.terminalFontSize,
+                        colorScheme = appSettings.terminalColorScheme,
+                        scrollbackRows = appSettings.terminalScrollback.coerceIn(100, 50_000),
+                        onUserInput = { bytes ->
+                            tabManager.activeTabId.value?.let { id ->
+                                sessionOrchestrator.sendBytes(id, bytes)
+                                KeepAliveService.clearAlert(id)
+                            }
+                        },
+                        onResize = { cols, rows ->
+                            tabManager.activeTabId.value?.let { id ->
+                                sessionOrchestrator.resize(id, cols, rows)
+                            }
+                        },
+                        onSingleTap = {
+                            val imm = getSystemService(INPUT_METHOD_SERVICE) as android.view.inputmethod.InputMethodManager
+                            val handle = terminalHandle ?: return@SshTerminal
+                            imm.showSoftInput(handle.view, android.view.inputmethod.InputMethodManager.SHOW_IMPLICIT)
+                        },
+                        onReady = { handle ->
+                            terminalHandle = handle
+                            FileLogger.log("MainActivity", "SshTerminal ready")
+                            // Replay buffer for active tab if any
+                            tabManager.activeTabId.value?.let { id ->
+                                val buf = sessionOrchestrator.getBuffer(id)
+                                if (buf.isNotEmpty()) handle.replay(buf.toByteArray(Charsets.UTF_8))
+                            }
+                        },
+                        modifier = modifier,
+                    )
                 }
             )
         }
@@ -264,17 +270,14 @@ class MainActivity : FragmentActivity() {
     override fun onResume() {
         super.onResume()
         isAppInForeground = true
-        // Screen is on — release wake lock (CPU already awake)
         KeepAliveService.onAppForeground()
         sessionOrchestrator.setBackgroundMode(false)
-        // Clear alerts for active tab when app comes to foreground
         tabManager.activeTabId.value?.let { KeepAliveService.clearAlert(it) }
     }
 
     override fun onPause() {
         super.onPause()
         isAppInForeground = false
-        // Going to background — acquire wake lock to keep SSH alive
         KeepAliveService.onAppBackground()
         sessionOrchestrator.setBackgroundMode(true)
     }
@@ -299,7 +302,6 @@ class MainActivity : FragmentActivity() {
                 .build()
             cm.registerNetworkCallback(request, object : android.net.ConnectivityManager.NetworkCallback() {
                 override fun onAvailable(network: android.net.Network) {
-                    // Network came back — try reconnecting disconnected sessions
                     FileLogger.log("Network", "Network available, checking for disconnected sessions")
                     val disconnected = tabManager.tabs.value.filter {
                         it.status == com.clauderemote.model.SessionStatus.DISCONNECTED
@@ -318,398 +320,6 @@ class MainActivity : FragmentActivity() {
         } catch (e: Exception) {
             FileLogger.error("Network", "Failed to register network callback", e)
         }
-    }
-
-    private fun replayBuffer(bufferedOutput: String) {
-        // Delay to ensure WebView is laid out and visible
-        terminalWebView?.postDelayed({
-            clearTerminal()
-            if (bufferedOutput.isNotEmpty()) {
-                writeToTerminal(bufferedOutput)
-            }
-            fitTerminal()
-        }, 150)
-    }
-
-    private fun fitTerminal() {
-        val wv = terminalWebView ?: return
-        // Fit immediately and again after layout settles
-        wv.post { wv.evaluateJavascript("fitAddon.fit();if(A)A.onTerminalResize(term.cols,term.rows)", null) }
-        wv.postDelayed({
-            wv.evaluateJavascript("fitAddon.fit();if(A)A.onTerminalResize(term.cols,term.rows)", null)
-        }, 500)
-    }
-
-    @SuppressLint("SetJavaScriptEnabled", "ClickableViewAccessibility")
-    @Composable
-    private fun TerminalWebView(modifier: Modifier) {
-        AndroidView(
-            factory = { context ->
-                WebView(context).apply {
-                    layoutParams = android.view.ViewGroup.LayoutParams(
-                        android.view.ViewGroup.LayoutParams.MATCH_PARENT,
-                        android.view.ViewGroup.LayoutParams.MATCH_PARENT
-                    )
-
-                    settings.javaScriptEnabled = true
-                    settings.domStorageEnabled = true
-                    settings.allowFileAccess = true
-                    settings.setSupportZoom(false)
-                    settings.cacheMode = WebSettings.LOAD_DEFAULT
-                    setBackgroundColor(0xFF1E1E1E.toInt())
-
-                    addJavascriptInterface(TerminalBridge(), "Android")
-                    webViewClient = object : WebViewClient() {
-                        override fun onPageFinished(view: WebView?, url: String?) {
-                            FileLogger.log("MainActivity", "WebView loaded, size: ${view?.width}x${view?.height}px")
-                            // Apply saved settings
-                            val savedSize = appSettings.terminalFontSize
-                            if (savedSize != 14) {
-                                view?.evaluateJavascript("setFontSize($savedSize)", null)
-                            }
-                            val scheme = appSettings.terminalColorScheme
-                            if (scheme != "default") {
-                                view?.evaluateJavascript("applyColorScheme('$scheme')", null)
-                            }
-                        }
-                    }
-
-                    setOnLongClickListener { true }
-                    isLongClickable = false
-                    isHapticFeedbackEnabled = false
-
-                    setupTouchHandlers(this)
-                    loadUrl("file:///android_asset/terminal/terminal.html")
-                    terminalWebView = this
-                    FileLogger.log("MainActivity", "Terminal WebView created")
-
-                    // Re-fit terminal whenever Android changes the WebView's layout
-                    // (keyboard open/close, orientation change, Compose recomposition)
-                    var lastWidth = 0; var lastHeight = 0
-                    viewTreeObserver.addOnGlobalLayoutListener {
-                        val w = width; val h = height
-                        if (w != lastWidth || h != lastHeight) {
-                            lastWidth = w; lastHeight = h
-                            if (w > 0 && h > 0) fitTerminal()
-                        }
-                    }
-                }
-            },
-            modifier = modifier
-        )
-    }
-
-    @SuppressLint("ClickableViewAccessibility")
-    private fun setupTouchHandlers(webView: WebView) {
-        var twoFingerActive = false
-        var twoFingerStartY = 0f
-        var twoFingerStartDist = 0f
-        var startFontSize = appSettings.terminalFontSize
-        var mode: String? = null
-        var scrollAccum2f = 0f
-
-        var oneFingerFontSize = appSettings.terminalFontSize
-        var oneFingerStartX = 0f
-        var oneFingerStartY = 0f
-        var oneFingerLastY = 0f
-        var oneFingerScrolling = false
-        var longPressHandled = false
-        var scrollAccum1f = 0f
-        var longPressRunnable: Runnable? = null
-        val handler = android.os.Handler(android.os.Looper.getMainLooper())
-        val deadZoneDp = 5f
-        var lastTapTime = 0L
-
-        webView.setOnTouchListener { v, event ->
-            val density = v.resources.displayMetrics.density
-            val deadZone = deadZoneDp * density
-
-            when (event.actionMasked) {
-                MotionEvent.ACTION_DOWN -> {
-                    oneFingerStartX = event.x
-                    oneFingerStartY = event.y
-                    oneFingerLastY = event.y
-                    oneFingerScrolling = false
-                    longPressHandled = false
-                    scrollAccum1f = 0f
-                    oneFingerFontSize = appSettings.terminalFontSize
-
-                    longPressRunnable?.let { handler.removeCallbacks(it) }
-                    val cssX = event.x / density
-                    val cssY = event.y / density
-                    longPressRunnable = Runnable {
-                        if (!oneFingerScrolling && !twoFingerActive) {
-                            longPressHandled = true
-                            webView.evaluateJavascript("selectWordAt($cssX,$cssY);if(A)A.haptic()", null)
-                        }
-                    }
-                    handler.postDelayed(longPressRunnable!!, 500)
-                    false
-                }
-                MotionEvent.ACTION_POINTER_DOWN -> {
-                    longPressRunnable?.let { handler.removeCallbacks(it) }
-                    oneFingerScrolling = false
-                    if (event.pointerCount == 2) {
-                        twoFingerActive = true
-                        val dx = event.getX(0) - event.getX(1)
-                        val dy = event.getY(0) - event.getY(1)
-                        twoFingerStartDist = kotlin.math.sqrt(dx * dx + dy * dy)
-                        twoFingerStartY = (event.getY(0) + event.getY(1)) / 2f
-                        mode = null
-                        scrollAccum2f = 0f
-                        startFontSize = appSettings.terminalFontSize
-                    }
-                    false
-                }
-                MotionEvent.ACTION_MOVE -> {
-                    if (twoFingerActive && event.pointerCount >= 2) {
-                        val dx = event.getX(0) - event.getX(1)
-                        val dy = event.getY(0) - event.getY(1)
-                        val dist = kotlin.math.sqrt(dx * dx + dy * dy)
-                        val midY = (event.getY(0) + event.getY(1)) / 2f
-                        val distChange = kotlin.math.abs(dist - twoFingerStartDist)
-                        val yChange = kotlin.math.abs(midY - twoFingerStartY)
-
-                        if (mode == null && (distChange > 20f || yChange > 15f)) {
-                            mode = if (distChange > yChange * 2f) "pinch" else "scroll"
-                        }
-
-                        when (mode) {
-                            "scroll" -> {
-                                val lineHeight = startFontSize * 1.2f * density
-                                scrollAccum2f += twoFingerStartY - midY
-                                val lines = (scrollAccum2f / lineHeight).toInt()
-                                if (lines != 0) {
-                                    webView.evaluateJavascript("scrollTerminal($lines)", null)
-                                    scrollAccum2f -= lines * lineHeight
-                                }
-                                twoFingerStartY = midY
-                                return@setOnTouchListener true
-                            }
-                            "pinch" -> {
-                                val scale = dist / twoFingerStartDist
-                                val newSize = (startFontSize * scale).toInt().coerceIn(8, 32)
-                                webView.evaluateJavascript(
-                                    "if(term.options.fontSize!==$newSize){term.options.fontSize=$newSize;fitAddon.fit()}", null)
-                                return@setOnTouchListener true
-                            }
-                        }
-                        return@setOnTouchListener false
-                    }
-
-                    // 1-finger move — but NOT when JS is dragging selection handles
-                    if (event.pointerCount == 1 && !twoFingerActive && !handleDragActive) {
-                        val dx = event.x - oneFingerStartX
-                        val dy = event.y - oneFingerStartY
-                        if (!oneFingerScrolling && (dx * dx + dy * dy > deadZone * deadZone)) {
-                            oneFingerScrolling = true
-                            longPressRunnable?.let { handler.removeCallbacks(it) }
-                            webView.evaluateJavascript("term.clearSelection()", null)
-                        }
-                        if (oneFingerScrolling) {
-                            val deltaY = oneFingerLastY - event.y
-                            oneFingerLastY = event.y
-                            val lineHeight = oneFingerFontSize * 1.2f * density
-                            scrollAccum1f += deltaY
-                            val lines = (scrollAccum1f / lineHeight).toInt()
-                            if (lines != 0) {
-                                webView.evaluateJavascript("scrollTerminal($lines)", null)
-                                scrollAccum1f -= lines * lineHeight
-                            }
-                        }
-                        return@setOnTouchListener true
-                    }
-                    // Let JS handle moves when dragging selection handles
-                    if (handleDragActive) return@setOnTouchListener false
-                    false
-                }
-                MotionEvent.ACTION_POINTER_UP,
-                MotionEvent.ACTION_UP,
-                MotionEvent.ACTION_CANCEL -> {
-                    longPressRunnable?.let { handler.removeCallbacks(it) }
-                    val was2f = twoFingerActive
-                    val wasPinch = mode == "pinch"
-                    val was1fScroll = oneFingerScrolling
-                    val wasLongPress = longPressHandled
-                    twoFingerActive = false
-                    mode = null
-                    oneFingerScrolling = false
-
-                    if (wasPinch) {
-                        webView.postDelayed({
-                            webView.evaluateJavascript("fitAddon.fit();if(A)A.onTerminalResize(term.cols,term.rows)", null)
-                            // Save font size
-                            webView.evaluateJavascript("term.options.fontSize") { size ->
-                                size?.toIntOrNull()?.let { appSettings.terminalFontSize = it }
-                            }
-                        }, 100)
-                    }
-
-                    if (was2f || was1fScroll || wasLongPress) return@setOnTouchListener true
-
-                    // Double-tap detection: show keyboard
-                    if (event.actionMasked == MotionEvent.ACTION_UP && !was2f && !was1fScroll && !wasLongPress) {
-                        val now = System.currentTimeMillis()
-                        if (now - lastTapTime < 400) {
-                            // Double tap — focus xterm textarea to show keyboard
-                            webView.evaluateJavascript("term.focus();document.querySelector('.xterm-helper-textarea')?.focus()", null)
-                            val imm = webView.context.getSystemService(android.content.Context.INPUT_METHOD_SERVICE) as android.view.inputmethod.InputMethodManager
-                            imm.showSoftInput(webView, android.view.inputmethod.InputMethodManager.SHOW_IMPLICIT)
-                        }
-                        lastTapTime = now
-                    }
-
-                    false
-                }
-                else -> false
-            }
-        }
-    }
-
-    private inner class TerminalBridge {
-        @JavascriptInterface
-        fun setHandleDrag(active: Boolean) {
-            handleDragActive = active
-        }
-
-        @JavascriptInterface
-        fun onTerminalInput(data: String) {
-            tabManager.activeTabId.value?.let { id ->
-                sessionOrchestrator.sendInput(id, data)
-                KeepAliveService.clearAlert(id)
-            }
-        }
-
-        @JavascriptInterface
-        fun onTerminalReady(cols: Int, rows: Int) {
-            val wv = terminalWebView
-            FileLogger.log("MainActivity", "Terminal ready: ${cols}x${rows}, WebView: ${wv?.width}x${wv?.height}px")
-            tabManager.activeTabId.value?.let { id ->
-                sessionOrchestrator.resize(id, cols, rows)
-            }
-        }
-
-        @JavascriptInterface
-        fun onTerminalResize(cols: Int, rows: Int) {
-            tabManager.activeTabId.value?.let { id ->
-                sessionOrchestrator.resize(id, cols, rows)
-            }
-        }
-
-        @JavascriptInterface
-        fun copyToClipboard(text: String) {
-            val cm = getSystemService(CLIPBOARD_SERVICE) as android.content.ClipboardManager
-            cm.setPrimaryClip(android.content.ClipData.newPlainText("terminal", text))
-            haptic()
-        }
-
-        @JavascriptInterface
-        fun getClipboard(): String {
-            val cm = getSystemService(CLIPBOARD_SERVICE) as android.content.ClipboardManager
-            return cm.primaryClip?.getItemAt(0)?.text?.toString() ?: ""
-        }
-
-        @JavascriptInterface
-        fun openUrl(url: String) {
-            try {
-                val intent = Intent(Intent.ACTION_VIEW, android.net.Uri.parse(url))
-                intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                startActivity(intent)
-            } catch (e: Exception) {
-                FileLogger.error("MainActivity", "Failed to open URL: $url", e)
-            }
-        }
-
-        @JavascriptInterface
-        fun exportScrollback(content: String) {
-            try {
-                val dir = File(cacheDir, "exports")
-                dir.mkdirs()
-                val file = File(dir, "terminal_${System.currentTimeMillis()}.log")
-                file.writeText(content)
-                val uri = FileProvider.getUriForFile(this@MainActivity, "${packageName}.fileprovider", file)
-                val intent = Intent(Intent.ACTION_SEND).apply {
-                    type = "text/plain"
-                    putExtra(Intent.EXTRA_STREAM, uri)
-                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-                }
-                startActivity(Intent.createChooser(intent, "Export terminal log"))
-            } catch (e: Exception) {
-                FileLogger.error("MainActivity", "Export failed", e)
-            }
-        }
-
-        @JavascriptInterface
-        fun haptic() {
-            val prefs = getSharedPreferences("claude_remote", MODE_PRIVATE)
-            if (!prefs.getBoolean("haptic_feedback", false)) return
-            val vibrator = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.S) {
-                val vm = getSystemService(VIBRATOR_MANAGER_SERVICE) as android.os.VibratorManager
-                vm.defaultVibrator
-            } else {
-                @Suppress("DEPRECATION")
-                getSystemService(VIBRATOR_SERVICE) as android.os.Vibrator
-            }
-            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
-                vibrator.vibrate(android.os.VibrationEffect.createOneShot(5, android.os.VibrationEffect.DEFAULT_AMPLITUDE))
-            } else {
-                @Suppress("DEPRECATION")
-                vibrator.vibrate(5)
-            }
-        }
-
-        @JavascriptInterface
-        fun onSwipeTab(direction: String) {
-            val tabs = tabManager.tabs.value
-            if (tabs.size < 2) return
-            val activeId = tabManager.activeTabId.value ?: return
-            val idx = tabs.indexOfFirst { it.id == activeId }
-            val nextIdx = if (direction == "right") {
-                if (idx <= 0) tabs.size - 1 else idx - 1
-            } else {
-                if (idx >= tabs.size - 1) 0 else idx + 1
-            }
-            runOnUiThread { sessionOrchestrator.switchTab(tabs[nextIdx].id) }
-        }
-
-        @JavascriptInterface
-        fun onImagePath(path: String) {
-            FileLogger.log("MainActivity", "Image path clicked: $path")
-            val activeId = tabManager.activeTabId.value ?: return
-            kotlinx.coroutines.MainScope().launch {
-                try {
-                    val bytes = sessionOrchestrator.downloadFile(activeId, path) ?: return@launch
-                    if (bytes.isNotEmpty()) {
-                        val dir = java.io.File(cacheDir, "preview")
-                        dir.mkdirs()
-                        val ext = path.substringAfterLast('.', "png")
-                        val file = java.io.File(dir, "preview_${System.currentTimeMillis()}.$ext")
-                        file.writeBytes(bytes)
-                        val uri = androidx.core.content.FileProvider.getUriForFile(
-                            this@MainActivity, "${packageName}.fileprovider", file
-                        )
-                        val intent = android.content.Intent(android.content.Intent.ACTION_VIEW).apply {
-                            setDataAndType(uri, "image/*")
-                            addFlags(android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION)
-                        }
-                        startActivity(intent)
-                    }
-                } catch (e: Exception) {
-                    FileLogger.error("MainActivity", "Image preview failed: ${e.message}", e)
-                }
-            }
-        }
-    }
-
-    private fun writeToTerminal(data: String) {
-        val wv = terminalWebView ?: return
-        val safe = JSONObject.quote(data)
-        wv.post { wv.evaluateJavascript("writeOutput($safe)", null) }
-    }
-
-    private fun clearTerminal() {
-        val wv = terminalWebView ?: return
-        wv.post { wv.evaluateJavascript("clearTerminal()", null) }
     }
 
     private fun installUpdate(apkBytes: ByteArray, info: UpdateInfo) {

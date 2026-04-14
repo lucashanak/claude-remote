@@ -60,7 +60,7 @@ class SessionOrchestrator(
     private val _usageTokens = MutableStateFlow<CostCalculator.UsageTokens?>(null)
     val usageTokens: StateFlow<CostCalculator.UsageTokens?> = _usageTokens
 
-    // Terminal output callback — set by the platform (Android WebView, Desktop terminal)
+    // Terminal output callback — set by the platform (Android native terminal, Desktop JediTerm)
     var onTerminalOutput: ((sessionId: String, data: String) -> Unit)? = null
 
     // Tab switch callback — platform clears terminal and replays buffer

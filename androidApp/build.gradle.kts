@@ -57,6 +57,7 @@ android {
 
 dependencies {
     implementation(project(":shared"))
+    implementation(project(":terminal-view"))
     implementation("androidx.activity:activity-compose:1.9.3")
     implementation("androidx.core:core-ktx:1.15.0")
     implementation("androidx.biometric:biometric:1.1.0")
@@ -64,10 +65,3 @@ dependencies {
     implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.7.3")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")
 }
-
-// Copy shared terminal assets before build
-tasks.register<Copy>("copySharedAssets") {
-    from("${rootProject.projectDir}/shared-assets/terminal")
-    into("src/main/assets/terminal")
-}
-tasks.named("preBuild") { dependsOn("copySharedAssets") }
