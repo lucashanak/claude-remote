@@ -35,12 +35,13 @@ class SshTerminalHandle internal constructor(
     fun replay(bufferedOutput: ByteArray) {
         if (!isReady) return
         session.emulator?.reset()
-        if (bufferedOutput.isNotEmpty()) session.receiveSshBytes(bufferedOutput)
+        if (bufferedOutput.isNotEmpty()) session.appendDirect(bufferedOutput)
         view.onScreenUpdated()
     }
 
     fun applyFontSize(dp: Int) {
-        view.setTextSize(dp.coerceIn(6, 48))
+        val px = (dp.coerceIn(6, 48) * view.resources.displayMetrics.density).toInt()
+        view.setTextSize(px)
     }
 
     fun applyColorScheme(scheme: String) {
@@ -81,7 +82,8 @@ fun SshTerminal(
             }
             val viewClient = ClauDeTerminalViewClient(onSingleTap)
             view.setTerminalViewClient(viewClient)
-            view.setTextSize(fontSizeDp.coerceIn(6, 48))
+            val density = ctx.resources.displayMetrics.density
+            view.setTextSize((fontSizeDp.coerceIn(6, 48) * density).toInt())
 
             // attachSession reads getWidth/getHeight and is a no-op if the view
             // isn't yet laid out. Handle both the immediate-post case and later
@@ -116,7 +118,8 @@ fun SshTerminal(
             view
         },
         update = { view ->
-            view.setTextSize(fontSizeDp.coerceIn(6, 48))
+            val density = view.resources.displayMetrics.density
+            view.setTextSize((fontSizeDp.coerceIn(6, 48) * density).toInt())
             (view.mTermSession as? SshTerminalSession)?.let { applyColorSchemeTo(it, colorScheme) }
             view.onScreenUpdated()
         }

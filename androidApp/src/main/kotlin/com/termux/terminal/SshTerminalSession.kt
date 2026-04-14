@@ -71,18 +71,18 @@ class SshTerminalSession(
     }
 
     /**
-     * Feed SSH bytes into the emulator. Safe to call from any thread — the
-     * bytes are queued and drained on the main thread by the upstream
-     * [android.os.Handler] machinery. Drops bytes if the emulator has not yet
-     * been initialized (happens between session creation and first layout).
+     * Feed bytes directly into the emulator, bypassing the ByteQueue.
+     * Must be called on the main thread.
      */
+    fun appendDirect(data: ByteArray) {
+        if (data.isEmpty() || mEmulator == null) return
+        mEmulator.append(data, data.size)
+        notifyScreenUpdate()
+    }
+
     fun receiveSshBytes(data: ByteArray) {
         if (data.isEmpty()) return
-        if (mEmulator == null) return // view not laid out yet; drop (tab-switch replay will re-feed)
-        // Write in chunks that fit the 4KB ByteQueue, posting MSG_NEW_INPUT between
-        // each so the main-thread handler can drain the buffer while we wait().
-        // Without chunking, a single large write blocks forever because MSG_NEW_INPUT
-        // is never posted until write() returns.
+        if (mEmulator == null) return
         var offset = 0
         while (offset < data.size) {
             val len = minOf(BYTE_QUEUE_SIZE, data.size - offset)
