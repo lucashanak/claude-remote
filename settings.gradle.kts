@@ -19,3 +19,5 @@ rootProject.name = "claude-remote"
 include(":shared")
 include(":androidApp")
 include(":desktopApp")
+include(":terminal-emulator")
+include(":terminal-view")
