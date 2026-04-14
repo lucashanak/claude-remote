@@ -71,7 +71,7 @@ class SshTerminalSession(
     }
 
     /**
-     * Feed bytes directly into the emulator, bypassing the ByteQueue.
+     * Feed bytes directly into the emulator, bypassing the handler queue.
      * Must be called on the main thread.
      */
     fun appendDirect(data: ByteArray) {
@@ -80,20 +80,18 @@ class SshTerminalSession(
         notifyScreenUpdate()
     }
 
+    /**
+     * Feed SSH bytes into the emulator. Safe to call from any thread.
+     * Posts to the main thread via Handler — the IO thread never blocks.
+     */
     fun receiveSshBytes(data: ByteArray) {
         if (data.isEmpty()) return
         if (mEmulator == null) return
-        var offset = 0
-        while (offset < data.size) {
-            val len = minOf(BYTE_QUEUE_SIZE, data.size - offset)
-            if (!mProcessToTerminalIOQueue.write(data, offset, len)) return
-            mMainThreadHandler.sendEmptyMessage(MSG_NEW_INPUT)
-            offset += len
+        mMainThreadHandler.post {
+            if (mEmulator != null) {
+                mEmulator.append(data, data.size)
+                notifyScreenUpdate()
+            }
         }
-    }
-
-    companion object {
-        private const val MSG_NEW_INPUT = 1
-        private const val BYTE_QUEUE_SIZE = 4096
     }
 }

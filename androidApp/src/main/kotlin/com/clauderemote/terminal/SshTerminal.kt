@@ -80,6 +80,7 @@ fun SshTerminal(
                 isFocusable = true
                 isFocusableInTouchMode = true
             }
+            sessionClient.terminalView = view
             val viewClient = ClauDeTerminalViewClient(onSingleTap)
             view.setTerminalViewClient(viewClient)
             val density = ctx.resources.displayMetrics.density
@@ -187,9 +188,10 @@ private class ClauDeTerminalViewClient(
 }
 
 private class ClauDeTerminalSessionClient(private val ctx: Context) : TerminalSessionClient {
+    var terminalView: TerminalView? = null
 
     override fun onTextChanged(changedSession: TerminalSession) {
-        // Repaint is driven by TerminalView's own inner session-client wrapper.
+        terminalView?.onScreenUpdated()
     }
 
     override fun onTitleChanged(changedSession: TerminalSession) {}
