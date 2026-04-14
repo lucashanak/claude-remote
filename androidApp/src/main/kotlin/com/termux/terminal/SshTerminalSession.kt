@@ -79,13 +79,21 @@ class SshTerminalSession(
     fun receiveSshBytes(data: ByteArray) {
         if (data.isEmpty()) return
         if (mEmulator == null) return // view not laid out yet; drop (tab-switch replay will re-feed)
-        if (mProcessToTerminalIOQueue.write(data, 0, data.size)) {
+        // Write in chunks that fit the 4KB ByteQueue, posting MSG_NEW_INPUT between
+        // each so the main-thread handler can drain the buffer while we wait().
+        // Without chunking, a single large write blocks forever because MSG_NEW_INPUT
+        // is never posted until write() returns.
+        var offset = 0
+        while (offset < data.size) {
+            val len = minOf(BYTE_QUEUE_SIZE, data.size - offset)
+            if (!mProcessToTerminalIOQueue.write(data, offset, len)) return
             mMainThreadHandler.sendEmptyMessage(MSG_NEW_INPUT)
+            offset += len
         }
     }
 
     companion object {
-        // Mirrors the private constant TerminalSession.MSG_NEW_INPUT.
         private const val MSG_NEW_INPUT = 1
+        private const val BYTE_QUEUE_SIZE = 4096
     }
 }
