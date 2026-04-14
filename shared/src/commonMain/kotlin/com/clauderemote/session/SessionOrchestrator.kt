@@ -27,6 +27,7 @@ class SessionOrchestrator(
 
     // Per-session terminal output buffer (ring buffer, capped at MAX_BUFFER)
     private val outputBuffers = mutableMapOf<String, StringBuilder>()
+    private val bufferLock = Any()
 
     // Prompt detection for notifications
     private val promptDetector = InputPromptDetector()
@@ -222,7 +223,7 @@ class SessionOrchestrator(
             alias = parsedAlias
         )
 
-        outputBuffers[sessionId] = StringBuilder()
+        synchronized(bufferLock) { outputBuffers[sessionId] = StringBuilder() }
         tabManager.addTab(session)
         FileLogger.log(TAG, "Launching session: ${server.name} → $folder (${connectionType.name}, ${mode.name}, ${model.name})")
 
@@ -253,9 +254,11 @@ class SessionOrchestrator(
     fun switchTab(id: String) {
         tabManager.switchTab(id)
         promptDetector.onUserInput(id)
-        // Replay last 2KB of buffer — just enough for current screen
-        val full = outputBuffers[id]?.toString() ?: ""
-        val tail = if (full.length > 2048) full.substring(full.length - 2048) else full
+        val tail = synchronized(bufferLock) {
+            val buf = outputBuffers[id] ?: return@synchronized ""
+            val len = buf.length
+            if (len > 2048) buf.substring(len - 2048) else buf.toString()
+        }
         promptDetector.suppressFor(2000)
         onTabSwitched?.invoke(id, tail)
     }
@@ -478,27 +481,33 @@ class SessionOrchestrator(
         val start = System.currentTimeMillis()
         val promptChars = setOf('$', '#', '>', '%')
         while (System.currentTimeMillis() - start < maxWait) {
-            val buf = outputBuffers[sessionId]?.toString() ?: ""
-            if (buf.isNotEmpty()) {
-                val lastLine = buf.trimEnd().takeLast(80)
-                if (lastLine.any { it in promptChars }) return
+            val lastLine = synchronized(bufferLock) {
+                val buf = outputBuffers[sessionId]
+                if (buf == null || buf.isEmpty()) ""
+                else {
+                    val len = buf.length
+                    buf.substring(maxOf(0, len - 80)).trimEnd()
+                }
             }
+            if (lastLine.isNotEmpty() && lastLine.any { it in promptChars }) return
             kotlinx.coroutines.delay(50)
         }
     }
 
     private fun appendToBuffer(sessionId: String, data: String) {
-        val buf = outputBuffers[sessionId] ?: return
-        buf.append(data)
-        // Cap buffer at MAX_BUFFER — keep tail
-        if (buf.length > MAX_BUFFER) {
-            val excess = buf.length - MAX_BUFFER
-            buf.delete(0, excess)
+        synchronized(bufferLock) {
+            val buf = outputBuffers[sessionId] ?: return
+            buf.append(data)
+            if (buf.length > MAX_BUFFER) {
+                val tail = buf.substring(buf.length - MAX_BUFFER)
+                buf.clear()
+                buf.append(tail)
+            }
         }
     }
 
     fun clearBuffer(sessionId: String) {
-        outputBuffers[sessionId]?.clear()
+        synchronized(bufferLock) { outputBuffers[sessionId]?.clear() }
     }
 
     private fun warnNoConnection(sessionId: String) {
@@ -645,7 +654,7 @@ class SessionOrchestrator(
         connections.remove(sessionId)
         moshConnections[sessionId]?.disconnect()
         moshConnections.remove(sessionId)
-        outputBuffers.remove(sessionId)
+        synchronized(bufferLock) { outputBuffers.remove(sessionId) }
         promptDetector.removeSession(sessionId)
         pendingInputs.remove(sessionId)
         _sessionActivities.update { it - sessionId }
@@ -658,7 +667,7 @@ class SessionOrchestrator(
     suspend fun disconnectAll() {
         connections.values.forEach { it.disconnect() }
         connections.clear()
-        outputBuffers.clear()
+        synchronized(bufferLock) { outputBuffers.clear() }
     }
 
     fun getConnection(sessionId: String): SshManager? = connections[sessionId]
@@ -696,8 +705,11 @@ class SessionOrchestrator(
     }
 
     fun getBuffer(sessionId: String): String {
-        val full = outputBuffers[sessionId]?.toString() ?: ""
-        return if (full.length > 2048) full.substring(full.length - 2048) else full
+        synchronized(bufferLock) {
+            val buf = outputBuffers[sessionId] ?: return ""
+            val len = buf.length
+            return if (len > 2048) buf.substring(len - 2048) else buf.toString()
+        }
     }
 
     private fun generateId(): String {
