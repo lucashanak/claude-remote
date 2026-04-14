@@ -16,6 +16,8 @@ import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
 import java.io.OutputStream
@@ -30,6 +32,7 @@ class SshManager(
     private var readJob: Job? = null
     private var ioScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
     private var onConnectionLost: (() -> Unit)? = null
+    private val writeMutex = Mutex()
 
     @Volatile private var disconnected = false
 
@@ -136,42 +139,30 @@ class SshManager(
 
     fun sendInput(data: String) {
         if (disconnected) return
-        ioScope.launch {
-            try {
-                withTimeout(WRITE_TIMEOUT) {
-                    withContext(Dispatchers.IO) {
-                        val os = outputStream ?: return@withContext
-                        os.write(data.toByteArray(Charsets.UTF_8))
-                        os.flush()
-                    }
-                }
-            } catch (e: Exception) {
-                if (!disconnected) {
-                    disconnected = true
-                    FileLogger.error(TAG, "sendInput failed/timeout", e)
-                    onConnectionLost?.invoke()
-                }
-            }
-        }
+        ioScope.launch { writeToSsh(data.toByteArray(Charsets.UTF_8)) }
     }
 
     fun sendBytes(data: ByteArray) {
         if (disconnected) return
-        ioScope.launch {
-            try {
-                withTimeout(WRITE_TIMEOUT) {
+        ioScope.launch { writeToSsh(data) }
+    }
+
+    private suspend fun writeToSsh(data: ByteArray) {
+        try {
+            withTimeout(WRITE_TIMEOUT) {
+                writeMutex.withLock {
                     withContext(Dispatchers.IO) {
                         val os = outputStream ?: return@withContext
                         os.write(data)
                         os.flush()
                     }
                 }
-            } catch (e: Exception) {
-                if (!disconnected) {
-                    disconnected = true
-                    FileLogger.error(TAG, "sendBytes failed/timeout", e)
-                    onConnectionLost?.invoke()
-                }
+            }
+        } catch (e: Exception) {
+            if (!disconnected) {
+                disconnected = true
+                FileLogger.error(TAG, "SSH write failed/timeout", e)
+                onConnectionLost?.invoke()
             }
         }
     }
