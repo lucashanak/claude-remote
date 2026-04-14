@@ -98,15 +98,18 @@ fun SshTerminal(
             val tryAttach = {
                 val w = view.width; val h = view.height
                 if (w > 0 && h > 0) {
+                    val sizeChanged = w != lastW || h != lastH
                     if (!handle.isReady) {
                         view.attachSession(session)
                         applyColorSchemeTo(session, colorScheme)
                         FileLogger.log("SshTerminal", "attached: ${w}x${h}px")
-                    } else if (w != lastW || h != lastH) {
+                        lastW = w; lastH = h
+                        view.onScreenUpdated()
+                    } else if (sizeChanged) {
+                        lastW = w; lastH = h
                         view.updateSize()
+                        view.onScreenUpdated()
                     }
-                    lastW = w; lastH = h
-                    view.onScreenUpdated()
                     if (!readyFired && handle.isReady) {
                         readyFired = true
                         onReady(handle)
