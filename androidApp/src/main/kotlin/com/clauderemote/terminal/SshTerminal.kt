@@ -113,6 +113,14 @@ fun SshTerminal(
                     if (!readyFired && handle.isReady) {
                         readyFired = true
                         onReady(handle)
+                        // Belt-and-suspenders re-fit: Compose sometimes settles the
+                        // final layout after our first attach (insets, keyboard
+                        // animation, split-screen). Without a re-poke the emulator
+                        // stays on cols/rows measured from the initial pass and
+                        // tmux renders at the wrong size until the next real
+                        // resize. Re-run tryAttach after a beat to catch that.
+                        view.postDelayed({ tryAttach() }, 300)
+                        view.postDelayed({ tryAttach() }, 800)
                     }
                 }
             }
