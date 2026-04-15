@@ -31,6 +31,9 @@ class SshTerminalHandle internal constructor(
 
     fun feedSshBytes(bytes: ByteArray) = session.receiveSshBytes(bytes)
 
+    /** Current emulator dimensions, or null if not yet initialized. */
+    fun currentSize(): Pair<Int, Int>? = session.emulator?.let { it.mColumns to it.mRows }
+
     /**
      * Clear the emulator and replay a buffer (used on tab switch).
      *

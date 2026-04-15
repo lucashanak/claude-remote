@@ -249,10 +249,12 @@ class SessionOrchestrator(
     }
 
     /**
-     * Switch the active tab. Notifies platform to clear terminal and replay buffer,
-     * then kicks tmux with a quick PTY resize toggle so it redraws the entire
-     * window — the 2 KB tail we replay is usually a partial update, not a full
-     * screen dump, so without SIGWINCH tmux won't repaint the whole viewport.
+     * Switch the active tab. Notifies platform to clear terminal and replay buffer.
+     * The platform is expected to follow up with a [resize] call using the *current*
+     * TerminalView dimensions — each session's [SshManager.lastCols]/[lastRows]
+     * reflect the last time *that* session was active and may be stale when we
+     * switch from a session that was resized differently. See MainActivity for the
+     * SIGWINCH kick after tab switch.
      */
     fun switchTab(id: String) {
         tabManager.switchTab(id)
@@ -264,18 +266,20 @@ class SessionOrchestrator(
         }
         promptDetector.suppressFor(2000)
         onTabSwitched?.invoke(id, tail)
+    }
 
-        // Fake PTY resize → double SIGWINCH → tmux full redraw. Matches what
-        // orientation-change accidentally does and fixes the "old screen content
-        // shows, only a small region repaints" symptom after tab switch.
-        connections[id]?.let { conn ->
-            val cols = conn.lastCols
-            val rows = conn.lastRows
-            if (cols > 0 && rows > 1) {
-                conn.resize(cols, rows - 1)
-                conn.resize(cols, rows)
-            }
-        }
+    /**
+     * Kick tmux into a full-screen redraw by toggling the PTY size. The 2 KB tail
+     * we replay on tab switch is usually a partial update (statusline, cursor
+     * move) rather than a full screen dump, so without an explicit SIGWINCH tmux
+     * won't repaint the rest of the viewport. Called by the platform after it
+     * has laid out the terminal for the new session at the current dimensions.
+     */
+    fun kickRedraw(sessionId: String, cols: Int, rows: Int) {
+        val conn = connections[sessionId] ?: return
+        if (cols <= 0 || rows <= 1) return
+        conn.resize(cols, rows - 1)
+        conn.resize(cols, rows)
     }
 
     private val reconnectScope = kotlinx.coroutines.CoroutineScope(

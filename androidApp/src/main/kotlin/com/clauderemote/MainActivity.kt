@@ -156,7 +156,16 @@ class MainActivity : FragmentActivity() {
 
         sessionOrchestrator.onTabSwitched = { sessionId, bufferedOutput ->
             FileLogger.log("MainActivity", "Tab switched to $sessionId, buffer: ${bufferedOutput.length} chars")
-            terminalHandle?.replay(bufferedOutput.toByteArray(Charsets.UTF_8))
+            val handle = terminalHandle
+            handle?.replay(bufferedOutput.toByteArray(Charsets.UTF_8))
+            // Kick tmux with SIGWINCH toggle at the *current* TerminalView
+            // dimensions — each session's SshManager tracks its own last-known
+            // size and can be stale when switching. Post to the view's handler
+            // so it fires on the main thread after replay lands.
+            handle?.view?.post {
+                val (cols, rows) = handle.currentSize() ?: return@post
+                sessionOrchestrator.kickRedraw(sessionId, cols, rows)
+            }
         }
 
         sessionOrchestrator.onSessionDisconnect = { sessionId ->
