@@ -156,15 +156,20 @@ class MainActivity : FragmentActivity() {
 
         sessionOrchestrator.onTabSwitched = { sessionId, bufferedOutput ->
             FileLogger.log("MainActivity", "Tab switched to $sessionId, buffer: ${bufferedOutput.length} chars")
-            val handle = terminalHandle
-            handle?.replay(bufferedOutput.toByteArray(Charsets.UTF_8))
-            // Kick tmux with SIGWINCH toggle at the *current* TerminalView
-            // dimensions — each session's SshManager tracks its own last-known
-            // size and can be stale when switching. Post to the view's handler
-            // so it fires on the main thread after replay lands.
-            handle?.view?.post {
+            val handle = terminalHandle ?: return@onTabSwitched
+            handle.replay(bufferedOutput.toByteArray(Charsets.UTF_8))
+            // Force a full tmux redraw after the switch. Naive toggle
+            // resize(c, r-1) + resize(c, r) delivered back-to-back can
+            // be coalesced by the kernel — tmux reads *current* pty size
+            // == the value it already had, sees no change, skips redraw.
+            // Use a delay between the two resizes and make the intermediate
+            // size strictly different so SIGWINCH always fires twice.
+            handle.view.post {
                 val (cols, rows) = handle.currentSize() ?: return@post
-                sessionOrchestrator.kickRedraw(sessionId, cols, rows)
+                if (cols <= 0 || rows <= 1) return@post
+                val conn = sessionOrchestrator.getConnection(sessionId) ?: return@post
+                conn.resize(cols, rows - 1)
+                handle.view.postDelayed({ conn.resize(cols, rows) }, 80)
             }
         }
 
