@@ -193,13 +193,38 @@ class SshManager(
     suspend fun uploadFile(bytes: ByteArray, remoteDir: String, fileName: String): String = withContext(Dispatchers.IO) {
         val sess = session ?: throw IllegalStateException("Not connected")
         val sftp = sess.openChannel("sftp") as ChannelSftp
-        sftp.connect(10000)
+        sftp.connect(5000) // 5s — fail fast on dead WebSocket so caller can retry after reconnect
         try {
             try { sftp.mkdir(remoteDir) } catch (_: Exception) {}
             val remotePath = "$remoteDir/$fileName"
             sftp.put(bytes.inputStream(), remotePath)
             remotePath
         } finally { sftp.disconnect() }
+    }
+
+    /**
+     * Quick probe: open+close an exec channel to verify the SSH transport
+     * is truly alive (catches dead Cloudflare WebSocket where isConnected
+     * still returns true because JSch hasn't detected the failure yet).
+     *
+     * If probe fails, kills the JSch session so the read loop exits and
+     * fires onConnectionLost → autoReconnect.
+     */
+    suspend fun probeConnection(): Boolean = withContext(Dispatchers.IO) {
+        try {
+            val sess = session ?: return@withContext false
+            val ch = sess.openChannel("exec") as com.jcraft.jsch.ChannelExec
+            ch.setCommand("true")
+            ch.connect(3000)
+            ch.disconnect()
+            true
+        } catch (_: Exception) {
+            // Probe failed — transport is dead. Kill JSch session to unblock
+            // the read loop (which fires onConnectionLost → autoReconnect).
+            FileLogger.log(TAG, "Probe failed, forcing session disconnect to trigger reconnect")
+            try { session?.disconnect() } catch (_: Exception) {}
+            false
+        }
     }
 
     fun getSession(): Session? = session
