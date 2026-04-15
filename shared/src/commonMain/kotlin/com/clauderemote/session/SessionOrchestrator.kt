@@ -641,18 +641,13 @@ class SessionOrchestrator(
      * Upload a file to the remote server for the given session.
      * Returns the remote path of the uploaded file.
      *
-     * SAF file pickers can kill the underlying TCP/WebSocket while the app
-     * is backgrounded.  With Cloudflare tunnel the WebSocket dies but JSch
-     * `isConnected` still returns true (it hasn't detected the failure yet).
-     *
-     * Strategy: try SFTP directly; on failure kill the stale session so the
-     * read loop fires onConnectionLost → autoReconnect, then retry on the
-     * fresh connection.
+     * If autoReconnect is already running (SAF picker killed the socket),
+     * waits for it to finish.  Never kills the connection itself — that
+     * was causing a cascade of 3 failed reconnects.
      */
     suspend fun uploadFile(sessionId: String, bytes: ByteArray, fileName: String): String {
-        val deadline = System.currentTimeMillis() + 25_000L
+        val deadline = System.currentTimeMillis() + 20_000L
         var lastException: Exception? = null
-        var killedStaleConnection = false
 
         while (System.currentTimeMillis() < deadline) {
             val c = connections[sessionId]
@@ -664,14 +659,10 @@ class SessionOrchestrator(
                     return remotePath
                 } catch (e: Exception) {
                     lastException = e
-                    FileLogger.error(TAG, "SFTP upload failed for $sessionId", e)
-                    // Connection reports connected but SFTP failed — transport
-                    // is likely dead (Cloudflare WebSocket zombie). Kill it once
-                    // to trigger reconnect; after that just wait for the new one.
-                    if (!killedStaleConnection) {
-                        killedStaleConnection = true
-                        c.killForReconnect()
-                    }
+                    FileLogger.error(TAG, "Upload exec failed for $sessionId: ${e.message}", e)
+                    // Don't kill the connection — if transport is truly dead,
+                    // the read loop will detect it via ServerAliveInterval and
+                    // autoReconnect will handle recovery.
                 }
             }
             kotlinx.coroutines.delay(1000)

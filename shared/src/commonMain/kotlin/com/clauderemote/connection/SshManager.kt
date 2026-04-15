@@ -195,40 +195,34 @@ class SshManager(
      */
     suspend fun uploadFile(bytes: ByteArray, remoteDir: String, fileName: String): String = withContext(Dispatchers.IO) {
         val sess = session ?: throw IllegalStateException("Not connected")
+        FileLogger.log(TAG, "uploadFile: session.isConnected=${sess.isConnected}, bytes=${bytes.size}, file=$fileName")
         val safeName = fileName.replace("'", "'\\''")
         val remotePath = "$remoteDir/$safeName"
         val ch = sess.openChannel("exec") as com.jcraft.jsch.ChannelExec
         ch.setCommand("mkdir -p '$remoteDir' && cat > '$remotePath'")
         ch.inputStream = null
         val os = ch.outputStream
+        FileLogger.log(TAG, "uploadFile: connecting exec channel...")
         ch.connect(5000)
+        FileLogger.log(TAG, "uploadFile: exec channel connected, writing ${bytes.size} bytes")
         try {
             os.write(bytes)
             os.flush()
             os.close()
+            FileLogger.log(TAG, "uploadFile: bytes written, waiting for cat to finish")
             // Wait for remote cat to finish
             val deadline = System.currentTimeMillis() + 10_000L
             while (!ch.isClosed && System.currentTimeMillis() < deadline) {
                 Thread.sleep(100)
             }
-            if (ch.exitStatus != 0) throw java.io.IOException("Upload failed (exit ${ch.exitStatus})")
+            val exit = ch.exitStatus
+            FileLogger.log(TAG, "uploadFile: done, closed=${ch.isClosed}, exit=$exit")
+            if (exit != 0) throw java.io.IOException("Upload failed (exit $exit)")
             remotePath
         } finally { ch.disconnect() }
     }
 
-    /**
-     * Kill the underlying JSch session without setting [disconnected] flag,
-     * so the read loop's finally block fires [onConnectionLost] → autoReconnect.
-     * Use when transport is detected as dead (e.g. SFTP failed on stale
-     * Cloudflare WebSocket) but JSch hasn't noticed yet.
-     */
-    fun killForReconnect() {
-        FileLogger.log(TAG, "Killing stale session to trigger reconnect")
-        try { channel?.disconnect() } catch (_: Exception) {}
-        try { session?.disconnect() } catch (_: Exception) {}
-    }
-
-    fun getSession(): Session? = session
+fun getSession(): Session? = session
 
     companion object {
         private const val TAG = "SshManager"
