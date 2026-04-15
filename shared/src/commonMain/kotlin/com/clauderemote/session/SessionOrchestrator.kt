@@ -632,10 +632,23 @@ class SessionOrchestrator(
     /**
      * Upload a file to the remote server for the given session.
      * Returns the remote path of the uploaded file.
+     *
+     * Waits up to 10 s for the connection to be in an `isConnected` state
+     * before uploading — SAF pickers on some Android OEMs briefly kill
+     * backgrounded TCP sockets, which makes SSH auto-reconnect; without
+     * this wait the upload would throw immediately even though a
+     * functioning reconnection is seconds away.
      */
     suspend fun uploadFile(sessionId: String, bytes: ByteArray, fileName: String): String {
+        val deadline = System.currentTimeMillis() + 10_000L
+        while (System.currentTimeMillis() < deadline) {
+            val c = connections[sessionId]
+            if (c != null && c.isConnected) break
+            kotlinx.coroutines.delay(200)
+        }
         val conn = connections[sessionId]
             ?: throw IllegalStateException("No connection for session $sessionId")
+        if (!conn.isConnected) throw IllegalStateException("SSH not ready for $sessionId (upload timeout)")
         val remoteDir = "/tmp/claude-uploads"
         val remotePath = conn.uploadFile(bytes, remoteDir, fileName)
         FileLogger.log(TAG, "File uploaded: $remotePath (${bytes.size} bytes)")
