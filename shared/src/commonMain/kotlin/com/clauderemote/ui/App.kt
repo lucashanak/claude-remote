@@ -44,6 +44,7 @@ fun App(
     sessionOrchestrator: SessionOrchestrator,
     appVersion: String = "1.0.0",
     onInstallUpdate: ((ByteArray, UpdateInfo) -> Unit)? = null,
+    onGetCurrentApk: (() -> ByteArray)? = null,
     onShareLog: ((String) -> Unit)? = null,
     onTerminalScreenVisible: (() -> Unit)? = null,
     onPickKeyFile: ((callback: (String) -> Unit) -> Unit)? = null,
@@ -184,38 +185,90 @@ fun App(
     fun downloadUpdate(info: UpdateInfo) {
         scope.launch {
             try {
-                // Choose platform-appropriate asset URL
-                // Android: always APK. Desktop: prefer DMG, fallback to APK.
                 val onAndroid = try { Class.forName("android.os.Build"); true } catch (_: Exception) { false }
-                val downloadUrl = if (onAndroid) info.apkUrl else info.dmgUrl.ifBlank { info.apkUrl }
-                if (downloadUrl.isBlank()) {
-                    updateState = updateState.copy(error = "No update available for this platform")
-                    return@launch
-                }
+                val usePatch = onAndroid && info.hasPatch && onGetCurrentApk != null
 
-                updateState = updateState.copy(downloading = true, error = null, statusText = "Downloading...")
-
-                val bytes = UpdateChecker.downloadFile(downloadUrl) { progress, dl, total ->
-                    updateState = updateState.copy(
-                        progress = progress,
-                        statusText = "Downloading ${UpdateChecker.formatBytes(dl)} / ${UpdateChecker.formatBytes(total)}"
-                    )
-                }
-
-                if (info.apkSha256 != null && downloadUrl == info.apkUrl) {
-                    val actualHash = UpdateChecker.sha256(bytes)
-                    if (actualHash != info.apkSha256) {
-                        updateState = updateState.copy(
-                            downloading = false,
-                            error = "Hash mismatch - download corrupted"
-                        )
+                if (!usePatch) {
+                    // Full download path (desktop or no patches available)
+                    val downloadUrl = if (onAndroid) info.apkUrl else info.dmgUrl.ifBlank { info.apkUrl }
+                    if (downloadUrl.isBlank()) {
+                        updateState = updateState.copy(error = "No update available for this platform")
                         return@launch
                     }
-                }
 
-                updateState = updateState.copy(statusText = "Installing v${info.version}...", progress = 100)
-                onInstallUpdate?.invoke(bytes, info)
+                    updateState = updateState.copy(downloading = true, error = null, statusText = "Downloading...")
+
+                    val bytes = UpdateChecker.downloadFile(downloadUrl) { progress, dl, total ->
+                        updateState = updateState.copy(
+                            progress = progress,
+                            statusText = "Downloading ${UpdateChecker.formatBytes(dl)} / ${UpdateChecker.formatBytes(total)}"
+                        )
+                    }
+
+                    if (info.apkSha256 != null && downloadUrl == info.apkUrl) {
+                        val actualHash = UpdateChecker.sha256(bytes)
+                        if (actualHash != info.apkSha256) {
+                            updateState = updateState.copy(
+                                downloading = false,
+                                error = "Hash mismatch - download corrupted"
+                            )
+                            return@launch
+                        }
+                    }
+
+                    updateState = updateState.copy(statusText = "Installing v${info.version}...", progress = 100)
+                    onInstallUpdate?.invoke(bytes, info)
+                } else {
+                    // Patch update path
+                    updateState = updateState.copy(downloading = true, error = null, statusText = "Reading current APK...")
+
+                    val currentApk = withContext(Dispatchers.IO) { onGetCurrentApk!!() }
+                    var apkBytes = currentApk
+                    val totalSteps = info.patchChain.size
+                    val totalPatchBytes = info.totalPatchSize
+                    var downloadedSoFar = 0L
+
+                    for ((idx, step) in info.patchChain.withIndex()) {
+                        updateState = updateState.copy(
+                            statusText = "Patch ${idx + 1}/$totalSteps: ${step.from} → ${step.to}",
+                            progress = if (totalPatchBytes > 0) ((downloadedSoFar * 100) / totalPatchBytes).toInt() else 0
+                        )
+
+                        val patchBytes = UpdateChecker.downloadFile(step.url) { _, dl, _ ->
+                            val totalDl = downloadedSoFar + dl
+                            updateState = updateState.copy(
+                                progress = if (totalPatchBytes > 0) ((totalDl * 100) / totalPatchBytes).toInt() else 0,
+                                statusText = "Patch ${idx + 1}/$totalSteps: ${UpdateChecker.formatBytes(totalDl)} / ${UpdateChecker.formatBytes(totalPatchBytes)}"
+                            )
+                        }
+                        downloadedSoFar += step.size
+
+                        updateState = updateState.copy(statusText = "Applying patch ${idx + 1}/$totalSteps...")
+                        apkBytes = withContext(Dispatchers.IO) {
+                            UpdateChecker.applyPatch(apkBytes, patchBytes)
+                        }
+                    }
+
+                    // Verify final APK hash
+                    if (info.apkSha256 != null) {
+                        val actualHash = UpdateChecker.sha256(apkBytes)
+                        if (actualHash != info.apkSha256) {
+                            updateState = updateState.copy(
+                                downloading = false,
+                                error = "Patch result hash mismatch - falling back to full download"
+                            )
+                            // Fallback: retry with full APK
+                            val fallbackInfo = info.copy(patchChain = emptyList())
+                            downloadUpdate(fallbackInfo)
+                            return@launch
+                        }
+                    }
+
+                    updateState = updateState.copy(statusText = "Installing v${info.version}...", progress = 100)
+                    onInstallUpdate?.invoke(apkBytes, info)
+                }
             } catch (e: Exception) {
+                FileLogger.error("App", "Update failed", e)
                 updateState = updateState.copy(
                     downloading = false,
                     error = "Download failed: ${e.message}"

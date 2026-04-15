@@ -188,4 +188,13 @@ object UpdateChecker {
         val digest = java.security.MessageDigest.getInstance("SHA-256")
         return digest.digest(data).joinToString("") { "%02x".format(it) }
     }
+
+    /**
+     * Apply a bsdiff patch to produce a new file.
+     */
+    fun applyPatch(oldBytes: ByteArray, patchBytes: ByteArray): ByteArray {
+        val output = java.io.ByteArrayOutputStream()
+        io.sigpipe.jbsdiff.Patch.patch(oldBytes, patchBytes, output)
+        return output.toByteArray()
+    }
 }
