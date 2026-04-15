@@ -87,6 +87,8 @@ class SessionOrchestrator(
     private val latencyPollingJobs = mutableMapOf<String, kotlinx.coroutines.Job>()
     @Volatile private var isInBackground = false
     private val reconnectingSessionIds = mutableSetOf<String>()
+    // Last known terminal dimensions per session — used to re-send SIGWINCH after reconnect
+    private val terminalSizes = mutableMapOf<String, Pair<Int, Int>>()
 
     /** Call from onPause/onResume to pause heavy background work and save battery. */
     fun setBackgroundMode(background: Boolean) {
@@ -361,6 +363,12 @@ class SessionOrchestrator(
         // Tmux
         sendTmuxCommand(sshManager, session, isNewTmuxSession)
         promptDetector.suppressFor(3000) // suppress during tmux screen redraw
+
+        // Apply saved terminal dimensions — TerminalView won't fire onResize
+        // because its size hasn't changed, but the new SSH channel defaults to 80x24.
+        terminalSizes[session.id]?.let { (cols, rows) ->
+            sshManager.resize(cols, rows)
+        }
     }
 
     private fun sendTmuxCommand(sshManager: SshManager, session: ClaudeSession, isNew: Boolean) {
@@ -417,6 +425,15 @@ class SessionOrchestrator(
                     kotlinx.coroutines.delay(100)
                     sendTmuxCommand(sshManager, session, false)
                     promptDetector.suppressFor(3000) // suppress during tmux screen redraw after reconnect
+
+                    // Re-send terminal dimensions — the new SshManager defaults
+                    // to 80x24 but the TerminalView hasn't changed size, so
+                    // onResize won't fire.  Without this, tmux renders at 80x24
+                    // leaving a gap below the content.
+                    terminalSizes[session.id]?.let { (cols, rows) ->
+                        kotlinx.coroutines.delay(200) // let tmux attach settle
+                        sshManager.resize(cols, rows)
+                    }
 
                     tabManager.updateTabStatus(session.id, SessionStatus.ACTIVE)
                     updateActivity(session.id, SessionActivity.WAITING_FOR_INPUT)
@@ -614,6 +631,7 @@ class SessionOrchestrator(
     }
 
     fun resize(sessionId: String, cols: Int, rows: Int) {
+        terminalSizes[sessionId] = cols to rows
         connections[sessionId]?.resize(cols, rows)
     }
 
@@ -710,6 +728,7 @@ class SessionOrchestrator(
         synchronized(bufferLock) { outputBuffers.remove(sessionId) }
         promptDetector.removeSession(sessionId)
         pendingInputs.remove(sessionId)
+        terminalSizes.remove(sessionId)
         _sessionActivities.update { it - sessionId }
         _contextPercents.update { it - sessionId }
         _latencies.update { it - sessionId }
