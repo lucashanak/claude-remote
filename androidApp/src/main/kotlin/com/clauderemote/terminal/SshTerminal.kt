@@ -31,11 +31,25 @@ class SshTerminalHandle internal constructor(
 
     fun feedSshBytes(bytes: ByteArray) = session.receiveSshBytes(bytes)
 
-    /** Clear the emulator and replay a buffer (used on tab switch). Safe before-ready: drops if not ready. */
+    /**
+     * Clear the emulator and replay a buffer (used on tab switch).
+     *
+     * `TerminalEmulator.reset()` only resets parser state (cursor, flags,
+     * margins, colors) — the screen buffer content is untouched. Without
+     * an explicit erase, the 2 KB tail we replay only overwrites the rows
+     * it mentions and the rest of the screen still shows the previous
+     * session's content. Prepend CSI 2J (erase screen), CSI 3J (erase
+     * scrollback), CSI H (home cursor) so the tail paints on a blank slate.
+     */
     fun replay(bufferedOutput: ByteArray) {
         if (!isReady) return
         session.emulator?.reset()
-        if (bufferedOutput.isNotEmpty()) session.appendDirect(bufferedOutput)
+        val combined = if (bufferedOutput.isEmpty()) CLEAR_PRELUDE
+            else ByteArray(CLEAR_PRELUDE.size + bufferedOutput.size).also {
+                System.arraycopy(CLEAR_PRELUDE, 0, it, 0, CLEAR_PRELUDE.size)
+                System.arraycopy(bufferedOutput, 0, it, CLEAR_PRELUDE.size, bufferedOutput.size)
+            }
+        session.appendDirect(combined)
         view.onScreenUpdated()
     }
 
@@ -47,6 +61,12 @@ class SshTerminalHandle internal constructor(
     fun applyColorScheme(scheme: String) {
         applyColorSchemeTo(session, scheme)
         view.invalidate()
+    }
+
+    private companion object {
+        // ESC [ 2 J — erase visible screen; ESC [ 3 J — erase scrollback;
+        // ESC [ H — cursor home. Used as a prelude to buffer replay.
+        private val CLEAR_PRELUDE: ByteArray = "\u001B[2J\u001B[3J\u001B[H".toByteArray(Charsets.US_ASCII)
     }
 }
 
