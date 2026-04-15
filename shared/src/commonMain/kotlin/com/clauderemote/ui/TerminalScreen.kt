@@ -74,6 +74,8 @@ fun TerminalScreen(
     onClearPending: (() -> Unit)? = null,
     onNavigate: ((String) -> Unit)? = null,
     onSplitView: ((secondSessionId: String?) -> Unit)? = null,
+    invertColors: Boolean = false,
+    onToggleInvertColors: (() -> Unit)? = null,
     terminalContent: @Composable (Modifier) -> Unit,
     splitTerminalContent: (@Composable (Modifier) -> Unit)? = null
 ) {
@@ -314,6 +316,20 @@ fun TerminalScreen(
                 if (!compactMode) {
                     TextButton(onClick = { showControlBar = !showControlBar }) {
                         Text(if (showControlBar) "Hide" else "Ctrl", style = MaterialTheme.typography.bodySmall)
+                    }
+                }
+                // Sunlight-readable toggle (global color inversion)
+                if (onToggleInvertColors != null) {
+                    IconButton(
+                        onClick = onToggleInvertColors,
+                        modifier = Modifier.size(36.dp),
+                    ) {
+                        // ☀ U+2600 when off, ☾ U+263E when on — Unicode glyphs
+                        // keep us icon-library-agnostic and render in a TextButton.
+                        Text(
+                            if (invertColors) "\u263E" else "\u2600",
+                            style = MaterialTheme.typography.titleMedium,
+                        )
                     }
                 }
                 // More menu button

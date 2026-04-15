@@ -53,6 +53,7 @@ fun App(
     onShowNativeMenu: (() -> Unit)? = null,
     sshKeyManager: com.clauderemote.connection.SshKeyManager? = null,
     exitApp: (() -> Unit)? = null,
+    onInvertColorsChanged: ((Boolean) -> Unit)? = null,
     terminalContent: @Composable (modifier: Modifier) -> Unit
 ) {
     val scope = rememberCoroutineScope()
@@ -67,6 +68,7 @@ fun App(
     var tabCloseConfirmId by remember { mutableStateOf<String?>(null) }
     var sessionUsagePercent by remember { mutableStateOf<Int?>(null) }
     var weekUsagePercent by remember { mutableStateOf<Int?>(null) }
+    var invertColors by remember { mutableStateOf(appSettings.invertColors) }
 
     // Collect new StateFlows from orchestrator
     val sessionActivities by sessionOrchestrator.sessionActivities.collectAsState()
@@ -411,6 +413,13 @@ fun App(
                     TerminalScreen(
                         tabs = tabs,
                         activeTabId = activeTabId,
+                        invertColors = invertColors,
+                        onToggleInvertColors = {
+                            val next = !invertColors
+                            invertColors = next
+                            appSettings.invertColors = next
+                            onInvertColorsChanged?.invoke(next)
+                        },
                         onTabSwitch = { sessionOrchestrator.switchTab(it) },
                         onRenameSession = { id, newAlias ->
                             tabManager.updateAlias(id, newAlias)

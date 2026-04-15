@@ -230,6 +230,7 @@ class MainActivity : FragmentActivity() {
                     terminalHandle?.applyFontSize(size)
                 },
                 exitApp = { finishAffinity() },
+                onInvertColorsChanged = { invert -> applyInvertLayer(invert) },
                 terminalContent = { modifier ->
                     SshTerminal(
                         fontSizeDp = appSettings.terminalFontSize,
@@ -270,6 +271,8 @@ class MainActivity : FragmentActivity() {
     override fun onResume() {
         super.onResume()
         isAppInForeground = true
+        // Re-apply invert layer on resume (layer can be lost across config changes).
+        window.decorView.post { applyInvertLayer(appSettings.invertColors) }
         KeepAliveService.onAppForeground()
         sessionOrchestrator.setBackgroundMode(false)
         tabManager.activeTabId.value?.let { KeepAliveService.clearAlert(it) }
@@ -319,6 +322,32 @@ class MainActivity : FragmentActivity() {
             })
         } catch (e: Exception) {
             FileLogger.error("Network", "Failed to register network callback", e)
+        }
+    }
+
+    /**
+     * Toggle a GPU color-matrix inversion on the entire window. Covers Compose
+     * rendering plus the native [com.termux.view.TerminalView] embedded via
+     * [androidx.compose.ui.viewinterop.AndroidView] — both are children of the
+     * same Android view hierarchy, so a hardware layer on the Compose root
+     * captures every pixel.
+     */
+    private fun applyInvertLayer(invert: Boolean) {
+        val root = (findViewById<android.view.ViewGroup>(android.R.id.content))
+            ?.getChildAt(0) ?: return
+        if (invert) {
+            val matrix = android.graphics.ColorMatrix(floatArrayOf(
+                -1f, 0f, 0f, 0f, 255f,
+                 0f,-1f, 0f, 0f, 255f,
+                 0f, 0f,-1f, 0f, 255f,
+                 0f, 0f, 0f, 1f,   0f,
+            ))
+            val paint = android.graphics.Paint().apply {
+                colorFilter = android.graphics.ColorMatrixColorFilter(matrix)
+            }
+            root.setLayerType(android.view.View.LAYER_TYPE_HARDWARE, paint)
+        } else {
+            root.setLayerType(android.view.View.LAYER_TYPE_NONE, null)
         }
     }
 

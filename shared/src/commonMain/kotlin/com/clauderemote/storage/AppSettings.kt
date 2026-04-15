@@ -89,4 +89,10 @@ class AppSettings(private val prefs: PlatformPreferences) {
     var biometricLockEnabled: Boolean
         get() = prefs.getBoolean("biometric_lock_enabled", false)
         set(value) = prefs.putBoolean("biometric_lock_enabled", value)
+
+    // Sunlight-readable mode: invert all pixel colors on the Activity root
+    // (Compose + AndroidView children) via a hardware color-matrix layer.
+    var invertColors: Boolean
+        get() = prefs.getBoolean("invert_colors", false)
+        set(value) = prefs.putBoolean("invert_colors", value)
 }
