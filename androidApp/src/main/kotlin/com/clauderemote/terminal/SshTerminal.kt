@@ -95,7 +95,7 @@ fun SshTerminal(
             var readyFired = false
             var lastW = 0
             var lastH = 0
-            val tryAttach = {
+            fun tryAttach() {
                 val w = view.width; val h = view.height
                 if (w > 0 && h > 0) {
                     val sizeChanged = w != lastW || h != lastH
