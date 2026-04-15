@@ -4,7 +4,6 @@ import com.clauderemote.model.AuthMethod
 import com.clauderemote.model.SshServer
 import com.clauderemote.storage.ServerStorage
 import com.clauderemote.util.FileLogger
-import com.jcraft.jsch.ChannelSftp
 import com.jcraft.jsch.ChannelShell
 import com.jcraft.jsch.JSch
 import com.jcraft.jsch.Session
@@ -190,16 +189,31 @@ class SshManager(
         FileLogger.log(TAG, "Disconnected")
     }
 
+    /**
+     * Upload file via exec channel + cat (works over Cloudflare WebSocket
+     * tunnel where SFTP subsystem may not be available).
+     */
     suspend fun uploadFile(bytes: ByteArray, remoteDir: String, fileName: String): String = withContext(Dispatchers.IO) {
         val sess = session ?: throw IllegalStateException("Not connected")
-        val sftp = sess.openChannel("sftp") as ChannelSftp
-        sftp.connect(5000)
+        val safeName = fileName.replace("'", "'\\''")
+        val remotePath = "$remoteDir/$safeName"
+        val ch = sess.openChannel("exec") as com.jcraft.jsch.ChannelExec
+        ch.setCommand("mkdir -p '$remoteDir' && cat > '$remotePath'")
+        ch.inputStream = null
+        val os = ch.outputStream
+        ch.connect(5000)
         try {
-            try { sftp.mkdir(remoteDir) } catch (_: Exception) {}
-            val remotePath = "$remoteDir/$fileName"
-            sftp.put(bytes.inputStream(), remotePath)
+            os.write(bytes)
+            os.flush()
+            os.close()
+            // Wait for remote cat to finish
+            val deadline = System.currentTimeMillis() + 10_000L
+            while (!ch.isClosed && System.currentTimeMillis() < deadline) {
+                Thread.sleep(100)
+            }
+            if (ch.exitStatus != 0) throw java.io.IOException("Upload failed (exit ${ch.exitStatus})")
             remotePath
-        } finally { sftp.disconnect() }
+        } finally { ch.disconnect() }
     }
 
     /**
