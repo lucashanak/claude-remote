@@ -59,12 +59,14 @@ class KeepAliveService : Service() {
     }
 
     private var wakeLock: PowerManager.WakeLock? = null
+    private var wifiLock: android.net.wifi.WifiManager.WifiLock? = null
 
     override fun onCreate() {
         super.onCreate()
         instance = this
         createNotificationChannel()
         acquireWakeLock()
+        acquireWifiLock()
         FileLogger.log(TAG, "Service created")
     }
 
@@ -76,6 +78,7 @@ class KeepAliveService : Service() {
 
     override fun onDestroy() {
         releaseWakeLock()
+        releaseWifiLock()
         instance = null
         FileLogger.log(TAG, "Service destroyed")
         super.onDestroy()
@@ -179,6 +182,21 @@ class KeepAliveService : Service() {
     private fun releaseWakeLock() {
         wakeLock?.let { if (it.isHeld) it.release() }
         FileLogger.log(TAG, "WakeLock released")
+    }
+
+    @Suppress("DEPRECATION")
+    private fun acquireWifiLock() {
+        val wm = applicationContext.getSystemService(Context.WIFI_SERVICE) as android.net.wifi.WifiManager
+        if (wifiLock == null) {
+            wifiLock = wm.createWifiLock(android.net.wifi.WifiManager.WIFI_MODE_FULL_HIGH_PERF, "clauderemote:wifi")
+        }
+        wifiLock?.let { if (!it.isHeld) it.acquire() }
+        FileLogger.log(TAG, "WifiLock acquired")
+    }
+
+    private fun releaseWifiLock() {
+        wifiLock?.let { if (it.isHeld) it.release() }
+        FileLogger.log(TAG, "WifiLock released")
     }
 
     /** Switch wake lock on/off based on app visibility.

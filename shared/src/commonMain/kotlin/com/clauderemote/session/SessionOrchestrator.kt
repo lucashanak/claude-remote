@@ -86,6 +86,7 @@ class SessionOrchestrator(
     private val usagePollingJobs = mutableMapOf<String, kotlinx.coroutines.Job>()
     private val latencyPollingJobs = mutableMapOf<String, kotlinx.coroutines.Job>()
     @Volatile private var isInBackground = false
+    private val reconnectingSessionIds = mutableSetOf<String>()
 
     /** Call from onPause/onResume to pause heavy background work and save battery. */
     fun setBackgroundMode(background: Boolean) {
@@ -384,49 +385,56 @@ class SessionOrchestrator(
         emit: (String) -> Unit,
         maxAttempts: Int = 3
     ) {
-        for (attempt in 1..maxAttempts) {
-            emit("\r\n\u001B[33mConnection lost. Reconnecting ($attempt/$maxAttempts)...\u001B[0m\r\n")
-            FileLogger.log(TAG, "Auto-reconnect attempt $attempt/$maxAttempts for ${session.id}")
-            kotlinx.coroutines.delay(2000L * attempt) // increasing delay
-
-            try {
-                // Clean up old connection
-                connections[session.id]?.disconnect()
-                connections.remove(session.id)
-
-                val sshManager = SshManager(serverStorage)
-                connections[session.id] = sshManager
-
-                sshManager.connect(
-                    session.server,
-                    onOutput = { data -> emit(data) },
-                    onConnectionLost = {
-                        tabManager.updateTabStatus(session.id, SessionStatus.DISCONNECTED)
-                        reconnectScope.launch { autoReconnect(session, emit) }
-                    }
-                )
-
-                // Wait for shell prompt, clear garbage, then attach tmux
-                waitForShellPrompt(session.id, 3000)
-                sshManager.sendInput("\u0003\n") // Ctrl-C + Enter to clear
-                kotlinx.coroutines.delay(100)
-                sendTmuxCommand(sshManager, session, false)
-                promptDetector.suppressFor(3000) // suppress during tmux screen redraw after reconnect
-
-                tabManager.updateTabStatus(session.id, SessionStatus.ACTIVE)
-                updateActivity(session.id, SessionActivity.WAITING_FOR_INPUT)
-                onSessionActive?.invoke(session)
-                emit("\r\n\u001B[32mReconnected!\u001B[0m\r\n")
-                FileLogger.log(TAG, "Auto-reconnect succeeded for ${session.id}")
-                flushPendingInputs(session.id)
-                return
-            } catch (e: Exception) {
-                FileLogger.error(TAG, "Auto-reconnect attempt $attempt failed", e)
-            }
+        synchronized(reconnectingSessionIds) {
+            if (!reconnectingSessionIds.add(session.id)) return // already reconnecting
         }
+        try {
+            for (attempt in 1..maxAttempts) {
+                emit("\r\n\u001B[33mConnection lost. Reconnecting ($attempt/$maxAttempts)...\u001B[0m\r\n")
+                FileLogger.log(TAG, "Auto-reconnect attempt $attempt/$maxAttempts for ${session.id}")
+                kotlinx.coroutines.delay(2000L * attempt) // increasing delay
 
-        emit("\r\n\u001B[31mReconnect failed after $maxAttempts attempts.\u001B[0m\r\n")
-        onSessionDisconnect?.invoke(session.id)
+                try {
+                    // Clean up old connection
+                    connections[session.id]?.disconnect()
+                    connections.remove(session.id)
+
+                    val sshManager = SshManager(serverStorage)
+                    connections[session.id] = sshManager
+
+                    sshManager.connect(
+                        session.server,
+                        onOutput = { data -> emit(data) },
+                        onConnectionLost = {
+                            tabManager.updateTabStatus(session.id, SessionStatus.DISCONNECTED)
+                            reconnectScope.launch { autoReconnect(session, emit) }
+                        }
+                    )
+
+                    // Wait for shell prompt, clear garbage, then attach tmux
+                    waitForShellPrompt(session.id, 3000)
+                    sshManager.sendInput("\u0003\n") // Ctrl-C + Enter to clear
+                    kotlinx.coroutines.delay(100)
+                    sendTmuxCommand(sshManager, session, false)
+                    promptDetector.suppressFor(3000) // suppress during tmux screen redraw after reconnect
+
+                    tabManager.updateTabStatus(session.id, SessionStatus.ACTIVE)
+                    updateActivity(session.id, SessionActivity.WAITING_FOR_INPUT)
+                    onSessionActive?.invoke(session)
+                    emit("\r\n\u001B[32mReconnected!\u001B[0m\r\n")
+                    FileLogger.log(TAG, "Auto-reconnect succeeded for ${session.id}")
+                    flushPendingInputs(session.id)
+                    return
+                } catch (e: Exception) {
+                    FileLogger.error(TAG, "Auto-reconnect attempt $attempt failed", e)
+                }
+            }
+
+            emit("\r\n\u001B[31mReconnect failed after $maxAttempts attempts.\u001B[0m\r\n")
+            onSessionDisconnect?.invoke(session.id)
+        } finally {
+            synchronized(reconnectingSessionIds) { reconnectingSessionIds.remove(session.id) }
+        }
     }
 
     private suspend fun connectMosh(session: ClaudeSession, isNewTmuxSession: Boolean) {
@@ -659,6 +667,12 @@ class SessionOrchestrator(
      * Reconnect a disconnected session. Reuses the same session config.
      */
     suspend fun reconnectSession(sessionId: String) {
+        synchronized(reconnectingSessionIds) {
+            if (sessionId in reconnectingSessionIds) {
+                FileLogger.log(TAG, "Skipping reconnectSession for $sessionId — autoReconnect already running")
+                return
+            }
+        }
         val session = tabManager.getTab(sessionId) ?: return
         FileLogger.log(TAG, "Reconnecting session $sessionId to ${session.server.name}")
 
