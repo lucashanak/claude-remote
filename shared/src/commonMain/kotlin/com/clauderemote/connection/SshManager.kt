@@ -206,8 +206,17 @@ class SshManager(
         ch.connect(5000)
         FileLogger.log(TAG, "uploadFile: exec channel connected, writing ${bytes.size} bytes")
         try {
-            os.write(bytes)
-            os.flush()
+            // Throttle writes — sending large bursts through Cloudflare
+            // WebSocket tunnel causes cloudflared to drop the connection
+            // (EOFException). 4KB chunks with 20ms pauses ≈ 200KB/s.
+            var off = 0
+            while (off < bytes.size) {
+                val len = minOf(4096, bytes.size - off)
+                os.write(bytes, off, len)
+                os.flush()
+                off += len
+                if (off < bytes.size) Thread.sleep(20)
+            }
             os.close()
             FileLogger.log(TAG, "uploadFile: bytes written, waiting for cat to finish")
             // Wait for remote cat to finish
