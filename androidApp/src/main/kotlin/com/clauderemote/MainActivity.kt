@@ -154,9 +154,9 @@ class MainActivity : FragmentActivity() {
             terminalHandle?.feedSshBytes(data.toByteArray(Charsets.UTF_8))
         }
 
-        sessionOrchestrator.onTabSwitched = { sessionId, bufferedOutput ->
+        sessionOrchestrator.onTabSwitched = tabSwitch@ { sessionId, bufferedOutput ->
             FileLogger.log("MainActivity", "Tab switched to $sessionId, buffer: ${bufferedOutput.length} chars")
-            val handle = terminalHandle ?: return@onTabSwitched
+            val handle = terminalHandle ?: return@tabSwitch
             handle.replay(bufferedOutput.toByteArray(Charsets.UTF_8))
             // Force a full tmux redraw after the switch. Naive toggle
             // resize(c, r-1) + resize(c, r) delivered back-to-back can
@@ -214,6 +214,9 @@ class MainActivity : FragmentActivity() {
                 sshKeyManager = sshKeyManager,
                 appVersion = appVersion,
                 onInstallUpdate = { apkBytes, info -> installUpdate(apkBytes, info) },
+                onGetCurrentApk = {
+                    File(applicationInfo.sourceDir).readBytes()
+                },
                 onShareLog = { log ->
                     val intent = Intent(Intent.ACTION_SEND).apply {
                         type = "text/plain"
