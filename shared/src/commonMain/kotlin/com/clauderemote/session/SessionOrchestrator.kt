@@ -643,24 +643,20 @@ class SessionOrchestrator(
      *
      * SAF file pickers can kill the underlying TCP/WebSocket while the app
      * is backgrounded.  With Cloudflare tunnel the WebSocket dies but JSch
-     * `isConnected` still returns true (it hasn't detected the failure).
+     * `isConnected` still returns true (it hasn't detected the failure yet).
      *
-     * Strategy: probe the connection first; if probe or SFTP fails, wait
-     * for autoReconnect and retry on the fresh connection.
+     * Strategy: try SFTP directly; on failure kill the stale session so the
+     * read loop fires onConnectionLost → autoReconnect, then retry on the
+     * fresh connection.
      */
     suspend fun uploadFile(sessionId: String, bytes: ByteArray, fileName: String): String {
-        val deadline = System.currentTimeMillis() + 20_000L
+        val deadline = System.currentTimeMillis() + 25_000L
         var lastException: Exception? = null
+        var killedStaleConnection = false
 
         while (System.currentTimeMillis() < deadline) {
             val c = connections[sessionId]
             if (c != null && c.isConnected) {
-                // Probe transport — catches dead Cloudflare WebSocket
-                if (!c.probeConnection()) {
-                    FileLogger.log(TAG, "Upload probe failed for $sessionId, waiting for reconnect")
-                    kotlinx.coroutines.delay(1000)
-                    continue
-                }
                 try {
                     val remoteDir = "/tmp/claude-uploads"
                     val remotePath = c.uploadFile(bytes, remoteDir, fileName)
@@ -668,10 +664,17 @@ class SessionOrchestrator(
                     return remotePath
                 } catch (e: Exception) {
                     lastException = e
-                    FileLogger.error(TAG, "SFTP upload failed for $sessionId, will retry after reconnect", e)
+                    FileLogger.error(TAG, "SFTP upload failed for $sessionId", e)
+                    // Connection reports connected but SFTP failed — transport
+                    // is likely dead (Cloudflare WebSocket zombie). Kill it once
+                    // to trigger reconnect; after that just wait for the new one.
+                    if (!killedStaleConnection) {
+                        killedStaleConnection = true
+                        c.killForReconnect()
+                    }
                 }
             }
-            kotlinx.coroutines.delay(500)
+            kotlinx.coroutines.delay(1000)
         }
         throw lastException ?: IllegalStateException("SSH not ready for $sessionId (upload timeout)")
     }

@@ -193,7 +193,7 @@ class SshManager(
     suspend fun uploadFile(bytes: ByteArray, remoteDir: String, fileName: String): String = withContext(Dispatchers.IO) {
         val sess = session ?: throw IllegalStateException("Not connected")
         val sftp = sess.openChannel("sftp") as ChannelSftp
-        sftp.connect(5000) // 5s — fail fast on dead WebSocket so caller can retry after reconnect
+        sftp.connect(5000)
         try {
             try { sftp.mkdir(remoteDir) } catch (_: Exception) {}
             val remotePath = "$remoteDir/$fileName"
@@ -203,28 +203,15 @@ class SshManager(
     }
 
     /**
-     * Quick probe: open+close an exec channel to verify the SSH transport
-     * is truly alive (catches dead Cloudflare WebSocket where isConnected
-     * still returns true because JSch hasn't detected the failure yet).
-     *
-     * If probe fails, kills the JSch session so the read loop exits and
-     * fires onConnectionLost → autoReconnect.
+     * Kill the underlying JSch session without setting [disconnected] flag,
+     * so the read loop's finally block fires [onConnectionLost] → autoReconnect.
+     * Use when transport is detected as dead (e.g. SFTP failed on stale
+     * Cloudflare WebSocket) but JSch hasn't noticed yet.
      */
-    suspend fun probeConnection(): Boolean = withContext(Dispatchers.IO) {
-        try {
-            val sess = session ?: return@withContext false
-            val ch = sess.openChannel("exec") as com.jcraft.jsch.ChannelExec
-            ch.setCommand("true")
-            ch.connect(3000)
-            ch.disconnect()
-            true
-        } catch (_: Exception) {
-            // Probe failed — transport is dead. Kill JSch session to unblock
-            // the read loop (which fires onConnectionLost → autoReconnect).
-            FileLogger.log(TAG, "Probe failed, forcing session disconnect to trigger reconnect")
-            try { session?.disconnect() } catch (_: Exception) {}
-            false
-        }
+    fun killForReconnect() {
+        FileLogger.log(TAG, "Killing stale session to trigger reconnect")
+        try { channel?.disconnect() } catch (_: Exception) {}
+        try { session?.disconnect() } catch (_: Exception) {}
     }
 
     fun getSession(): Session? = session
