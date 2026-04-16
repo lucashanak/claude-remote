@@ -1,5 +1,8 @@
 package com.termux.terminal
 
+import com.clauderemote.session.RowSnapshot
+import com.clauderemote.session.ScreenStateSnapshot
+
 /**
  * A [TerminalSession] that is *not* backed by a local subprocess. Instead, SSH bytes
  * received from the network are fed in via [receiveSshBytes], and user keystrokes
@@ -92,6 +95,65 @@ class SshTerminalSession(
                 mEmulator.append(data, data.size)
                 notifyScreenUpdate()
             }
+        }
+    }
+
+    /**
+     * Read the bottom [rowCount] rows of the rendered screen as a snapshot with
+     * per-cell foreground colors. MUST be called on the Android main thread —
+     * the emulator is not thread-safe and all writes are funneled through
+     * [mMainThreadHandler].
+     *
+     * Used by [com.clauderemote.session.ScreenStateClassifier] to distinguish
+     * Claude's dark-red "working indicator" from idle chat content.
+     */
+    fun readBottomRowsSnapshot(rowCount: Int = 8): ScreenStateSnapshot? {
+        val emu = mEmulator ?: return null
+        val buffer = emu.screen ?: return null
+        val cols = emu.mColumns
+        val rows = emu.mRows
+        val startRow = (rows - rowCount).coerceAtLeast(0)
+        val result = ArrayList<RowSnapshot>(rows - startRow)
+        for (r in startRow until rows) {
+            val internal = buffer.externalToInternalRow(r)
+            val termRow = buffer.mLines[internal]
+            val text = CharArray(cols) { ' ' }
+            val reds = BooleanArray(cols)
+            if (termRow != null) {
+                for (c in 0 until cols) {
+                    val idx = termRow.findStartOfColumn(c)
+                    if (idx < termRow.mText.size) text[c] = termRow.mText[idx]
+                    val fg = TextStyle.decodeForeColor(termRow.getStyle(c))
+                    reds[c] = isReddishFg(fg)
+                }
+            }
+            // null row (unallocated) → keep the all-space / all-false defaults, preserve alignment
+            result.add(RowSnapshot(String(text), reds))
+        }
+        return ScreenStateSnapshot(result, cols)
+    }
+
+    /**
+     * Is [fg] a "reddish" foreground? Covers:
+     *  - ANSI palette indices 1 (red) and 9 (bright red)
+     *  - Common 256-color red indices Claude Code may use
+     *  - 24-bit truecolor with dominant red channel
+     *
+     * For 24-bit, `fg` is encoded as `0xff000000 | RGB` per [TextStyle.decodeForeColor].
+     */
+    private fun isReddishFg(fg: Int): Boolean {
+        // Truecolor (high byte 0xff) → decode RGB
+        if ((fg.toLong() and 0xff000000L) == 0xff000000L) {
+            val r = (fg ushr 16) and 0xff
+            val g = (fg ushr 8) and 0xff
+            val b = fg and 0xff
+            return r >= 120 && r > g + 40 && r > b + 40
+        }
+        // Indexed palette
+        return when (fg) {
+            1, 9 -> true                           // ANSI red + bright red
+            88, 124, 160, 196, 197, 203, 204 -> true // common 256-color reds
+            else -> false
         }
     }
 }

@@ -29,8 +29,29 @@ class SessionOrchestrator(
     private val outputBuffers = mutableMapOf<String, StringBuilder>()
     private val bufferLock = Any()
 
-    // Prompt detection for notifications
-    private val promptDetector = InputPromptDetector()
+    // Prompt detection for notifications — quiescence-based, reads rendered screen state.
+    private val promptDetector = InputPromptDetector().apply {
+        onDetection = { det ->
+            val isActive = tabManager.activeTabId.value == det.sessionId
+            onClaudeNeedsInput?.invoke(det.sessionId, det.type.displayHint, isActive)
+        }
+        onStateChange = { sessionId, state ->
+            when (state) {
+                ClaudeState.WORKING -> updateActivity(sessionId, SessionActivity.WORKING)
+                ClaudeState.IDLE -> updateActivity(sessionId, SessionActivity.WAITING_FOR_INPUT)
+                ClaudeState.UNKNOWN -> {} // keep last known activity
+            }
+        }
+    }
+
+    /**
+     * Platform-provided screen snapshot reader. Must marshal onto the thread that
+     * owns the terminal emulator (main looper on Android, EDT on Swing). Pass-through
+     * to [InputPromptDetector.screenReader].
+     */
+    var screenReader: (suspend (sessionId: String) -> ScreenStateSnapshot?)?
+        get() = promptDetector.screenReader
+        set(value) { promptDetector.screenReader = value }
 
     // Per-session activity state (for health indicator dots)
     private val _sessionActivities = kotlinx.coroutines.flow.MutableStateFlow<Map<String, SessionActivity>>(emptyMap())
@@ -317,19 +338,10 @@ class SessionOrchestrator(
             lastOutputTime = now
             if (burstMode) return
 
-            // Detect prompts for all sessions (active and background)
-            val detection = promptDetector.onOutput(session.id, text)
-            if (detection != null) {
-                onClaudeNeedsInput?.invoke(session.id, detection.type.displayHint, isActive)
-                // Update activity based on prompt type
-                val activity = when (detection.type) {
-                    PromptType.INPUT_PROMPT -> SessionActivity.WAITING_FOR_INPUT
-                    PromptType.APPROVAL_NEEDED, PromptType.PERMISSION_PROMPT -> SessionActivity.APPROVAL_NEEDED
-                }
-                updateActivity(session.id, activity)
-            }
-            // Feed buffer for multi-chunk parsing
-            promptDetector.feedRecentOutput(session.id, text)
+            // Feed output — detector handles buffering + schedules quiescence check.
+            // Detection fires asynchronously via promptDetector.onDetection callback
+            // once the rendered screen state classifies as IDLE.
+            promptDetector.onOutput(session.id, text)
             // Parse context window usage
             val ctx = promptDetector.parseContextPercent(session.id, text)
             if (ctx != null) {
@@ -487,11 +499,7 @@ class SessionOrchestrator(
             if (isActive) {
                 onTerminalOutput?.invoke(session.id, text)
             }
-            promptDetector.feedRecentOutput(session.id, text)
-            val detection = promptDetector.onOutput(session.id, text)
-            if (detection != null) {
-                onClaudeNeedsInput?.invoke(session.id, detection.type.displayHint, isActive)
-            }
+            promptDetector.onOutput(session.id, text)
         }
 
         val success = moshManager.connect(

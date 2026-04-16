@@ -24,6 +24,7 @@ import com.clauderemote.util.UpdateInfo
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.GlobalScope
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.io.File
 
 class MainActivity : FragmentActivity() {
@@ -195,6 +196,18 @@ class MainActivity : FragmentActivity() {
             if ((!fg || !isActiveTab) && appSettings.notificationsEnabled) {
                 FileLogger.log("Notify", "Sending alert for '$title'")
                 KeepAliveService.sendAlert(sessionId, title, hint)
+            }
+        }
+
+        // Screen-state reader for the new color-aware prompt detector. The primary
+        // terminal emulator reflects ONLY the currently-active tab, so we return
+        // null for background sessions (regression vs. the old regex detector: no
+        // background-tab notifications in this iteration). Shadow emulators per
+        // session would lift this restriction — left for a follow-up.
+        sessionOrchestrator.screenReader = { sessionId ->
+            withContext(Dispatchers.Main) {
+                if (tabManager.activeTabId.value != sessionId) null
+                else terminalHandle?.readScreenStateSnapshot()
             }
         }
 

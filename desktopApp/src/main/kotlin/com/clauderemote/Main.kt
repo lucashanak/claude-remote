@@ -7,6 +7,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Window
 import androidx.compose.ui.window.application
 import androidx.compose.ui.window.rememberWindowState
+import com.clauderemote.session.RowSnapshot
+import com.clauderemote.session.ScreenStateSnapshot
 import com.clauderemote.session.SessionOrchestrator
 import com.clauderemote.session.TabManager
 import com.clauderemote.storage.AppSettings
@@ -14,6 +16,7 @@ import com.clauderemote.storage.PlatformPreferences
 import com.clauderemote.storage.ServerStorage
 import com.clauderemote.ui.App
 import com.clauderemote.util.FileLogger
+import com.jediterm.terminal.TerminalColor
 import com.jediterm.terminal.TtyConnector
 import com.jediterm.terminal.ui.JediTermWidget
 import com.jediterm.terminal.ui.settings.DefaultSettingsProvider
@@ -149,6 +152,17 @@ fun main() = application {
             widget.terminalPanel.clearBuffer()
             if (bufferedOutput.isNotEmpty()) connector.feedOutput(bufferedOutput)
         }
+    }
+
+    // Screen-state reader for the color-aware prompt detector. JediTerm's
+    // TerminalTextBuffer is internally locked, so we can call it from any
+    // coroutine dispatcher without Swing-EDT marshaling. Only the active tab's
+    // widget state is inspected — background sessions return null (regression
+    // vs. the old regex detector: no background-tab notifications in this
+    // iteration). Shadow emulators per session would lift this — left for later.
+    sessionOrchestrator.screenReader = { sessionId ->
+        if (tabManager.activeTabId.value != sessionId) null
+        else readJediTermSnapshot(termWidget, rowCount = 8)
     }
 
     // Desktop notifications via SystemTray
@@ -475,4 +489,70 @@ private fun DesktopTerminalView(
             }
         }
     )
+}
+
+/**
+ * Snapshot the bottom [rowCount] rows of the JediTerm widget with per-cell
+ * foreground color info for [com.clauderemote.session.ScreenStateClassifier].
+ *
+ * [com.jediterm.terminal.model.TerminalTextBuffer] has an internal lock, so
+ * this can be called from any thread — we acquire the lock ourselves.
+ */
+private fun readJediTermSnapshot(widget: JediTermWidget?, rowCount: Int): ScreenStateSnapshot? {
+    val w = widget ?: return null
+    val buffer = try { w.terminalTextBuffer } catch (_: Throwable) { return null } ?: return null
+    buffer.lock()
+    try {
+        val cols = buffer.width
+        val rows = buffer.height
+        if (cols <= 0 || rows <= 0) return null
+        val startRow = (rows - rowCount).coerceAtLeast(0)
+        val result = ArrayList<RowSnapshot>(rows - startRow)
+        for (r in startRow until rows) {
+            val line = buffer.getLine(r) ?: continue
+            val text = CharArray(cols) { ' ' }
+            val reds = BooleanArray(cols)
+            var col = 0
+            line.forEachEntry { entry ->
+                val isRed = isReddishFgJedi(entry.style?.foreground)
+                val s = entry.text?.toString() ?: ""
+                val len = entry.length
+                var i = 0
+                while (i < len && col < cols) {
+                    if (i < s.length) text[col] = s[i]
+                    reds[col] = isRed
+                    i++
+                    col++
+                }
+            }
+            result.add(RowSnapshot(String(text), reds))
+        }
+        return ScreenStateSnapshot(result, cols)
+    } finally {
+        buffer.unlock()
+    }
+}
+
+/**
+ * Is the JediTerm foreground color "reddish"? Mirrors the Android variant in
+ * [com.termux.terminal.SshTerminalSession.isReddishFg] — checks ANSI red
+ * (indices 1 & 9), common 256-color reds, and 24-bit with dominant red.
+ */
+private fun isReddishFgJedi(fg: TerminalColor?): Boolean {
+    if (fg == null) return false
+    if (fg.isIndexed) {
+        return when (fg.colorIndex) {
+            1, 9, 88, 124, 160, 196, 197, 203, 204 -> true
+            else -> false
+        }
+    }
+    return try {
+        val c = fg.toColor()
+        val r = c.red
+        val g = c.green
+        val b = c.blue
+        r >= 120 && r > g + 40 && r > b + 40
+    } catch (_: Throwable) {
+        false
+    }
 }

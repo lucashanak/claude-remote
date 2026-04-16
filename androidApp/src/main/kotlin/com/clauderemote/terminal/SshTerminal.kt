@@ -9,6 +9,7 @@ import android.view.ViewGroup
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.viewinterop.AndroidView
+import com.clauderemote.session.ScreenStateSnapshot
 import com.clauderemote.util.FileLogger
 import com.termux.terminal.SshTerminalSession
 import com.termux.terminal.TerminalEmulator
@@ -65,6 +66,15 @@ class SshTerminalHandle internal constructor(
         applyColorSchemeTo(session, scheme)
         view.invalidate()
     }
+
+    /**
+     * Snapshot the bottom rows of the rendered screen for Claude-state
+     * classification. MUST be called on the Android main thread — the
+     * emulator is not thread-safe. Callers in coroutines should use
+     * `withContext(Dispatchers.Main) { handle.readScreenStateSnapshot() }`.
+     */
+    fun readScreenStateSnapshot(rowCount: Int = 8): ScreenStateSnapshot? =
+        session.readBottomRowsSnapshot(rowCount)
 
     private companion object {
         // ESC [ 2 J — erase visible screen; ESC [ 3 J — erase scrollback;
