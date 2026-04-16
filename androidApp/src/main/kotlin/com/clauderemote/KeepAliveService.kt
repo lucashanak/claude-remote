@@ -16,8 +16,15 @@ class KeepAliveService : Service() {
     companion object {
         private const val CHANNEL_ID = "keepalive"
         private const val ALERT_CHANNEL_ID = "claude_alerts"
+        /**
+         * Single notification id used for BOTH the quiet foreground-service
+         * notification and the "Claude needs input" alert. Switching channels
+         * on the same id gives the user ONE notification that merely
+         * upgrades to HIGH-importance alerting when needed — rather than two
+         * concurrent status-bar entries (the old "dimmed gear" + "loud alert"
+         * pair the user complained about).
+         */
         private const val NOTIFICATION_ID = 1
-        private const val ALERT_NOTIFICATION_BASE_ID = 1000
         private const val TAG = "KeepAlive"
 
         private var instance: KeepAliveService? = null
@@ -61,6 +68,11 @@ class KeepAliveService : Service() {
     private var wakeLock: PowerManager.WakeLock? = null
     private var wifiLock: android.net.wifi.WifiManager.WifiLock? = null
 
+    /** Last description passed via [updateDescription] — restored when an alert is dismissed. */
+    @Volatile private var currentDescription: String = "Active session"
+    /** Session id whose alert is currently rendered in our single notification, or null. */
+    @Volatile private var currentAlertSessionId: String? = null
+
     override fun onCreate() {
         super.onCreate()
         instance = this
@@ -72,6 +84,7 @@ class KeepAliveService : Service() {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         val desc = intent?.getStringExtra("description") ?: "Active session"
+        currentDescription = desc
         startForeground(NOTIFICATION_ID, buildNotification(desc))
         return START_STICKY
     }
@@ -131,11 +144,27 @@ class KeepAliveService : Service() {
             .build()
     }
 
+    /**
+     * Quietly update the persistent notification's description. If an alert
+     * is currently showing, we keep the alert content — the user hasn't
+     * acknowledged it yet.
+     */
     fun updateNotification(description: String) {
-        val nm = getSystemService(NotificationManager::class.java)
-        nm.notify(NOTIFICATION_ID, buildNotification(description))
+        currentDescription = description
+        if (currentAlertSessionId != null) return
+        startForeground(NOTIFICATION_ID, buildNotification(description))
     }
 
+    /**
+     * Raise an attention-grabbing alert by upgrading the SAME foreground-service
+     * notification (same id) to the HIGH-importance `claude_alerts` channel.
+     * The user sees one notification that changes appearance, not two
+     * concurrent entries.
+     *
+     * Must stay `setOngoing(true)` and NOT `setAutoCancel(true)` — this
+     * notification is tied to a foreground service; cancelling it would
+     * violate the FGS contract.
+     */
     fun postAlert(sessionId: String, sessionTitle: String, hint: String) {
         val openIntent = PendingIntent.getActivity(
             this, sessionId.hashCode(),
@@ -152,21 +181,27 @@ class KeepAliveService : Service() {
             .setContentText(hint)
             .setSmallIcon(android.R.drawable.ic_dialog_info)
             .setContentIntent(openIntent)
-            .setAutoCancel(true)
+            .setOngoing(true)
             .setPriority(Notification.PRIORITY_HIGH)
             .setCategory(Notification.CATEGORY_MESSAGE)
             .setDefaults(Notification.DEFAULT_ALL)
             .setFullScreenIntent(openIntent, false)
             .build()
 
-        val nm = getSystemService(NotificationManager::class.java)
-        nm.notify(ALERT_NOTIFICATION_BASE_ID + sessionId.hashCode().and(0xFFFF), notification)
+        currentAlertSessionId = sessionId
+        startForeground(NOTIFICATION_ID, notification)
         FileLogger.log(TAG, "Alert sent: $sessionTitle — $hint")
     }
 
+    /**
+     * Revert the single notification back to the quiet keep-alive appearance
+     * after the user has acknowledged the alert (tapped, switched tabs, or
+     * typed into the session).
+     */
     fun dismissAlert(sessionId: String) {
-        val nm = getSystemService(NotificationManager::class.java)
-        nm.cancel(ALERT_NOTIFICATION_BASE_ID + sessionId.hashCode().and(0xFFFF))
+        if (currentAlertSessionId != sessionId) return
+        currentAlertSessionId = null
+        startForeground(NOTIFICATION_ID, buildNotification(currentDescription))
     }
 
     @Suppress("DEPRECATION")
