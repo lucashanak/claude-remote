@@ -447,6 +447,11 @@ else:
                 updateContextPercent(session.id, ctx)
                 onContextUpdate?.invoke(session.id, ctx)
             }
+            // Parse usage stats from terminal output (e.g. /usage command)
+            val usage = promptDetector.parseUsage(session.id, text)
+            if (usage != null) {
+                onUsageUpdate?.invoke(usage["session"], usage["week"])
+            }
         }
 
         sshManager.connect(

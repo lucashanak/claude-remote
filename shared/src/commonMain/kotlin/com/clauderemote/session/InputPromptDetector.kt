@@ -140,11 +140,17 @@ class InputPromptDetector(
             if (total > 0) return ((used / total) * 100).toInt().coerceIn(0, 100)
         }
         CONTEXT_PERCENT_REGEX.find(stripped)?.let { match ->
-            return match.groupValues[1].toIntOrNull()?.coerceIn(0, 100)
+            return (match.groupValues[1].toIntOrNull() ?: match.groupValues[2].toIntOrNull())
+                ?.coerceIn(0, 100)
         }
         TOKENS_REMAINING_REGEX.find(stripped)?.let { match ->
             val remaining = parseTokenCount(match.groupValues[1])
-            val total = 200.0
+            // Infer context window size from remaining tokens
+            val total = when {
+                remaining <= 200_000 -> 200_000.0
+                remaining <= 1_000_000 -> 1_000_000.0
+                else -> remaining * 1.5 // unknown window, estimate conservatively
+            }
             if (remaining in 0.0..total) {
                 return ((1.0 - remaining / total) * 100).toInt().coerceIn(0, 100)
             }
@@ -167,9 +173,9 @@ class InputPromptDetector(
     private fun parseTokenCount(s: String): Double {
         val clean = s.replace(",", "").trim()
         return when {
-            clean.endsWith("k", ignoreCase = true) -> clean.dropLast(1).toDoubleOrNull()?.times(1.0) ?: 0.0
-            clean.endsWith("m", ignoreCase = true) -> clean.dropLast(1).toDoubleOrNull()?.times(1000.0) ?: 0.0
-            else -> clean.toDoubleOrNull()?.div(1000.0) ?: 0.0
+            clean.endsWith("k", ignoreCase = true) -> clean.dropLast(1).toDoubleOrNull()?.times(1_000.0) ?: 0.0
+            clean.endsWith("m", ignoreCase = true) -> clean.dropLast(1).toDoubleOrNull()?.times(1_000_000.0) ?: 0.0
+            else -> clean.toDoubleOrNull() ?: 0.0
         }
     }
 
