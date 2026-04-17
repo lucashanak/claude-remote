@@ -300,7 +300,7 @@ else:
                 promptDetector.markHookActive(sessionId)
                 FileLogger.log(TAG, "Notify watcher started for $sessionId (tmux=$tmuxName)")
 
-                while (kotlinx.coroutines.isActive && ch.isConnected) {
+                while (isActive && ch.isConnected) {
                     val line = kotlinx.coroutines.withContext(Dispatchers.IO) {
                         reader.readLine()
                     } ?: break
@@ -362,7 +362,7 @@ else:
             onSessionActive?.invoke(session)
             startUsagePolling(sessionId)
             startLatencyPolling(sessionId)
-            startNotifyWatcher(sessionId, session.tmuxSessionName, sshManager)
+            connections[sessionId]?.let { startNotifyWatcher(sessionId, session.tmuxSessionName, it) }
             session.copy(status = SessionStatus.ACTIVE)
         } catch (e: Exception) {
             FileLogger.error(TAG, "Session launch failed", e)
