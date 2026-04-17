@@ -32,6 +32,14 @@ class InputPromptDetector(
     /** Rolling stripped-ANSI output buffer per session — used by context/usage parsers. */
     private val recentOutput = mutableMapOf<String, StringBuilder>()
 
+    /**
+     * Sessions whose idle detection is handled by the Claude Code `Stop` hook
+     * watcher. For these sessions, quiescence-based screen-state checks are
+     * skipped — the hook fires a shell command the moment Claude finishes,
+     * which is faster and more reliable than polling the rendered terminal.
+     */
+    private val hookActiveSessions = mutableSetOf<String>()
+
     @Volatile private var suppressUntil = 0L
 
     /**
@@ -52,14 +60,23 @@ class InputPromptDetector(
         suppressUntil = currentTimeMillis() + millis
     }
 
+    /** Mark a session as using the Claude Code `Stop` hook for idle detection. */
+    fun markHookActive(sessionId: String) { hookActiveSessions.add(sessionId) }
+
+    /** Remove hook-active flag (session disconnected or hook watcher failed). */
+    fun markHookInactive(sessionId: String) { hookActiveSessions.remove(sessionId) }
+
     /**
      * Feed a chunk of terminal output. Always updates the recent-output buffer
-     * (for context/usage parsing) and, unless suppressed, resets the
-     * per-session quiescence timer. Returns immediately; detection is async.
+     * (for context/usage parsing) and, unless the session uses hook-based
+     * detection or is suppressed, resets the per-session quiescence timer.
+     * Returns immediately; detection is async.
      */
     fun onOutput(sessionId: String, text: String) {
         feedRecentOutput(sessionId, text)
 
+        // Hook-based detection is authoritative — skip screen-state polling.
+        if (sessionId in hookActiveSessions) return
         if (currentTimeMillis() < suppressUntil) return
 
         val state = sessionStates.getOrPut(sessionId) { SessionState() }

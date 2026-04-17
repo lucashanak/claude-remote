@@ -106,6 +106,8 @@ class SessionOrchestrator(
     // Per-session periodic polling jobs
     private val usagePollingJobs = mutableMapOf<String, kotlinx.coroutines.Job>()
     private val latencyPollingJobs = mutableMapOf<String, kotlinx.coroutines.Job>()
+    // Per-session Claude Code Stop-hook watchers (tail -f on notify file)
+    private val notifyWatchers = mutableMapOf<String, kotlinx.coroutines.Job>()
     @Volatile private var isInBackground = false
     private val reconnectingSessionIds = mutableSetOf<String>()
     // Last known terminal dimensions per session — used to re-send SIGWINCH after reconnect
@@ -223,6 +225,102 @@ class SessionOrchestrator(
         }
     }
 
+    // ---- Claude Code Stop-hook integration ----
+
+    /**
+     * Shell command run via SSH exec to ensure `~/.claude/settings.json` on the
+     * remote server contains a `Stop` hook that appends to `/tmp/claude-notify`.
+     * Uses `python3` for safe JSON merge (preserves all existing content).
+     * Idempotent — checks for our marker string before adding.
+     */
+    private val ENSURE_HOOK_COMMAND = """
+        python3 -c "
+import json, os
+p = os.path.expanduser('~/.claude/settings.json')
+d = {}
+if os.path.exists(p):
+    with open(p) as f: d = json.load(f)
+h = d.setdefault('hooks', {}).setdefault('Stop', [])
+marker = 'claude-remote-notify'
+if not any(marker in str(e.get('command','')) for e in h):
+    h.append({'type':'command','command':\"echo claude-remote-notify \$(tmux display-message -p '#S' 2>/dev/null || echo unknown) \$(date +%s) >> /tmp/claude-notify\"})
+    os.makedirs(os.path.dirname(p), exist_ok=True)
+    with open(p, 'w') as f: json.dump(d, f, indent=2)
+    print('HOOK_ADDED')
+else:
+    print('HOOK_EXISTS')
+" 2>&1 || echo 'HOOK_FAILED'
+    """.trimIndent()
+
+    /**
+     * Ensure the Claude Code `Stop` hook is present on the remote server. Runs
+     * a one-shot SSH exec. Safe to call multiple times — the script is
+     * idempotent. Failures are logged but non-fatal (screen-scraping fallback
+     * still works).
+     */
+    private suspend fun ensureStopHook(sshManager: SshManager) {
+        try {
+            val result = kotlinx.coroutines.withContext(Dispatchers.IO) {
+                val sshSession = sshManager.getSession() ?: return@withContext "NO_SESSION"
+                val ch = sshSession.openChannel("exec") as com.jcraft.jsch.ChannelExec
+                ch.setCommand(ENSURE_HOOK_COMMAND)
+                ch.inputStream = null
+                val input = ch.inputStream
+                ch.connect(10_000)
+                val out = input.bufferedReader().readText().trim()
+                ch.disconnect()
+                out
+            }
+            FileLogger.log(TAG, "Stop hook setup: $result")
+        } catch (e: Exception) {
+            FileLogger.error(TAG, "Stop hook setup failed: ${e.message}", e)
+        }
+    }
+
+    /**
+     * Start a background SSH exec channel that `tail -f /tmp/claude-notify` and
+     * fires [onClaudeNeedsInput] whenever our Stop-hook marker appears for the
+     * given tmux session. Marks the session as hook-active in the detector so
+     * screen-state polling is skipped.
+     *
+     * If the watcher channel drops (SSH reconnect), screen-state fallback
+     * resumes automatically via [markHookInactive].
+     */
+    private fun startNotifyWatcher(sessionId: String, tmuxName: String, sshManager: SshManager) {
+        notifyWatchers[sessionId]?.cancel()
+        notifyWatchers[sessionId] = reconnectScope.launch {
+            try {
+                val sshSession = sshManager.getSession() ?: return@launch
+                val ch = sshSession.openChannel("exec") as com.jcraft.jsch.ChannelExec
+                ch.setCommand("touch /tmp/claude-notify && tail -n 0 -f /tmp/claude-notify")
+                ch.inputStream = null
+                val reader = ch.inputStream.bufferedReader()
+                ch.connect(5000)
+
+                promptDetector.markHookActive(sessionId)
+                FileLogger.log(TAG, "Notify watcher started for $sessionId (tmux=$tmuxName)")
+
+                while (kotlinx.coroutines.isActive && ch.isConnected) {
+                    val line = kotlinx.coroutines.withContext(Dispatchers.IO) {
+                        reader.readLine()
+                    } ?: break
+                    if (!line.contains("claude-remote-notify")) continue
+                    if (!line.contains(tmuxName)) continue
+                    FileLogger.log(TAG, "Stop hook fired for $sessionId: $line")
+                    val isActive = tabManager.activeTabId.value == sessionId
+                    onClaudeNeedsInput?.invoke(sessionId, "Claude is ready for input", isActive)
+                    updateActivity(sessionId, SessionActivity.WAITING_FOR_INPUT)
+                }
+                ch.disconnect()
+            } catch (e: Exception) {
+                FileLogger.error(TAG, "Notify watcher failed for $sessionId: ${e.message}", e)
+            } finally {
+                promptDetector.markHookInactive(sessionId)
+                FileLogger.log(TAG, "Notify watcher stopped for $sessionId")
+            }
+        }
+    }
+
     suspend fun launchSession(
         server: SshServer,
         folder: String,
@@ -264,6 +362,7 @@ class SessionOrchestrator(
             onSessionActive?.invoke(session)
             startUsagePolling(sessionId)
             startLatencyPolling(sessionId)
+            startNotifyWatcher(sessionId, session.tmuxSessionName, sshManager)
             session.copy(status = SessionStatus.ACTIVE)
         } catch (e: Exception) {
             FileLogger.error(TAG, "Session launch failed", e)
@@ -372,6 +471,10 @@ class SessionOrchestrator(
             waitForShellPrompt(session.id, 3000)
         }
 
+        // Ensure Claude Code's Stop hook is configured → enables hook-based
+        // idle detection (fast, reliable) instead of screen-state polling.
+        ensureStopHook(sshManager)
+
         // Tmux
         sendTmuxCommand(sshManager, session, isNewTmuxSession)
         promptDetector.suppressFor(3000) // suppress during tmux screen redraw
@@ -450,6 +553,7 @@ class SessionOrchestrator(
                     tabManager.updateTabStatus(session.id, SessionStatus.ACTIVE)
                     updateActivity(session.id, SessionActivity.WAITING_FOR_INPUT)
                     onSessionActive?.invoke(session)
+                    startNotifyWatcher(session.id, session.tmuxSessionName, sshManager)
                     emit("\r\n\u001B[32mReconnected!\u001B[0m\r\n")
                     FileLogger.log(TAG, "Auto-reconnect succeeded for ${session.id}")
                     flushPendingInputs(session.id)
@@ -719,6 +823,7 @@ class SessionOrchestrator(
             connectSsh(session, false) // attach to existing tmux
             tabManager.updateTabStatus(sessionId, SessionStatus.ACTIVE)
             onSessionActive?.invoke(session)
+            connections[sessionId]?.let { startNotifyWatcher(sessionId, session.tmuxSessionName, it) }
             FileLogger.log(TAG, "Reconnected: $sessionId")
         } catch (e: Exception) {
             FileLogger.error(TAG, "Reconnect failed", e)
@@ -729,6 +834,8 @@ class SessionOrchestrator(
     suspend fun disconnectSession(sessionId: String) {
         usagePollingJobs.remove(sessionId)?.cancel()
         latencyPollingJobs.remove(sessionId)?.cancel()
+        notifyWatchers.remove(sessionId)?.cancel()
+        promptDetector.markHookInactive(sessionId)
         connections[sessionId]?.disconnect()
         connections.remove(sessionId)
         moshConnections[sessionId]?.disconnect()
