@@ -41,7 +41,8 @@ class SshTtyConnector(
     private var pendingOffset = 0
     @Volatile private var connected = true
     // Last known terminal size — reapplied after SSH reconnect (fixes wrong size from previous device)
-    @Volatile private var lastTermSize: com.jediterm.core.util.TermSize? = null
+    @Volatile var lastTermSize: com.jediterm.core.util.TermSize? = null
+        private set
 
     /** Called by SessionOrchestrator.onTerminalOutput — receives already-decoded SSH string chunks */
     fun feedOutput(data: String) {
@@ -146,11 +147,22 @@ fun main() = application {
     sessionOrchestrator.onTerminalOutput = { _, data ->
         connector.feedOutput(data)
     }
-    sessionOrchestrator.onTabSwitched = tabSwitched@{ _, bufferedOutput ->
+    sessionOrchestrator.onTabSwitched = tabSwitched@{ sessionId, bufferedOutput ->
         val widget = termWidget ?: return@tabSwitched
         javax.swing.SwingUtilities.invokeLater {
             widget.terminalPanel.clearBuffer()
             if (bufferedOutput.isNotEmpty()) connector.feedOutput(bufferedOutput)
+            // Force a full tmux redraw after the switch, matching Android behavior.
+            // Toggle PTY size to fire SIGWINCH twice — naive back-to-back resize can
+            // be coalesced by the kernel, so use a delay between the two resizes.
+            val termSize = connector.lastTermSize ?: return@invokeLater
+            val cols = termSize.columns
+            val rows = termSize.rows
+            if (cols <= 0 || rows <= 1) return@invokeLater
+            sessionOrchestrator.resize(sessionId, cols, rows - 1)
+            javax.swing.Timer(80) {
+                sessionOrchestrator.resize(sessionId, cols, rows)
+            }.also { it.isRepeats = false }.start()
         }
     }
 
@@ -378,6 +390,43 @@ fun main() = application {
                     val frame = javax.swing.SwingUtilities.getWindowAncestor(termWidget) ?: return@invokeLater
                     val framePos = frame.locationOnScreen
                     popup.show(frame, mousePos.x - framePos.x, mousePos.y - framePos.y)
+                }
+            },
+            onNativeRenameDialog = { sessionId, currentAlias ->
+                javax.swing.SwingUtilities.invokeLater {
+                    val parent = javax.swing.SwingUtilities.getWindowAncestor(termWidget)
+                    val newAlias = javax.swing.JOptionPane.showInputDialog(parent, "Session alias:", currentAlias) ?: return@invokeLater
+                    val trimmed = newAlias.trim()
+                    tabManager.updateAlias(sessionId, trimmed)
+                    val tab = tabManager.getTab(sessionId) ?: return@invokeLater
+                    val newTmuxName = com.clauderemote.model.TmuxNameParser.build(
+                        tab.server.name, tab.folder,
+                        tab.mode == com.clauderemote.model.ClaudeMode.YOLO, trimmed
+                    )
+                    Thread {
+                        kotlinx.coroutines.runBlocking {
+                            sessionOrchestrator.renameTmuxSession(sessionId, tab.tmuxSessionName, newTmuxName)
+                        }
+                    }.start()
+                }
+            },
+            onNativeCloseConfirm = { sessionId ->
+                javax.swing.SwingUtilities.invokeLater {
+                    val session = tabManager.getTab(sessionId)
+                    val parent = javax.swing.SwingUtilities.getWindowAncestor(termWidget)
+                    val result = javax.swing.JOptionPane.showConfirmDialog(
+                        parent,
+                        "Disconnect from ${session?.server?.name ?: "server"}?",
+                        "Close Session",
+                        javax.swing.JOptionPane.OK_CANCEL_OPTION
+                    )
+                    if (result == javax.swing.JOptionPane.OK_OPTION) {
+                        Thread {
+                            kotlinx.coroutines.runBlocking {
+                                try { sessionOrchestrator.disconnectSession(sessionId) } catch (_: Exception) {}
+                            }
+                        }.start()
+                    }
                 }
             },
             exitApp = ::exitApplication,

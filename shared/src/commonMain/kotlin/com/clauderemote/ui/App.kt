@@ -52,6 +52,8 @@ fun App(
     onPickFile: ((callback: (List<Pair<ByteArray, String>>) -> Unit) -> Unit)? = null,
     onApplyFontSize: ((Int) -> Unit)? = null,
     onShowNativeMenu: (() -> Unit)? = null,
+    onNativeRenameDialog: ((sessionId: String, currentAlias: String) -> Unit)? = null,
+    onNativeCloseConfirm: ((sessionId: String) -> Unit)? = null,
     sshKeyManager: com.clauderemote.connection.SshKeyManager? = null,
     exitApp: (() -> Unit)? = null,
     onInvertColorsChanged: ((Boolean) -> Unit)? = null,
@@ -503,13 +505,18 @@ fun App(
                             }
                         },
                         onShowNativeMenu = onShowNativeMenu,
+                        onNativeRenameDialog = onNativeRenameDialog,
                         onReconnect = { id ->
                             scope.launch { sessionOrchestrator.reconnectSession(id) }
                         },
                         onTabClose = { id ->
                             val session = tabManager.getTab(id)
                             if (session?.status == SessionStatus.ACTIVE) {
-                                tabCloseConfirmId = id
+                                if (onNativeCloseConfirm != null) {
+                                    onNativeCloseConfirm.invoke(id)
+                                } else {
+                                    tabCloseConfirmId = id
+                                }
                             } else {
                                 scope.launch {
                                     sessionOrchestrator.disconnectSession(id)

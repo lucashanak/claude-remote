@@ -63,6 +63,7 @@ fun TerminalScreen(
     onFetchCommands: (suspend () -> List<SlashCommand>)? = null,
     onFontSizeChange: ((Int) -> Unit)? = null,
     onShowNativeMenu: (() -> Unit)? = null, // Desktop: show menu via Swing (bypasses SwingPanel z-order)
+    onNativeRenameDialog: ((sessionId: String, currentAlias: String) -> Unit)? = null, // Desktop: rename via Swing dialog
     onAttachRemote: ((com.clauderemote.model.RemoteSession) -> Unit)? = null,
     remoteSessions: List<com.clauderemote.model.RemoteSession> = emptyList(),
     contextPercent: Int? = null,
@@ -172,6 +173,7 @@ fun TerminalScreen(
                     onMenuOpen = onMenuOpen,
                     onAttachRemote = onAttachRemote,
                     onRenameSession = onRenameSession,
+                    onNativeRenameDialog = onNativeRenameDialog,
                     modifier = Modifier.width(200.dp).fillMaxHeight()
                 )
             }
@@ -680,35 +682,38 @@ private fun SessionSidePanel(
     onMenuOpen: () -> Unit,
     onAttachRemote: ((com.clauderemote.model.RemoteSession) -> Unit)?,
     onRenameSession: ((sessionId: String, newAlias: String) -> Unit)? = null,
+    onNativeRenameDialog: ((sessionId: String, currentAlias: String) -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
     var renamingItem by remember { mutableStateOf<SessionItem?>(null) }
     var renameText by remember { mutableStateOf("") }
 
-    // Rename dialog — uses AlertDialog which renders as a separate OS window,
-    // always visible above the JediTerm SwingPanel heavyweight component
-    renamingItem?.let { item ->
-        AlertDialog(
-            onDismissRequest = { renamingItem = null },
-            title = { Text("Rename session") },
-            text = {
-                OutlinedTextField(
-                    value = renameText,
-                    onValueChange = { renameText = it },
-                    label = { Text("Alias") },
-                    singleLine = true
-                )
-            },
-            confirmButton = {
-                TextButton(onClick = {
-                    item.tab?.let { onRenameSession?.invoke(it.id, renameText.trim()) }
-                    renamingItem = null
-                }) { Text("OK") }
-            },
-            dismissButton = {
-                TextButton(onClick = { renamingItem = null }) { Text("Cancel") }
-            }
-        )
+    // Rename dialog — on desktop use native Swing dialog (AlertDialog renders
+    // behind the heavyweight JediTerm SwingPanel); on Android use Compose AlertDialog.
+    if (onNativeRenameDialog == null) {
+        renamingItem?.let { item ->
+            AlertDialog(
+                onDismissRequest = { renamingItem = null },
+                title = { Text("Rename session") },
+                text = {
+                    OutlinedTextField(
+                        value = renameText,
+                        onValueChange = { renameText = it },
+                        label = { Text("Alias") },
+                        singleLine = true
+                    )
+                },
+                confirmButton = {
+                    TextButton(onClick = {
+                        item.tab?.let { onRenameSession?.invoke(it.id, renameText.trim()) }
+                        renamingItem = null
+                    }) { Text("OK") }
+                },
+                dismissButton = {
+                    TextButton(onClick = { renamingItem = null }) { Text("Cancel") }
+                }
+            )
+        }
     }
 
     Surface(
@@ -767,8 +772,12 @@ private fun SessionSidePanel(
                                 if (item.isConnected && onRenameSession != null) {
                                     IconButton(
                                         onClick = {
-                                            renameText = item.label
-                                            renamingItem = item
+                                            if (onNativeRenameDialog != null && item.tab != null) {
+                                                onNativeRenameDialog.invoke(item.tab.id, item.label)
+                                            } else {
+                                                renameText = item.label
+                                                renamingItem = item
+                                            }
                                         },
                                         modifier = Modifier.size(20.dp)
                                     ) { Text("\u270E", style = MaterialTheme.typography.labelSmall) } // pencil
