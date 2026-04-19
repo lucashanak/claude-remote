@@ -99,7 +99,9 @@ fun LauncherScreen(
             // Remote Sessions (tmux sessions discovered on servers)
             // Filter out sessions already connected in-app
             val connectedTmuxNames = activeSessions.map { it.tmuxSessionName }.toSet()
-            val filteredRemote = remoteSessions.filter { it.tmuxSession.name !in connectedTmuxNames }
+            val filteredRemote = remoteSessions
+                .filter { it.tmuxSession.name !in connectedTmuxNames }
+                .distinctBy { "${it.server.id}:${it.tmuxSession.name}" }
             if (filteredRemote.isNotEmpty() || remoteSessionsLoading) {
                 item {
                     Row(
