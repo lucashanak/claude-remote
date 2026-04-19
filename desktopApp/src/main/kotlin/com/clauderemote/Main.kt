@@ -316,7 +316,8 @@ fun main() = application {
             },
             onPickFile = { callback ->
                 javax.swing.SwingUtilities.invokeLater {
-                    val dialog = java.awt.FileDialog(null as java.awt.Frame?, "Attach File", java.awt.FileDialog.LOAD)
+                    val parent = javax.swing.SwingUtilities.getWindowAncestor(termWidget) as? java.awt.Frame
+                    val dialog = java.awt.FileDialog(parent, "Attach File", java.awt.FileDialog.LOAD)
                     dialog.isMultipleMode = true
                     dialog.isVisible = true
                     val files = dialog.files
@@ -327,6 +328,12 @@ fun main() = application {
                         callback(pairs)
                     } else {
                         callback(emptyList())
+                    }
+                    // Force repaint after native dialog — macOS can leave the
+                    // SwingPanel in a stale state after FileDialog steals focus
+                    termWidget?.let { w ->
+                        w.revalidate()
+                        w.repaint()
                     }
                 }
             },
@@ -488,12 +495,19 @@ private fun DesktopTerminalView(
 
                         override fun getDefaultForeground(): com.jediterm.terminal.TerminalColor = darkFg
                         override fun getDefaultBackground(): com.jediterm.terminal.TerminalColor = darkBg
+
+                        // Compose SwingPanel on macOS doesn't forward Cmd+C reliably to
+                        // the embedded Swing component, so auto-copy during drag gives the
+                        // user the clipboard contents without needing the keystroke.
+                        override fun copyOnSelect(): Boolean = true
                     }
 
                     val widget = JediTermWidget(settings)
                     widget.setTtyConnector(connector)
                     widget.start()
                     termWidget = widget
+
+                    installMousePressFilter(widget.terminalPanel)
 
                     panel.add(widget, BorderLayout.CENTER)
 
@@ -538,6 +552,50 @@ private fun DesktopTerminalView(
             }
         }
     )
+}
+
+/**
+ * Compose SwingPanel on macOS fires a phantom MOUSE_PRESSED immediately after
+ * a drag-release, which JediTerm's own mousePressed handler treats as a fresh
+ * click and nulls the selection (TerminalPanel.java:248). We intercept by
+ * unregistering JediTerm's mouse listeners, then re-adding them through a
+ * wrapper that swallows exactly one press per drag-release pair.
+ */
+private fun installMousePressFilter(termPanel: java.awt.Component) {
+    val originals = termPanel.mouseListeners.toList()
+    originals.forEach { termPanel.removeMouseListener(it) }
+
+    var dragInProgress = false
+    var suppressNextPress = false
+
+    termPanel.addMouseMotionListener(object : java.awt.event.MouseMotionAdapter() {
+        override fun mouseDragged(e: java.awt.event.MouseEvent) {
+            dragInProgress = true
+        }
+    })
+
+    termPanel.addMouseListener(object : java.awt.event.MouseListener {
+        override fun mousePressed(e: java.awt.event.MouseEvent) {
+            if (suppressNextPress) {
+                suppressNextPress = false
+                return
+            }
+            originals.forEach { it.mousePressed(e) }
+        }
+        override fun mouseReleased(e: java.awt.event.MouseEvent) {
+            if (dragInProgress) {
+                suppressNextPress = true
+                dragInProgress = false
+            }
+            originals.forEach { it.mouseReleased(e) }
+        }
+        override fun mouseClicked(e: java.awt.event.MouseEvent) =
+            originals.forEach { it.mouseClicked(e) }
+        override fun mouseEntered(e: java.awt.event.MouseEvent) =
+            originals.forEach { it.mouseEntered(e) }
+        override fun mouseExited(e: java.awt.event.MouseEvent) =
+            originals.forEach { it.mouseExited(e) }
+    })
 }
 
 /**

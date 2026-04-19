@@ -209,20 +209,22 @@ class SshManager(
             // Throttle writes — sending large bursts through Cloudflare
             // WebSocket tunnel causes cloudflared to drop the connection
             // (EOFException). 4KB chunks with 20ms pauses ≈ 200KB/s.
+            // Uses coroutine delay instead of Thread.sleep to avoid blocking
+            // Dispatchers.IO threads (which caused freezes on macOS desktop).
             var off = 0
             while (off < bytes.size) {
                 val len = minOf(4096, bytes.size - off)
                 os.write(bytes, off, len)
                 os.flush()
                 off += len
-                if (off < bytes.size) Thread.sleep(20)
+                if (off < bytes.size) kotlinx.coroutines.delay(20)
             }
             os.close()
             FileLogger.log(TAG, "uploadFile: bytes written, waiting for cat to finish")
             // Wait for remote cat to finish
             val deadline = System.currentTimeMillis() + 10_000L
             while (!ch.isClosed && System.currentTimeMillis() < deadline) {
-                Thread.sleep(100)
+                kotlinx.coroutines.delay(100)
             }
             val exit = ch.exitStatus
             FileLogger.log(TAG, "uploadFile: done, closed=${ch.isClosed}, exit=$exit")
