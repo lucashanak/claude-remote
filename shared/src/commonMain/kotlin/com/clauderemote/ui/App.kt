@@ -115,6 +115,18 @@ fun App(
                     }.awaitAll().flatten()
                 }
                 remoteSessions = results
+                // Prune disconnected tabs whose tmux session no longer
+                // exists on the server — prevents stale entries in side panel
+                val remoteTmuxNames = results.map { it.tmuxSession.name }.toSet()
+                val staleTabs = tabManager.tabs.value.filter { tab ->
+                    tab.status != SessionStatus.ACTIVE &&
+                        tab.tmuxSessionName.isNotBlank() &&
+                        tab.tmuxSessionName !in remoteTmuxNames
+                }
+                staleTabs.forEach { tab ->
+                    FileLogger.log("App", "Pruning stale tab ${tab.id} (tmux ${tab.tmuxSessionName})")
+                    tabManager.removeTab(tab.id)
+                }
             } catch (_: Exception) {
                 remoteSessions = emptyList()
             }
@@ -126,6 +138,16 @@ fun App(
     LaunchedEffect(Unit) { scanRemoteSessions() }
     LaunchedEffect(currentScreen) {
         if (currentScreen == Screen.LAUNCHER) scanRemoteSessions()
+    }
+    // Periodically refresh remote sessions while on terminal screen
+    // so the side panel stays up-to-date
+    LaunchedEffect(currentScreen) {
+        if (currentScreen == Screen.TERMINAL) {
+            while (true) {
+                kotlinx.coroutines.delay(30_000) // every 30s
+                scanRemoteSessions()
+            }
+        }
     }
 
     // Update state
