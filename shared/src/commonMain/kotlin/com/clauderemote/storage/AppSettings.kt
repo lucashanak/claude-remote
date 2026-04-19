@@ -22,13 +22,13 @@ class AppSettings(private val prefs: PlatformPreferences) {
     // Claude defaults
     var defaultClaudeMode: ClaudeMode
         get() = try {
-            ClaudeMode.valueOf(prefs.getString("default_claude_mode", "NORMAL"))
-        } catch (e: Exception) { ClaudeMode.NORMAL }
+            ClaudeMode.valueOf(prefs.getString("default_claude_mode", "YOLO"))
+        } catch (e: Exception) { ClaudeMode.YOLO }
         set(value) = prefs.putString("default_claude_mode", value.name)
 
     var defaultClaudeModel: ClaudeModel
         get() = try {
-            ClaudeModel.valueOf(prefs.getString("default_claude_model", "SONNET"))
+            ClaudeModel.valueOf(prefs.getString("default_claude_model", "DEFAULT"))
         } catch (e: Exception) { ClaudeModel.DEFAULT }
         set(value) = prefs.putString("default_claude_model", value.name)
 

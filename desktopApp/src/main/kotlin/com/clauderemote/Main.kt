@@ -152,6 +152,7 @@ fun main() = application {
         javax.swing.SwingUtilities.invokeLater {
             widget.terminalPanel.clearBuffer()
             if (bufferedOutput.isNotEmpty()) connector.feedOutput(bufferedOutput)
+            widget.terminalPanel.requestFocusInWindow()
             // Force a full tmux redraw after the switch, matching Android behavior.
             // Toggle PTY size to fire SIGWINCH twice — naive back-to-back resize can
             // be coalesced by the kernel, so use a delay between the two resizes.
@@ -162,6 +163,7 @@ fun main() = application {
             sessionOrchestrator.resize(sessionId, cols, rows - 1)
             javax.swing.Timer(80) {
                 sessionOrchestrator.resize(sessionId, cols, rows)
+                widget.terminalPanel.requestFocusInWindow()
             }.also { it.isRepeats = false }.start()
         }
     }
@@ -507,7 +509,7 @@ private fun DesktopTerminalView(
                     widget.start()
                     termWidget = widget
 
-                    installMousePressFilter(widget.terminalPanel)
+                    installSelectionGuard(widget.terminalPanel)
 
                     panel.add(widget, BorderLayout.CENTER)
 
@@ -555,18 +557,25 @@ private fun DesktopTerminalView(
 }
 
 /**
- * Compose SwingPanel on macOS fires a phantom MOUSE_PRESSED immediately after
- * a drag-release, which JediTerm's own mousePressed handler treats as a fresh
- * click and nulls the selection (TerminalPanel.java:248). We intercept by
- * unregistering JediTerm's mouse listeners, then re-adding them through a
- * wrapper that swallows exactly one press per drag-release pair.
+ * Keep the user's drag-selection visible after mouseReleased. Under Compose
+ * SwingPanel on macOS, something clears JediTerm's mySelection right after
+ * release — could be a phantom MOUSE_PRESSED (TerminalPanel.java:248) or a
+ * scrollArea() call from incoming SSH output (TerminalPanel.java:1510).
+ * Instead of guessing which, we snapshot mySelection right after a drag-end
+ * and restore it via reflection if it gets nulled within a short window.
+ * A fresh mousePressed (real new click) discards the snapshot so a normal
+ * click still clears selection as expected.
  */
-private fun installMousePressFilter(termPanel: java.awt.Component) {
-    val originals = termPanel.mouseListeners.toList()
-    originals.forEach { termPanel.removeMouseListener(it) }
+private fun installSelectionGuard(termPanel: java.awt.Component) {
+    val selectionField = try {
+        termPanel.javaClass.getDeclaredField("mySelection").apply { isAccessible = true }
+    } catch (e: Throwable) {
+        FileLogger.error("Desktop", "Selection guard: cannot access mySelection", e)
+        return
+    }
 
     var dragInProgress = false
-    var suppressNextPress = false
+    var savedSelection: Any? = null
 
     termPanel.addMouseMotionListener(object : java.awt.event.MouseMotionAdapter() {
         override fun mouseDragged(e: java.awt.event.MouseEvent) {
@@ -574,27 +583,27 @@ private fun installMousePressFilter(termPanel: java.awt.Component) {
         }
     })
 
-    termPanel.addMouseListener(object : java.awt.event.MouseListener {
+    termPanel.addMouseListener(object : java.awt.event.MouseAdapter() {
         override fun mousePressed(e: java.awt.event.MouseEvent) {
-            if (suppressNextPress) {
-                suppressNextPress = false
-                return
-            }
-            originals.forEach { it.mousePressed(e) }
+            // Real new click → stop guarding previous selection.
+            savedSelection = null
         }
+
         override fun mouseReleased(e: java.awt.event.MouseEvent) {
-            if (dragInProgress) {
-                suppressNextPress = true
-                dragInProgress = false
+            if (!dragInProgress) return
+            dragInProgress = false
+            val snapshot = selectionField.get(termPanel) ?: return
+            savedSelection = snapshot
+            for (delay in listOf(10, 40, 120, 300)) {
+                javax.swing.Timer(delay) {
+                    val saved = savedSelection ?: return@Timer
+                    if (selectionField.get(termPanel) == null) {
+                        selectionField.set(termPanel, saved)
+                        termPanel.repaint()
+                    }
+                }.also { it.isRepeats = false }.start()
             }
-            originals.forEach { it.mouseReleased(e) }
         }
-        override fun mouseClicked(e: java.awt.event.MouseEvent) =
-            originals.forEach { it.mouseClicked(e) }
-        override fun mouseEntered(e: java.awt.event.MouseEvent) =
-            originals.forEach { it.mouseEntered(e) }
-        override fun mouseExited(e: java.awt.event.MouseEvent) =
-            originals.forEach { it.mouseExited(e) }
     })
 }
 
