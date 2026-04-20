@@ -2,6 +2,8 @@ package com.clauderemote.ui
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
@@ -16,9 +18,8 @@ import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.key.*
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.window.Dialog
-import androidx.compose.ui.window.DialogProperties
 import com.clauderemote.model.ClaudeModel
 import com.clauderemote.model.ClaudeSession
 import com.clauderemote.session.SlashCommand
@@ -132,18 +133,27 @@ fun CommandPaletteDialog(
 
     LaunchedEffect(filter) { selectedIndex = 0 }
 
-    // Use plain Dialog instead of Material3 AlertDialog: under Compose Desktop
-    // on macOS, AlertDialog rendered its scrim but the content collapsed to zero
-    // height (the LazyColumn inside text={} got no bounded height constraint).
-    // usePlatformDefaultWidth=false lets our Surface control the size directly.
-    Dialog(
-        onDismissRequest = onDismiss,
-        properties = DialogProperties(usePlatformDefaultWidth = false)
+    // Inline overlay rather than Dialog/AlertDialog: both of those spawn a
+    // separate OS-level window under Compose Desktop, and on macOS inside this
+    // app (JediTerm SwingPanel + skiko) the dialog window's content never
+    // rendered — the app darkened (scrim) but the palette was invisible.
+    // A Box rendered directly in the parent window avoids the issue entirely.
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(Color.Black.copy(alpha = 0.5f))
+            .pointerInput(Unit) { detectTapGestures(onTap = { onDismiss() }) },
+        contentAlignment = Alignment.TopCenter
     ) {
         Surface(
-            modifier = Modifier.widthIn(min = 360.dp, max = 600.dp).heightIn(max = 450.dp),
+            modifier = Modifier
+                .padding(top = 72.dp, start = 24.dp, end = 24.dp)
+                .widthIn(min = 400.dp, max = 720.dp)
+                .heightIn(max = 500.dp)
+                .pointerInput(Unit) { detectTapGestures { /* swallow */ } },
             shape = MaterialTheme.shapes.medium,
-            tonalElevation = 8.dp
+            tonalElevation = 8.dp,
+            shadowElevation = 8.dp
         ) {
                 Column(modifier = Modifier.fillMaxWidth()) {
                     val filterFocus = remember { FocusRequester() }
