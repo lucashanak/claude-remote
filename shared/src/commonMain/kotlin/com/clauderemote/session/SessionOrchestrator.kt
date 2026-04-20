@@ -240,15 +240,26 @@ p = os.path.expanduser('~/.claude/settings.json')
 d = {}
 if os.path.exists(p):
     with open(p) as f: d = json.load(f)
-h = d.setdefault('hooks', {}).setdefault('Stop', [])
+hooks = d.setdefault('hooks', {})
+stop = hooks.setdefault('Stop', [])
 marker = 'claude-remote-notify'
-if not any(marker in str(e.get('command','')) for e in h):
-    h.append({'type':'command','command':\"echo claude-remote-notify \$(tmux display-message -p '#S' 2>/dev/null || echo unknown) \$(date +%s) >> /tmp/claude-notify\"})
+cmd = \"echo claude-remote-notify \$(tmux display-message -p '#S' 2>/dev/null || echo unknown) \$(date +%s) >> /tmp/claude-notify\"
+want = {'matcher': '', 'hooks': [{'type': 'command', 'command': cmd}]}
+def has_marker(e):
+    if not isinstance(e, dict): return False
+    if marker in str(e.get('command', '')): return True
+    for h in e.get('hooks') or []:
+        if isinstance(h, dict) and marker in str(h.get('command', '')): return True
+    return False
+canonical_ok = any(e == want for e in stop if isinstance(e, dict))
+stale = [e for e in stop if has_marker(e) and e != want]
+if canonical_ok and not stale:
+    print('HOOK_EXISTS')
+else:
+    hooks['Stop'] = [e for e in stop if not has_marker(e)] + [want]
     os.makedirs(os.path.dirname(p), exist_ok=True)
     with open(p, 'w') as f: json.dump(d, f, indent=2)
-    print('HOOK_ADDED')
-else:
-    print('HOOK_EXISTS')
+    print('HOOK_FIXED')
 " 2>&1 || echo 'HOOK_FAILED'
     """.trimIndent()
 
