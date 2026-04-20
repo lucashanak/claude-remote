@@ -44,9 +44,74 @@ class SshTtyConnector(
     @Volatile var lastTermSize: com.jediterm.core.util.TermSize? = null
         private set
 
+    // Holds an OSC 52 sequence that was split across chunk boundaries.
+    private val oscCarry = StringBuilder()
+
     /** Called by SessionOrchestrator.onTerminalOutput — receives already-decoded SSH string chunks */
     fun feedOutput(data: String) {
-        if (data.isNotEmpty()) queue.offer(data.toCharArray())
+        if (data.isEmpty()) return
+        val filtered = interceptOsc52(data)
+        if (filtered.isNotEmpty()) queue.offer(filtered.toCharArray())
+    }
+
+    /**
+     * JediTerm 3.64 ignores OSC 52 (clipboard) escapes, so we parse them here
+     * and write to the system clipboard ourselves. Called with the entire
+     * chunk as received — the chunk is stripped of OSC 52 before being fed
+     * to JediTerm. Partial sequences at a chunk boundary are buffered until
+     * the next chunk arrives.
+     *
+     * Sequence: ESC ] 52 ; <selection-type> ; <base64-text> (BEL | ESC \)
+     */
+    private fun interceptOsc52(data: String): String {
+        val input = if (oscCarry.isEmpty()) data else {
+            val combined = oscCarry.toString() + data
+            oscCarry.clear()
+            combined
+        }
+        val out = StringBuilder(input.length)
+        var i = 0
+        while (true) {
+            val start = input.indexOf("\u001B]52;", i)
+            if (start < 0) {
+                out.append(input, i, input.length)
+                return out.toString()
+            }
+            out.append(input, i, start)
+            // Locate terminator: BEL (\u0007) or ST (ESC \ = \u001B\u005C).
+            var end = -1
+            var termLen = 0
+            var j = start + 5
+            while (j < input.length) {
+                val c = input[j]
+                if (c == '\u0007') { end = j; termLen = 1; break }
+                if (c == '\u001B' && j + 1 < input.length && input[j + 1] == '\\') {
+                    end = j; termLen = 2; break
+                }
+                j++
+            }
+            if (end < 0) {
+                // Terminator not yet in buffer — park the partial sequence for the next chunk.
+                oscCarry.append(input, start, input.length)
+                return out.toString()
+            }
+            val payload = input.substring(start + 5, end)
+            val sep = payload.indexOf(';')
+            if (sep >= 0) {
+                val b64 = payload.substring(sep + 1)
+                try {
+                    val decoded = java.util.Base64.getDecoder().decode(b64)
+                    val text = String(decoded, StandardCharsets.UTF_8)
+                    java.awt.Toolkit.getDefaultToolkit().systemClipboard.setContents(
+                        java.awt.datatransfer.StringSelection(text), null
+                    )
+                    FileLogger.log("Desktop", "OSC 52 clipboard write: ${text.length} chars")
+                } catch (t: Throwable) {
+                    FileLogger.error("Desktop", "OSC 52 decode failed", t)
+                }
+            }
+            i = end + termLen
+        }
     }
 
     override fun read(buf: CharArray, offset: Int, length: Int): Int {

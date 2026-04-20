@@ -48,7 +48,14 @@ object TmuxManager {
      * Build the tmux attach/create command.
      */
     fun buildAttachCommand(sessionName: String): String {
-        return "tmux new-session -A -s '${sessionName.replace("'", "\\'")}' \\; set-option -g mouse on"
+        // set-clipboard on + terminal-features clipboard → tmux sends the selected
+        // text back to the terminal via OSC 52 after a mouse-drag selection, which
+        // both the desktop app (custom interceptor) and Termux on Android honor.
+        val escapedName = sessionName.replace("'", "\\'")
+        return "tmux new-session -A -s '$escapedName' \\; " +
+            "set-option -g mouse on \\; " +
+            "set-option -g set-clipboard on \\; " +
+            "set-option -ga terminal-features ',*:clipboard'"
     }
 
     /**
