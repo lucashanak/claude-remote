@@ -255,7 +255,6 @@ fun CommandPaletteDialog(
                         }
                     }
                 }
-            }
         }
     }
 }
