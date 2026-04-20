@@ -557,13 +557,15 @@ private fun DesktopTerminalView(
 }
 
 /**
- * Handle terminal text selection on macOS Compose SwingPanel:
- * 1) Copy the selected text directly to the system clipboard on drag-end
- *    (JediTerm's own copyOnSelect path is unreliable here — we don't trust it).
- * 2) Restore mySelection via reflection if it gets nulled within ~300ms after
- *    release (phantom MOUSE_PRESSED, scrollArea on incoming output, etc.).
- * A fresh mousePressed discards the restore snapshot so a new click still
- * clears selection as expected.
+ * Terminal text selection on macOS Compose SwingPanel is broken because
+ * mySelection is nulled between the last MOUSE_DRAGGED and MOUSE_RELEASED
+ * (cause unclear — phantom press, scrollArea from incoming output, a Compose
+ * synthetic, etc.). So we can't rely on reading the selection at release time.
+ *
+ * Workaround: snapshot the selected text on every drag step (while mySelection
+ * is still live). On release we flush the last snapshot to the system clipboard,
+ * independent of whatever state mySelection is in at that moment. Also keep a
+ * visual restore via reflection so the yellow highlight stays visible.
  */
 private fun installSelectionGuard(termPanel: com.jediterm.terminal.ui.TerminalPanel) {
     val selectionField = try {
@@ -574,50 +576,59 @@ private fun installSelectionGuard(termPanel: com.jediterm.terminal.ui.TerminalPa
     }
 
     var dragInProgress = false
-    var savedSelection: com.jediterm.terminal.model.TerminalSelection? = null
+    var lastSelectionText: String? = null
+    var lastSelection: com.jediterm.terminal.model.TerminalSelection? = null
+
+    fun snapshotSelection() {
+        val sel = termPanel.selection ?: return
+        lastSelection = sel
+        try {
+            val buffer = termPanel.terminalTextBuffer
+            buffer.lock()
+            try {
+                lastSelectionText = com.jediterm.terminal.model.SelectionUtil
+                    .getSelectionText(sel, buffer)
+            } finally {
+                buffer.unlock()
+            }
+        } catch (t: Throwable) {
+            FileLogger.error("Desktop", "snapshotSelection failed", t)
+        }
+    }
 
     termPanel.addMouseMotionListener(object : java.awt.event.MouseMotionAdapter() {
         override fun mouseDragged(e: java.awt.event.MouseEvent) {
             dragInProgress = true
+            snapshotSelection()
         }
     })
 
     termPanel.addMouseListener(object : java.awt.event.MouseAdapter() {
         override fun mousePressed(e: java.awt.event.MouseEvent) {
-            savedSelection = null
+            lastSelection = null
+            lastSelectionText = null
         }
 
         override fun mouseReleased(e: java.awt.event.MouseEvent) {
             if (!dragInProgress) return
             dragInProgress = false
-            val selection = termPanel.selection ?: return
-            savedSelection = selection
 
-            // Copy the selected text to the system clipboard now, while
-            // mySelection is still populated. JediTerm's own copyOnSelect
-            // fires during drag but seems to fail under Compose SwingPanel.
-            try {
-                val buffer = termPanel.terminalTextBuffer
-                buffer.lock()
-                val text = try {
-                    com.jediterm.terminal.model.SelectionUtil
-                        .getSelectionText(selection, buffer)
-                } finally {
-                    buffer.unlock()
+            val text = lastSelectionText
+            FileLogger.log("Desktop", "selection release: textLen=${text?.length ?: -1}")
+            if (!text.isNullOrEmpty()) {
+                try {
+                    java.awt.Toolkit.getDefaultToolkit().systemClipboard.setContents(
+                        java.awt.datatransfer.StringSelection(text), null
+                    )
+                } catch (t: Throwable) {
+                    FileLogger.error("Desktop", "Clipboard write failed", t)
                 }
-                if (text.isNotEmpty()) {
-                    val clipboard = java.awt.Toolkit.getDefaultToolkit().systemClipboard
-                    clipboard.setContents(java.awt.datatransfer.StringSelection(text), null)
-                }
-            } catch (t: Throwable) {
-                FileLogger.error("Desktop", "Clipboard copy failed", t)
             }
 
-            // Restore mySelection if anything clears it shortly after release.
+            val saved = lastSelection ?: return
             for (delay in listOf(10, 40, 120, 300)) {
                 javax.swing.Timer(delay) {
-                    val saved = savedSelection ?: return@Timer
-                    if (selectionField.get(termPanel) == null) {
+                    if (selectionField.get(termPanel) == null && lastSelection != null) {
                         selectionField.set(termPanel, saved)
                         termPanel.repaint()
                     }
