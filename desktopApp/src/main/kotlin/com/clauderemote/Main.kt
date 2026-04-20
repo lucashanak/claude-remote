@@ -575,6 +575,7 @@ private fun DesktopTerminalView(
                     termWidget = widget
 
                     installSelectionGuard(widget.terminalPanel)
+                    installDragScroller(widget.terminalPanel)
 
                     panel.add(widget, BorderLayout.CENTER)
 
@@ -701,6 +702,104 @@ private fun installSelectionGuard(termPanel: com.jediterm.terminal.ui.TerminalPa
             }
         }
     })
+}
+
+/**
+ * Drag-time scrolling for terminal selection:
+ *  B) While a drag is active, poll the global mouse position every 30 ms. If
+ *     the cursor leaves the panel vertically, synthesize MouseWheelEvent and
+ *     MOUSE_DRAGGED events at the edge. JediTerm's own wheel listener routes
+ *     the wheel to tmux (remote reporting) or the local scrollbar depending
+ *     on Shift, which matches the drag's shift state captured at press time.
+ *  C) Forward wheel-during-drag: after a real wheel event fires while
+ *     dragging, dispatch an extra MOUSE_DRAGGED at the current cursor so
+ *     the selection edge tracks to the newly-scrolled content.
+ */
+private fun installDragScroller(termPanel: com.jediterm.terminal.ui.TerminalPanel) {
+    var dragging = false
+    var dragShift = false
+    var pollTimer: javax.swing.Timer? = null
+
+    fun dispatchWheel(x: Int, y: Int, rotation: Int, shift: Boolean) {
+        val mods = if (shift) java.awt.event.InputEvent.SHIFT_DOWN_MASK else 0
+        termPanel.dispatchEvent(
+            java.awt.event.MouseWheelEvent(
+                termPanel, java.awt.event.MouseEvent.MOUSE_WHEEL,
+                System.currentTimeMillis(), mods,
+                x, y, 0, false,
+                java.awt.event.MouseWheelEvent.WHEEL_UNIT_SCROLL,
+                kotlin.math.abs(rotation).coerceAtLeast(1), rotation
+            )
+        )
+    }
+
+    fun dispatchDrag(x: Int, y: Int, shift: Boolean) {
+        val mods = (if (shift) java.awt.event.InputEvent.SHIFT_DOWN_MASK else 0) or
+            java.awt.event.InputEvent.BUTTON1_DOWN_MASK
+        termPanel.dispatchEvent(
+            java.awt.event.MouseEvent(
+                termPanel, java.awt.event.MouseEvent.MOUSE_DRAGGED,
+                System.currentTimeMillis(), mods,
+                x, y, 0, false,
+                java.awt.event.MouseEvent.BUTTON1
+            )
+        )
+    }
+
+    termPanel.addMouseListener(object : java.awt.event.MouseAdapter() {
+        override fun mousePressed(e: java.awt.event.MouseEvent) {
+            if (e.button != java.awt.event.MouseEvent.BUTTON1) return
+            dragging = true
+            dragShift = e.isShiftDown
+            pollTimer?.stop()
+            pollTimer = javax.swing.Timer(30) {
+                if (!dragging || !termPanel.isShowing) return@Timer
+                val ptr = java.awt.MouseInfo.getPointerInfo() ?: return@Timer
+                val panelLoc = try { termPanel.locationOnScreen } catch (_: Throwable) { return@Timer }
+                val pw = termPanel.width
+                val ph = termPanel.height
+                if (pw <= 0 || ph <= 0) return@Timer
+                val localY = ptr.location.y - panelLoc.y
+                val localX = (ptr.location.x - panelLoc.x).coerceIn(0, pw - 1)
+                val direction = when {
+                    localY < 0 -> -1
+                    localY >= ph -> 1
+                    else -> 0
+                }
+                if (direction != 0) {
+                    val dist = if (direction < 0) -localY else localY - ph + 1
+                    val speed = (1 + dist / 25).coerceAtMost(5)
+                    val edgeY = if (direction < 0) 0 else ph - 1
+                    dispatchWheel(localX, edgeY, direction * speed, dragShift)
+                    dispatchDrag(localX, edgeY, dragShift)
+                }
+            }.apply { isRepeats = true; start() }
+        }
+
+        override fun mouseReleased(e: java.awt.event.MouseEvent) {
+            dragging = false
+            pollTimer?.stop()
+            pollTimer = null
+        }
+    })
+
+    termPanel.addMouseWheelListener { e ->
+        if (!dragging) return@addMouseWheelListener
+        // Let JediTerm's existing wheel listener scroll first, then synthesize
+        // a MOUSE_DRAGGED at the cursor so the selection extends to the new
+        // content revealed by the scroll.
+        javax.swing.SwingUtilities.invokeLater {
+            if (!dragging || !termPanel.isShowing) return@invokeLater
+            val ptr = java.awt.MouseInfo.getPointerInfo() ?: return@invokeLater
+            val panelLoc = try { termPanel.locationOnScreen } catch (_: Throwable) { return@invokeLater }
+            val pw = termPanel.width
+            val ph = termPanel.height
+            if (pw <= 0 || ph <= 0) return@invokeLater
+            val x = (ptr.location.x - panelLoc.x).coerceIn(0, pw - 1)
+            val y = (ptr.location.y - panelLoc.y).coerceIn(0, ph - 1)
+            dispatchDrag(x, y, dragShift || e.isShiftDown)
+        }
+    }
 }
 
 /**
