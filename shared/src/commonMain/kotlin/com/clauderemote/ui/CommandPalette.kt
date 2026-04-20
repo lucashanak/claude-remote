@@ -17,6 +17,8 @@ import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.key.*
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import com.clauderemote.model.ClaudeModel
 import com.clauderemote.model.ClaudeSession
 import com.clauderemote.session.SlashCommand
@@ -49,10 +51,11 @@ fun buildPaletteActions(
 
     // Claude slash commands
     slashCommands.forEach { cmd ->
+        val label = if (cmd.description.isNotBlank()) "${cmd.command} — ${cmd.description}" else cmd.command
         actions.add(PaletteAction(
             id = "cmd_${cmd.command}",
-            label = cmd.command,
-            category = "Commands",
+            label = label,
+            category = cmd.category,
             onExecute = { onSendCommand(cmd.command + "\r") }
         ))
     }
@@ -129,15 +132,19 @@ fun CommandPaletteDialog(
 
     LaunchedEffect(filter) { selectedIndex = 0 }
 
-    AlertDialog(
+    // Use plain Dialog instead of Material3 AlertDialog: under Compose Desktop
+    // on macOS, AlertDialog rendered its scrim but the content collapsed to zero
+    // height (the LazyColumn inside text={} got no bounded height constraint).
+    // usePlatformDefaultWidth=false lets our Surface control the size directly.
+    Dialog(
         onDismissRequest = onDismiss,
-        confirmButton = {},
-        text = {
-            Surface(
-                modifier = Modifier.fillMaxWidth().heightIn(max = 450.dp),
-                shape = MaterialTheme.shapes.medium,
-                tonalElevation = 8.dp
-            ) {
+        properties = DialogProperties(usePlatformDefaultWidth = false)
+    ) {
+        Surface(
+            modifier = Modifier.widthIn(min = 360.dp, max = 600.dp).heightIn(max = 450.dp),
+            shape = MaterialTheme.shapes.medium,
+            tonalElevation = 8.dp
+        ) {
                 Column(modifier = Modifier.fillMaxWidth()) {
                     val filterFocus = remember { FocusRequester() }
                     LaunchedEffect(Unit) { filterFocus.requestFocus() }
@@ -250,5 +257,5 @@ fun CommandPaletteDialog(
                 }
             }
         }
-    )
+    }
 }
