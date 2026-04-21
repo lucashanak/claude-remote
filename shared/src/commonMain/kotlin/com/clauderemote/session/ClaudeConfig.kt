@@ -14,7 +14,12 @@ import com.clauderemote.model.ClaudeModel
  * - /compact compacts context
  * - /rewind undoes changes
  * - /config opens settings
- * - YOLO mode (--dangerously-skip-permissions) cannot be toggled at runtime
+ *
+ * Permission handling:
+ * - Non-YOLO launches pass --allow-dangerously-skip-permissions, which keeps
+ *   the permission gate at startup but lets the user opt into YOLO from the
+ *   running session (so mode can be flipped without reconnecting)
+ * - YOLO launches pass --dangerously-skip-permissions directly (starts in YOLO)
  */
 object ClaudeConfig {
 
@@ -35,9 +40,14 @@ object ClaudeConfig {
 
         when (mode) {
             ClaudeMode.AUTO_ACCEPT -> claudeArgs.add("--auto-accept")
-            ClaudeMode.YOLO -> claudeArgs.add("--dangerously-skip-permissions")
             ClaudeMode.PLAN, ClaudeMode.NORMAL -> {}
+            ClaudeMode.YOLO -> {}
         }
+
+        claudeArgs.add(
+            if (mode == ClaudeMode.YOLO) "--dangerously-skip-permissions"
+            else "--allow-dangerously-skip-permissions"
+        )
 
         parts.add(claudeArgs.joinToString(" "))
         return parts.joinToString(" && ")

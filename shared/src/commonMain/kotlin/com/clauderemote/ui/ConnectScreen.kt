@@ -175,7 +175,7 @@ fun ConnectScreen(
                                 if (mode == ClaudeMode.YOLO) {
                                     Spacer(Modifier.width(4.dp))
                                     Text(
-                                        "(--dangerously-skip-permissions, cannot toggle at runtime)",
+                                        "(--dangerously-skip-permissions)",
                                         style = MaterialTheme.typography.bodySmall,
                                         color = MaterialTheme.colorScheme.error
                                     )
