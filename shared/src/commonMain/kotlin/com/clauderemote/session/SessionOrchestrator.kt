@@ -513,7 +513,7 @@ else:
             sshManager.sendInput(command + "\n")
         } else {
             val escaped = session.tmuxSessionName.replace("'", "\\'")
-            val command = "tmux set-option -g window-size latest 2>/dev/null; tmux attach-session -t '$escaped' 2>/dev/null || tmux new-session -A -s '$escaped' \\; set-option -g mouse on"
+            val command = "tmux set-option -g window-size latest 2>/dev/null; tmux set-option -g history-limit 100000 2>/dev/null; tmux attach-session -t '$escaped' 2>/dev/null || tmux new-session -A -s '$escaped' \\; set-option -g mouse on \\; set-option -g history-limit 100000"
             FileLogger.log(TAG, "Attaching to tmux: $command")
             sshManager.sendInput(command + "\n")
         }
@@ -610,7 +610,7 @@ else:
             )
         } else {
             val escaped = session.tmuxSessionName.replace("'", "\\'")
-            "tmux set-option -g window-size latest 2>/dev/null; tmux attach-session -t '$escaped' 2>/dev/null || tmux new-session -A -s '$escaped' \\; set-option -g mouse on"
+            "tmux set-option -g window-size latest 2>/dev/null; tmux set-option -g history-limit 100000 2>/dev/null; tmux attach-session -t '$escaped' 2>/dev/null || tmux new-session -A -s '$escaped' \\; set-option -g mouse on \\; set-option -g history-limit 100000"
         }
 
         fun emit(text: String) {

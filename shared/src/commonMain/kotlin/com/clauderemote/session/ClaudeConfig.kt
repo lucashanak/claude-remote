@@ -64,8 +64,10 @@ object ClaudeConfig {
         // Kill existing session with same name to avoid -A reattaching
         // and sending keystrokes into a running program
         return "tmux kill-session -t '$escaped' 2>/dev/null; " +
+                "tmux set-option -g history-limit 100000 2>/dev/null; " +
                 "tmux new-session -s '$escaped' " +
                 "\\; set-option -g mouse on " +
+                "\\; set-option -g history-limit 100000 " +
                 "\\; send-keys '${claudeCmd.replace("'", "\\'")}' Enter"
     }
 

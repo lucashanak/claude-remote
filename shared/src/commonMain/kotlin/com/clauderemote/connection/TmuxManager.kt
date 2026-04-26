@@ -55,6 +55,7 @@ object TmuxManager {
         return "tmux new-session -A -s '$escapedName' \\; " +
             "set-option -g mouse on \\; " +
             "set-option -g set-clipboard on \\; " +
+            "set-option -g history-limit 100000 \\; " +
             "set-option -ga terminal-features ',*:clipboard'"
     }
 
