@@ -28,6 +28,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.key.*
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.compose.runtime.saveable.rememberSaveable
 import com.clauderemote.model.ClaudeModel
 import com.clauderemote.model.ClaudeSession
@@ -88,6 +89,11 @@ fun TerminalScreen(
     var renameText by remember { mutableStateOf("") }
     var moreMenu by remember { mutableStateOf(false) }
     val inputFocusRequester = remember { FocusRequester() }
+    LaunchedEffect(activeTabId) {
+        if (activeTabId != null) {
+            try { inputFocusRequester.requestFocus() } catch (_: Exception) {}
+        }
+    }
     var showClaudeMd by remember { mutableStateOf(false) }
     var claudeMdContent by remember { mutableStateOf("") }
     var commandFilter by remember { mutableStateOf("") }
@@ -737,21 +743,31 @@ private fun SessionSidePanel(
             HorizontalDivider()
 
             Column(modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState())) {
-                allSessions.forEach { (folder, items) ->
+                allSessions.entries.forEachIndexed { index, (folder, items) ->
+                    if (index > 0) {
+                        HorizontalDivider(
+                            modifier = Modifier.padding(horizontal = 8.dp),
+                            color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.4f)
+                        )
+                    }
                     Text(
-                        folder,
-                        style = MaterialTheme.typography.labelSmall,
+                        folder.uppercase(),
+                        style = MaterialTheme.typography.labelSmall.copy(
+                            fontWeight = androidx.compose.ui.text.font.FontWeight.SemiBold,
+                            letterSpacing = 0.8.sp
+                        ),
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp)
+                        modifier = Modifier.padding(start = 12.dp, end = 12.dp, top = 8.dp, bottom = 2.dp)
                     )
                     items.forEach { item ->
+                        val isActive = item.tab?.id == activeTabId
                         val dotColor = if (!item.isConnected) Color(0xFF666666)
                             else activityDotColor(
                                 sessionActivities[item.id],
                                 item.status ?: SessionStatus.ACTIVE
                             )
                         Surface(
-                            color = if (item.tab?.id == activeTabId) MaterialTheme.colorScheme.primaryContainer
+                            color = if (isActive) MaterialTheme.colorScheme.primaryContainer
                                    else Color.Transparent,
                             modifier = Modifier.fillMaxWidth().clickable {
                                 if (item.isConnected && item.tab != null) onTabSwitch(item.tab.id)
@@ -759,34 +775,57 @@ private fun SessionSidePanel(
                             }
                         ) {
                             Row(
-                                modifier = Modifier.padding(start = 12.dp, end = 4.dp, top = 6.dp, bottom = 6.dp),
+                                modifier = Modifier.height(IntrinsicSize.Min),
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
-                                Box(modifier = Modifier.size(8.dp).background(dotColor, shape = CircleShape))
-                                Spacer(Modifier.width(8.dp))
-                                Text(
-                                    item.label + if (!item.isConnected) " (remote)" else "",
-                                    style = MaterialTheme.typography.bodySmall,
-                                    modifier = Modifier.weight(1f)
+                                Box(
+                                    modifier = Modifier
+                                        .width(3.dp)
+                                        .fillMaxHeight()
+                                        .background(
+                                            if (isActive) MaterialTheme.colorScheme.primary
+                                            else Color.Transparent
+                                        )
                                 )
-                                if (item.isConnected && onRenameSession != null) {
-                                    IconButton(
-                                        onClick = {
-                                            if (onNativeRenameDialog != null && item.tab != null) {
-                                                onNativeRenameDialog.invoke(item.tab.id, item.label)
-                                            } else {
-                                                renameText = item.label
-                                                renamingItem = item
-                                            }
-                                        },
-                                        modifier = Modifier.size(20.dp)
-                                    ) { Text("\u270E", style = MaterialTheme.typography.labelSmall) } // pencil
-                                }
-                                if (item.isConnected) {
-                                    IconButton(
-                                        onClick = { item.tab?.let { onTabClose(it.id) } },
-                                        modifier = Modifier.size(20.dp)
-                                    ) { Icon(Icons.Default.Close, "Close", modifier = Modifier.size(12.dp)) }
+                                Row(
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .padding(start = 9.dp, end = 4.dp, top = 4.dp, bottom = 4.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Box(modifier = Modifier.size(8.dp).background(dotColor, shape = CircleShape))
+                                    Spacer(Modifier.width(8.dp))
+                                    Text(
+                                        item.label,
+                                        style = if (isActive)
+                                            MaterialTheme.typography.bodySmall.copy(
+                                                fontWeight = androidx.compose.ui.text.font.FontWeight.Medium
+                                            )
+                                        else MaterialTheme.typography.bodySmall,
+                                        color = if (!item.isConnected)
+                                            MaterialTheme.colorScheme.onSurfaceVariant
+                                        else MaterialTheme.colorScheme.onSurface,
+                                        modifier = Modifier.weight(1f)
+                                    )
+                                    if (isActive && item.isConnected && onRenameSession != null) {
+                                        IconButton(
+                                            onClick = {
+                                                if (onNativeRenameDialog != null && item.tab != null) {
+                                                    onNativeRenameDialog.invoke(item.tab.id, item.label)
+                                                } else {
+                                                    renameText = item.label
+                                                    renamingItem = item
+                                                }
+                                            },
+                                            modifier = Modifier.size(20.dp)
+                                        ) { Text("\u270E", style = MaterialTheme.typography.labelSmall) }
+                                    }
+                                    if (isActive && item.isConnected) {
+                                        IconButton(
+                                            onClick = { item.tab?.let { onTabClose(it.id) } },
+                                            modifier = Modifier.size(20.dp)
+                                        ) { Icon(Icons.Default.Close, "Close", modifier = Modifier.size(12.dp)) }
+                                    }
                                 }
                             }
                         }

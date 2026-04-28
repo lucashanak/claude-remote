@@ -183,55 +183,58 @@ private fun ActiveSessionCard(session: ClaudeSession, onClick: () -> Unit) {
         )
     ) {
         Row(
-            modifier = Modifier.padding(16.dp),
+            modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
             if (session.status == SessionStatus.CONNECTING) {
                 CircularProgressIndicator(
-                    modifier = Modifier.size(16.dp),
+                    modifier = Modifier.size(14.dp),
                     strokeWidth = 2.dp
                 )
-                Spacer(Modifier.width(8.dp))
+            } else {
+                val statusColor = when (session.status) {
+                    SessionStatus.ACTIVE -> MaterialTheme.colorScheme.primary
+                    SessionStatus.DISCONNECTED -> MaterialTheme.colorScheme.error
+                    SessionStatus.ERROR -> MaterialTheme.colorScheme.error
+                    else -> MaterialTheme.colorScheme.tertiary
+                }
+                Surface(
+                    modifier = Modifier.size(10.dp),
+                    shape = MaterialTheme.shapes.small,
+                    color = statusColor
+                ) {}
             }
-
-            val statusColor = when (session.status) {
-                SessionStatus.ACTIVE -> MaterialTheme.colorScheme.primary
-                SessionStatus.CONNECTING -> MaterialTheme.colorScheme.tertiary
-                SessionStatus.DISCONNECTED -> MaterialTheme.colorScheme.error
-                SessionStatus.ERROR -> MaterialTheme.colorScheme.error
-            }
-
-            Surface(
-                modifier = Modifier.size(12.dp),
-                shape = MaterialTheme.shapes.small,
-                color = statusColor
-            ) {}
 
             Spacer(Modifier.width(12.dp))
 
             Column(modifier = Modifier.weight(1f)) {
-                Text(
-                    session.server.name,
-                    style = MaterialTheme.typography.titleSmall
-                )
-                Text(
-                    session.displayLabel,
-                    style = MaterialTheme.typography.bodySmall
-                )
-                if (session.alias.isNotBlank()) {
-                    val folderLabel = session.folder.trimEnd('/').substringAfterLast('/').ifBlank { session.folder }
+                Row(verticalAlignment = Alignment.CenterVertically) {
                     Text(
-                        folderLabel,
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                        session.displayLabel,
+                        style = MaterialTheme.typography.titleSmall
                     )
+                    val folderLabel = session.folder.trimEnd('/').substringAfterLast('/').ifBlank { session.folder }
+                    if (session.alias.isNotBlank() && folderLabel != session.displayLabel) {
+                        Spacer(Modifier.width(6.dp))
+                        Text(
+                            folderLabel,
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
                 }
                 Text(
-                    "claude (${session.mode.displayName.lowercase()}) \u2022 ${session.durationText}",
-                    style = MaterialTheme.typography.bodySmall,
+                    "${session.server.name} \u00B7 ${session.mode.displayName.lowercase()}",
+                    style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
             }
+
+            Text(
+                session.durationText,
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
         }
     }
 }
