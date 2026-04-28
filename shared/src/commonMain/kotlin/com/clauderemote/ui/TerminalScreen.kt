@@ -744,20 +744,19 @@ private fun SessionSidePanel(
 
             Column(modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState())) {
                 allSessions.entries.forEachIndexed { index, (folder, items) ->
-                    if (index > 0) {
-                        HorizontalDivider(
-                            modifier = Modifier.padding(horizontal = 8.dp),
-                            color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.4f)
-                        )
-                    }
                     Text(
                         folder.uppercase(),
-                        style = MaterialTheme.typography.labelSmall.copy(
-                            fontWeight = androidx.compose.ui.text.font.FontWeight.SemiBold,
-                            letterSpacing = 0.8.sp
+                        style = MaterialTheme.typography.labelMedium.copy(
+                            fontWeight = androidx.compose.ui.text.font.FontWeight.Bold,
+                            letterSpacing = 1.0.sp
                         ),
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.padding(start = 12.dp, end = 12.dp, top = 8.dp, bottom = 2.dp)
+                        color = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.padding(
+                            start = 12.dp,
+                            end = 12.dp,
+                            top = if (index == 0) 6.dp else 10.dp,
+                            bottom = 2.dp
+                        )
                     )
                     items.forEach { item ->
                         val isActive = item.tab?.id == activeTabId
@@ -790,7 +789,7 @@ private fun SessionSidePanel(
                                 Row(
                                     modifier = Modifier
                                         .weight(1f)
-                                        .padding(start = 9.dp, end = 4.dp, top = 4.dp, bottom = 4.dp),
+                                        .padding(start = 9.dp, end = 4.dp, top = 2.dp, bottom = 2.dp),
                                     verticalAlignment = Alignment.CenterVertically
                                 ) {
                                     Box(modifier = Modifier.size(8.dp).background(dotColor, shape = CircleShape))
