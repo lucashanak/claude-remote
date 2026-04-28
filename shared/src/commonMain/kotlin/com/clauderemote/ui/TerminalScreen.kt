@@ -744,20 +744,25 @@ private fun SessionSidePanel(
 
             Column(modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState())) {
                 allSessions.entries.forEachIndexed { index, (folder, items) ->
-                    Text(
-                        folder.uppercase(),
-                        style = MaterialTheme.typography.labelMedium.copy(
-                            fontWeight = androidx.compose.ui.text.font.FontWeight.Bold,
-                            letterSpacing = 1.0.sp
-                        ),
-                        color = MaterialTheme.colorScheme.primary,
-                        modifier = Modifier.padding(
-                            start = 12.dp,
-                            end = 12.dp,
-                            top = if (index == 0) 6.dp else 10.dp,
-                            bottom = 2.dp
+                    if (index > 0) Spacer(Modifier.height(4.dp))
+                    Surface(
+                        color = MaterialTheme.colorScheme.secondaryContainer,
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text(
+                            folder,
+                            style = MaterialTheme.typography.titleSmall.copy(
+                                fontWeight = androidx.compose.ui.text.font.FontWeight.Bold
+                            ),
+                            color = MaterialTheme.colorScheme.onSecondaryContainer,
+                            modifier = Modifier.padding(
+                                start = 12.dp,
+                                end = 12.dp,
+                                top = 6.dp,
+                                bottom = 6.dp
+                            )
                         )
-                    )
+                    }
                     items.forEach { item ->
                         val isActive = item.tab?.id == activeTabId
                         val dotColor = if (!item.isConnected) Color(0xFF666666)
@@ -789,7 +794,7 @@ private fun SessionSidePanel(
                                 Row(
                                     modifier = Modifier
                                         .weight(1f)
-                                        .padding(start = 9.dp, end = 4.dp, top = 2.dp, bottom = 2.dp),
+                                        .padding(start = 17.dp, end = 4.dp, top = 2.dp, bottom = 2.dp),
                                     verticalAlignment = Alignment.CenterVertically
                                 ) {
                                     Box(modifier = Modifier.size(8.dp).background(dotColor, shape = CircleShape))
