@@ -1113,6 +1113,14 @@ else:
         _latencies.update { it - sessionId }
         _pendingCounts.update { it - sessionId }
         tabManager.removeTab(sessionId)
+        // After removal, the active tab may have shifted to another session.
+        // Fire onTabSwitched so the platform terminal clears the now-stale
+        // SSH/bash content and replays the new active session's buffer —
+        // otherwise the user keeps staring at the closed session's last frame.
+        val newActive = tabManager.activeTabId.value
+        if (newActive != null) {
+            switchTab(newActive)
+        }
     }
 
     suspend fun disconnectAll() {

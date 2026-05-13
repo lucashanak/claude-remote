@@ -43,14 +43,25 @@ class SessionStorage(private val prefs: PlatformPreferences) {
 
     fun load(): List<PersistedSession> {
         val raw = prefs.getString(KEY_SESSIONS, "[]")
-        return try {
+        val parsed = try {
             json.decodeFromString<List<PersistedSession>>(raw)
         } catch (e: Exception) {
             // Corrupt blob — drop it so we don't loop on parse errors. Logging
             // is platform-agnostic (println shows up in logcat / stdout).
             println("SessionStorage: failed to decode persisted sessions, resetting (${e.message})")
-            emptyList()
+            return emptyList()
         }
+        // Dedupe by (serverId, tmuxSessionName) keeping the entry with the
+        // newest createdAt — heals stale duplicates that older app versions
+        // (which keyed upsert only on the in-memory id) accumulated on disk.
+        val deduped = parsed
+            .groupBy { it.serverId to it.tmuxSessionName }
+            .map { (_, group) -> group.maxByOrNull { it.createdAt } ?: group.first() }
+        if (deduped.size != parsed.size) {
+            println("SessionStorage: deduped ${parsed.size - deduped.size} stale entries on load")
+            save(deduped)
+        }
+        return deduped
     }
 
     fun save(sessions: List<PersistedSession>) {
