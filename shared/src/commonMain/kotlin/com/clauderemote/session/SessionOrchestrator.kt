@@ -537,15 +537,34 @@ else:
             val command = if (tmuxExists) {
                 "tmux set-option -g window-size latest 2>/dev/null; tmux set-option -g history-limit 100000 2>/dev/null; tmux attach-session -t '$escaped'"
             } else if (session.claudeSessionId != null) {
-                FileLogger.log(TAG, "Tmux '${session.tmuxSessionName}' missing — rebuilding with claude --resume ${session.claudeSessionId}")
-                ClaudeConfig.buildTmuxLaunchCommand(
-                    tmuxSessionName = session.tmuxSessionName,
-                    folder = session.folder,
-                    mode = session.mode,
-                    model = session.model,
-                    claudeSessionId = session.claudeSessionId,
-                    resume = true
-                )
+                // Resume only works if claude actually wrote a transcript file
+                // for this UUID. The transcript appears lazily — first user/
+                // assistant turn — so a session that was launched but never
+                // interacted with has no jsonl, and `--resume` would print
+                // "No conversation found". In that case we re-launch fresh
+                // with the same `--session-id` so future restarts can resume.
+                val hasTranscript = probeTranscriptExists(sshManager, session.folder, session.claudeSessionId)
+                if (hasTranscript) {
+                    FileLogger.log(TAG, "Tmux '${session.tmuxSessionName}' missing — rebuilding with claude --resume ${session.claudeSessionId}")
+                    ClaudeConfig.buildTmuxLaunchCommand(
+                        tmuxSessionName = session.tmuxSessionName,
+                        folder = session.folder,
+                        mode = session.mode,
+                        model = session.model,
+                        claudeSessionId = session.claudeSessionId,
+                        resume = true
+                    )
+                } else {
+                    FileLogger.log(TAG, "Tmux '${session.tmuxSessionName}' missing and no transcript for ${session.claudeSessionId} — fresh launch with same --session-id")
+                    ClaudeConfig.buildTmuxLaunchCommand(
+                        tmuxSessionName = session.tmuxSessionName,
+                        folder = session.folder,
+                        mode = session.mode,
+                        model = session.model,
+                        claudeSessionId = session.claudeSessionId,
+                        resume = false
+                    )
+                }
             } else {
                 FileLogger.log(TAG, "Tmux '${session.tmuxSessionName}' missing and no claudeSessionId — fresh launch")
                 ClaudeConfig.buildTmuxLaunchCommand(
@@ -581,6 +600,44 @@ else:
         } catch (e: Exception) {
             FileLogger.error(TAG, "Tmux probe failed for $sessionName: ${e.message}", e)
             true // fail-open
+        }
+    }
+
+    /**
+     * Probe whether a Claude Code transcript file exists for the given UUID
+     * in the encoded form of [folder]. Used to decide whether `--resume <uuid>`
+     * will succeed or whether we need to launch fresh with `--session-id <uuid>`.
+     *
+     * Encoding: `~` is expanded to `$HOME`, relative folders are anchored at
+     * `$HOME`, then every `/` becomes `-` (matches Claude Code's on-disk layout
+     * under `~/.claude/projects/`).
+     *
+     * Fail-closed (returns false on probe error) so we don't try a `--resume`
+     * that we can't verify — it's safer to start fresh than to crash with
+     * "No conversation found".
+     */
+    private fun probeTranscriptExists(sshManager: SshManager, folder: String, uuid: String): Boolean {
+        return try {
+            val sshSession = sshManager.getSession() ?: return false
+            val escapedFolder = folder.replace("'", "'\\''")
+            val cmd = """
+                F='$escapedFolder'
+                E="${'$'}{F/#~/${'$'}HOME}"
+                case "${'$'}E" in /*) ;; *) E="${'$'}HOME/${'$'}E";; esac
+                ENC=${'$'}(echo "${'$'}E" | sed 's|/|-|g')
+                [ -f "${'$'}HOME/.claude/projects/${'$'}ENC/$uuid.jsonl" ] && echo YES || echo NO
+            """.trimIndent()
+            val ch = sshSession.openChannel("exec") as com.jcraft.jsch.ChannelExec
+            ch.setCommand(cmd)
+            ch.inputStream = null
+            val input = ch.inputStream
+            ch.connect(1500)
+            val out = input.bufferedReader().readText().trim()
+            ch.disconnect()
+            out.endsWith("YES")
+        } catch (e: Exception) {
+            FileLogger.error(TAG, "Transcript probe failed for $uuid in $folder: ${e.message}", e)
+            false
         }
     }
 
@@ -1048,7 +1105,8 @@ if [ "${'$'}HAVE_JQ" = "1" ]; then
         UUID=${'$'}(jq -r ".[${'$'}i].claudeSessionId // empty" "${'$'}SESSIONS_FILE")
         tmux has-session -t "${'$'}TMUX_NAME" 2>/dev/null && continue
         FOLDER_EXP="${'$'}{FOLDER/#\~/${'$'}HOME}"
-        [ -d "${'$'}FOLDER_EXP" ] || continue
+        case "${'$'}FOLDER_EXP" in /*) ;; *) FOLDER_EXP="${'$'}HOME/${'$'}FOLDER_EXP";; esac
+        [ -d "${'$'}FOLDER_EXP" ] || { echo "skip ${'$'}TMUX_NAME — folder ${'$'}FOLDER_EXP missing"; continue; }
         ARGS=("claude")
         case "${'$'}MODEL" in
             OPUS) ARGS+=(--model opus);;
@@ -1059,8 +1117,19 @@ if [ "${'$'}HAVE_JQ" = "1" ]; then
             YOLO) ARGS+=(--dangerously-skip-permissions);;
             *) ARGS+=(--allow-dangerously-skip-permissions);;
         esac
+        # Resume only if a transcript actually exists for this UUID — claude
+        # creates the jsonl lazily (first user/assistant turn), so a session
+        # that was launched but never used has nothing to resume. Falling back
+        # to fresh `--session-id` keeps the UUID stable for next time.
         if [ -n "${'$'}UUID" ]; then
-            ARGS+=(--resume "${'$'}UUID")
+            ENC=${'$'}(echo "${'$'}FOLDER_EXP" | sed 's|/|-|g')
+            JSONL="${'$'}HOME/.claude/projects/${'$'}ENC/${'$'}UUID.jsonl"
+            if [ -f "${'$'}JSONL" ]; then
+                ARGS+=(--resume "${'$'}UUID")
+            else
+                echo "no transcript at ${'$'}JSONL — launching fresh with --session-id ${'$'}UUID"
+                ARGS+=(--session-id "${'$'}UUID")
+            fi
         fi
         CMD="${'$'}{ARGS[*]}"
         if tmux new-session -d -s "${'$'}TMUX_NAME" -c "${'$'}FOLDER_EXP" \
