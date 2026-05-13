@@ -26,7 +26,9 @@ object ClaudeConfig {
     fun buildLaunchCommand(
         folder: String,
         mode: ClaudeMode,
-        model: ClaudeModel
+        model: ClaudeModel,
+        claudeSessionId: String? = null,
+        resume: Boolean = false
     ): String {
         val parts = mutableListOf<String>()
         parts.add("cd ${shellEscape(folder)}")
@@ -49,6 +51,19 @@ object ClaudeConfig {
             else "--allow-dangerously-skip-permissions"
         )
 
+        // Session-id flag: --resume reuses an existing conversation UUID,
+        // --session-id forces a NEW session to use a deterministic UUID.
+        // These are mutually exclusive — resume wins when both are set.
+        if (claudeSessionId != null) {
+            if (resume) {
+                claudeArgs.add("--resume")
+                claudeArgs.add(claudeSessionId)
+            } else {
+                claudeArgs.add("--session-id")
+                claudeArgs.add(claudeSessionId)
+            }
+        }
+
         parts.add(claudeArgs.joinToString(" "))
         return parts.joinToString(" && ")
     }
@@ -57,9 +72,11 @@ object ClaudeConfig {
         tmuxSessionName: String,
         folder: String,
         mode: ClaudeMode,
-        model: ClaudeModel
+        model: ClaudeModel,
+        claudeSessionId: String? = null,
+        resume: Boolean = false
     ): String {
-        val claudeCmd = buildLaunchCommand(folder, mode, model)
+        val claudeCmd = buildLaunchCommand(folder, mode, model, claudeSessionId, resume)
         val escaped = tmuxSessionName.replace("'", "\\'")
         // Kill existing session with same name to avoid -A reattaching
         // and sending keystrokes into a running program

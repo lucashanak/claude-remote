@@ -10,7 +10,13 @@ data class ClaudeSession(
     val connectionType: ConnectionType,
     val status: SessionStatus = SessionStatus.CONNECTING,
     val connectedAt: Long = System.currentTimeMillis(),
-    val alias: String = ""
+    val alias: String = "",
+    /**
+     * UUID passed to `claude --session-id <uuid>` at launch. Used to deterministically
+     * resume the same conversation via `claude --resume <uuid>` after a server reboot
+     * or app restart. Null only for sessions launched before this field existed.
+     */
+    val claudeSessionId: String? = null
 ) {
     val tabTitle: String get() {
         if (alias.isNotBlank()) return alias

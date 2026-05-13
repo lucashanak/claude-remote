@@ -541,7 +541,7 @@ fun App(
                                 }
                             } else {
                                 scope.launch {
-                                    sessionOrchestrator.disconnectSession(id)
+                                    sessionOrchestrator.forgetSession(id)
                                     if (tabManager.tabs.value.isEmpty()) currentScreen = Screen.LAUNCHER
                                 }
                             }
@@ -743,7 +743,7 @@ fun App(
                     TextButton(onClick = {
                         tabCloseConfirmId = null
                         scope.launch {
-                            sessionOrchestrator.disconnectSession(id)
+                            sessionOrchestrator.forgetSession(id)
                             if (tabManager.tabs.value.isEmpty()) currentScreen = Screen.LAUNCHER
                         }
                     }) { Text("Disconnect") }

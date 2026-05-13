@@ -142,7 +142,8 @@ class MainActivity : FragmentActivity() {
         serverStorage = ServerStorage(prefs)
         appSettings = AppSettings(prefs)
         tabManager = TabManager()
-        sessionOrchestrator = SessionOrchestrator(serverStorage, tabManager)
+        val sessionStorage = com.clauderemote.storage.SessionStorage(prefs)
+        sessionOrchestrator = SessionOrchestrator(serverStorage, tabManager, sessionStorage)
         com.clauderemote.connection.MoshManager.init(this)
         val sshKeyManager = com.clauderemote.connection.SshKeyManager(prefs)
 
@@ -213,6 +214,11 @@ class MainActivity : FragmentActivity() {
 
         handleSessionIntent(intent)
         registerNetworkCallback()
+
+        // Resurrect persisted tabs from previous app run. Restore is
+        // idempotent inside the orchestrator (configuration changes that
+        // recreate the Activity won't double-connect).
+        sessionOrchestrator.restoreAndReconnect()
 
         val appVersion = try {
             packageManager.getPackageInfo(packageName, 0).versionName ?: "1.0.0"

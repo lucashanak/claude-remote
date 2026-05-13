@@ -6,6 +6,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.update
 import com.clauderemote.storage.ServerStorage
+import com.clauderemote.storage.SessionStorage
 import com.clauderemote.util.FileLogger
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.isActive
@@ -20,7 +21,8 @@ import kotlin.random.Random
  */
 class SessionOrchestrator(
     private val serverStorage: ServerStorage,
-    private val tabManager: TabManager
+    private val tabManager: TabManager,
+    private val sessionStorage: SessionStorage? = null
 ) {
     private val connections = mutableMapOf<String, SshManager>()
     private val moshConnections = mutableMapOf<String, com.clauderemote.connection.MoshManager>()
@@ -342,6 +344,10 @@ else:
         isNewTmuxSession: Boolean = true
     ): ClaudeSession = withContext(Dispatchers.IO) {
         val sessionId = generateId()
+        // Pre-generate a UUID for `claude --session-id <uuid>` so we can later
+        // restore the conversation deterministically via `claude --resume <uuid>`.
+        // Avoids a polling race against `~/.claude/projects/<encoded-cwd>/*.jsonl`.
+        val claudeSessionId = generateUuidV4()
 
         val parsedAlias = com.clauderemote.model.TmuxNameParser.parse(tmuxSessionName, server.name).alias
         val session = ClaudeSession(
@@ -353,7 +359,8 @@ else:
             tmuxSessionName = tmuxSessionName,
             connectionType = connectionType,
             status = SessionStatus.CONNECTING,
-            alias = parsedAlias
+            alias = parsedAlias,
+            claudeSessionId = claudeSessionId
         )
 
         synchronized(bufferLock) { outputBuffers[sessionId] = StringBuilder() }
@@ -374,6 +381,14 @@ else:
             startUsagePolling(sessionId)
             startLatencyPolling(sessionId)
             connections[sessionId]?.let { startNotifyWatcher(sessionId, session.tmuxSessionName, it) }
+            // Persist session for app-restart and server-reboot recovery.
+            sessionStorage?.upsert(SessionStorage.fromClaudeSession(session))
+            connections[sessionId]?.let { conn ->
+                reconnectScope.launch {
+                    ensureRestoreService(conn)
+                    pushSessionsToServer(conn, server.id)
+                }
+            }
             session.copy(status = SessionStatus.ACTIVE)
         } catch (e: Exception) {
             FileLogger.error(TAG, "Session launch failed", e)
@@ -508,14 +523,64 @@ else:
                 tmuxSessionName = session.tmuxSessionName,
                 folder = session.folder,
                 mode = session.mode,
-                model = session.model
+                model = session.model,
+                claudeSessionId = session.claudeSessionId,
+                resume = false
             )
             sshManager.sendInput(command + "\n")
         } else {
+            // Probe tmux first. If the named session is gone (server reboot,
+            // someone killed it), recreate it and re-launch claude with --resume
+            // so the conversation continues. Otherwise plain attach.
+            val tmuxExists = probeTmuxSession(sshManager, session.tmuxSessionName)
             val escaped = session.tmuxSessionName.replace("'", "\\'")
-            val command = "tmux set-option -g window-size latest 2>/dev/null; tmux set-option -g history-limit 100000 2>/dev/null; tmux attach-session -t '$escaped' 2>/dev/null || tmux new-session -A -s '$escaped' \\; set-option -g mouse on \\; set-option -g history-limit 100000"
+            val command = if (tmuxExists) {
+                "tmux set-option -g window-size latest 2>/dev/null; tmux set-option -g history-limit 100000 2>/dev/null; tmux attach-session -t '$escaped'"
+            } else if (session.claudeSessionId != null) {
+                FileLogger.log(TAG, "Tmux '${session.tmuxSessionName}' missing — rebuilding with claude --resume ${session.claudeSessionId}")
+                ClaudeConfig.buildTmuxLaunchCommand(
+                    tmuxSessionName = session.tmuxSessionName,
+                    folder = session.folder,
+                    mode = session.mode,
+                    model = session.model,
+                    claudeSessionId = session.claudeSessionId,
+                    resume = true
+                )
+            } else {
+                FileLogger.log(TAG, "Tmux '${session.tmuxSessionName}' missing and no claudeSessionId — fresh launch")
+                ClaudeConfig.buildTmuxLaunchCommand(
+                    tmuxSessionName = session.tmuxSessionName,
+                    folder = session.folder,
+                    mode = session.mode,
+                    model = session.model
+                )
+            }
             FileLogger.log(TAG, "Attaching to tmux: $command")
             sshManager.sendInput(command + "\n")
+        }
+    }
+
+    /**
+     * Synchronous tmux session existence probe via SSH exec channel.
+     * Returns true if `tmux has-session -t <name>` exits 0. Returns true on
+     * exec failure too (fail-open: fall through to attach which will create
+     * via -A if needed — old behavior).
+     */
+    private fun probeTmuxSession(sshManager: SshManager, sessionName: String): Boolean {
+        return try {
+            val sshSession = sshManager.getSession() ?: return true
+            val escaped = sessionName.replace("'", "\\'")
+            val ch = sshSession.openChannel("exec") as com.jcraft.jsch.ChannelExec
+            ch.setCommand("tmux has-session -t '$escaped' 2>/dev/null && echo YES || echo NO")
+            ch.inputStream = null
+            val input = ch.inputStream
+            ch.connect(1500) // fail-open probe — keep snappy on cell links
+            val out = input.bufferedReader().readText().trim()
+            ch.disconnect()
+            out.endsWith("YES")
+        } catch (e: Exception) {
+            FileLogger.error(TAG, "Tmux probe failed for $sessionName: ${e.message}", e)
+            true // fail-open
         }
     }
 
@@ -847,6 +912,42 @@ else:
         }
     }
 
+    /**
+     * Forget a session permanently (used when user explicitly closes a tab,
+     * not just disconnects). Removes the persisted record so it won't be
+     * resurrected on next app start, and re-syncs the server-side
+     * sessions.json so systemd doesn't try to restore it after reboot.
+     */
+    suspend fun forgetSession(sessionId: String) {
+        val session = tabManager.getTab(sessionId)
+        try {
+            sessionStorage?.remove(sessionId)
+            if (session != null) {
+                val conn = connections[sessionId]
+                if (conn != null && conn.isConnected) {
+                    try {
+                        com.clauderemote.connection.TmuxManager.killSession(
+                            conn.getSession() ?: error("no ssh"),
+                            session.tmuxSessionName
+                        )
+                    } catch (e: Exception) {
+                        FileLogger.error(TAG, "Tmux kill failed for $sessionId: ${e.message}", e)
+                    }
+                    try {
+                        pushSessionsToServer(conn, session.server.id)
+                    } catch (e: Exception) {
+                        FileLogger.error(TAG, "sessions.json push failed for ${session.server.id}: ${e.message}", e)
+                    }
+                }
+            }
+        } finally {
+            // Always tear down the in-memory connection / tab, even if the
+            // server-side cleanup above threw — otherwise the tab list and
+            // connection map drift out of sync with what the user expects.
+            disconnectSession(sessionId)
+        }
+    }
+
     suspend fun disconnectSession(sessionId: String) {
         usagePollingJobs.remove(sessionId)?.cancel()
         latencyPollingJobs.remove(sessionId)?.cancel()
@@ -881,8 +982,295 @@ else:
                 val sshSession = connections[sessionId]?.getSession() ?: return@withContext
                 com.clauderemote.connection.TmuxManager.renameSession(sshSession, oldName, newName)
                 FileLogger.log(TAG, "Tmux renamed: $oldName → $newName")
+                // Persist the new tmux name + re-sync server snapshot so the
+                // restore service uses it after a reboot.
+                val tab = tabManager.getTab(sessionId)
+                if (tab != null && sessionStorage != null) {
+                    val updated = tab.copy(tmuxSessionName = newName)
+                    sessionStorage.upsert(SessionStorage.fromClaudeSession(updated))
+                    connections[sessionId]?.let { pushSessionsToServer(it, tab.server.id) }
+                }
             } catch (e: Exception) {
                 FileLogger.error(TAG, "Tmux rename failed", e)
+            }
+        }
+    }
+
+    // ---------------- Server-side restore (systemd) ----------------
+
+    /**
+     * Idempotent installer for the user-level systemd service that restores
+     * tmux + claude sessions after a server reboot. Writes:
+     *   ~/.claude-remote/restore.sh
+     *   ~/.config/systemd/user/claude-remote-restore.service
+     * then enables linger + the unit. Safe to call on every connect — checks
+     * for a marker line in the script before rewriting.
+     *
+     * Requires: bash, jq, tmux, claude on PATH at boot. The service uses an
+     * explicit PATH so it works under empty systemd-user env.
+     */
+    private val INSTALL_RESTORE_COMMAND = """
+        set -e
+        mkdir -p "${'$'}HOME/.claude-remote" "${'$'}HOME/.config/systemd/user"
+        SCRIPT="${'$'}HOME/.claude-remote/restore.sh"
+        UNIT="${'$'}HOME/.config/systemd/user/claude-remote-restore.service"
+        MARKER="claude-remote-restore-v2"
+        # Append-only log so we can debug installs after the fact.
+        echo "[${'$'}(date -u +%FT%TZ)] install: invoked by client" >> "${'$'}HOME/.claude-remote/install.log"
+        if ! grep -q "${'$'}MARKER" "${'$'}SCRIPT" 2>/dev/null; then
+            cat > "${'$'}SCRIPT" <<'RESTORE_EOF'
+#!/usr/bin/env bash
+# claude-remote-restore-v2 — recreates tmux+claude sessions from sessions.json
+set -u
+LOG="${'$'}HOME/.claude-remote/restore.log"
+exec >> "${'$'}LOG" 2>&1
+echo "----- ${'$'}(date -u +%FT%TZ) restore.sh start (pid=${'$'}${'$'}) -----"
+SESSIONS_FILE="${'$'}HOME/.claude-remote/sessions.json"
+if [ ! -f "${'$'}SESSIONS_FILE" ]; then
+    echo "no sessions.json yet — client has not synced; nothing to restore"
+    exit 0
+fi
+command -v tmux >/dev/null 2>&1 || { echo "tmux not in PATH"; exit 1; }
+command -v claude >/dev/null 2>&1 || { echo "claude not in PATH"; exit 1; }
+HAVE_JQ=0
+command -v jq >/dev/null 2>&1 && HAVE_JQ=1
+parse_field() {
+    local key="${'$'}1" line="${'$'}2"
+    echo "${'$'}line" | sed -n "s/.*\"${'$'}key\":[[:space:]]*\"\([^\"]*\)\".*/\1/p"
+}
+if [ "${'$'}HAVE_JQ" = "1" ]; then
+    COUNT=${'$'}(jq 'length' "${'$'}SESSIONS_FILE")
+    for i in ${'$'}(seq 0 ${'$'}((COUNT-1))); do
+        TMUX_NAME=${'$'}(jq -r ".[${'$'}i].tmuxSessionName" "${'$'}SESSIONS_FILE")
+        FOLDER=${'$'}(jq -r ".[${'$'}i].folder" "${'$'}SESSIONS_FILE")
+        MODE=${'$'}(jq -r ".[${'$'}i].mode" "${'$'}SESSIONS_FILE")
+        MODEL=${'$'}(jq -r ".[${'$'}i].model" "${'$'}SESSIONS_FILE")
+        UUID=${'$'}(jq -r ".[${'$'}i].claudeSessionId // empty" "${'$'}SESSIONS_FILE")
+        tmux has-session -t "${'$'}TMUX_NAME" 2>/dev/null && continue
+        FOLDER_EXP="${'$'}{FOLDER/#\~/${'$'}HOME}"
+        [ -d "${'$'}FOLDER_EXP" ] || continue
+        ARGS=("claude")
+        case "${'$'}MODEL" in
+            OPUS) ARGS+=(--model opus);;
+            SONNET) ARGS+=(--model sonnet);;
+            HAIKU) ARGS+=(--model haiku);;
+        esac
+        case "${'$'}MODE" in
+            YOLO) ARGS+=(--dangerously-skip-permissions);;
+            *) ARGS+=(--allow-dangerously-skip-permissions);;
+        esac
+        if [ -n "${'$'}UUID" ]; then
+            ARGS+=(--resume "${'$'}UUID")
+        fi
+        CMD="${'$'}{ARGS[*]}"
+        if tmux new-session -d -s "${'$'}TMUX_NAME" -c "${'$'}FOLDER_EXP" \
+            "tmux set-option -g mouse on; tmux set-option -g history-limit 100000; ${'$'}CMD"; then
+            echo "Restored ${'$'}TMUX_NAME (${'$'}FOLDER_EXP) [uuid=${'$'}UUID]"
+        else
+            echo "FAILED to restore ${'$'}TMUX_NAME (${'$'}FOLDER_EXP) — tmux exit ${'$'}?"
+        fi
+    done
+else
+    echo "jq not installed — falling back to line parser"
+    while IFS= read -r line; do
+        case "${'$'}line" in
+            *tmuxSessionName*) TMUX_NAME=${'$'}(parse_field tmuxSessionName "${'$'}line");;
+            *\"folder\"*)      FOLDER=${'$'}(parse_field folder "${'$'}line");;
+            *\"mode\"*)        MODE=${'$'}(parse_field mode "${'$'}line");;
+            *\"model\"*)       MODEL=${'$'}(parse_field model "${'$'}line");;
+            *claudeSessionId*) UUID=${'$'}(parse_field claudeSessionId "${'$'}line");;
+            *\}*)
+                if [ -n "${'$'}{TMUX_NAME:-}" ] && [ -n "${'$'}{FOLDER:-}" ]; then
+                    if ! tmux has-session -t "${'$'}TMUX_NAME" 2>/dev/null; then
+                        FOLDER_EXP="${'$'}{FOLDER/#\~/${'$'}HOME}"
+                        [ -d "${'$'}FOLDER_EXP" ] && {
+                            CMD="claude --allow-dangerously-skip-permissions"
+                            [ -n "${'$'}{UUID:-}" ] && CMD="${'$'}CMD --resume ${'$'}UUID"
+                            tmux new-session -d -s "${'$'}TMUX_NAME" -c "${'$'}FOLDER_EXP" \
+                                "tmux set-option -g mouse on; tmux set-option -g history-limit 100000; ${'$'}CMD"
+                            echo "Restored ${'$'}TMUX_NAME"
+                        }
+                    fi
+                fi
+                TMUX_NAME=""; FOLDER=""; MODE=""; MODEL=""; UUID=""
+                ;;
+        esac
+    done < "${'$'}SESSIONS_FILE"
+fi
+RESTORE_EOF
+            chmod +x "${'$'}SCRIPT"
+            echo "RESTORE_SCRIPT_INSTALLED"
+        else
+            echo "RESTORE_SCRIPT_PRESENT"
+        fi
+        if ! grep -q "claude-remote-restore" "${'$'}UNIT" 2>/dev/null; then
+            cat > "${'$'}UNIT" <<UNIT_EOF
+[Unit]
+Description=Claude Remote — restore tmux+claude sessions on boot
+After=default.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+Environment=PATH=%h/.local/bin:%h/.npm-global/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=/usr/bin/env bash %h/.claude-remote/restore.sh
+
+[Install]
+WantedBy=default.target
+UNIT_EOF
+            systemctl --user daemon-reload 2>/dev/null || true
+            systemctl --user enable claude-remote-restore.service 2>/dev/null || true
+            loginctl enable-linger "${'$'}USER" 2>/dev/null || true
+            echo "RESTORE_UNIT_INSTALLED"
+        else
+            systemctl --user enable claude-remote-restore.service 2>/dev/null || true
+            echo "RESTORE_UNIT_PRESENT"
+        fi
+        # Probe whether linger actually stuck — without it the user systemd
+        # instance dies on logout and the restore unit never fires after reboot.
+        # Most distros require polkit/sudo for `loginctl enable-linger`, so
+        # the call above often fails silently. Surface the verdict in the log
+        # so the client can warn the user once.
+        LINGER=${'$'}(loginctl show-user "${'$'}USER" --property=Linger --value 2>/dev/null || echo unknown)
+        echo "LINGER=${'$'}LINGER"
+    """.trimIndent()
+
+    /**
+     * Track which servers we've already attempted install on this app session
+     * to avoid pinging on every persist. Best-effort — if the install fails
+     * (no systemd, e.g. macOS, BSD), the in-app reconnect path still works.
+     */
+    private val installedRestoreServers = mutableSetOf<String>()
+
+    private suspend fun ensureRestoreService(sshManager: SshManager) {
+        val serverId = tabManager.tabs.value.firstOrNull { connections[it.id] === sshManager }?.server?.id
+        if (serverId != null) {
+            synchronized(installedRestoreServers) {
+                if (!installedRestoreServers.add(serverId)) return
+            }
+        }
+        try {
+            val out = withContext(Dispatchers.IO) {
+                val sshSession = sshManager.getSession() ?: return@withContext "NO_SESSION"
+                val ch = sshSession.openChannel("exec") as com.jcraft.jsch.ChannelExec
+                ch.setCommand(INSTALL_RESTORE_COMMAND)
+                ch.inputStream = null
+                val input = ch.inputStream
+                ch.connect(15_000)
+                val text = input.bufferedReader().readText().trim()
+                ch.disconnect()
+                text
+            }
+            FileLogger.log(TAG, "Restore service install: $out")
+            if (out.contains("LINGER=no") || out.contains("LINGER=unknown")) {
+                FileLogger.log(TAG,
+                    "WARNING: linger is not enabled on the server — the restore service " +
+                    "will only fire after a manual login. Run `sudo loginctl enable-linger \$USER` " +
+                    "on the server to make session persistence work after reboot."
+                )
+            }
+        } catch (e: Exception) {
+            FileLogger.error(TAG, "Restore service install failed: ${e.message}", e)
+        }
+    }
+
+    /**
+     * Push the per-server `sessions.json` snapshot to the remote server via
+     * `cat > tmp && mv tmp final` (atomic rename). The systemd restore unit
+     * reads this file at boot.
+     */
+    private suspend fun pushSessionsToServer(sshManager: SshManager, serverId: String) {
+        val storage = sessionStorage ?: return
+        try {
+            val payload = storage.serializeForServer(serverId)
+            withContext(Dispatchers.IO) {
+                val sshSession = sshManager.getSession() ?: return@withContext
+                val ch = sshSession.openChannel("exec") as com.jcraft.jsch.ChannelExec
+                // Atomic write + append-only push log so server-side debugging
+                // can confirm whether/when the client actually synced.
+                ch.setCommand(
+                    "mkdir -p \"\$HOME/.claude-remote\" && " +
+                    "cat > \"\$HOME/.claude-remote/sessions.json.tmp\" && " +
+                    "mv \"\$HOME/.claude-remote/sessions.json.tmp\" \"\$HOME/.claude-remote/sessions.json\" && " +
+                    "echo \"[\$(date -u +%FT%TZ)] push: ${payload.length} bytes for ${serverId.replace("\"", "")}\" >> \"\$HOME/.claude-remote/push.log\""
+                )
+                ch.inputStream = null
+                val os = ch.outputStream
+                ch.connect(5000)
+                os.write(payload.toByteArray(Charsets.UTF_8))
+                os.flush()
+                os.close()
+                val deadline = System.currentTimeMillis() + 5000
+                while (!ch.isClosed && System.currentTimeMillis() < deadline) {
+                    kotlinx.coroutines.delay(50)
+                }
+                val exit = ch.exitStatus
+                ch.disconnect()
+                if (exit != 0) {
+                    FileLogger.error(
+                        TAG,
+                        "sessions.json sync exec exited with $exit for $serverId — restore service may use stale data",
+                        null
+                    )
+                    return@withContext
+                }
+            }
+            FileLogger.log(TAG, "Synced sessions.json to server $serverId (${payload.length} bytes)")
+        } catch (e: Exception) {
+            FileLogger.error(TAG, "sessions.json sync failed for $serverId: ${e.message}", e)
+        }
+    }
+
+    /**
+     * Rehydrate persisted sessions on app start. Returns the list of
+     * ClaudeSessions that were restored into [tabManager] (status =
+     * CONNECTING). Caller is responsible for triggering reconnectSession()
+     * for each, which will probe tmux and either attach or rebuild via
+     * `claude --resume <uuid>`.
+     */
+    @Volatile private var restoreDone = false
+
+    fun restorePersistedTabs(): List<ClaudeSession> {
+        val storage = sessionStorage ?: return emptyList()
+        // Idempotent — if the host (Activity, app window) calls this twice
+        // (e.g. Android configuration change re-runs initApp), we mustn't
+        // duplicate tabs or fan out parallel reconnects to the same tmux.
+        if (restoreDone) return emptyList()
+        restoreDone = true
+        val persisted = storage.load()
+        if (persisted.isEmpty()) return emptyList()
+        val existingIds = tabManager.tabs.value.map { it.id }.toSet()
+        val rehydrated = persisted.mapNotNull { p ->
+            if (p.id in existingIds) return@mapNotNull null
+            val cs = SessionStorage.toClaudeSession(p, serverStorage)
+            if (cs == null) {
+                FileLogger.log(TAG, "Dropping persisted session ${p.id}: server ${p.serverId} not found")
+                storage.remove(p.id)
+            }
+            cs
+        }
+        rehydrated.forEach { session ->
+            synchronized(bufferLock) { outputBuffers[session.id] = StringBuilder() }
+            tabManager.addTab(session)
+            tabManager.updateTabStatus(session.id, SessionStatus.DISCONNECTED)
+            updateActivity(session.id, SessionActivity.DISCONNECTED)
+        }
+        FileLogger.log(TAG, "Restored ${rehydrated.size} persisted sessions to tabs")
+        return rehydrated
+    }
+
+    /**
+     * One-shot restore + background reconnect, scoped to the orchestrator's
+     * own [reconnectScope] (SupervisorJob-backed) so callers don't need to
+     * wire a CoroutineScope. Idempotent — safe to call from both Activity
+     * onCreate and Window init without producing duplicate connect attempts.
+     */
+    fun restoreAndReconnect() {
+        val restored = restorePersistedTabs()
+        if (restored.isEmpty()) return
+        reconnectScope.launch {
+            for (s in restored) {
+                try { reconnectSession(s.id) } catch (_: Exception) {}
             }
         }
     }
@@ -919,6 +1307,16 @@ else:
         val bytes = Random.nextBytes(16)
         return bytes.joinToString("") { "%02x".format(it) }
     }
+
+    /**
+     * Generate a cryptographically random RFC 4122 v4 UUID. Used for
+     * `claude --session-id` so the same value can later resume the
+     * conversation via `--resume <uuid>`. Backed by SecureRandom (via
+     * java.util.UUID) — a non-cryptographic PRNG would let a co-tenant
+     * on the server guess upcoming session ids and tamper with their
+     * transcripts under `~/.claude/projects/`.
+     */
+    private fun generateUuidV4(): String = java.util.UUID.randomUUID().toString()
 
     companion object {
         private const val TAG = "SessionOrchestrator"

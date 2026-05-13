@@ -202,7 +202,8 @@ fun main() = application {
     val serverStorage = ServerStorage(prefs)
     val appSettings = AppSettings(prefs)
     val tabManager = TabManager()
-    val sessionOrchestrator = SessionOrchestrator(serverStorage, tabManager)
+    val sessionStorage = com.clauderemote.storage.SessionStorage(prefs)
+    val sessionOrchestrator = SessionOrchestrator(serverStorage, tabManager, sessionStorage)
     val sshKeyManager = com.clauderemote.connection.SshKeyManager(prefs)
 
     // Create connector and wire SSH output → JediTerm
@@ -292,6 +293,11 @@ fun main() = application {
             }
         } catch (_: Exception) {}
     }
+
+    // Resurrect persisted tabs from previous app run before showing the window
+    // so the user sees their sessions immediately (status DISCONNECTED while
+    // reconnect spins up in the background, scoped to the orchestrator).
+    sessionOrchestrator.restoreAndReconnect()
 
     Window(
         onCloseRequest = {
