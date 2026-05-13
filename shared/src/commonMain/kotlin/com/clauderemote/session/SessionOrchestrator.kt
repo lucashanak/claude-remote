@@ -217,10 +217,19 @@ class SessionOrchestrator(
     }
 
     /**
-     * Resolve the real claude session_id for a tmux session by reading
-     * `~/.claude/sessions/<pane_pid>.json` over SSH. Returns null if the
-     * file does not exist (claude not yet ready), if jq is missing, or on
-     * any exec failure.
+     * Resolve the real claude session_id for a tmux session.
+     *
+     * Why we don't just read `~/.claude/sessions/<pid>.json`: that file
+     * records the session_id claude was *launched* with, but claude does
+     * NOT update it after the user invokes `/resume` and switches to a
+     * different conversation. The flag-supplied id stays stale forever.
+     *
+     * Strategy: ask claude itself by looking at which jsonl in
+     * `~/.claude/projects/<encoded-cwd>/` it has actually been writing
+     * to since process start. The newest jsonl with mtime > pid start
+     * time is the conversation claude is currently appending to —
+     * regardless of /resume, /clear, /compact churn. Falls back to
+     * sessions/<pid>.json if no jsonl matches (claude still warming up).
      */
     private suspend fun readRealSessionId(sshManager: SshManager, tmuxName: String): String? {
         return withContext(Dispatchers.IO) {
@@ -229,8 +238,15 @@ class SessionOrchestrator(
                 val escaped = tmuxName.replace("'", "'\\''")
                 val cmd = "PID=\$(tmux list-panes -t '$escaped' -F '#{pane_pid}' 2>/dev/null | head -1); " +
                     "[ -n \"\$PID\" ] || exit 1; " +
-                    "F=\"\$HOME/.claude/sessions/\$PID.json\"; " +
-                    "[ -f \"\$F\" ] && jq -r .sessionId \"\$F\" 2>/dev/null"
+                    "CWD=\$(readlink \"/proc/\$PID/cwd\" 2>/dev/null) || exit 1; " +
+                    "ENC=\$(echo \"\$CWD\" | sed 's|/|-|g'); " +
+                    "PIDSTART=\$(stat -c '%Y' /proc/\$PID 2>/dev/null) || exit 1; " +
+                    "NEWEST=\$(find \"\$HOME/.claude/projects/\$ENC\" -maxdepth 1 -name '*.jsonl' " +
+                    "-newermt \"@\$PIDSTART\" -printf '%T@ %f\\n' 2>/dev/null " +
+                    "| sort -nr | head -1 | awk '{print \$2}' | sed 's/\\.jsonl\$//'); " +
+                    "if [ -n \"\$NEWEST\" ]; then echo \"\$NEWEST\"; " +
+                    "else F=\"\$HOME/.claude/sessions/\$PID.json\"; " +
+                    "[ -f \"\$F\" ] && jq -r .sessionId \"\$F\" 2>/dev/null; fi"
                 val ch = sshSession.openChannel("exec") as com.jcraft.jsch.ChannelExec
                 ch.setCommand(cmd)
                 ch.inputStream = null
