@@ -191,11 +191,22 @@ class SessionOrchestrator(
                             if (claimedByOther) {
                                 FileLogger.log(TAG, "Session $sessionId real_uuid drifted to $real but already used by another tab — keeping ${tab.claudeSessionId}")
                             } else {
-                                FileLogger.log(TAG, "Session $sessionId real_uuid drifted: ${tab.claudeSessionId} -> $real")
-                                tabManager.updateClaudeSessionId(sessionId, real)
-                                val updated = tab.copy(claudeSessionId = real)
-                                sessionStorage.upsert(SessionStorage.fromClaudeSession(updated))
-                                connections[sessionId]?.let { pushSessionsToServer(it, tab.server.id) }
+                                // Only adopt the drifted UUID if claude actually
+                                // produced a transcript for it. Without this,
+                                // a transient empty session (user invoked
+                                // /clear or /resume → picker → new conversation)
+                                // would overwrite our stored UUID with one that
+                                // has nothing to resume after reboot.
+                                val targetHasTranscript = probeTranscriptExists(sshManager, tab.folder, real)
+                                if (!targetHasTranscript) {
+                                    FileLogger.log(TAG, "Session $sessionId real_uuid drifted to $real but it has no transcript yet — keeping ${tab.claudeSessionId}")
+                                } else {
+                                    FileLogger.log(TAG, "Session $sessionId real_uuid drifted: ${tab.claudeSessionId} -> $real")
+                                    tabManager.updateClaudeSessionId(sessionId, real)
+                                    val updated = tab.copy(claudeSessionId = real)
+                                    sessionStorage.upsert(SessionStorage.fromClaudeSession(updated))
+                                    connections[sessionId]?.let { pushSessionsToServer(it, tab.server.id) }
+                                }
                             }
                         }
                     }
