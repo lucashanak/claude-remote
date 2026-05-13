@@ -5,6 +5,7 @@ import com.clauderemote.model.*
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.update
+import com.clauderemote.storage.PersistedSession
 import com.clauderemote.storage.ServerStorage
 import com.clauderemote.storage.SessionStorage
 import com.clauderemote.util.FileLogger
@@ -166,6 +167,12 @@ class SessionOrchestrator(
      * 3s warm-up gives claude time to write its first state file; then we
      * poll every 60s. Cancelled in [disconnectSession].
      */
+    /**
+     * Pull the authoritative `~/.claude-remote/sessions.json` from the
+     * server and reconcile this tab's claudeSessionId with whatever the
+     * server-side drift daemon has recorded. Replaces the older per-pid
+     * probe — the server now owns the truth, the client just mirrors it.
+     */
     private fun startSessionIdRefresh(sessionId: String, tmuxName: String, sshManager: SshManager) {
         if (sessionStorage == null) return
         sessionIdRefreshJobs[sessionId]?.cancel()
@@ -173,41 +180,15 @@ class SessionOrchestrator(
             kotlinx.coroutines.delay(3000)
             while (isActive) {
                 try {
-                    val real = readRealSessionId(sshManager, tmuxName)
-                    if (real != null) {
+                    val remote = fetchSessionsFromServer(sshManager)
+                    if (remote != null) {
+                        val entry = remote.firstOrNull { it.tmuxSessionName == tmuxName }
+                        val realUuid = entry?.claudeSessionId
                         val tab = tabManager.getTab(sessionId)
-                        if (tab != null && tab.claudeSessionId != real) {
-                            // Refuse drifts that would point this tab at a UUID
-                            // already owned by another tab. That happens when
-                            // the user invokes `/resume` and picks the same
-                            // conversation in two tabs — adopting the same UUID
-                            // here would make both tabs restore to the same
-                            // content after reboot. Keep the original UUID; the
-                            // session won't auto-resume but at least each tab
-                            // stays distinct.
-                            val claimedByOther = tabManager.tabs.value.any {
-                                it.id != sessionId && it.claudeSessionId == real
-                            }
-                            if (claimedByOther) {
-                                FileLogger.log(TAG, "Session $sessionId real_uuid drifted to $real but already used by another tab — keeping ${tab.claudeSessionId}")
-                            } else {
-                                // Only adopt the drifted UUID if claude actually
-                                // produced a transcript for it. Without this,
-                                // a transient empty session (user invoked
-                                // /clear or /resume → picker → new conversation)
-                                // would overwrite our stored UUID with one that
-                                // has nothing to resume after reboot.
-                                val targetHasTranscript = probeTranscriptExists(sshManager, tab.folder, real)
-                                if (!targetHasTranscript) {
-                                    FileLogger.log(TAG, "Session $sessionId real_uuid drifted to $real but it has no transcript yet — keeping ${tab.claudeSessionId}")
-                                } else {
-                                    FileLogger.log(TAG, "Session $sessionId real_uuid drifted: ${tab.claudeSessionId} -> $real")
-                                    tabManager.updateClaudeSessionId(sessionId, real)
-                                    val updated = tab.copy(claudeSessionId = real)
-                                    sessionStorage.upsert(SessionStorage.fromClaudeSession(updated))
-                                    connections[sessionId]?.let { pushSessionsToServer(it, tab.server.id) }
-                                }
-                            }
+                        if (tab != null && !realUuid.isNullOrBlank() && tab.claudeSessionId != realUuid) {
+                            FileLogger.log(TAG, "Session $sessionId UUID synced from server: ${tab.claudeSessionId} -> $realUuid")
+                            tabManager.updateClaudeSessionId(sessionId, realUuid)
+                            sessionStorage.upsert(SessionStorage.fromClaudeSession(tab.copy(claudeSessionId = realUuid)))
                         }
                     }
                 } catch (_: Exception) {}
@@ -215,6 +196,38 @@ class SessionOrchestrator(
             }
         }
     }
+
+    /**
+     * Read the server's authoritative sessions.json under a shared file
+     * lock (so we never read mid-write from the drift daemon or restore.sh).
+     * Returns null on transport failure, empty list on missing file or
+     * parse error.
+     */
+    private suspend fun fetchSessionsFromServer(sshManager: SshManager): List<PersistedSession>? {
+        return withContext(Dispatchers.IO) {
+            try {
+                val sshSession = sshManager.getSession() ?: return@withContext null
+                val ch = sshSession.openChannel("exec") as com.jcraft.jsch.ChannelExec
+                ch.setCommand(
+                    "touch \"\$HOME/.claude-remote/sessions.lock\"; " +
+                    "flock -s \"\$HOME/.claude-remote/sessions.lock\" " +
+                    "cat \"\$HOME/.claude-remote/sessions.json\" 2>/dev/null"
+                )
+                ch.inputStream = null
+                val input = ch.inputStream
+                ch.connect(3000)
+                val out = input.bufferedReader().readText().trim()
+                ch.disconnect()
+                if (out.isEmpty()) emptyList()
+                else fetchJson.decodeFromString<List<PersistedSession>>(out)
+            } catch (e: Exception) {
+                FileLogger.error(TAG, "fetchSessionsFromServer failed: ${e.message}", e)
+                null
+            }
+        }
+    }
+
+    private val fetchJson = kotlinx.serialization.json.Json { ignoreUnknownKeys = true }
 
     /**
      * Resolve the real claude session_id for a tmux session by reading
@@ -1187,23 +1200,30 @@ else:
         set -e
         mkdir -p "${'$'}HOME/.claude-remote" "${'$'}HOME/.config/systemd/user"
         SCRIPT="${'$'}HOME/.claude-remote/restore.sh"
+        DRIFT="${'$'}HOME/.claude-remote/drift.sh"
         UNIT="${'$'}HOME/.config/systemd/user/claude-remote-restore.service"
-        MARKER="claude-remote-restore-v2"
-        # Append-only log so we can debug installs after the fact.
+        DUNIT="${'$'}HOME/.config/systemd/user/claude-remote-drift.service"
+        DTIMER="${'$'}HOME/.config/systemd/user/claude-remote-drift.timer"
+        LOCK="${'$'}HOME/.claude-remote/sessions.lock"
+        MARKER="claude-remote-restore-v3"
+        touch "${'$'}LOCK"
         echo "[${'$'}(date -u +%FT%TZ)] install: invoked by client" >> "${'$'}HOME/.claude-remote/install.log"
         if ! grep -q "${'$'}MARKER" "${'$'}SCRIPT" 2>/dev/null; then
             cat > "${'$'}SCRIPT" <<'RESTORE_EOF'
 #!/usr/bin/env bash
-# claude-remote-restore-v2 — recreates tmux+claude sessions from sessions.json
+# claude-remote-restore-v3 — recreates tmux+claude sessions from sessions.json (snapshot under flock)
 set -u
 LOG="${'$'}HOME/.claude-remote/restore.log"
 exec >> "${'$'}LOG" 2>&1
 echo "----- ${'$'}(date -u +%FT%TZ) restore.sh start (pid=${'$'}${'$'}) -----"
 SESSIONS_FILE="${'$'}HOME/.claude-remote/sessions.json"
+LOCK="${'$'}HOME/.claude-remote/sessions.lock"
 if [ ! -f "${'$'}SESSIONS_FILE" ]; then
     echo "no sessions.json yet — client has not synced; nothing to restore"
     exit 0
 fi
+touch "${'$'}LOCK"
+SNAP=${'$'}(flock -s "${'$'}LOCK" cat "${'$'}SESSIONS_FILE")
 command -v tmux >/dev/null 2>&1 || { echo "tmux not in PATH"; exit 1; }
 command -v claude >/dev/null 2>&1 || { echo "claude not in PATH"; exit 1; }
 HAVE_JQ=0
@@ -1213,13 +1233,13 @@ parse_field() {
     echo "${'$'}line" | sed -n "s/.*\"${'$'}key\":[[:space:]]*\"\([^\"]*\)\".*/\1/p"
 }
 if [ "${'$'}HAVE_JQ" = "1" ]; then
-    COUNT=${'$'}(jq 'length' "${'$'}SESSIONS_FILE")
+    COUNT=${'$'}(echo "${'$'}SNAP" | jq 'length')
     for i in ${'$'}(seq 0 ${'$'}((COUNT-1))); do
-        TMUX_NAME=${'$'}(jq -r ".[${'$'}i].tmuxSessionName" "${'$'}SESSIONS_FILE")
-        FOLDER=${'$'}(jq -r ".[${'$'}i].folder" "${'$'}SESSIONS_FILE")
-        MODE=${'$'}(jq -r ".[${'$'}i].mode" "${'$'}SESSIONS_FILE")
-        MODEL=${'$'}(jq -r ".[${'$'}i].model" "${'$'}SESSIONS_FILE")
-        UUID=${'$'}(jq -r ".[${'$'}i].claudeSessionId // empty" "${'$'}SESSIONS_FILE")
+        TMUX_NAME=${'$'}(echo "${'$'}SNAP" | jq -r ".[${'$'}i].tmuxSessionName")
+        FOLDER=${'$'}(echo "${'$'}SNAP" | jq -r ".[${'$'}i].folder")
+        MODE=${'$'}(echo "${'$'}SNAP" | jq -r ".[${'$'}i].mode")
+        MODEL=${'$'}(echo "${'$'}SNAP" | jq -r ".[${'$'}i].model")
+        UUID=${'$'}(echo "${'$'}SNAP" | jq -r ".[${'$'}i].claudeSessionId // empty")
         tmux has-session -t "${'$'}TMUX_NAME" 2>/dev/null && continue
         FOLDER_EXP="${'$'}{FOLDER/#\~/${'$'}HOME}"
         case "${'$'}FOLDER_EXP" in /*) ;; *) FOLDER_EXP="${'$'}HOME/${'$'}FOLDER_EXP";; esac
@@ -1289,6 +1309,73 @@ RESTORE_EOF
         else
             echo "RESTORE_SCRIPT_PRESENT"
         fi
+        if ! grep -q "${'$'}MARKER" "${'$'}DRIFT" 2>/dev/null; then
+            cat > "${'$'}DRIFT" <<'DRIFT_EOF'
+#!/usr/bin/env bash
+# claude-remote-restore-v3 — drift daemon: pulls real claude session_ids
+# from per-pid state files into sessions.json so the client doesn't have
+# to. Runs every minute via systemd-user timer.
+set -u
+LOG="${'$'}HOME/.claude-remote/drift.log"
+exec >> "${'$'}LOG" 2>&1
+echo "----- ${'$'}(date -u +%FT%TZ) drift start -----"
+SF="${'$'}HOME/.claude-remote/sessions.json"
+LOCK="${'$'}HOME/.claude-remote/sessions.lock"
+[ -f "${'$'}SF" ] || { echo "no sessions.json"; exit 0; }
+command -v tmux >/dev/null 2>&1 || { echo "no tmux"; exit 0; }
+command -v jq >/dev/null 2>&1 || { echo "no jq"; exit 0; }
+touch "${'$'}LOCK"
+
+# Walk the tmux pane's process tree to find the claude process — pane_pid
+# is sometimes bash (when claude was launched by a shell command), and
+# claude is a grandchild. Recursive descent finds the right pid.
+find_claude_descendant() {
+    local p=${'$'}1
+    if [ "${'$'}(ps -o comm= -p "${'$'}p" 2>/dev/null)" = "claude" ]; then
+        echo "${'$'}p"; return 0
+    fi
+    local c r
+    for c in ${'$'}(pgrep -P "${'$'}p" 2>/dev/null); do
+        r=${'$'}(find_claude_descendant "${'$'}c")
+        if [ -n "${'$'}r" ]; then echo "${'$'}r"; return 0; fi
+    done
+}
+
+# Build {tmuxName: realSessionId} from claude's per-pid state files.
+MAP="{}"
+for s in ${'$'}(tmux list-sessions -F '#{session_name}' 2>/dev/null); do
+    pane_pid=${'$'}(tmux list-panes -t "${'$'}s" -F '#{pane_pid}' 2>/dev/null | head -1)
+    [ -n "${'$'}pane_pid" ] || continue
+    pid=${'$'}(find_claude_descendant "${'$'}pane_pid")
+    [ -n "${'$'}pid" ] || { echo "skip ${'$'}s: no claude descendant of pid ${'$'}pane_pid"; continue; }
+    sf="${'$'}HOME/.claude/sessions/${'$'}pid.json"
+    [ -f "${'$'}sf" ] || { echo "skip ${'$'}s: no ${'$'}sf"; continue; }
+    sid=${'$'}(jq -r .sessionId "${'$'}sf" 2>/dev/null)
+    if [ -n "${'$'}sid" ] && [ "${'$'}sid" != "null" ]; then
+        MAP=${'$'}(echo "${'$'}MAP" | jq --arg n "${'$'}s" --arg sid "${'$'}sid" '. + {(${'$'}n): ${'$'}sid}')
+    fi
+done
+echo "MAP=${'$'}MAP"
+(
+    flock -x 9
+    OLD=${'$'}(cat "${'$'}SF")
+    NEW=${'$'}(echo "${'$'}OLD" | jq --argjson map "${'$'}MAP" '
+        map(. as ${'$'}e |
+            if (${'$'}map[${'$'}e.tmuxSessionName] // null) != null
+               and ${'$'}map[${'$'}e.tmuxSessionName] != ${'$'}e.claudeSessionId
+            then . + {claudeSessionId: ${'$'}map[${'$'}e.tmuxSessionName]}
+            else .
+            end)
+    ')
+    if [ "${'$'}NEW" != "${'$'}OLD" ]; then
+        echo "${'$'}NEW" > "${'$'}SF.tmp" && mv "${'$'}SF.tmp" "${'$'}SF"
+        echo "[${'$'}(date -u +%FT%TZ)] drift: updated UUIDs"
+    fi
+) 9<>"${'$'}LOCK"
+DRIFT_EOF
+            chmod +x "${'$'}DRIFT"
+            echo "DRIFT_SCRIPT_INSTALLED"
+        fi
         if ! grep -q "claude-remote-restore" "${'$'}UNIT" 2>/dev/null; then
             cat > "${'$'}UNIT" <<UNIT_EOF
 [Unit]
@@ -1311,6 +1398,31 @@ UNIT_EOF
         else
             systemctl --user enable claude-remote-restore.service 2>/dev/null || true
             echo "RESTORE_UNIT_PRESENT"
+        fi
+        if [ ! -f "${'$'}DUNIT" ] || [ ! -f "${'$'}DTIMER" ]; then
+            cat > "${'$'}DUNIT" <<DUNIT_EOF
+[Unit]
+Description=Claude Remote — sync sessions.json with claude session_ids
+
+[Service]
+Type=oneshot
+Environment=PATH=%h/.local/bin:%h/.npm-global/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=/usr/bin/env bash %h/.claude-remote/drift.sh
+DUNIT_EOF
+            cat > "${'$'}DTIMER" <<DTIMER_EOF
+[Unit]
+Description=Run claude-remote-drift every minute
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=1min
+
+[Install]
+WantedBy=timers.target
+DTIMER_EOF
+            systemctl --user daemon-reload 2>/dev/null || true
+            systemctl --user enable --now claude-remote-drift.timer 2>/dev/null || true
+            echo "DRIFT_TIMER_INSTALLED"
         fi
         # Probe whether linger actually stuck — without it the user systemd
         # instance dies on logout and the restore unit never fires after reboot.
