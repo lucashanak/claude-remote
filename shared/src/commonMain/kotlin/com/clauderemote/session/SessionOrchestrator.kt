@@ -177,11 +177,26 @@ class SessionOrchestrator(
                     if (real != null) {
                         val tab = tabManager.getTab(sessionId)
                         if (tab != null && tab.claudeSessionId != real) {
-                            FileLogger.log(TAG, "Session $sessionId real_uuid drifted: ${tab.claudeSessionId} -> $real")
-                            tabManager.updateClaudeSessionId(sessionId, real)
-                            val updated = tab.copy(claudeSessionId = real)
-                            sessionStorage.upsert(SessionStorage.fromClaudeSession(updated))
-                            connections[sessionId]?.let { pushSessionsToServer(it, tab.server.id) }
+                            // Refuse drifts that would point this tab at a UUID
+                            // already owned by another tab. That happens when
+                            // the user invokes `/resume` and picks the same
+                            // conversation in two tabs — adopting the same UUID
+                            // here would make both tabs restore to the same
+                            // content after reboot. Keep the original UUID; the
+                            // session won't auto-resume but at least each tab
+                            // stays distinct.
+                            val claimedByOther = tabManager.tabs.value.any {
+                                it.id != sessionId && it.claudeSessionId == real
+                            }
+                            if (claimedByOther) {
+                                FileLogger.log(TAG, "Session $sessionId real_uuid drifted to $real but already used by another tab — keeping ${tab.claudeSessionId}")
+                            } else {
+                                FileLogger.log(TAG, "Session $sessionId real_uuid drifted: ${tab.claudeSessionId} -> $real")
+                                tabManager.updateClaudeSessionId(sessionId, real)
+                                val updated = tab.copy(claudeSessionId = real)
+                                sessionStorage.upsert(SessionStorage.fromClaudeSession(updated))
+                                connections[sessionId]?.let { pushSessionsToServer(it, tab.server.id) }
+                            }
                         }
                     }
                 } catch (_: Exception) {}

@@ -59,7 +59,16 @@ class SessionStorage(private val prefs: PlatformPreferences) {
 
     fun upsert(session: PersistedSession) {
         val list = load().toMutableList()
-        val idx = list.indexOfFirst { it.id == session.id }
+        // Match first by app-internal id, then fall back to (server, tmux name)
+        // — the app may regenerate `id` on a fresh launch even though the
+        // user is reopening the same tmux session. Without this fallback we
+        // accumulate duplicates that the systemd restore service then tries
+        // to rebuild as separate panes.
+        val byId = list.indexOfFirst { it.id == session.id }
+        val byName = list.indexOfFirst {
+            it.serverId == session.serverId && it.tmuxSessionName == session.tmuxSessionName
+        }
+        val idx = if (byId >= 0) byId else byName
         if (idx >= 0) list[idx] = session else list.add(session)
         save(list)
     }
