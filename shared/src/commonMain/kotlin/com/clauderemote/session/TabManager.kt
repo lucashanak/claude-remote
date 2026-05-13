@@ -51,5 +51,18 @@ class TabManager {
         }
     }
 
+    /**
+     * Update the persisted Claude Code session UUID. Called by the orchestrator
+     * after polling `~/.claude/sessions/<pid>.json` on the server, to capture
+     * cases where claude internally switched session_id (e.g. user invoked
+     * `/resume` and picked a different conversation, or `/clear` started a
+     * fresh one). Keeps SessionStorage in sync with reality.
+     */
+    fun updateClaudeSessionId(id: String, claudeSessionId: String) {
+        _tabs.update { tabs ->
+            tabs.map { if (it.id == id) it.copy(claudeSessionId = claudeSessionId) else it }
+        }
+    }
+
     fun getTab(id: String): ClaudeSession? = _tabs.value.find { it.id == id }
 }

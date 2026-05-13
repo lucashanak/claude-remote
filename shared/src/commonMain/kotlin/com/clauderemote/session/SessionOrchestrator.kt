@@ -110,6 +110,13 @@ class SessionOrchestrator(
     private val latencyPollingJobs = mutableMapOf<String, kotlinx.coroutines.Job>()
     // Per-session Claude Code Stop-hook watchers (tail -f on notify file)
     private val notifyWatchers = mutableMapOf<String, kotlinx.coroutines.Job>()
+    // Per-session pollers that read ~/.claude/sessions/<pid>.json on the
+    // server to capture the *real* claude session_id — which can drift from
+    // the UUID we passed via --session-id when the user invokes /resume,
+    // /clear, /compact etc. Without this we'd push a stale UUID to
+    // sessions.json and the next reboot's restore.sh would --resume the
+    // wrong (or non-existent) conversation.
+    private val sessionIdRefreshJobs = mutableMapOf<String, kotlinx.coroutines.Job>()
     @Volatile private var isInBackground = false
     private val reconnectingSessionIds = mutableSetOf<String>()
     // Last known terminal dimensions per session — used to re-send SIGWINCH after reconnect
@@ -144,6 +151,70 @@ class SessionOrchestrator(
                     } catch (_: Exception) {}
                 }
                 kotlinx.coroutines.delay(120_000) // poll every 2 min (was 30s)
+            }
+        }
+    }
+
+    /**
+     * Periodically read the server-side `~/.claude/sessions/<pid>.json` for
+     * this session's tmux pane and update [tabManager] + [sessionStorage]
+     * whenever claude's internal session_id differs from what we have.
+     *
+     * Triggers a server-side `sessions.json` push only when the UUID actually
+     * changes, so the systemd restore service always has the latest real id.
+     *
+     * 3s warm-up gives claude time to write its first state file; then we
+     * poll every 60s. Cancelled in [disconnectSession].
+     */
+    private fun startSessionIdRefresh(sessionId: String, tmuxName: String, sshManager: SshManager) {
+        if (sessionStorage == null) return
+        sessionIdRefreshJobs[sessionId]?.cancel()
+        sessionIdRefreshJobs[sessionId] = reconnectScope.launch {
+            kotlinx.coroutines.delay(3000)
+            while (isActive) {
+                try {
+                    val real = readRealSessionId(sshManager, tmuxName)
+                    if (real != null) {
+                        val tab = tabManager.getTab(sessionId)
+                        if (tab != null && tab.claudeSessionId != real) {
+                            FileLogger.log(TAG, "Session $sessionId real_uuid drifted: ${tab.claudeSessionId} -> $real")
+                            tabManager.updateClaudeSessionId(sessionId, real)
+                            val updated = tab.copy(claudeSessionId = real)
+                            sessionStorage.upsert(SessionStorage.fromClaudeSession(updated))
+                            connections[sessionId]?.let { pushSessionsToServer(it, tab.server.id) }
+                        }
+                    }
+                } catch (_: Exception) {}
+                kotlinx.coroutines.delay(60_000)
+            }
+        }
+    }
+
+    /**
+     * Resolve the real claude session_id for a tmux session by reading
+     * `~/.claude/sessions/<pane_pid>.json` over SSH. Returns null if the
+     * file does not exist (claude not yet ready), if jq is missing, or on
+     * any exec failure.
+     */
+    private suspend fun readRealSessionId(sshManager: SshManager, tmuxName: String): String? {
+        return withContext(Dispatchers.IO) {
+            try {
+                val sshSession = sshManager.getSession() ?: return@withContext null
+                val escaped = tmuxName.replace("'", "'\\''")
+                val cmd = "PID=\$(tmux list-panes -t '$escaped' -F '#{pane_pid}' 2>/dev/null | head -1); " +
+                    "[ -n \"\$PID\" ] || exit 1; " +
+                    "F=\"\$HOME/.claude/sessions/\$PID.json\"; " +
+                    "[ -f \"\$F\" ] && jq -r .sessionId \"\$F\" 2>/dev/null"
+                val ch = sshSession.openChannel("exec") as com.jcraft.jsch.ChannelExec
+                ch.setCommand(cmd)
+                ch.inputStream = null
+                val input = ch.inputStream
+                ch.connect(2000)
+                val out = input.bufferedReader().readText().trim()
+                ch.disconnect()
+                if (out.isEmpty() || out == "null" || !out.matches(Regex("^[0-9a-f-]{36}$"))) null else out
+            } catch (e: Exception) {
+                null
             }
         }
     }
@@ -381,6 +452,7 @@ else:
             startUsagePolling(sessionId)
             startLatencyPolling(sessionId)
             connections[sessionId]?.let { startNotifyWatcher(sessionId, session.tmuxSessionName, it) }
+            connections[sessionId]?.let { startSessionIdRefresh(sessionId, session.tmuxSessionName, it) }
             // Persist session for app-restart and server-reboot recovery.
             sessionStorage?.upsert(SessionStorage.fromClaudeSession(session))
             connections[sessionId]?.let { conn ->
@@ -692,6 +764,7 @@ else:
                     updateActivity(session.id, SessionActivity.WAITING_FOR_INPUT)
                     onSessionActive?.invoke(session)
                     startNotifyWatcher(session.id, session.tmuxSessionName, sshManager)
+                    startSessionIdRefresh(session.id, session.tmuxSessionName, sshManager)
                     emit("\r\n\u001B[32mReconnected!\u001B[0m\r\n")
                     FileLogger.log(TAG, "Auto-reconnect succeeded for ${session.id}")
                     flushPendingInputs(session.id)
@@ -962,6 +1035,7 @@ else:
             tabManager.updateTabStatus(sessionId, SessionStatus.ACTIVE)
             onSessionActive?.invoke(session)
             connections[sessionId]?.let { startNotifyWatcher(sessionId, session.tmuxSessionName, it) }
+            connections[sessionId]?.let { startSessionIdRefresh(sessionId, session.tmuxSessionName, it) }
             FileLogger.log(TAG, "Reconnected: $sessionId")
         } catch (e: Exception) {
             FileLogger.error(TAG, "Reconnect failed", e)
@@ -1009,6 +1083,7 @@ else:
         usagePollingJobs.remove(sessionId)?.cancel()
         latencyPollingJobs.remove(sessionId)?.cancel()
         notifyWatchers.remove(sessionId)?.cancel()
+        sessionIdRefreshJobs.remove(sessionId)?.cancel()
         promptDetector.markHookInactive(sessionId)
         connections[sessionId]?.disconnect()
         connections.remove(sessionId)
