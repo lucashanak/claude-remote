@@ -125,7 +125,10 @@ fun App(
                 }
                 staleTabs.forEach { tab ->
                     FileLogger.log("App", "Pruning stale tab ${tab.id} (tmux ${tab.tmuxSessionName})")
-                    tabManager.removeTab(tab.id)
+                    // forgetSession removes from SessionStorage and re-syncs the
+                    // server-side sessions.json so the systemd restore service
+                    // doesn't try to re-materialise this tab on next reboot.
+                    scope.launch { sessionOrchestrator.forgetSession(tab.id) }
                 }
             } catch (_: Exception) {
                 remoteSessions = emptyList()
@@ -532,18 +535,14 @@ fun App(
                             scope.launch { sessionOrchestrator.reconnectSession(id) }
                         },
                         onTabClose = { id ->
-                            val session = tabManager.getTab(id)
-                            if (session?.status == SessionStatus.ACTIVE) {
-                                if (onNativeCloseConfirm != null) {
-                                    onNativeCloseConfirm.invoke(id)
-                                } else {
-                                    tabCloseConfirmId = id
-                                }
+                            // Always confirm — closing forgets the persisted
+                            // session and kills the remote tmux pane, which
+                            // is destructive enough that we don't want a
+                            // single misclick to lose the conversation.
+                            if (onNativeCloseConfirm != null) {
+                                onNativeCloseConfirm.invoke(id)
                             } else {
-                                scope.launch {
-                                    sessionOrchestrator.forgetSession(id)
-                                    if (tabManager.tabs.value.isEmpty()) currentScreen = Screen.LAUNCHER
-                                }
+                                tabCloseConfirmId = id
                             }
                         },
                         onNewTab = { currentScreen = Screen.LAUNCHER },
@@ -738,7 +737,7 @@ fun App(
             AlertDialog(
                 onDismissRequest = { tabCloseConfirmId = null },
                 title = { Text("Close Session") },
-                text = { Text("Disconnect from ${session?.server?.name ?: "server"}?") },
+                text = { Text("Permanently close session on ${session?.server?.name ?: "server"}? The tmux pane will be killed and the conversation removed from your tab list.") },
                 confirmButton = {
                     TextButton(onClick = {
                         tabCloseConfirmId = null
@@ -746,7 +745,7 @@ fun App(
                             sessionOrchestrator.forgetSession(id)
                             if (tabManager.tabs.value.isEmpty()) currentScreen = Screen.LAUNCHER
                         }
-                    }) { Text("Disconnect") }
+                    }) { Text("Close") }
                 },
                 dismissButton = {
                     TextButton(onClick = { tabCloseConfirmId = null }) { Text("Cancel") }

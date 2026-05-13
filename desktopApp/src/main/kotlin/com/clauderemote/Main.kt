@@ -457,11 +457,21 @@ fun main() = application {
                     popup.add(javax.swing.JMenuItem("Close session").apply {
                         addActionListener {
                             tabManager.activeTabId.value?.let { id ->
-                                Thread {
-                                    kotlinx.coroutines.runBlocking {
-                                        try { sessionOrchestrator.disconnectSession(id) } catch (_: Exception) {}
-                                    }
-                                }.start()
+                                val session = tabManager.getTab(id)
+                                val parent = javax.swing.SwingUtilities.getWindowAncestor(termWidget)
+                                val result = javax.swing.JOptionPane.showConfirmDialog(
+                                    parent,
+                                    "Permanently close session on ${session?.server?.name ?: "server"}? The tmux pane will be killed and the conversation removed from your tab list.",
+                                    "Close Session",
+                                    javax.swing.JOptionPane.OK_CANCEL_OPTION
+                                )
+                                if (result == javax.swing.JOptionPane.OK_OPTION) {
+                                    Thread {
+                                        kotlinx.coroutines.runBlocking {
+                                            try { sessionOrchestrator.forgetSession(id) } catch (_: Exception) {}
+                                        }
+                                    }.start()
+                                }
                             }
                         }
                     })
@@ -496,14 +506,14 @@ fun main() = application {
                     val parent = javax.swing.SwingUtilities.getWindowAncestor(termWidget)
                     val result = javax.swing.JOptionPane.showConfirmDialog(
                         parent,
-                        "Disconnect from ${session?.server?.name ?: "server"}?",
+                        "Permanently close session on ${session?.server?.name ?: "server"}? The tmux pane will be killed and the conversation removed from your tab list.",
                         "Close Session",
                         javax.swing.JOptionPane.OK_CANCEL_OPTION
                     )
                     if (result == javax.swing.JOptionPane.OK_OPTION) {
                         Thread {
                             kotlinx.coroutines.runBlocking {
-                                try { sessionOrchestrator.disconnectSession(sessionId) } catch (_: Exception) {}
+                                try { sessionOrchestrator.forgetSession(sessionId) } catch (_: Exception) {}
                             }
                         }.start()
                     }
