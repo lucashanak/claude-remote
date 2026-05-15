@@ -140,7 +140,9 @@ class InputPromptDetector(
             if (total > 0) return ((used / total) * 100).toInt().coerceIn(0, 100)
         }
         CONTEXT_PERCENT_REGEX.find(stripped)?.let { match ->
-            return (match.groupValues[1].toIntOrNull() ?: match.groupValues[2].toIntOrNull())
+            return (match.groupValues.getOrNull(1)?.toIntOrNull()
+                ?: match.groupValues.getOrNull(2)?.toIntOrNull()
+                ?: match.groupValues.getOrNull(3)?.toIntOrNull())
                 ?.coerceIn(0, 100)
         }
         TOKENS_REMAINING_REGEX.find(stripped)?.let { match ->
@@ -161,11 +163,16 @@ class InputPromptDetector(
     fun parseUsage(sessionId: String, text: String): Map<String, Int>? {
         val stripped = recentOutput[sessionId]?.toString() ?: stripAnsi(text)
         val result = mutableMapOf<String, Int>()
-        SESSION_USAGE_REGEX.find(stripped)?.let {
-            it.groupValues[1].toIntOrNull()?.let { pct -> result["session"] = pct }
+        SESSION_USAGE_REGEX.find(stripped)?.let { m ->
+            // Either capture group 1 (legacy '/usage' output) or 2 (OMC '5h:NN%').
+            (m.groupValues.getOrNull(1)?.toIntOrNull()
+                ?: m.groupValues.getOrNull(2)?.toIntOrNull())
+                ?.let { pct -> result["session"] = pct }
         }
-        WEEK_USAGE_REGEX.find(stripped)?.let {
-            it.groupValues[1].toIntOrNull()?.let { pct -> result["week"] = pct }
+        WEEK_USAGE_REGEX.find(stripped)?.let { m ->
+            (m.groupValues.getOrNull(1)?.toIntOrNull()
+                ?: m.groupValues.getOrNull(2)?.toIntOrNull())
+                ?.let { pct -> result["week"] = pct }
         }
         return result.ifEmpty { null }
     }
@@ -194,10 +201,25 @@ class InputPromptDetector(
 
         private val ANSI_REGEX = Regex("\u001B(?:\\[\\??[0-9;]*[a-zA-Z]|\\][^\u0007]*\u0007)")
         private val CONTEXT_RATIO_REGEX = Regex("([\\d,.]+[km]?)\\s*/\\s*([\\d,.]+[km]?)\\s*tokens", RegexOption.IGNORE_CASE)
-        private val CONTEXT_PERCENT_REGEX = Regex("(\\d{1,3})%\\s*context|context[:\\s]+(\\d{1,3})%", RegexOption.IGNORE_CASE)
+        // Match Claude Code /usage output ("33% context", "context: 33%")
+        // OR the OMC statusline at the bottom of every turn ("ctx:20%").
+        private val CONTEXT_PERCENT_REGEX = Regex(
+            "(\\d{1,3})%\\s*context|context[:\\s]+(\\d{1,3})%|ctx[:\\s]+(\\d{1,3})%",
+            RegexOption.IGNORE_CASE
+        )
         private val TOKENS_REMAINING_REGEX = Regex("([\\d,.]+[km]?)\\s*tokens?\\s*remaining", RegexOption.IGNORE_CASE)
-        private val SESSION_USAGE_REGEX = Regex("Current session[\\s\\S]{0,50}?(\\d{1,3})%\\s*used", RegexOption.IGNORE_CASE)
-        private val WEEK_USAGE_REGEX = Regex("Current week[\\s\\S]{0,60}?(\\d{1,3})%\\s*used", RegexOption.IGNORE_CASE)
+        // Match both `/usage` command output ("Current session ... 33% used")
+        // and the OMC statusline ("5h:33%(2h59m)"). OMC is what actually paints
+        // on every turn — without this fallback the chip stays at '—' forever
+        // unless the user explicitly runs /usage.
+        private val SESSION_USAGE_REGEX = Regex(
+            "Current session[\\s\\S]{0,50}?(\\d{1,3})%\\s*used|5h[:\\s]+(\\d{1,3})%",
+            RegexOption.IGNORE_CASE
+        )
+        private val WEEK_USAGE_REGEX = Regex(
+            "Current week[\\s\\S]{0,60}?(\\d{1,3})%\\s*used|wk[:\\s]+(\\d{1,3})%",
+            RegexOption.IGNORE_CASE
+        )
 
         fun stripAnsi(text: String): String = ANSI_REGEX.replace(text, "")
 
