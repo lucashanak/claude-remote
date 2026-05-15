@@ -229,11 +229,11 @@ fun main() = application {
             // cache may be null, in which case the previous code early-returned
             // and the tmux session stayed at whatever dims the other client (e.g.
             // Android) had set on the server.
-            val display: com.jediterm.terminal.TerminalDisplay = widget.terminalPanel
-            val cols = display.columnCount.takeIf { it > 0 }
+            val buffer = widget.terminalTextBuffer
+            val cols = buffer?.width?.takeIf { it > 0 }
                 ?: connector.lastTermSize?.columns
                 ?: return@invokeLater
-            val rows = display.rowCount.takeIf { it > 0 }
+            val rows = buffer?.height?.takeIf { it > 0 }
                 ?: connector.lastTermSize?.rows
                 ?: return@invokeLater
             if (cols <= 0 || rows <= 1) return@invokeLater
@@ -393,9 +393,8 @@ fun main() = application {
                     // from a different device (Android) that had a smaller terminal.
                     // Pass widget dims as a fallback in case JediTerm hasn't yet fired
                     // its first resize into the connector.
-                    val fallback = widget?.terminalPanel?.let { panel ->
-                        val d: com.jediterm.terminal.TerminalDisplay = panel
-                        val c = d.columnCount; val r = d.rowCount
+                    val fallback = widget?.terminalTextBuffer?.let { b ->
+                        val c = b.width; val r = b.height
                         if (c > 0 && r > 0) com.jediterm.core.util.TermSize(c, r) else null
                     }
                     connector.reapplySize(fallback)
@@ -622,9 +621,9 @@ private fun DesktopTerminalView(
                             // Pass widget display dims as fallback — JediTerm fires its
                             // own resize() callback asynchronously after revalidate(),
                             // so lastTermSize may not be populated yet on first paint.
-                            val d: com.jediterm.terminal.TerminalDisplay = widget.terminalPanel
-                            val fallback = if (d.columnCount > 0 && d.rowCount > 0)
-                                com.jediterm.core.util.TermSize(d.columnCount, d.rowCount)
+                            val b = widget.terminalTextBuffer
+                            val fallback = if (b != null && b.width > 0 && b.height > 0)
+                                com.jediterm.core.util.TermSize(b.width, b.height)
                             else null
                             connector.reapplySize(fallback)
                         }
