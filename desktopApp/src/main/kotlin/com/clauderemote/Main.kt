@@ -178,13 +178,13 @@ class SshTtyConnector(
 
     /** Re-sends the last known terminal size to the active session.
      *  Call this after connecting to an existing tmux session to fix size mismatch
-     *  (e.g. session was previously used from Android with different terminal size). */
-    fun reapplySize() {
-        lastTermSize?.let { size ->
-            tabManager.activeTabId.value?.let { id ->
-                sessionOrchestrator.resize(id, size.columns, size.rows)
-            }
-        }
+     *  (e.g. session was previously used from Android with different terminal size).
+     *  Caller may pass [fallback] (current widget display dims) for the case where
+     *  JediTerm hasn't fired its first resize callback yet and [lastTermSize] is null. */
+    fun reapplySize(fallback: com.jediterm.core.util.TermSize? = null) {
+        val size = lastTermSize ?: fallback ?: return
+        val id = tabManager.activeTabId.value ?: return
+        sessionOrchestrator.resize(id, size.columns, size.rows)
     }
 }
 
@@ -222,9 +222,20 @@ fun main() = application {
             // Force a full tmux redraw after the switch, matching Android behavior.
             // Toggle PTY size to fire SIGWINCH twice — naive back-to-back resize can
             // be coalesced by the kernel, so use a delay between the two resizes.
-            val termSize = connector.lastTermSize ?: return@invokeLater
-            val cols = termSize.columns
-            val rows = termSize.rows
+            //
+            // Source of truth: the local JediTerm display dims. `lastTermSize` is
+            // only a fallback for the brief window before JediTerm has fired its
+            // first resize callback into the connector — on a first tab-switch the
+            // cache may be null, in which case the previous code early-returned
+            // and the tmux session stayed at whatever dims the other client (e.g.
+            // Android) had set on the server.
+            val display = widget.terminalPanel
+            val cols = display.columnCount.takeIf { it > 0 }
+                ?: connector.lastTermSize?.columns
+                ?: return@invokeLater
+            val rows = display.rowCount.takeIf { it > 0 }
+                ?: connector.lastTermSize?.rows
+                ?: return@invokeLater
             if (cols <= 0 || rows <= 1) return@invokeLater
             sessionOrchestrator.resize(sessionId, cols, rows - 1)
             javax.swing.Timer(80) {
@@ -379,8 +390,14 @@ fun main() = application {
                 val widget = termWidget
                 javax.swing.SwingUtilities.invokeLater {
                     // Reapply terminal size — fixes green rectangle when reconnecting
-                    // from a different device (Android) that had a smaller terminal
-                    connector.reapplySize()
+                    // from a different device (Android) that had a smaller terminal.
+                    // Pass widget dims as a fallback in case JediTerm hasn't yet fired
+                    // its first resize into the connector.
+                    val fallback = widget?.terminalPanel?.let { d ->
+                        val c = d.columnCount; val r = d.rowCount
+                        if (c > 0 && r > 0) com.jediterm.core.util.TermSize(c, r) else null
+                    }
+                    connector.reapplySize(fallback)
                     if (widget != null && buffer.isNotEmpty()) {
                         widget.terminalPanel.clearBuffer()
                         connector.feedOutput(buffer)
@@ -601,7 +618,14 @@ private fun DesktopTerminalView(
                             widget.size = panel.size
                             widget.revalidate()
                             widget.repaint()
-                            connector.reapplySize() // also push PTY size to SSH
+                            // Pass widget display dims as fallback — JediTerm fires its
+                            // own resize() callback asynchronously after revalidate(),
+                            // so lastTermSize may not be populated yet on first paint.
+                            val d = widget.terminalPanel
+                            val fallback = if (d.columnCount > 0 && d.rowCount > 0)
+                                com.jediterm.core.util.TermSize(d.columnCount, d.rowCount)
+                            else null
+                            connector.reapplySize(fallback)
                         }
                     }
                     panel.addComponentListener(object : java.awt.event.ComponentAdapter() {
