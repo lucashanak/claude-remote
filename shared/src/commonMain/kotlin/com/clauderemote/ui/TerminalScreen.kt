@@ -685,7 +685,16 @@ fun TerminalScreen(
             if (activeSession != null) {
                 PromptInputBar(
                     commands = commands,
-                    onSend = { text -> onSendCommand(text + "\r") },
+                    onSend = { text ->
+                        // Wrap in bracketed paste so Claude Code's prompt
+                        // commits the content as a paste block, then submits
+                        // on the trailing CR rather than treating it as a
+                        // newline-inside-paste. Without this, longer or
+                        // multi-line inputs sometimes land in the prompt
+                        // buffer but never submit — user has to press Send
+                        // again to fire a bare \r.
+                        onSendCommand("[200~" + text + "[201~\r")
+                    },
                     onSendCommand = onSendCommand,
                     onAttachFile = onAttachFile,
                     inputFocusRequester = inputFocusRequester

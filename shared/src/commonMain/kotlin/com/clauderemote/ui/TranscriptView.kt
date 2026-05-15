@@ -19,6 +19,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.clauderemote.session.status.RemoteSessionStatus
 import com.clauderemote.session.transcript.TranscriptEntry
+import com.mikepenz.markdown.m3.Markdown
 import kotlinx.coroutines.launch
 
 /**
@@ -55,9 +56,18 @@ fun TranscriptView(
     // Cheap: scans backwards from the end and stops at the first match.
     val todoPending = remember(entries) { countOpenTodos(entries) }
 
-    // Auto-scroll to bottom when new entries arrive and the user is already near the bottom.
+    // Jump to the end on first non-empty load so opening the view shows the
+    // most recent conversation, not the oldest entries. After that, auto-
+    // scroll only when the user is already near the bottom (so they don't
+    // get yanked away while reading older messages).
+    var didInitialJump by remember { mutableStateOf(false) }
     LaunchedEffect(filtered.size) {
         if (filtered.isEmpty()) return@LaunchedEffect
+        if (!didInitialJump) {
+            didInitialJump = true
+            listState.scrollToItem(filtered.lastIndex)
+            return@LaunchedEffect
+        }
         val info = listState.layoutInfo
         val lastVisible = info.visibleItemsInfo.lastOrNull()?.index ?: -1
         val nearBottom = lastVisible >= filtered.size - 3
@@ -337,24 +347,13 @@ private fun RoleHeader(role: String, timestamp: String?) {
 }
 
 /**
- * Render a chunk that may contain ``` code fences. Splits into alternating
- * prose / code segments; code segments get monospace + scrollable horiz panel.
+ * Render a chunk of markdown using multiplatform-markdown-renderer.
+ * Handles headers, lists, tables, bold/italic, inline code, code fences,
+ * blockquotes, and links — all theme-aware via the M3 wrapper.
  */
 @Composable
 private fun RichBody(text: String) {
-    val segments = remember(text) { splitCodeFences(text) }
-    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-        for (seg in segments) {
-            if (seg.isCode) {
-                MonospaceBlock(seg.text)
-            } else {
-                Text(
-                    seg.text,
-                    style = MaterialTheme.typography.bodyMedium
-                )
-            }
-        }
-    }
+    Markdown(content = text)
 }
 
 @Composable
@@ -374,37 +373,6 @@ private fun MonospaceBlock(text: String) {
             )
         }
     }
-}
-
-private data class Segment(val text: String, val isCode: Boolean)
-
-private fun splitCodeFences(text: String): List<Segment> {
-    val out = mutableListOf<Segment>()
-    val fence = "```"
-    var i = 0
-    while (i < text.length) {
-        val start = text.indexOf(fence, i)
-        if (start < 0) {
-            val tail = text.substring(i)
-            if (tail.isNotEmpty()) out += Segment(tail, false)
-            break
-        }
-        if (start > i) {
-            out += Segment(text.substring(i, start).trimEnd('\n'), false)
-        }
-        // Skip optional language tag on the same line.
-        val langEnd = text.indexOf('\n', start + fence.length).let { if (it < 0) text.length else it }
-        val codeStart = (langEnd + 1).coerceAtMost(text.length)
-        val end = text.indexOf(fence, codeStart)
-        if (end < 0) {
-            out += Segment(text.substring(codeStart), true)
-            break
-        }
-        out += Segment(text.substring(codeStart, end).trimEnd('\n'), true)
-        i = end + fence.length
-        if (i < text.length && text[i] == '\n') i++
-    }
-    return out
 }
 
 private fun formatTimestamp(iso: String): String {

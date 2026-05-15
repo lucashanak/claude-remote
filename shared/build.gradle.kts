@@ -30,6 +30,7 @@ kotlin {
                 implementation("com.squareup.okhttp3:okhttp:4.12.0")
                 implementation("io.sigpipe:jbsdiff:1.0")
                 implementation("org.json:json:20240303")
+                implementation("com.mikepenz:multiplatform-markdown-renderer-m3:0.27.0")
             }
         }
         val androidMain by getting {
