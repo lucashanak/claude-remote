@@ -615,7 +615,8 @@ fun TerminalScreen(
                     sessionUsagePercent = sessionUsagePercent,
                     weekUsagePercent = weekUsagePercent,
                     latencyMs = latencyMs,
-                    remoteStatus = remoteStatus
+                    remoteStatus = remoteStatus,
+                    activity = activeTabId?.let { sessionActivities[it] }
                 )
             }
         } else if (splitActive && splitTerminalContent != null && wideMode) {

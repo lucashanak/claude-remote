@@ -17,6 +17,16 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.lazy.LazyListScope
+import androidx.compose.ui.draw.alpha
+import androidx.compose.ui.graphics.Color
+import com.clauderemote.model.SessionActivity
 import com.clauderemote.session.status.RemoteSessionStatus
 import com.clauderemote.session.transcript.TranscriptEntry
 import com.mikepenz.markdown.m3.Markdown
@@ -36,7 +46,8 @@ fun TranscriptView(
     sessionUsagePercent: Int? = null,
     weekUsagePercent: Int? = null,
     latencyMs: Long? = null,
-    remoteStatus: RemoteSessionStatus? = null
+    remoteStatus: RemoteSessionStatus? = null,
+    activity: SessionActivity? = null
 ) {
     val listState = rememberLazyListState()
     val scope = rememberCoroutineScope()
@@ -61,18 +72,20 @@ fun TranscriptView(
     // scroll only when the user is already near the bottom (so they don't
     // get yanked away while reading older messages).
     var didInitialJump by remember { mutableStateOf(false) }
-    LaunchedEffect(filtered.size) {
+    val skeletonShowing = activity == SessionActivity.WORKING
+    val virtualLast = filtered.size - 1 + if (skeletonShowing) 1 else 0
+    LaunchedEffect(filtered.size, skeletonShowing) {
         if (filtered.isEmpty()) return@LaunchedEffect
         if (!didInitialJump) {
             didInitialJump = true
-            listState.scrollToItem(filtered.lastIndex)
+            listState.scrollToItem(virtualLast)
             return@LaunchedEffect
         }
         val info = listState.layoutInfo
         val lastVisible = info.visibleItemsInfo.lastOrNull()?.index ?: -1
-        val nearBottom = lastVisible >= filtered.size - 3
+        val nearBottom = lastVisible >= virtualLast - 3
         if (nearBottom) {
-            scope.launch { listState.animateScrollToItem(filtered.lastIndex) }
+            scope.launch { listState.animateScrollToItem(virtualLast) }
         }
     }
 
@@ -85,28 +98,13 @@ fun TranscriptView(
             latencyMs = latencyMs,
             todoPending = todoPending,
             activeSkill = remoteStatus?.activeSkill,
-            activeSubagents = remoteStatus?.activeSubagents ?: 0
+            activeSubagents = remoteStatus?.activeSubagents ?: 0,
+            activity = activity,
+            showThinking = showThinking,
+            showSystem = showSystem,
+            onToggleThinking = { showThinking = !showThinking },
+            onToggleSystem = { showSystem = !showSystem }
         )
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .background(MaterialTheme.colorScheme.surfaceVariant)
-                .padding(horizontal = 12.dp, vertical = 4.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(8.dp)
-        ) {
-            Spacer(Modifier.weight(1f))
-            FilterChip(
-                selected = showThinking,
-                onClick = { showThinking = !showThinking },
-                label = { Text("Show thinking", style = MaterialTheme.typography.labelSmall) }
-            )
-            FilterChip(
-                selected = showSystem,
-                onClick = { showSystem = !showSystem },
-                label = { Text("Show system", style = MaterialTheme.typography.labelSmall) }
-            )
-        }
 
         if (filtered.isEmpty()) {
             Box(
@@ -139,6 +137,9 @@ fun TranscriptView(
                         is TranscriptEntry.ToolResult -> ToolResultCard(entry)
                         is TranscriptEntry.SystemNote -> SystemNoteRow(entry)
                     }
+                }
+                if (activity == SessionActivity.WORKING) {
+                    item(key = "__working_skeleton__") { WorkingSkeletonCard() }
                 }
             }
         }
@@ -390,27 +391,143 @@ private fun StatusBar(
     latencyMs: Long?,
     todoPending: Int,
     activeSkill: String?,
-    activeSubagents: Int
+    activeSubagents: Int,
+    activity: SessionActivity?,
+    showThinking: Boolean,
+    showSystem: Boolean,
+    onToggleThinking: () -> Unit,
+    onToggleSystem: () -> Unit
 ) {
+    var filterMenu by remember { mutableStateOf(false) }
     Surface(
         modifier = Modifier.fillMaxWidth(),
         color = MaterialTheme.colorScheme.surfaceContainer
     ) {
         Row(
-            modifier = Modifier
-                .horizontalScroll(rememberScrollState())
-                .padding(horizontal = 12.dp, vertical = 4.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(10.dp)
+            modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp),
+            verticalAlignment = Alignment.CenterVertically
         ) {
-            StatusChip("$entryCount entries")
-            if (contextPercent != null) StatusChip("ctx ${contextPercent}%")
-            if (sessionUsagePercent != null) StatusChip("5h ${sessionUsagePercent}%")
-            if (weekUsagePercent != null) StatusChip("wk ${weekUsagePercent}%")
-            if (todoPending > 0) StatusChip("↘ $todoPending")
-            if (activeSubagents > 0) StatusChip("⚡ $activeSubagents")
-            if (!activeSkill.isNullOrBlank()) StatusChip("skill: $activeSkill")
-            if (latencyMs != null) StatusChip("${latencyMs}ms")
+            Row(
+                modifier = Modifier
+                    .weight(1f)
+                    .horizontalScroll(rememberScrollState()),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                ActivityIndicator(activity)
+                StatusChip("$entryCount entries")
+                if (contextPercent != null) StatusChip("ctx ${contextPercent}%")
+                if (sessionUsagePercent != null) StatusChip("5h ${sessionUsagePercent}%")
+                if (weekUsagePercent != null) StatusChip("wk ${weekUsagePercent}%")
+                if (todoPending > 0) StatusChip("↘ $todoPending")
+                if (activeSubagents > 0) StatusChip("⚡ $activeSubagents")
+                if (!activeSkill.isNullOrBlank()) StatusChip("skill: $activeSkill")
+                if (latencyMs != null) StatusChip("${latencyMs}ms")
+            }
+            Box {
+                IconButton(
+                    onClick = { filterMenu = true },
+                    modifier = Modifier.size(28.dp)
+                ) {
+                    Text(
+                        "▾",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                DropdownMenu(
+                    expanded = filterMenu,
+                    onDismissRequest = { filterMenu = false }
+                ) {
+                    DropdownMenuItem(
+                        text = { Text("Show thinking") },
+                        trailingIcon = { Text(if (showThinking) "✓" else "") },
+                        onClick = { onToggleThinking(); filterMenu = false }
+                    )
+                    DropdownMenuItem(
+                        text = { Text("Show system") },
+                        trailingIcon = { Text(if (showSystem) "✓" else "") },
+                        onClick = { onToggleSystem(); filterMenu = false }
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun ActivityIndicator(activity: SessionActivity?) {
+    val (color, label) = when (activity) {
+        SessionActivity.WORKING -> Color(0xFFFFC107) to "working"
+        SessionActivity.WAITING_FOR_INPUT -> Color(0xFF4CAF50) to "ready"
+        SessionActivity.APPROVAL_NEEDED -> Color(0xFFFF5722) to "approval"
+        SessionActivity.DISCONNECTED -> Color(0xFFB0BEC5) to "offline"
+        SessionActivity.IDLE -> Color(0xFF78909C) to "idle"
+        null -> return
+    }
+    val alpha = if (activity == SessionActivity.WORKING || activity == SessionActivity.APPROVAL_NEEDED) {
+        val t = rememberInfiniteTransition(label = "activity-pulse")
+        t.animateFloat(
+            initialValue = 0.35f,
+            targetValue = 1f,
+            animationSpec = infiniteRepeatable(
+                animation = tween(900),
+                repeatMode = RepeatMode.Reverse
+            ),
+            label = "alpha"
+        ).value
+    } else 1f
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(4.dp)
+    ) {
+        Surface(
+            modifier = Modifier.size(8.dp).alpha(alpha),
+            color = color,
+            shape = CircleShape
+        ) {}
+        Text(
+            label,
+            style = MaterialTheme.typography.labelSmall,
+            fontFamily = FontFamily.Monospace,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+    }
+}
+
+@Composable
+private fun WorkingSkeletonCard() {
+    val t = rememberInfiniteTransition(label = "skeleton")
+    val alpha by t.animateFloat(
+        initialValue = 0.3f,
+        targetValue = 0.9f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(700),
+            repeatMode = RepeatMode.Reverse
+        ),
+        label = "skeleton-alpha"
+    )
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+        shape = RoundedCornerShape(8.dp)
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            Surface(
+                modifier = Modifier.size(8.dp).alpha(alpha),
+                color = MaterialTheme.colorScheme.primary,
+                shape = CircleShape
+            ) {}
+            Text(
+                "Claude is working…",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = alpha),
+                fontFamily = FontFamily.Monospace
+            )
         }
     }
 }
