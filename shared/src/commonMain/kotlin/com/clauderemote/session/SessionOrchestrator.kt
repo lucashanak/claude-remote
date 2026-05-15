@@ -36,7 +36,7 @@ class SessionOrchestrator(
     private val promptDetector = InputPromptDetector().apply {
         onDetection = { det ->
             val isActive = tabManager.activeTabId.value == det.sessionId
-            onClaudeNeedsInput?.invoke(det.sessionId, det.type.displayHint, isActive)
+            fireNeedsInput(det.sessionId, det.type.displayHint, isActive)
         }
         onStateChange = { sessionId, state ->
             when (state) {
@@ -77,6 +77,20 @@ class SessionOrchestrator(
         _sessionActivities.update { it + (sessionId to activity) }
     }
 
+    /** Dispatch [onClaudeNeedsInput] no more than once per [notifyDebounceMs] per
+     *  session — protects against rapid duplicate fires from the Stop-hook stream
+     *  and from the screen-state fallback firing on transient quiescence. */
+    private fun fireNeedsInput(sessionId: String, hint: String, isActive: Boolean) {
+        val now = System.currentTimeMillis()
+        val last = lastNeedsInputAt[sessionId] ?: 0L
+        if (now - last < notifyDebounceMs) {
+            FileLogger.log(TAG, "Suppressed needs-input for $sessionId (debounce)")
+            return
+        }
+        lastNeedsInputAt[sessionId] = now
+        onClaudeNeedsInput?.invoke(sessionId, hint, isActive)
+    }
+
     private fun updateContextPercent(sessionId: String, percent: Int) {
         _contextPercents.update { it + (sessionId to percent) }
     }
@@ -111,6 +125,12 @@ class SessionOrchestrator(
     private val latencyPollingJobs = mutableMapOf<String, kotlinx.coroutines.Job>()
     // Per-session Claude Code Stop-hook watchers (tail -f on notify file)
     private val notifyWatchers = mutableMapOf<String, kotlinx.coroutines.Job>()
+    /** Per-session timestamp of the last "needs input" dispatch, used to debounce
+     *  the Stop-hook fire stream — claude can emit several markers in quick
+     *  succession (model handoff, tool retries) and we don't want to vibrate
+     *  the phone for each one. */
+    private val lastNeedsInputAt = mutableMapOf<String, Long>()
+    private val notifyDebounceMs = 5_000L
     // Per-session pollers that read ~/.claude/sessions/<pid>.json on the
     // server to capture the *real* claude session_id — which can drift from
     // the UUID we passed via --session-id when the user invokes /resume,
@@ -439,7 +459,7 @@ else:
                     if (!line.contains(tmuxName)) continue
                     FileLogger.log(TAG, "Stop hook fired for $sessionId: $line")
                     val isActive = tabManager.activeTabId.value == sessionId
-                    onClaudeNeedsInput?.invoke(sessionId, "Claude is ready for input", isActive)
+                    fireNeedsInput(sessionId, "Claude is ready for input", isActive)
                     updateActivity(sessionId, SessionActivity.WAITING_FOR_INPUT)
                 }
                 ch.disconnect()
@@ -772,7 +792,12 @@ else:
             for (attempt in 1..maxAttempts) {
                 emit("\r\n\u001B[33mConnection lost. Reconnecting ($attempt/$maxAttempts)...\u001B[0m\r\n")
                 FileLogger.log(TAG, "Auto-reconnect attempt $attempt/$maxAttempts for ${session.id}")
-                kotlinx.coroutines.delay(2000L * attempt) // increasing delay
+                // Exponential backoff (2s, 4s, 8s, …) capped at 30s, plus 0–500ms
+                // jitter to avoid synchronized retry storms across multiple sessions
+                // when the network flaps on a phone.
+                val base = (2000L shl (attempt - 1).coerceAtMost(5)).coerceAtMost(30_000L)
+                val jitter = kotlin.random.Random.nextLong(500)
+                kotlinx.coroutines.delay(base + jitter)
 
                 try {
                     // Clean up old connection

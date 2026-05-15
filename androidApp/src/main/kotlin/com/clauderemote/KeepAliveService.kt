@@ -234,11 +234,21 @@ class KeepAliveService : Service() {
         FileLogger.log(TAG, "WifiLock released")
     }
 
-    /** Switch wake lock on/off based on app visibility.
-     *  When app is in foreground the screen is already on — no wake lock needed.
-     *  When app goes to background we need it to keep receiving SSH data. */
+    /** Switch wake lock + WiFi lock on/off based on app visibility.
+     *  When app is in foreground the screen is already on — no locks needed.
+     *  When app goes to background we re-acquire so SSH keeps flowing.
+     *
+     *  WIFI_MODE_FULL_HIGH_PERF is the single biggest battery cost in this
+     *  service; releasing it while the user is actively looking at the screen
+     *  (WiFi radio stays awake anyway) recovers the largest share. */
     fun setWakeLockEnabled(enabled: Boolean) {
-        if (enabled) acquireWakeLock() else releaseWakeLock()
-        FileLogger.log(TAG, "WakeLock enabled=$enabled")
+        if (enabled) {
+            acquireWakeLock()
+            acquireWifiLock()
+        } else {
+            releaseWakeLock()
+            releaseWifiLock()
+        }
+        FileLogger.log(TAG, "Locks enabled=$enabled")
     }
 }
