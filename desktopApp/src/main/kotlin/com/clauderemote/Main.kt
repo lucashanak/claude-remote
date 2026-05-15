@@ -229,7 +229,7 @@ fun main() = application {
             // cache may be null, in which case the previous code early-returned
             // and the tmux session stayed at whatever dims the other client (e.g.
             // Android) had set on the server.
-            val display = widget.terminalPanel
+            val display: com.jediterm.terminal.TerminalDisplay = widget.terminalPanel
             val cols = display.columnCount.takeIf { it > 0 }
                 ?: connector.lastTermSize?.columns
                 ?: return@invokeLater
@@ -393,7 +393,8 @@ fun main() = application {
                     // from a different device (Android) that had a smaller terminal.
                     // Pass widget dims as a fallback in case JediTerm hasn't yet fired
                     // its first resize into the connector.
-                    val fallback = widget?.terminalPanel?.let { d ->
+                    val fallback = widget?.terminalPanel?.let { panel ->
+                        val d: com.jediterm.terminal.TerminalDisplay = panel
                         val c = d.columnCount; val r = d.rowCount
                         if (c > 0 && r > 0) com.jediterm.core.util.TermSize(c, r) else null
                     }
@@ -621,7 +622,7 @@ private fun DesktopTerminalView(
                             // Pass widget display dims as fallback — JediTerm fires its
                             // own resize() callback asynchronously after revalidate(),
                             // so lastTermSize may not be populated yet on first paint.
-                            val d = widget.terminalPanel
+                            val d: com.jediterm.terminal.TerminalDisplay = widget.terminalPanel
                             val fallback = if (d.columnCount > 0 && d.rowCount > 0)
                                 com.jediterm.core.util.TermSize(d.columnCount, d.rowCount)
                             else null
