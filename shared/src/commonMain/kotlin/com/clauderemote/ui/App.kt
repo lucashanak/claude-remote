@@ -711,8 +711,6 @@ fun App(
                         contextPercents = contextPercents,
                         sessionUsagePercent = activeTabId?.let { sessionUsagePercents[it] },
                         weekUsagePercent = activeTabId?.let { weekUsagePercents[it] },
-                        sessionResetMin = activeTabId?.let { sessionResetMin[it] },
-                        weekResetMin = activeTabId?.let { weekResetMin[it] },
                         usageTokens = usageTokensState,
                         onBack = { currentScreen = Screen.LAUNCHER }
                     )

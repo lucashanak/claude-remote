@@ -348,11 +348,21 @@ private fun ToolRow(
                 modifier = Modifier.weight(1f).horizontalScroll(rememberScrollState())
             )
             if (result == null) {
+                val t = rememberInfiniteTransition(label = "tool-pending")
+                val pulseAlpha by t.animateFloat(
+                    initialValue = 0.35f,
+                    targetValue = 1f,
+                    animationSpec = infiniteRepeatable(
+                        animation = tween(900),
+                        repeatMode = RepeatMode.Reverse
+                    ),
+                    label = "tool-pending-alpha"
+                )
                 Text(
-                    "…",
+                    "●",
                     style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.tertiary,
-                    modifier = Modifier.padding(start = 4.dp)
+                    color = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.padding(start = 4.dp).alpha(pulseAlpha)
                 )
             } else if (errorTint) {
                 Text(
@@ -380,8 +390,10 @@ private fun ToolExpandedDetail(
             .fillMaxWidth()
             .padding(start = 16.dp, top = 2.dp, bottom = 4.dp)
     ) {
-        if (entry.fullInput.isNotBlank()) {
-            IndentedMono(entry.fullInput)
+        when (entry.name) {
+            "Edit" -> EditDiffBlock(entry.fullInput)
+            "Write" -> WriteDiffBlock(entry.fullInput)
+            else -> if (entry.fullInput.isNotBlank()) IndentedMono(entry.fullInput)
         }
         if (result != null) {
             Spacer(Modifier.height(4.dp))
@@ -395,6 +407,142 @@ private fun ToolExpandedDetail(
             IndentedMono(result.text, error = errorTint)
         }
     }
+}
+
+/**
+ * Render an Edit tool_use input as a unified diff: each old_string line
+ * prefixed with red '−', each new_string line with green '+'. Falls back
+ * to raw JSON if the input doesn't have the expected shape.
+ */
+@Composable
+private fun EditDiffBlock(fullInput: String) {
+    val parsed = remember(fullInput) { parseEditInput(fullInput) }
+    if (parsed == null) {
+        IndentedMono(fullInput)
+        return
+    }
+    val (path, oldStr, newStr) = parsed
+    Column(modifier = Modifier.fillMaxWidth()) {
+        if (path.isNotBlank()) {
+            Text(
+                path,
+                style = MaterialTheme.typography.labelSmall,
+                fontFamily = FontFamily.Monospace,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            Spacer(Modifier.height(2.dp))
+        }
+        DiffPane(removed = oldStr, added = newStr)
+    }
+}
+
+@Composable
+private fun WriteDiffBlock(fullInput: String) {
+    val parsed = remember(fullInput) { parseWriteInput(fullInput) }
+    if (parsed == null) {
+        IndentedMono(fullInput)
+        return
+    }
+    val (path, content) = parsed
+    Column(modifier = Modifier.fillMaxWidth()) {
+        if (path.isNotBlank()) {
+            Text(
+                path,
+                style = MaterialTheme.typography.labelSmall,
+                fontFamily = FontFamily.Monospace,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            Spacer(Modifier.height(2.dp))
+        }
+        DiffPane(removed = "", added = content)
+    }
+}
+
+@Composable
+private fun DiffPane(removed: String, added: String) {
+    val errorBg = MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.35f)
+    val addBg = androidx.compose.ui.graphics.Color(0xFF1E4620).copy(alpha = 0.45f)
+    val errorFg = MaterialTheme.colorScheme.error
+    val addFg = androidx.compose.ui.graphics.Color(0xFF7EE787)
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .horizontalScroll(rememberScrollState())
+    ) {
+        if (removed.isNotBlank()) {
+            removed.lines().forEach { line ->
+                DiffLine(prefix = "−", text = line, prefixColor = errorFg, background = errorBg)
+            }
+        }
+        if (added.isNotBlank()) {
+            added.lines().forEach { line ->
+                DiffLine(prefix = "+", text = line, prefixColor = addFg, background = addBg)
+            }
+        }
+    }
+}
+
+@Composable
+private fun DiffLine(
+    prefix: String,
+    text: String,
+    prefixColor: androidx.compose.ui.graphics.Color,
+    background: androidx.compose.ui.graphics.Color
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(background)
+            .padding(horizontal = 4.dp, vertical = 1.dp)
+    ) {
+        Text(
+            prefix,
+            style = MaterialTheme.typography.bodySmall,
+            fontFamily = FontFamily.Monospace,
+            color = prefixColor,
+            modifier = Modifier.padding(end = 6.dp)
+        )
+        Text(
+            text,
+            style = MaterialTheme.typography.bodySmall,
+            fontFamily = FontFamily.Monospace,
+            color = MaterialTheme.colorScheme.onSurface
+        )
+    }
+}
+
+private fun parseEditInput(json: String): Triple<String, String, String>? {
+    if (json.isBlank()) return null
+    return try {
+        val obj = kotlinx.serialization.json.Json
+            .parseToJsonElement(json) as? kotlinx.serialization.json.JsonObject ?: return null
+        val path = obj["file_path"]?.let {
+            (it as? kotlinx.serialization.json.JsonPrimitive)?.content
+        } ?: ""
+        val oldS = obj["old_string"]?.let {
+            (it as? kotlinx.serialization.json.JsonPrimitive)?.content
+        } ?: ""
+        val newS = obj["new_string"]?.let {
+            (it as? kotlinx.serialization.json.JsonPrimitive)?.content
+        } ?: ""
+        if (oldS.isEmpty() && newS.isEmpty()) return null
+        Triple(path, oldS, newS)
+    } catch (_: Throwable) { null }
+}
+
+private fun parseWriteInput(json: String): Pair<String, String>? {
+    if (json.isBlank()) return null
+    return try {
+        val obj = kotlinx.serialization.json.Json
+            .parseToJsonElement(json) as? kotlinx.serialization.json.JsonObject ?: return null
+        val path = obj["file_path"]?.let {
+            (it as? kotlinx.serialization.json.JsonPrimitive)?.content
+        } ?: ""
+        val content = obj["content"]?.let {
+            (it as? kotlinx.serialization.json.JsonPrimitive)?.content
+        } ?: return null
+        path to content
+    } catch (_: Throwable) { null }
 }
 
 @Composable
@@ -436,17 +584,11 @@ private fun ToolGroupBlock(
     }
 }
 
-private fun glyphFor(name: String): String = when (name) {
-    "Bash" -> "$"
-    "Read" -> "▤"
-    "Edit", "Write" -> "✎"
-    "Grep" -> "⌕"
-    "Glob" -> "◇"
-    "Agent", "Task" -> "→"
-    "TodoWrite" -> "✓"
-    "WebFetch", "WebSearch" -> "⇢"
-    else -> "▸"
-}
+// Single neutral glyph for every tool. Status (pending/error/done) is
+// communicated via color and the trailing indicator, not via the prefix
+// shape — matches the codicon-style restraint of the Claude Code chat
+// panel where every tool call leads with the same arrow.
+private fun glyphFor(name: String): String = "▸"
 
 private sealed class RenderItem {
     data class Single(val entry: TranscriptEntry) : RenderItem()
