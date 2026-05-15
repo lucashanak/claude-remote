@@ -52,8 +52,10 @@ object TranscriptParser {
                 "user" -> parseUser(obj, out)
                 "assistant" -> parseAssistant(obj, out)
                 "system" -> parseSystem(obj, out)
-                "last-prompt" -> parseLastPrompt(obj, out)
-                // Drop: attachment, file-history-snapshot, ai-title, queue-operation, permission-mode.
+                // Drop: attachment, file-history-snapshot, ai-title, last-prompt,
+                // queue-operation, permission-mode. `last-prompt` is a duplicate
+                // checkpoint that Claude Code re-emits with the same text every
+                // turn — using it as a fallback produced ghost user bubbles.
                 else -> {}
             }
         }
@@ -200,24 +202,6 @@ object TranscriptParser {
             else -> input.keys.joinToString(", ")
         }
         return summary.take(200) to pretty
-    }
-
-    private fun parseLastPrompt(obj: JsonObject, out: MutableList<TranscriptEntry>) {
-        // Fallback for Claude Code variants that record the user prompt only
-        // in a `last-prompt` record (or alongside a user record without the
-        // visible text). Dedupe against the previous UserPrompt entry so we
-        // don't render the same question twice on builds that emit both.
-        val text = obj["lastPrompt"]?.jsonPrimitive?.contentOrNull ?: return
-        if (text.isBlank()) return
-        val leaf = obj["leafUuid"]?.jsonPrimitive?.contentOrNull
-        val recent = out.asReversed().firstOrNull { it is TranscriptEntry.UserPrompt }
-            as? TranscriptEntry.UserPrompt
-        if (recent != null && recent.text == text) return
-        out += TranscriptEntry.UserPrompt(
-            id = "last-prompt:" + (leaf ?: text.hashCode().toString()),
-            timestamp = null,
-            text = text
-        )
     }
 
     private fun parseSystem(obj: JsonObject, out: MutableList<TranscriptEntry>) {
