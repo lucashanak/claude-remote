@@ -30,6 +30,10 @@ import com.clauderemote.model.SessionActivity
 import com.clauderemote.session.status.RemoteSessionStatus
 import com.clauderemote.session.transcript.TranscriptEntry
 import com.mikepenz.markdown.m3.Markdown
+import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.unit.Density
 import kotlinx.coroutines.launch
 
 /**
@@ -53,12 +57,29 @@ fun TranscriptView(
     val scope = rememberCoroutineScope()
     var showSystem by remember { mutableStateOf(false) }
     var showThinking by remember { mutableStateOf(false) }
+    var fontScale by rememberSaveable { mutableStateOf(1f) }
 
-    val filtered = remember(entries, showSystem, showThinking) {
+    // Pair each ToolCall with its matching ToolResult so we can render them
+    // in a single collapsible row. Orphan ToolResults (no preceding call,
+    // streamed before its call appears, etc.) still render standalone.
+    val resultsByToolId = remember(entries) {
+        entries.filterIsInstance<TranscriptEntry.ToolResult>()
+            .mapNotNull { r -> r.toolUseId?.let { it to r } }
+            .toMap()
+    }
+    val pairedResultIds = remember(entries, resultsByToolId) {
+        entries.filterIsInstance<TranscriptEntry.ToolCall>()
+            .mapNotNull { resultsByToolId[it.toolUseId]?.id }
+            .toSet()
+    }
+
+    val filtered = remember(entries, showSystem, showThinking, pairedResultIds) {
         entries.filter { entry ->
             when (entry) {
                 is TranscriptEntry.SystemNote -> showSystem
                 is TranscriptEntry.AssistantThinking -> showThinking
+                // Paired results are rendered inside their tool-call card.
+                is TranscriptEntry.ToolResult -> entry.id !in pairedResultIds
                 else -> true
             }
         }
@@ -124,7 +145,11 @@ fun TranscriptView(
             showThinking = showThinking,
             showSystem = showSystem,
             onToggleThinking = { showThinking = !showThinking },
-            onToggleSystem = { showSystem = !showSystem }
+            onToggleSystem = { showSystem = !showSystem },
+            fontScale = fontScale,
+            onFontScaleDelta = { delta ->
+                fontScale = (fontScale + delta).coerceIn(0.7f, 1.6f)
+            }
         )
 
         if (filtered.isEmpty()) {
@@ -141,26 +166,37 @@ fun TranscriptView(
             return@Column
         }
 
-        SelectionContainer {
-            LazyColumn(
-                state = listState,
-                modifier = Modifier.fillMaxSize().padding(horizontal = 8.dp),
-                verticalArrangement = Arrangement.spacedBy(6.dp),
-                contentPadding = PaddingValues(vertical = 8.dp)
-            ) {
-                items(filtered, key = { it.id }) { entry ->
-                    when (entry) {
-                        is TranscriptEntry.UserPrompt -> UserPromptCard(entry)
-                        is TranscriptEntry.SlashCommand -> SlashCommandRow(entry)
-                        is TranscriptEntry.AssistantText -> AssistantTextCard(entry)
-                        is TranscriptEntry.AssistantThinking -> ThinkingCard(entry)
-                        is TranscriptEntry.ToolCall -> ToolCallCard(entry)
-                        is TranscriptEntry.ToolResult -> ToolResultCard(entry)
-                        is TranscriptEntry.SystemNote -> SystemNoteRow(entry)
+        val baseDensity = LocalDensity.current
+        CompositionLocalProvider(
+            LocalDensity provides Density(
+                density = baseDensity.density,
+                fontScale = baseDensity.fontScale * fontScale
+            )
+        ) {
+            SelectionContainer {
+                LazyColumn(
+                    state = listState,
+                    modifier = Modifier.fillMaxSize().padding(horizontal = 8.dp),
+                    verticalArrangement = Arrangement.spacedBy(6.dp),
+                    contentPadding = PaddingValues(vertical = 8.dp)
+                ) {
+                    items(filtered, key = { it.id }) { entry ->
+                        when (entry) {
+                            is TranscriptEntry.UserPrompt -> UserPromptCard(entry)
+                            is TranscriptEntry.SlashCommand -> SlashCommandRow(entry)
+                            is TranscriptEntry.AssistantText -> AssistantTextCard(entry)
+                            is TranscriptEntry.AssistantThinking -> ThinkingCard(entry)
+                            is TranscriptEntry.ToolCall -> ToolCallCard(
+                                entry,
+                                result = resultsByToolId[entry.toolUseId]
+                            )
+                            is TranscriptEntry.ToolResult -> ToolResultCard(entry)
+                            is TranscriptEntry.SystemNote -> SystemNoteRow(entry)
+                        }
                     }
-                }
-                if (effectiveActivity == SessionActivity.WORKING) {
-                    item(key = "__working_skeleton__") { WorkingSkeletonCard() }
+                    if (effectiveActivity == SessionActivity.WORKING) {
+                        item(key = "__working_skeleton__") { WorkingSkeletonCard() }
+                    }
                 }
             }
         }
@@ -252,27 +288,41 @@ private fun ThinkingCard(entry: TranscriptEntry.AssistantThinking) {
 }
 
 @Composable
-private fun ToolCallCard(entry: TranscriptEntry.ToolCall) {
+private fun ToolCallCard(
+    entry: TranscriptEntry.ToolCall,
+    result: TranscriptEntry.ToolResult? = null
+) {
     var expanded by remember { mutableStateOf(false) }
+    val errorTint = result?.isError == true
+    val accent = when {
+        errorTint -> MaterialTheme.colorScheme.error
+        result == null -> MaterialTheme.colorScheme.tertiary
+        else -> MaterialTheme.colorScheme.outline
+    }
     Surface(
         modifier = Modifier.fillMaxWidth(),
-        color = MaterialTheme.colorScheme.secondaryContainer,
-        shape = RoundedCornerShape(6.dp)
+        color = MaterialTheme.colorScheme.surface,
+        shape = RoundedCornerShape(6.dp),
+        border = androidx.compose.foundation.BorderStroke(1.dp, accent.copy(alpha = 0.5f))
     ) {
-        Column(modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp)) {
+        Column {
             Row(
-                modifier = Modifier.fillMaxWidth().clickable { expanded = !expanded },
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable { expanded = !expanded }
+                    .padding(horizontal = 10.dp, vertical = 6.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Text(
-                    if (expanded) "▼" else "▶",
+                    if (expanded) "▾" else "▸",
                     style = MaterialTheme.typography.labelSmall,
                     modifier = Modifier.padding(end = 6.dp)
                 )
                 Text(
                     entry.name,
                     style = MaterialTheme.typography.labelMedium,
-                    fontWeight = FontWeight.Bold
+                    fontWeight = FontWeight.Bold,
+                    color = accent
                 )
                 Spacer(Modifier.width(8.dp))
                 Text(
@@ -282,10 +332,45 @@ private fun ToolCallCard(entry: TranscriptEntry.ToolCall) {
                     maxLines = 1,
                     modifier = Modifier.weight(1f).horizontalScroll(rememberScrollState())
                 )
+                if (result == null) {
+                    Text(
+                        "…",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.tertiary,
+                        modifier = Modifier.padding(start = 4.dp)
+                    )
+                } else if (errorTint) {
+                    Text(
+                        "!",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.error,
+                        modifier = Modifier.padding(start = 4.dp)
+                    )
+                }
             }
-            if (expanded && entry.fullInput.isNotBlank()) {
-                Spacer(Modifier.height(4.dp))
-                MonospaceBlock(entry.fullInput)
+            if (expanded) {
+                Column(modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp)) {
+                    if (entry.fullInput.isNotBlank()) {
+                        Text(
+                            "input",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        Spacer(Modifier.height(2.dp))
+                        MonospaceBlock(entry.fullInput)
+                    }
+                    if (result != null) {
+                        Spacer(Modifier.height(6.dp))
+                        Text(
+                            if (errorTint) "error" else "result",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = if (errorTint) MaterialTheme.colorScheme.error
+                                   else MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        Spacer(Modifier.height(2.dp))
+                        MonospaceBlock(result.text)
+                    }
+                }
             }
         }
     }
@@ -429,7 +514,9 @@ private fun StatusBar(
     showThinking: Boolean,
     showSystem: Boolean,
     onToggleThinking: () -> Unit,
-    onToggleSystem: () -> Unit
+    onToggleSystem: () -> Unit,
+    fontScale: Float,
+    onFontScaleDelta: (Float) -> Unit
 ) {
     var filterMenu by remember { mutableStateOf(false) }
     Surface(
@@ -481,6 +568,20 @@ private fun StatusBar(
                         text = { Text("Show system") },
                         trailingIcon = { Text(if (showSystem) "✓" else "") },
                         onClick = { onToggleSystem(); filterMenu = false }
+                    )
+                    HorizontalDivider()
+                    DropdownMenuItem(
+                        text = {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text("Font ${(fontScale * 100).toInt()}%", modifier = Modifier.weight(1f))
+                                TextButton(onClick = { onFontScaleDelta(-0.1f) }) { Text("A−") }
+                                TextButton(onClick = { onFontScaleDelta(0.1f) }) { Text("A+") }
+                            }
+                        },
+                        onClick = {}
                     )
                 }
             }
