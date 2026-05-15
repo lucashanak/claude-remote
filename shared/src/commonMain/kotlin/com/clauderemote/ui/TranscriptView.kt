@@ -109,27 +109,7 @@ fun TranscriptView(
         else -> activity
     }
 
-    // Jump to the end on first non-empty load so opening the view shows the
-    // most recent conversation, not the oldest entries. After that, auto-
-    // scroll only when the user is already near the bottom (so they don't
-    // get yanked away while reading older messages).
-    var didInitialJump by remember { mutableStateOf(false) }
     val skeletonShowing = effectiveActivity == SessionActivity.WORKING
-    val virtualLast = filtered.size - 1 + if (skeletonShowing) 1 else 0
-    LaunchedEffect(filtered.size, skeletonShowing) {
-        if (filtered.isEmpty()) return@LaunchedEffect
-        if (!didInitialJump) {
-            didInitialJump = true
-            listState.scrollToItem(virtualLast)
-            return@LaunchedEffect
-        }
-        val info = listState.layoutInfo
-        val lastVisible = info.visibleItemsInfo.lastOrNull()?.index ?: -1
-        val nearBottom = lastVisible >= virtualLast - 3
-        if (nearBottom) {
-            scope.launch { listState.animateScrollToItem(virtualLast) }
-        }
-    }
 
     Column(modifier = modifier) {
         StatusBar(
@@ -171,6 +151,27 @@ fun TranscriptView(
         // to one tight stack instead of N bordered cards. Other entries pass
         // through unchanged as singletons.
         val rendered = remember(filtered) { groupConsecutiveTools(filtered) }
+        // Auto-scroll based on the *rendered* list size (post-grouping +
+        // skeleton), not the filtered entry count — grouping fuses runs of
+        // ToolCalls into one LazyColumn item, so filtered.size and the
+        // actual item count diverge.
+        var didInitialJump by remember { mutableStateOf(false) }
+        val itemsCount = rendered.size + if (skeletonShowing) 1 else 0
+        LaunchedEffect(itemsCount) {
+            if (itemsCount <= 0) return@LaunchedEffect
+            val lastIdx = itemsCount - 1
+            if (!didInitialJump) {
+                didInitialJump = true
+                listState.scrollToItem(lastIdx)
+                return@LaunchedEffect
+            }
+            val info = listState.layoutInfo
+            val lastVisible = info.visibleItemsInfo.lastOrNull()?.index ?: -1
+            val nearBottom = lastVisible >= lastIdx - 3
+            if (nearBottom) {
+                scope.launch { listState.animateScrollToItem(lastIdx) }
+            }
+        }
         CompositionLocalProvider(
             LocalDensity provides Density(
                 density = baseDensity.density,
