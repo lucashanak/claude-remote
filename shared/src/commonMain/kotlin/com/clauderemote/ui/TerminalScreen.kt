@@ -81,9 +81,16 @@ fun TerminalScreen(
     onToggleInvertColors: (() -> Unit)? = null,
     terminalContent: @Composable (Modifier) -> Unit,
     splitTerminalContent: (@Composable (Modifier) -> Unit)? = null,
-    transcriptEntries: List<TranscriptEntry> = emptyList()
+    transcriptEntries: List<TranscriptEntry> = emptyList(),
+    onTerminalContentVisible: (() -> Unit)? = null
 ) {
     var transcriptMode by rememberSaveable(activeTabId) { mutableStateOf(false) }
+    // Replay terminal buffer when toggling back from transcript view — the
+    // terminal widget loses its rendered scrollback when it leaves
+    // composition and remounts blank otherwise.
+    LaunchedEffect(transcriptMode, activeTabId) {
+        if (!transcriptMode) onTerminalContentVisible?.invoke()
+    }
     var showControlBar by remember { mutableStateOf(true) }
     var compactMode by remember { mutableStateOf(false) }
     var showCommandPicker by remember { mutableStateOf(false) }

@@ -74,12 +74,12 @@ fun TranscriptView(
             FilterChip(
                 selected = showThinking,
                 onClick = { showThinking = !showThinking },
-                label = { Text("Thinking", style = MaterialTheme.typography.labelSmall) }
+                label = { Text("Show thinking", style = MaterialTheme.typography.labelSmall) }
             )
             FilterChip(
                 selected = showSystem,
                 onClick = { showSystem = !showSystem },
-                label = { Text("System", style = MaterialTheme.typography.labelSmall) }
+                label = { Text("Show system", style = MaterialTheme.typography.labelSmall) }
             )
         }
 

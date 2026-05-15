@@ -673,7 +673,8 @@ fun App(
                         transcriptEntries = activeTabId?.let { id ->
                             val flow = remember(id) { sessionOrchestrator.transcriptFlow(id) }
                             flow.collectAsState().value
-                        } ?: emptyList()
+                        } ?: emptyList(),
+                        onTerminalContentVisible = onTerminalScreenVisible
                     )
                 }
 
