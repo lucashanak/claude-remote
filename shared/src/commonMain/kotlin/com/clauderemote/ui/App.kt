@@ -674,6 +674,10 @@ fun App(
                             val flow = remember(id) { sessionOrchestrator.transcriptFlow(id) }
                             flow.collectAsState().value
                         } ?: emptyList(),
+                        remoteStatus = activeTabId?.let { id ->
+                            val flow = remember(id) { sessionOrchestrator.remoteStatusFlow(id) }
+                            flow.collectAsState().value
+                        },
                         onTerminalContentVisible = onTerminalScreenVisible
                     )
                 }

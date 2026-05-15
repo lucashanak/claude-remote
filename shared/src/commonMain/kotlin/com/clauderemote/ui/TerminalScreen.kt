@@ -35,6 +35,7 @@ import com.clauderemote.model.ClaudeSession
 import com.clauderemote.model.SessionStatus
 import com.clauderemote.session.CommandFetcher
 import com.clauderemote.session.SlashCommand
+import com.clauderemote.session.status.RemoteSessionStatus
 import com.clauderemote.session.transcript.TranscriptEntry
 import kotlinx.coroutines.launch
 
@@ -82,6 +83,7 @@ fun TerminalScreen(
     terminalContent: @Composable (Modifier) -> Unit,
     splitTerminalContent: (@Composable (Modifier) -> Unit)? = null,
     transcriptEntries: List<TranscriptEntry> = emptyList(),
+    remoteStatus: RemoteSessionStatus? = null,
     onTerminalContentVisible: (() -> Unit)? = null
 ) {
     var transcriptMode by rememberSaveable(activeTabId) { mutableStateOf(false) }
@@ -606,7 +608,15 @@ fun TerminalScreen(
         // Terminal content (with optional split view) or read-only transcript view
         if (transcriptMode) {
             Box(modifier = Modifier.fillMaxWidth().weight(1f)) {
-                TranscriptView(transcriptEntries, Modifier.fillMaxSize())
+                TranscriptView(
+                    entries = transcriptEntries,
+                    modifier = Modifier.fillMaxSize(),
+                    contextPercent = contextPercent,
+                    sessionUsagePercent = sessionUsagePercent,
+                    weekUsagePercent = weekUsagePercent,
+                    latencyMs = latencyMs,
+                    remoteStatus = remoteStatus
+                )
             }
         } else if (splitActive && splitTerminalContent != null && wideMode) {
             Row(modifier = Modifier.fillMaxWidth().weight(1f)) {

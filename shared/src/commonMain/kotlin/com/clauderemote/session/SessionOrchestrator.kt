@@ -2,6 +2,8 @@ package com.clauderemote.session
 
 import com.clauderemote.connection.SshManager
 import com.clauderemote.model.*
+import com.clauderemote.session.status.RemoteSessionStatus
+import com.clauderemote.session.status.SessionStatusPoller
 import com.clauderemote.session.transcript.TranscriptEntry
 import com.clauderemote.session.transcript.TranscriptStream
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -33,6 +35,10 @@ class SessionOrchestrator(
     // Per-session transcript streams (JSONL tail readers).
     private val transcriptStreams = mutableMapOf<String, TranscriptStream>()
     private val transcriptLock = Any()
+
+    // Per-session OMC state pollers (active skill + subagent count).
+    private val statusPollers = mutableMapOf<String, SessionStatusPoller>()
+    private val statusLock = Any()
 
     // Per-session terminal output buffer (ring buffer, capped at MAX_BUFFER)
     private val outputBuffers = mutableMapOf<String, StringBuilder>()
@@ -602,6 +608,23 @@ else:
         val uuid = tab.claudeSessionId
         if (uuid != null) stream.start(uuid)
         return stream.entries
+    }
+
+    /**
+     * Lazy poller for OMC remote state (active skill, in-flight subagents).
+     * Polls two small state files via SSH stat+cat every ~5 s; idle traffic
+     * stays under ~50 B/s. Cached per session and cleaned up on disconnect.
+     */
+    fun remoteStatusFlow(sessionId: String): kotlinx.coroutines.flow.StateFlow<RemoteSessionStatus> {
+        val tab = tabManager.getTab(sessionId)
+            ?: return kotlinx.coroutines.flow.MutableStateFlow(RemoteSessionStatus())
+        val poller = synchronized(statusLock) {
+            statusPollers.getOrPut(sessionId) {
+                SessionStatusPoller(tab.server, tab.folder, reconnectScope)
+            }
+        }
+        poller.start()
+        return poller.status
     }
 
     /**
@@ -1206,6 +1229,9 @@ else:
             transcriptStreams.remove(sessionId)?.let { stream ->
                 reconnectScope.launch { stream.stop() }
             }
+        }
+        synchronized(statusLock) {
+            statusPollers.remove(sessionId)?.stop()
         }
         promptDetector.removeSession(sessionId)
         pendingInputs.remove(sessionId)

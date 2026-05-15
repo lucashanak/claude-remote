@@ -17,6 +17,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import com.clauderemote.session.status.RemoteSessionStatus
 import com.clauderemote.session.transcript.TranscriptEntry
 import kotlinx.coroutines.launch
 
@@ -29,7 +30,12 @@ import kotlinx.coroutines.launch
 @Composable
 fun TranscriptView(
     entries: List<TranscriptEntry>,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    contextPercent: Int? = null,
+    sessionUsagePercent: Int? = null,
+    weekUsagePercent: Int? = null,
+    latencyMs: Long? = null,
+    remoteStatus: RemoteSessionStatus? = null
 ) {
     val listState = rememberLazyListState()
     val scope = rememberCoroutineScope()
@@ -45,6 +51,9 @@ fun TranscriptView(
             }
         }
     }
+    // Find the most recent TodoWrite tool_use to derive an open-todo count.
+    // Cheap: scans backwards from the end and stops at the first match.
+    val todoPending = remember(entries) { countOpenTodos(entries) }
 
     // Auto-scroll to bottom when new entries arrive and the user is already near the bottom.
     LaunchedEffect(filtered.size) {
@@ -58,6 +67,16 @@ fun TranscriptView(
     }
 
     Column(modifier = modifier) {
+        StatusBar(
+            entryCount = entries.size,
+            contextPercent = contextPercent,
+            sessionUsagePercent = sessionUsagePercent,
+            weekUsagePercent = weekUsagePercent,
+            latencyMs = latencyMs,
+            todoPending = todoPending,
+            activeSkill = remoteStatus?.activeSkill,
+            activeSubagents = remoteStatus?.activeSubagents ?: 0
+        )
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -66,11 +85,7 @@ fun TranscriptView(
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(8.dp)
         ) {
-            Text(
-                "${entries.size} entries",
-                style = MaterialTheme.typography.labelSmall,
-                modifier = Modifier.weight(1f)
-            )
+            Spacer(Modifier.weight(1f))
             FilterChip(
                 selected = showThinking,
                 onClick = { showThinking = !showThinking },
@@ -396,4 +411,66 @@ private fun formatTimestamp(iso: String): String {
     // 2026-05-15T15:24:02.384Z → 15:24:02
     val t = iso.substringAfter('T').substringBefore('.').substringBefore('Z')
     return t.take(8)
+}
+
+@Composable
+private fun StatusBar(
+    entryCount: Int,
+    contextPercent: Int?,
+    sessionUsagePercent: Int?,
+    weekUsagePercent: Int?,
+    latencyMs: Long?,
+    todoPending: Int,
+    activeSkill: String?,
+    activeSubagents: Int
+) {
+    Surface(
+        modifier = Modifier.fillMaxWidth(),
+        color = MaterialTheme.colorScheme.surfaceContainer
+    ) {
+        Row(
+            modifier = Modifier
+                .horizontalScroll(rememberScrollState())
+                .padding(horizontal = 12.dp, vertical = 4.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            StatusChip("$entryCount entries")
+            if (contextPercent != null) StatusChip("ctx ${contextPercent}%")
+            if (sessionUsagePercent != null) StatusChip("5h ${sessionUsagePercent}%")
+            if (weekUsagePercent != null) StatusChip("wk ${weekUsagePercent}%")
+            if (todoPending > 0) StatusChip("↘ $todoPending")
+            if (activeSubagents > 0) StatusChip("⚡ $activeSubagents")
+            if (!activeSkill.isNullOrBlank()) StatusChip("skill: $activeSkill")
+            if (latencyMs != null) StatusChip("${latencyMs}ms")
+        }
+    }
+}
+
+@Composable
+private fun StatusChip(text: String) {
+    Text(
+        text,
+        style = MaterialTheme.typography.labelSmall,
+        fontFamily = FontFamily.Monospace,
+        color = MaterialTheme.colorScheme.onSurfaceVariant
+    )
+}
+
+/**
+ * Walk the entries backwards to find the most recent TodoWrite tool_use,
+ * parse its `todos` array, and return the count of items whose status is
+ * not "completed". Returns 0 if no TodoWrite has been issued yet.
+ */
+private fun countOpenTodos(entries: List<TranscriptEntry>): Int {
+    val last = entries.asReversed().firstOrNull {
+        it is TranscriptEntry.ToolCall && it.name == "TodoWrite"
+    } as? TranscriptEntry.ToolCall ?: return 0
+    val json = last.fullInput
+    if (json.isBlank()) return 0
+    // Cheap: count `"status": "pending"` and `"status": "in_progress"`
+    // occurrences. Avoids dragging the json parser into the UI layer.
+    val pending = Regex("\"status\"\\s*:\\s*\"(pending|in_progress)\"")
+        .findAll(json).count()
+    return pending
 }
