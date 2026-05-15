@@ -49,6 +49,7 @@ class SessionStatusPoller(
 
     fun start() {
         if (pollJob?.isActive == true) return
+        FileLogger.log(TAG, "start: cwd=$cwd")
         pollJob = scope.launch { runPoll() }
     }
 
@@ -111,6 +112,9 @@ class SessionStatusPoller(
                 if (subMtime != lastSubagentMtime) {
                     lastSubagentMtime = subMtime
                     current = current.copy(activeSubagents = extractSubagentCount(subBody))
+                }
+                if (_status.value != current) {
+                    FileLogger.log(TAG, "status: skill=${current.activeSkill}, subagents=${current.activeSubagents}")
                 }
                 _status.value = current
             } catch (t: Throwable) {

@@ -67,12 +67,33 @@ fun TranscriptView(
     // Cheap: scans backwards from the end and stops at the first match.
     val todoPending = remember(entries) { countOpenTodos(entries) }
 
+    // Decay a stuck WORKING state. The prompt detector that drives `activity`
+    // runs off the terminal's rendered screen — when the user is in the
+    // transcript view the terminal is disposed, the detector can't read
+    // anything, and a WORKING reading from before the toggle freezes here.
+    // If no new entry has arrived for ~6 s, treat the state as ready so the
+    // pulsing dot + skeleton card stop misleading the user.
+    var lastChangeAt by remember { mutableStateOf(0L) }
+    LaunchedEffect(entries.size) { lastChangeAt = System.currentTimeMillis() }
+    var now by remember { mutableStateOf(System.currentTimeMillis()) }
+    LaunchedEffect(activity == SessionActivity.WORKING) {
+        while (activity == SessionActivity.WORKING) {
+            now = System.currentTimeMillis()
+            kotlinx.coroutines.delay(1000)
+        }
+    }
+    val effectiveActivity = when {
+        activity != SessionActivity.WORKING -> activity
+        lastChangeAt > 0 && now - lastChangeAt > 6_000 -> SessionActivity.WAITING_FOR_INPUT
+        else -> activity
+    }
+
     // Jump to the end on first non-empty load so opening the view shows the
     // most recent conversation, not the oldest entries. After that, auto-
     // scroll only when the user is already near the bottom (so they don't
     // get yanked away while reading older messages).
     var didInitialJump by remember { mutableStateOf(false) }
-    val skeletonShowing = activity == SessionActivity.WORKING
+    val skeletonShowing = effectiveActivity == SessionActivity.WORKING
     val virtualLast = filtered.size - 1 + if (skeletonShowing) 1 else 0
     LaunchedEffect(filtered.size, skeletonShowing) {
         if (filtered.isEmpty()) return@LaunchedEffect
@@ -99,7 +120,7 @@ fun TranscriptView(
             todoPending = todoPending,
             activeSkill = remoteStatus?.activeSkill,
             activeSubagents = remoteStatus?.activeSubagents ?: 0,
-            activity = activity,
+            activity = effectiveActivity,
             showThinking = showThinking,
             showSystem = showSystem,
             onToggleThinking = { showThinking = !showThinking },
@@ -138,7 +159,7 @@ fun TranscriptView(
                         is TranscriptEntry.SystemNote -> SystemNoteRow(entry)
                     }
                 }
-                if (activity == SessionActivity.WORKING) {
+                if (effectiveActivity == SessionActivity.WORKING) {
                     item(key = "__working_skeleton__") { WorkingSkeletonCard() }
                 }
             }
@@ -428,9 +449,9 @@ private fun StatusBar(
             ) {
                 ActivityIndicator(activity)
                 StatusChip("$entryCount entries")
-                if (contextPercent != null) StatusChip("ctx ${contextPercent}%")
-                if (sessionUsagePercent != null) StatusChip("5h ${sessionUsagePercent}%")
-                if (weekUsagePercent != null) StatusChip("wk ${weekUsagePercent}%")
+                StatusChip("ctx ${contextPercent?.let { "$it%" } ?: "—"}")
+                StatusChip("5h ${sessionUsagePercent?.let { "$it%" } ?: "—"}")
+                StatusChip("wk ${weekUsagePercent?.let { "$it%" } ?: "—"}")
                 if (todoPending > 0) StatusChip("↘ $todoPending")
                 if (activeSubagents > 0) StatusChip("⚡ $activeSubagents")
                 if (!activeSkill.isNullOrBlank()) StatusChip("skill: $activeSkill")
