@@ -105,7 +105,16 @@ class TranscriptStream(
                             val newEntries = TranscriptParser.parseLines(sequenceOf(line))
                             if (newEntries.isNotEmpty()) {
                                 _entries.update { prev ->
-                                    val combined = prev + newEntries
+                                    // Dedup by id. On SSH reconnect the
+                                    // outer retry loop reopens tail -F, which
+                                    // re-emits the last 2 000 lines from the
+                                    // start of the file. Without this guard
+                                    // every reconnect would clone the whole
+                                    // backlog into the entries flow.
+                                    val seen = prev.mapTo(HashSet(prev.size)) { it.id }
+                                    val unique = newEntries.filter { seen.add(it.id) }
+                                    if (unique.isEmpty()) return@update prev
+                                    val combined = prev + unique
                                     if (combined.size > MAX_ENTRIES) {
                                         combined.subList(combined.size - MAX_ENTRIES, combined.size).toList()
                                     } else combined
