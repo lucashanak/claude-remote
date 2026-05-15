@@ -76,6 +76,8 @@ fun App(
     val contextPercents by sessionOrchestrator.contextPercents.collectAsState()
     val sessionUsagePercents by sessionOrchestrator.sessionUsagePercents.collectAsState()
     val weekUsagePercents by sessionOrchestrator.weekUsagePercents.collectAsState()
+    val sessionResetMin by sessionOrchestrator.sessionResetMin.collectAsState()
+    val weekResetMin by sessionOrchestrator.weekResetMin.collectAsState()
     val latencies by sessionOrchestrator.latencies.collectAsState()
     val pendingCounts by sessionOrchestrator.pendingCounts.collectAsState()
 
@@ -645,6 +647,8 @@ fun App(
                         },
                         sessionUsagePercent = activeTabId?.let { sessionUsagePercents[it] },
                         weekUsagePercent = activeTabId?.let { weekUsagePercents[it] },
+                        sessionResetMin = activeTabId?.let { sessionResetMin[it] },
+                        weekResetMin = activeTabId?.let { weekResetMin[it] },
                         sessionActivities = sessionActivities,
                         contextPercent = activeTabId?.let { contextPercents[it] },
                         latencyMs = activeTabId?.let { latencies[it] },
@@ -707,6 +711,8 @@ fun App(
                         contextPercents = contextPercents,
                         sessionUsagePercent = activeTabId?.let { sessionUsagePercents[it] },
                         weekUsagePercent = activeTabId?.let { weekUsagePercents[it] },
+                        sessionResetMin = activeTabId?.let { sessionResetMin[it] },
+                        weekResetMin = activeTabId?.let { weekResetMin[it] },
                         usageTokens = usageTokensState,
                         onBack = { currentScreen = Screen.LAUNCHER }
                     )

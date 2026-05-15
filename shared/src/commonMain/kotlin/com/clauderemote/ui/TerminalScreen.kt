@@ -72,6 +72,8 @@ fun TerminalScreen(
     contextPercent: Int? = null,
     sessionUsagePercent: Int? = null,
     weekUsagePercent: Int? = null,
+    sessionResetMin: Int? = null,
+    weekResetMin: Int? = null,
     sessionActivities: Map<String, com.clauderemote.model.SessionActivity> = emptyMap(),
     latencyMs: Long? = null,
     pendingInputCount: Int = 0,
@@ -614,6 +616,8 @@ fun TerminalScreen(
                     contextPercent = contextPercent,
                     sessionUsagePercent = sessionUsagePercent,
                     weekUsagePercent = weekUsagePercent,
+                    sessionResetMin = sessionResetMin,
+                    weekResetMin = weekResetMin,
                     latencyMs = latencyMs,
                     remoteStatus = remoteStatus,
                     activity = activeTabId?.let { sessionActivities[it] }

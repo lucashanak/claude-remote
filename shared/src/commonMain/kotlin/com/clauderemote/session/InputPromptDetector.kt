@@ -174,6 +174,18 @@ class InputPromptDetector(
                 ?: m.groupValues.getOrNull(2)?.toIntOrNull())
                 ?.let { pct -> result["week"] = pct }
         }
+        // Reset times in total minutes — only captured when paired with the
+        // OMC short-form, since /usage doesn't print them in this layout.
+        SESSION_RESET_REGEX.find(stripped)?.let { m ->
+            val h = m.groupValues.getOrNull(1)?.toIntOrNull() ?: 0
+            val mins = m.groupValues.getOrNull(2)?.toIntOrNull() ?: 0
+            result["session_reset_min"] = h * 60 + mins
+        }
+        WEEK_RESET_REGEX.find(stripped)?.let { m ->
+            val h = m.groupValues.getOrNull(1)?.toIntOrNull() ?: 0
+            val mins = m.groupValues.getOrNull(2)?.toIntOrNull() ?: 0
+            result["week_reset_min"] = h * 60 + mins
+        }
         return result.ifEmpty { null }
     }
 
@@ -218,6 +230,18 @@ class InputPromptDetector(
         )
         private val WEEK_USAGE_REGEX = Regex(
             "Current week[\\s\\S]{0,60}?(\\d{1,3})%\\s*used|wk[:\\s]+(\\d{1,3})%",
+            RegexOption.IGNORE_CASE
+        )
+        // OMC also prints time-to-reset right after the percentage as
+        // `(XhYm)` — e.g. `5h:33%(2h59m)`, `wk:73%(15h9m)`. We anchor each
+        // reset capture to its own prefix so 5h's window doesn't get
+        // confused with wk's.
+        private val SESSION_RESET_REGEX = Regex(
+            "5h[:\\s]+\\d{1,3}%\\s*\\((?:(\\d+)h)?(\\d+)m\\)",
+            RegexOption.IGNORE_CASE
+        )
+        private val WEEK_RESET_REGEX = Regex(
+            "wk[:\\s]+\\d{1,3}%\\s*\\((?:(\\d+)h)?(\\d+)m\\)",
             RegexOption.IGNORE_CASE
         )
 

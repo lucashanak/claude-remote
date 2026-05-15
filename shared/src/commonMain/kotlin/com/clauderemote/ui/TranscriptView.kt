@@ -49,6 +49,8 @@ fun TranscriptView(
     contextPercent: Int? = null,
     sessionUsagePercent: Int? = null,
     weekUsagePercent: Int? = null,
+    sessionResetMin: Int? = null,
+    weekResetMin: Int? = null,
     latencyMs: Long? = null,
     remoteStatus: RemoteSessionStatus? = null,
     activity: SessionActivity? = null
@@ -117,6 +119,8 @@ fun TranscriptView(
             contextPercent = contextPercent,
             sessionUsagePercent = sessionUsagePercent,
             weekUsagePercent = weekUsagePercent,
+            sessionResetMin = sessionResetMin,
+            weekResetMin = weekResetMin,
             latencyMs = latencyMs,
             todoPending = todoPending,
             activeSkill = remoteStatus?.activeSkill,
@@ -607,6 +611,8 @@ private fun StatusBar(
     contextPercent: Int?,
     sessionUsagePercent: Int?,
     weekUsagePercent: Int?,
+    sessionResetMin: Int?,
+    weekResetMin: Int?,
     latencyMs: Long?,
     todoPending: Int,
     activeSkill: String?,
@@ -638,8 +644,8 @@ private fun StatusBar(
                 ActivityIndicator(activity)
                 StatusChip("$entryCount entries")
                 StatusChip("ctx ${contextPercent?.let { "$it%" } ?: "—"}")
-                StatusChip("5h ${sessionUsagePercent?.let { "$it%" } ?: "—"}")
-                StatusChip("wk ${weekUsagePercent?.let { "$it%" } ?: "—"}")
+                StatusChip(buildUsageLabel("5h", sessionUsagePercent, sessionResetMin))
+                StatusChip(buildUsageLabel("wk", weekUsagePercent, weekResetMin))
                 if (todoPending > 0) StatusChip("↘ $todoPending")
                 if (activeSubagents > 0) StatusChip("⚡ $activeSubagents")
                 if (!activeSkill.isNullOrBlank()) StatusChip("skill: $activeSkill")
@@ -782,6 +788,23 @@ private fun StatusChip(text: String) {
  * parse its `todos` array, and return the count of items whose status is
  * not "completed". Returns 0 if no TodoWrite has been issued yet.
  */
+/**
+ * Format a usage chip label combining percentage and time-to-reset.
+ * Either piece is optional; '—' is rendered when nothing is known so the
+ * chip's intent stays visible.
+ */
+private fun buildUsageLabel(prefix: String, pct: Int?, resetMin: Int?): String {
+    val pctPart = pct?.let { "$it%" } ?: "—"
+    val resetPart = resetMin?.let { formatReset(it) }
+    return if (resetPart != null) "$prefix $pctPart · $resetPart" else "$prefix $pctPart"
+}
+
+private fun formatReset(minutes: Int): String {
+    val h = minutes / 60
+    val m = minutes % 60
+    return if (h > 0) "${h}h${m}m" else "${m}m"
+}
+
 private fun countOpenTodos(entries: List<TranscriptEntry>): Int {
     val last = entries.asReversed().firstOrNull {
         it is TranscriptEntry.ToolCall && it.name == "TodoWrite"

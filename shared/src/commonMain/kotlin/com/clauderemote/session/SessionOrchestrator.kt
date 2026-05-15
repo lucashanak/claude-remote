@@ -143,6 +143,12 @@ class SessionOrchestrator(
     private val _weekUsagePercents = kotlinx.coroutines.flow.MutableStateFlow<Map<String, Int>>(emptyMap())
     val weekUsagePercents: kotlinx.coroutines.flow.StateFlow<Map<String, Int>> = _weekUsagePercents
 
+    // Time-to-reset (minutes) parsed from the OMC `(XhYm)` suffix.
+    private val _sessionResetMin = kotlinx.coroutines.flow.MutableStateFlow<Map<String, Int>>(emptyMap())
+    val sessionResetMin: kotlinx.coroutines.flow.StateFlow<Map<String, Int>> = _sessionResetMin
+    private val _weekResetMin = kotlinx.coroutines.flow.MutableStateFlow<Map<String, Int>>(emptyMap())
+    val weekResetMin: kotlinx.coroutines.flow.StateFlow<Map<String, Int>> = _weekResetMin
+
     // Per-session periodic polling jobs
     private val usagePollingJobs = mutableMapOf<String, kotlinx.coroutines.Job>()
     private val latencyPollingJobs = mutableMapOf<String, kotlinx.coroutines.Job>()
@@ -699,6 +705,12 @@ else:
                 }
                 usage["week"]?.let { w ->
                     _weekUsagePercents.update { it + (session.id to w) }
+                }
+                usage["session_reset_min"]?.let { m ->
+                    _sessionResetMin.update { it + (session.id to m) }
+                }
+                usage["week_reset_min"]?.let { m ->
+                    _weekResetMin.update { it + (session.id to m) }
                 }
                 onUsageUpdate?.invoke(usage["session"], usage["week"])
             }
@@ -1262,6 +1274,8 @@ else:
         _contextPercents.update { it - sessionId }
         _sessionUsagePercents.update { it - sessionId }
         _weekUsagePercents.update { it - sessionId }
+        _sessionResetMin.update { it - sessionId }
+        _weekResetMin.update { it - sessionId }
         _latencies.update { it - sessionId }
         _pendingCounts.update { it - sessionId }
         tabManager.removeTab(sessionId)
