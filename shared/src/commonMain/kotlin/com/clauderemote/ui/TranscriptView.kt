@@ -148,15 +148,27 @@ fun TranscriptView(
 
 @Composable
 private fun UserPromptCard(entry: TranscriptEntry.UserPrompt) {
-    Card(
-        modifier = Modifier.fillMaxWidth(),
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer),
-        shape = RoundedCornerShape(8.dp)
+    Row(
+        modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
+        horizontalArrangement = Arrangement.End
     ) {
-        Column(modifier = Modifier.padding(10.dp)) {
-            RoleHeader("You", entry.timestamp)
-            Spacer(Modifier.height(4.dp))
-            RichBody(entry.text)
+        Surface(
+            modifier = Modifier.widthIn(max = 600.dp),
+            color = MaterialTheme.colorScheme.primary,
+            contentColor = MaterialTheme.colorScheme.onPrimary,
+            shape = RoundedCornerShape(topStart = 14.dp, topEnd = 14.dp, bottomStart = 14.dp, bottomEnd = 4.dp)
+        ) {
+            Column(modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp)) {
+                if (entry.timestamp != null) {
+                    Text(
+                        formatTimestamp(entry.timestamp),
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onPrimary.copy(alpha = 0.7f)
+                    )
+                    Spacer(Modifier.height(2.dp))
+                }
+                RichBody(entry.text)
+            }
         }
     }
 }
