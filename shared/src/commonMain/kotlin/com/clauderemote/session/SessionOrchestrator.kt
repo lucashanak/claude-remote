@@ -132,6 +132,17 @@ class SessionOrchestrator(
     // Usage stats callback (session%, week%)
     var onUsageUpdate: ((sessionPercent: Int?, weekPercent: Int?) -> Unit)? = null
 
+    // Per-session usage percentages parsed from the OMC statusline. 5h and
+    // weekly are technically account-wide values but we still key by session
+    // because each session prints its own (potentially stale) snapshot — a
+    // fresh tab on the same account just shows '—' until its first turn,
+    // which is honest. Avoids cross-tab contamination where the last-emitting
+    // session's number sticks around after switching tabs.
+    private val _sessionUsagePercents = kotlinx.coroutines.flow.MutableStateFlow<Map<String, Int>>(emptyMap())
+    val sessionUsagePercents: kotlinx.coroutines.flow.StateFlow<Map<String, Int>> = _sessionUsagePercents
+    private val _weekUsagePercents = kotlinx.coroutines.flow.MutableStateFlow<Map<String, Int>>(emptyMap())
+    val weekUsagePercents: kotlinx.coroutines.flow.StateFlow<Map<String, Int>> = _weekUsagePercents
+
     // Per-session periodic polling jobs
     private val usagePollingJobs = mutableMapOf<String, kotlinx.coroutines.Job>()
     private val latencyPollingJobs = mutableMapOf<String, kotlinx.coroutines.Job>()
@@ -680,9 +691,15 @@ else:
                 updateContextPercent(session.id, ctx)
                 onContextUpdate?.invoke(session.id, ctx)
             }
-            // Parse usage stats from terminal output (e.g. /usage command)
+            // Parse usage stats from terminal output (OMC statusline or /usage).
             val usage = promptDetector.parseUsage(session.id, text)
             if (usage != null) {
+                usage["session"]?.let { s ->
+                    _sessionUsagePercents.update { it + (session.id to s) }
+                }
+                usage["week"]?.let { w ->
+                    _weekUsagePercents.update { it + (session.id to w) }
+                }
                 onUsageUpdate?.invoke(usage["session"], usage["week"])
             }
         }
@@ -1243,6 +1260,8 @@ else:
         terminalSizes.remove(sessionId)
         _sessionActivities.update { it - sessionId }
         _contextPercents.update { it - sessionId }
+        _sessionUsagePercents.update { it - sessionId }
+        _weekUsagePercents.update { it - sessionId }
         _latencies.update { it - sessionId }
         _pendingCounts.update { it - sessionId }
         tabManager.removeTab(sessionId)

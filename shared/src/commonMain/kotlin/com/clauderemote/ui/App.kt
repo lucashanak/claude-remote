@@ -69,23 +69,15 @@ fun App(
     var tmuxLoading by remember { mutableStateOf(false) }
     var connectionError by remember { mutableStateOf<String?>(null) }
     var tabCloseConfirmId by remember { mutableStateOf<String?>(null) }
-    var sessionUsagePercent by remember { mutableStateOf<Int?>(null) }
-    var weekUsagePercent by remember { mutableStateOf<Int?>(null) }
     var invertColors by remember { mutableStateOf(appSettings.invertColors) }
 
     // Collect new StateFlows from orchestrator
     val sessionActivities by sessionOrchestrator.sessionActivities.collectAsState()
     val contextPercents by sessionOrchestrator.contextPercents.collectAsState()
+    val sessionUsagePercents by sessionOrchestrator.sessionUsagePercents.collectAsState()
+    val weekUsagePercents by sessionOrchestrator.weekUsagePercents.collectAsState()
     val latencies by sessionOrchestrator.latencies.collectAsState()
     val pendingCounts by sessionOrchestrator.pendingCounts.collectAsState()
-
-    // Wire usage updates (parsed from /usage command output)
-    LaunchedEffect(Unit) {
-        sessionOrchestrator.onUsageUpdate = { session, week ->
-            if (session != null) sessionUsagePercent = session
-            if (week != null) weekUsagePercent = week
-        }
-    }
 
     var serverList by remember { mutableStateOf(serverStorage.loadServers()) }
     val tabs by tabManager.tabs.collectAsState()
@@ -651,8 +643,8 @@ fun App(
                                 } catch (_: Exception) {}
                             }
                         },
-                        sessionUsagePercent = sessionUsagePercent,
-                        weekUsagePercent = weekUsagePercent,
+                        sessionUsagePercent = activeTabId?.let { sessionUsagePercents[it] },
+                        weekUsagePercent = activeTabId?.let { weekUsagePercents[it] },
                         sessionActivities = sessionActivities,
                         contextPercent = activeTabId?.let { contextPercents[it] },
                         latencyMs = activeTabId?.let { latencies[it] },
@@ -713,8 +705,8 @@ fun App(
                         sessions = tabs,
                         sessionActivities = sessionActivities,
                         contextPercents = contextPercents,
-                        sessionUsagePercent = sessionUsagePercent,
-                        weekUsagePercent = weekUsagePercent,
+                        sessionUsagePercent = activeTabId?.let { sessionUsagePercents[it] },
+                        weekUsagePercent = activeTabId?.let { weekUsagePercents[it] },
                         usageTokens = usageTokensState,
                         onBack = { currentScreen = Screen.LAUNCHER }
                     )
