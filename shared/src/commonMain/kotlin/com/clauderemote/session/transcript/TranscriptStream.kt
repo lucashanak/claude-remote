@@ -62,13 +62,27 @@ class TranscriptStream(
     }
 
     private suspend fun runTail(uuid: String) {
-        val enc = encodeCwd(cwd)
-        val remotePath = "~/.claude/projects/$enc/$uuid.jsonl"
-        // tail -n N -F: emit the last N lines, then follow appends and rotations.
-        // We cap initial backlog to keep startup snappy and bound memory on long
-        // transcripts (full files can be MB+); user only needs recent context.
-        // 2>/dev/null suppresses transient "file truncated" messages.
-        val cmd = "tail -n $INITIAL_LINES -F $remotePath 2>/dev/null"
+        // Resolve the encoded cwd server-side: Claude Code keys
+        // ~/.claude/projects/<enc>/ by `pwd | sed 's|/|-|g'` of the absolute
+        // path, so we must shell-expand (handles `~`, relative paths) and
+        // then dash-replace there — doing it client-side breaks for any
+        // folder that needs shell expansion.
+        val safeFolder = cwd.replace("'", "'\\''")
+        val safeUuid = uuid.replace("'", "'\\''")
+        val cmd = buildString {
+            // Set FOLDER from a single-quoted literal (safe against shell
+            // metacharacters), then do a portable tilde expansion before cd.
+            append("F='").append(safeFolder).append("'; ")
+            append("case \"\$F\" in \"~\"*) F=\"\$HOME\${F#\"~\"}\";; esac; ")
+            append("ENC=\$(cd \"\$F\" 2>/dev/null && pwd | sed 's|/|-|g'); ")
+            append("[ -z \"\$ENC\" ] && exit 0; ")
+            // tail -n N -F: emit the last N lines, then follow appends and
+            // rotations. Capped to bound startup time / RAM on long sessions.
+            // 2>/dev/null suppresses transient "file truncated" / missing-file
+            // messages — tail -F will wait for the file to appear.
+            append("tail -n ").append(INITIAL_LINES)
+            append(" -F \"\$HOME/.claude/projects/\$ENC/").append(safeUuid).append(".jsonl\" 2>/dev/null")
+        }
         var attempt = 0
         while (scope.isActive) {
             attempt++
@@ -118,7 +132,5 @@ class TranscriptStream(
         private const val INITIAL_LINES = 2000
         // Hard cap on entries held in memory; oldest get dropped when exceeded.
         private const val MAX_ENTRIES = 5000
-
-        fun encodeCwd(cwd: String): String = cwd.replace('/', '-')
     }
 }
