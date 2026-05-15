@@ -167,6 +167,10 @@ fun TranscriptView(
         }
 
         val baseDensity = LocalDensity.current
+        // Pre-group consecutive ToolCalls so a run of Read/Edit/Bash collapses
+        // to one tight stack instead of N bordered cards. Other entries pass
+        // through unchanged as singletons.
+        val rendered = remember(filtered) { groupConsecutiveTools(filtered) }
         CompositionLocalProvider(
             LocalDensity provides Density(
                 density = baseDensity.density,
@@ -177,21 +181,29 @@ fun TranscriptView(
                 LazyColumn(
                     state = listState,
                     modifier = Modifier.fillMaxSize().padding(horizontal = 8.dp),
-                    verticalArrangement = Arrangement.spacedBy(6.dp),
+                    verticalArrangement = Arrangement.spacedBy(2.dp),
                     contentPadding = PaddingValues(vertical = 8.dp)
                 ) {
-                    items(filtered, key = { it.id }) { entry ->
-                        when (entry) {
-                            is TranscriptEntry.UserPrompt -> UserPromptCard(entry)
-                            is TranscriptEntry.SlashCommand -> SlashCommandRow(entry)
-                            is TranscriptEntry.AssistantText -> AssistantTextCard(entry)
-                            is TranscriptEntry.AssistantThinking -> ThinkingCard(entry)
-                            is TranscriptEntry.ToolCall -> ToolCallCard(
-                                entry,
-                                result = resultsByToolId[entry.toolUseId]
-                            )
-                            is TranscriptEntry.ToolResult -> ToolResultCard(entry)
-                            is TranscriptEntry.SystemNote -> SystemNoteRow(entry)
+                    items(
+                        items = rendered,
+                        key = { item ->
+                            when (item) {
+                                is RenderItem.Single -> item.entry.id
+                                is RenderItem.ToolGroup -> "tg:" + item.calls.first().id
+                            }
+                        }
+                    ) { item ->
+                        when (item) {
+                            is RenderItem.Single -> when (val e = item.entry) {
+                                is TranscriptEntry.UserPrompt -> UserPromptCard(e)
+                                is TranscriptEntry.SlashCommand -> SlashCommandRow(e)
+                                is TranscriptEntry.AssistantText -> AssistantTextCard(e)
+                                is TranscriptEntry.AssistantThinking -> ThinkingCard(e)
+                                is TranscriptEntry.ToolCall -> ToolRow(e, resultsByToolId[e.toolUseId])
+                                is TranscriptEntry.ToolResult -> ToolResultCard(e)
+                                is TranscriptEntry.SystemNote -> SystemNoteRow(e)
+                            }
+                            is RenderItem.ToolGroup -> ToolGroupBlock(item.calls, resultsByToolId)
                         }
                     }
                     if (effectiveActivity == SessionActivity.WORKING) {
@@ -248,16 +260,14 @@ private fun SlashCommandRow(entry: TranscriptEntry.SlashCommand) {
 
 @Composable
 private fun AssistantTextCard(entry: TranscriptEntry.AssistantText) {
-    Card(
-        modifier = Modifier.fillMaxWidth(),
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-        shape = RoundedCornerShape(8.dp)
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 4.dp, vertical = 4.dp)
     ) {
-        Column(modifier = Modifier.padding(10.dp)) {
-            RoleHeader(entry.model ?: "Claude", entry.timestamp)
-            Spacer(Modifier.height(4.dp))
-            RichBody(entry.text)
-        }
+        RoleHeader(entry.model ?: "Claude", entry.timestamp)
+        Spacer(Modifier.height(2.dp))
+        RichBody(entry.text)
     }
 }
 
@@ -287,93 +297,183 @@ private fun ThinkingCard(entry: TranscriptEntry.AssistantThinking) {
     }
 }
 
+/**
+ * Compact one-line tool row: glyph · name · summary · status indicator.
+ * Expanded reveals input + result indented under the row, no card framing.
+ */
 @Composable
-private fun ToolCallCard(
+private fun ToolRow(
     entry: TranscriptEntry.ToolCall,
-    result: TranscriptEntry.ToolResult? = null
+    result: TranscriptEntry.ToolResult?
 ) {
     var expanded by remember { mutableStateOf(false) }
     val errorTint = result?.isError == true
     val accent = when {
         errorTint -> MaterialTheme.colorScheme.error
         result == null -> MaterialTheme.colorScheme.tertiary
-        else -> MaterialTheme.colorScheme.outline
+        else -> MaterialTheme.colorScheme.onSurfaceVariant
     }
-    Surface(
-        modifier = Modifier.fillMaxWidth(),
-        color = MaterialTheme.colorScheme.surface,
-        shape = RoundedCornerShape(6.dp),
-        border = androidx.compose.foundation.BorderStroke(1.dp, accent.copy(alpha = 0.5f))
-    ) {
-        Column {
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .clickable { expanded = !expanded }
-                    .padding(horizontal = 10.dp, vertical = 6.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
+    Column {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clickable { expanded = !expanded }
+                .padding(horizontal = 4.dp, vertical = 2.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(
+                glyphFor(entry.name),
+                style = MaterialTheme.typography.labelMedium,
+                fontFamily = FontFamily.Monospace,
+                color = accent,
+                modifier = Modifier.padding(end = 6.dp)
+            )
+            Text(
+                entry.name,
+                style = MaterialTheme.typography.labelMedium,
+                color = accent,
+                modifier = Modifier.padding(end = 8.dp)
+            )
+            Text(
+                entry.inputSummary,
+                style = MaterialTheme.typography.bodySmall,
+                fontFamily = FontFamily.Monospace,
+                maxLines = 1,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.weight(1f).horizontalScroll(rememberScrollState())
+            )
+            if (result == null) {
                 Text(
-                    if (expanded) "▾" else "▸",
+                    "…",
                     style = MaterialTheme.typography.labelSmall,
-                    modifier = Modifier.padding(end = 6.dp)
+                    color = MaterialTheme.colorScheme.tertiary,
+                    modifier = Modifier.padding(start = 4.dp)
                 )
+            } else if (errorTint) {
                 Text(
-                    entry.name,
-                    style = MaterialTheme.typography.labelMedium,
-                    fontWeight = FontWeight.Bold,
-                    color = accent
+                    "!",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.error,
+                    modifier = Modifier.padding(start = 4.dp)
                 )
-                Spacer(Modifier.width(8.dp))
-                Text(
-                    entry.inputSummary,
-                    style = MaterialTheme.typography.bodySmall,
-                    fontFamily = FontFamily.Monospace,
-                    maxLines = 1,
-                    modifier = Modifier.weight(1f).horizontalScroll(rememberScrollState())
-                )
-                if (result == null) {
-                    Text(
-                        "…",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.tertiary,
-                        modifier = Modifier.padding(start = 4.dp)
-                    )
-                } else if (errorTint) {
-                    Text(
-                        "!",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.error,
-                        modifier = Modifier.padding(start = 4.dp)
-                    )
-                }
-            }
-            if (expanded) {
-                Column(modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp)) {
-                    if (entry.fullInput.isNotBlank()) {
-                        Text(
-                            "input",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                        Spacer(Modifier.height(2.dp))
-                        MonospaceBlock(entry.fullInput)
-                    }
-                    if (result != null) {
-                        Spacer(Modifier.height(6.dp))
-                        Text(
-                            if (errorTint) "error" else "result",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = if (errorTint) MaterialTheme.colorScheme.error
-                                   else MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                        Spacer(Modifier.height(2.dp))
-                        MonospaceBlock(result.text)
-                    }
-                }
             }
         }
+        if (expanded) {
+            ToolExpandedDetail(entry, result)
+        }
     }
+}
+
+@Composable
+private fun ToolExpandedDetail(
+    entry: TranscriptEntry.ToolCall,
+    result: TranscriptEntry.ToolResult?
+) {
+    val errorTint = result?.isError == true
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(start = 16.dp, top = 2.dp, bottom = 4.dp)
+    ) {
+        if (entry.fullInput.isNotBlank()) {
+            IndentedMono(entry.fullInput)
+        }
+        if (result != null) {
+            Spacer(Modifier.height(4.dp))
+            Text(
+                if (errorTint) "error" else "result",
+                style = MaterialTheme.typography.labelSmall,
+                color = if (errorTint) MaterialTheme.colorScheme.error
+                       else MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(bottom = 2.dp)
+            )
+            IndentedMono(result.text, error = errorTint)
+        }
+    }
+}
+
+@Composable
+private fun IndentedMono(text: String, error: Boolean = false) {
+    val border = if (error) MaterialTheme.colorScheme.error.copy(alpha = 0.6f)
+                 else MaterialTheme.colorScheme.outline.copy(alpha = 0.5f)
+    Row(modifier = Modifier.fillMaxWidth()) {
+        Box(
+            modifier = Modifier
+                .width(2.dp)
+                .heightIn(min = 16.dp)
+                .background(border)
+        )
+        Box(
+            modifier = Modifier
+                .weight(1f)
+                .horizontalScroll(rememberScrollState())
+                .padding(start = 8.dp, top = 2.dp, bottom = 2.dp)
+        ) {
+            Text(
+                text,
+                style = MaterialTheme.typography.bodySmall,
+                fontFamily = FontFamily.Monospace,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
+    }
+}
+
+@Composable
+private fun ToolGroupBlock(
+    calls: List<TranscriptEntry.ToolCall>,
+    results: Map<String, TranscriptEntry.ToolResult>
+) {
+    Column {
+        for (call in calls) {
+            ToolRow(call, results[call.toolUseId])
+        }
+    }
+}
+
+private fun glyphFor(name: String): String = when (name) {
+    "Bash" -> "$"
+    "Read" -> "▤"
+    "Edit", "Write" -> "✎"
+    "Grep" -> "⌕"
+    "Glob" -> "◇"
+    "Agent", "Task" -> "→"
+    "TodoWrite" -> "✓"
+    "WebFetch", "WebSearch" -> "⇢"
+    else -> "▸"
+}
+
+private sealed class RenderItem {
+    data class Single(val entry: TranscriptEntry) : RenderItem()
+    data class ToolGroup(val calls: List<TranscriptEntry.ToolCall>) : RenderItem()
+}
+
+/**
+ * Walk the entries and fuse any run of two-or-more consecutive ToolCall
+ * entries into a single ToolGroup item. Single tool calls render as
+ * standalone rows (avoids creating a singleton group around an isolated
+ * tool call between two assistant text blocks).
+ */
+private fun groupConsecutiveTools(entries: List<TranscriptEntry>): List<RenderItem> {
+    val out = ArrayList<RenderItem>(entries.size)
+    var i = 0
+    while (i < entries.size) {
+        val e = entries[i]
+        if (e is TranscriptEntry.ToolCall) {
+            var j = i + 1
+            while (j < entries.size && entries[j] is TranscriptEntry.ToolCall) j++
+            if (j - i >= 2) {
+                @Suppress("UNCHECKED_CAST")
+                val run = entries.subList(i, j).toList() as List<TranscriptEntry.ToolCall>
+                out += RenderItem.ToolGroup(run)
+                i = j
+                continue
+            }
+        }
+        out += RenderItem.Single(e)
+        i++
+    }
+    return out
 }
 
 @Composable
