@@ -14,7 +14,6 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -347,7 +346,7 @@ private fun RichBody(text: String) {
 private fun MonospaceBlock(text: String) {
     Surface(
         modifier = Modifier.fillMaxWidth(),
-        color = Color(0xFF1E1E1E),
+        color = MaterialTheme.colorScheme.surfaceContainerHighest,
         shape = RoundedCornerShape(4.dp)
     ) {
         Box(modifier = Modifier.horizontalScroll(rememberScrollState())) {
@@ -356,7 +355,7 @@ private fun MonospaceBlock(text: String) {
                 modifier = Modifier.padding(horizontal = 8.dp, vertical = 6.dp),
                 style = MaterialTheme.typography.bodySmall,
                 fontFamily = FontFamily.Monospace,
-                color = Color(0xFFE0E0E0)
+                color = MaterialTheme.colorScheme.onSurface
             )
         }
     }

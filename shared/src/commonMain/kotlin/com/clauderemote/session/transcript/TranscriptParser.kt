@@ -27,6 +27,11 @@ object TranscriptParser {
         isLenient = true
     }
 
+    private val prettyJson = Json {
+        prettyPrint = true
+        ignoreUnknownKeys = true
+    }
+
     private val slashCommandRegex = Regex(
         "<command-name>([^<]+)</command-name>\\s*<command-message>[^<]*</command-message>\\s*<command-args>([^<]*)</command-args>",
         RegexOption.DOT_MATCHES_ALL
@@ -34,10 +39,6 @@ object TranscriptParser {
 
     fun parseLines(lines: Sequence<String>): List<TranscriptEntry> {
         val out = mutableListOf<TranscriptEntry>()
-        // Maps assistant uuid → list of tool_use_ids it produced, in order.
-        // Used to look up which tool_call a tool_result links back to.
-        val assistantToolUseIds = mutableMapOf<String, MutableList<String>>()
-
         for (raw in lines) {
             val line = raw.trim()
             if (line.isEmpty()) continue
@@ -49,7 +50,7 @@ object TranscriptParser {
             val type = obj["type"]?.jsonPrimitive?.contentOrNull ?: continue
             when (type) {
                 "user" -> parseUser(obj, out)
-                "assistant" -> parseAssistant(obj, out, assistantToolUseIds)
+                "assistant" -> parseAssistant(obj, out)
                 "system" -> parseSystem(obj, out)
                 // Drop: attachment, file-history-snapshot, ai-title, last-prompt, queue-operation.
                 else -> {}
@@ -127,15 +128,13 @@ object TranscriptParser {
 
     private fun parseAssistant(
         obj: JsonObject,
-        out: MutableList<TranscriptEntry>,
-        assistantToolUseIds: MutableMap<String, MutableList<String>>
+        out: MutableList<TranscriptEntry>
     ) {
         val uuid = obj["uuid"]?.jsonPrimitive?.contentOrNull ?: return
         val ts = obj["timestamp"]?.jsonPrimitive?.contentOrNull
         val message = obj["message"]?.jsonObject ?: return
         val model = message["model"]?.jsonPrimitive?.contentOrNull
         val content = message["content"]?.jsonArray ?: return
-        val toolIds = mutableListOf<String>()
 
         content.forEachIndexed { idx, block ->
             val b = block as? JsonObject ?: return@forEachIndexed
@@ -166,7 +165,6 @@ object TranscriptParser {
                     val name = b["name"]?.jsonPrimitive?.contentOrNull ?: "tool"
                     val input = b["input"] as? JsonObject
                     val (summary, full) = summarizeToolInput(name, input)
-                    toolIds += toolUseId
                     out += TranscriptEntry.ToolCall(
                         id = "$uuid#$idx",
                         timestamp = ts,
@@ -179,13 +177,11 @@ object TranscriptParser {
                 else -> {}
             }
         }
-        if (toolIds.isNotEmpty()) assistantToolUseIds[uuid] = toolIds
     }
 
     private fun summarizeToolInput(name: String, input: JsonObject?): Pair<String, String> {
         if (input == null) return "" to ""
-        val pretty = Json { prettyPrint = true; ignoreUnknownKeys = true }
-            .encodeToString(JsonObject.serializer(), input)
+        val pretty = prettyJson.encodeToString(JsonObject.serializer(), input)
         val summary = when (name) {
             "Bash" -> input["command"]?.jsonPrimitive?.contentOrNull?.lines()?.first().orEmpty()
             "Read" -> {

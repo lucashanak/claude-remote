@@ -12,6 +12,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -39,12 +40,19 @@ class TranscriptStream(
     private var streamJob: Job? = null
     private var currentUuid: String? = null
 
+    @Synchronized
     fun start(claudeSessionUuid: String) {
         if (currentUuid == claudeSessionUuid && streamJob?.isActive == true) return
         currentUuid = claudeSessionUuid
-        streamJob?.cancel()
-        _entries.value = emptyList()
-        streamJob = scope.launch { runTail(claudeSessionUuid) }
+        // Cancel-and-join the previous tail in a new coroutine so the new one
+        // never appends concurrently with the old one. Capture the old job
+        // locally before reassignment.
+        val previous = streamJob
+        streamJob = scope.launch {
+            previous?.cancelAndJoin()
+            _entries.value = emptyList()
+            runTail(claudeSessionUuid)
+        }
     }
 
     suspend fun stop() {
@@ -56,9 +64,11 @@ class TranscriptStream(
     private suspend fun runTail(uuid: String) {
         val enc = encodeCwd(cwd)
         val remotePath = "~/.claude/projects/$enc/$uuid.jsonl"
-        // tail -n +1 -F: emit from line 1, follow rotations/recreations.
+        // tail -n N -F: emit the last N lines, then follow appends and rotations.
+        // We cap initial backlog to keep startup snappy and bound memory on long
+        // transcripts (full files can be MB+); user only needs recent context.
         // 2>/dev/null suppresses transient "file truncated" messages.
-        val cmd = "tail -n +1 -F $remotePath 2>/dev/null"
+        val cmd = "tail -n $INITIAL_LINES -F $remotePath 2>/dev/null"
         var attempt = 0
         while (scope.isActive) {
             attempt++
@@ -71,18 +81,21 @@ class TranscriptStream(
                     withContext(Dispatchers.IO) { ch.connect(10_000) }
                     try {
                         val reader = BufferedReader(InputStreamReader(inStream, Charsets.UTF_8))
-                        val pending = StringBuilder()
                         while (scope.isActive && !ch.isClosed) {
                             val line = withContext(Dispatchers.IO) {
                                 try { reader.readLine() } catch (_: Throwable) { null }
                             } ?: break
-                            pending.append(line).append('\n')
                             // Parse opportunistically. Each JSONL line is independent;
                             // partial lines (rare, when tail catches mid-write) will fail
                             // parse cleanly and get dropped by the parser.
                             val newEntries = TranscriptParser.parseLines(sequenceOf(line))
                             if (newEntries.isNotEmpty()) {
-                                _entries.value = _entries.value + newEntries
+                                _entries.update { prev ->
+                                    val combined = prev + newEntries
+                                    if (combined.size > MAX_ENTRIES) {
+                                        combined.subList(combined.size - MAX_ENTRIES, combined.size).toList()
+                                    } else combined
+                                }
                             }
                         }
                     } finally {
@@ -101,6 +114,10 @@ class TranscriptStream(
 
     companion object {
         private const val TAG = "TranscriptStream"
+        // Cap initial backlog from tail to bound startup time + RAM.
+        private const val INITIAL_LINES = 2000
+        // Hard cap on entries held in memory; oldest get dropped when exceeded.
+        private const val MAX_ENTRIES = 5000
 
         fun encodeCwd(cwd: String): String = cwd.replace('/', '-')
     }

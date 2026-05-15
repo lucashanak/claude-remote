@@ -586,20 +586,21 @@ else:
      * against `~/.claude/projects/<encoded-cwd>/<uuid>.jsonl` and starts
      * incremental parsing. Subsequent calls return the same flow.
      *
-     * Returns an empty flow if the tab does not exist yet or has no
-     * claudeSessionId — callers should re-collect after the session connects.
+     * If the tab does not yet have a `claudeSessionId` (fresh launch, server
+     * UUID poll hasn't completed), the stream is created but idle. It will
+     * auto-start when [notifyClaudeSessionIdChanged] fires, so callers don't
+     * need to re-call this method.
      */
     fun transcriptFlow(sessionId: String): kotlinx.coroutines.flow.StateFlow<List<TranscriptEntry>> {
         val tab = tabManager.getTab(sessionId)
-            ?: return kotlinx.coroutines.flow.MutableStateFlow(emptyList())
-        val uuid = tab.claudeSessionId
             ?: return kotlinx.coroutines.flow.MutableStateFlow(emptyList())
         val stream = synchronized(transcriptLock) {
             transcriptStreams.getOrPut(sessionId) {
                 TranscriptStream(tab.server, tab.folder, reconnectScope)
             }
         }
-        stream.start(uuid)
+        val uuid = tab.claudeSessionId
+        if (uuid != null) stream.start(uuid)
         return stream.entries
     }
 
