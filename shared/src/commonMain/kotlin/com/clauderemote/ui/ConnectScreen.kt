@@ -5,8 +5,11 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.selection.selectableGroup
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material3.*
 import androidx.compose.material3.MenuAnchorType
@@ -52,6 +55,12 @@ fun ConnectScreen(
     }
     var modelExpanded by remember { mutableStateOf(false) }
 
+    val launch: () -> Unit = {
+        onLaunch(folder, selectedMode, selectedModel, connectionType, tmuxSessionName, !useExistingTmux)
+    }
+    val launchKeyboardOptions = KeyboardOptions(imeAction = ImeAction.Go)
+    val launchKeyboardActions = KeyboardActions(onGo = { launch() })
+
     Scaffold(
         topBar = {
             TopAppBar(
@@ -86,7 +95,9 @@ fun ConnectScreen(
                             onValueChange = { folder = it },
                             label = { Text("Remote path") },
                             modifier = Modifier.weight(1f),
-                            singleLine = true
+                            singleLine = true,
+                            keyboardOptions = launchKeyboardOptions,
+                            keyboardActions = launchKeyboardActions
                         )
                         if (onBrowseFolders != null) {
                             Spacer(Modifier.width(8.dp))
@@ -268,7 +279,9 @@ fun ConnectScreen(
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .padding(start = 40.dp),
-                            singleLine = true
+                            singleLine = true,
+                            keyboardOptions = launchKeyboardOptions,
+                            keyboardActions = launchKeyboardActions
                         )
                         OutlinedTextField(
                             value = tmuxSessionName,
@@ -277,7 +290,9 @@ fun ConnectScreen(
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .padding(start = 40.dp),
-                            singleLine = true
+                            singleLine = true,
+                            keyboardOptions = launchKeyboardOptions,
+                            keyboardActions = launchKeyboardActions
                         )
                     }
 
@@ -329,9 +344,7 @@ fun ConnectScreen(
 
             // Launch button
             Button(
-                onClick = {
-                    onLaunch(folder, selectedMode, selectedModel, connectionType, tmuxSessionName, !useExistingTmux)
-                },
+                onClick = launch,
                 modifier = Modifier
                     .fillMaxWidth()
                     .height(56.dp)
