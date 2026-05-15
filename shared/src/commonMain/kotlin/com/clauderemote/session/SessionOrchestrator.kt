@@ -620,7 +620,12 @@ else:
             ?: return kotlinx.coroutines.flow.MutableStateFlow(RemoteSessionStatus())
         val poller = synchronized(statusLock) {
             statusPollers.getOrPut(sessionId) {
-                SessionStatusPoller(tab.server, tab.folder, reconnectScope)
+                SessionStatusPoller(
+                    server = tab.server,
+                    cwd = tab.folder,
+                    claudeSessionIdProvider = { tabManager.getTab(sessionId)?.claudeSessionId },
+                    scope = reconnectScope
+                )
             }
         }
         poller.start()

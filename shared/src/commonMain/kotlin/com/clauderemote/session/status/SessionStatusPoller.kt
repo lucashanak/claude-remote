@@ -39,6 +39,7 @@ data class RemoteSessionStatus(
 class SessionStatusPoller(
     private val server: SshServer,
     private val cwd: String,
+    private val claudeSessionIdProvider: () -> String?,
     private val scope: CoroutineScope
 ) {
     private val _status = MutableStateFlow(RemoteSessionStatus())
@@ -58,17 +59,22 @@ class SessionStatusPoller(
 
     private suspend fun runPoll() {
         val safeCwd = cwd.replace("'", "'\\''")
-        // Resolve absolute cwd once per poll tick; OMC writes state under
-        // <project>/.omc/state/ where <project> is the shell-expanded cwd.
-        val statCmd = buildString {
+        // OMC's skill-active state lives at
+        // <project>/.omc/state/sessions/<claudeSessionId>/skill-active-state.json
+        // (session-scoped), while subagent-tracking.json is project-wide at
+        // <project>/.omc/state/subagent-tracking.json. We resolve the id per
+        // tick because it can rotate when the user invokes /resume or /clear.
+        fun buildCmd(claudeUuid: String?): String = buildString {
+            val safeUuid = claudeUuid?.replace("'", "'\\''") ?: ""
             append("F='").append(safeCwd).append("'; ")
             append("case \"\$F\" in \"~\"*) F=\"\$HOME\${F#\"~\"}\";; esac; ")
             append("D=\$(cd \"\$F\" 2>/dev/null && pwd); ")
             append("[ -z \"\$D\" ] && exit 0; ")
-            // Print mtime + size + content for each file, separated by markers.
-            // The block format keeps a single round trip per poll.
-            append("for f in \"\$D/.omc/state/skill-active-state.json\" \"\$D/.omc/state/subagent-tracking.json\"; do ")
-            append("if [ -f \"\$f\" ]; then ")
+            append("U='").append(safeUuid).append("'; ")
+            append("SKILL=\"\$D/.omc/state/sessions/\$U/skill-active-state.json\"; ")
+            append("SUB=\"\$D/.omc/state/subagent-tracking.json\"; ")
+            append("for f in \"\$SKILL\" \"\$SUB\"; do ")
+            append("if [ -n \"\$U\" -o \"\$f\" = \"\$SUB\" ] && [ -f \"\$f\" ]; then ")
             append("echo \"===FILE \$f\"; ")
             append("stat -c '%Y' \"\$f\" 2>/dev/null || stat -f '%m' \"\$f\" 2>/dev/null || echo 0; ")
             append("cat \"\$f\" 2>/dev/null; ")
@@ -82,6 +88,7 @@ class SessionStatusPoller(
         while (scope.isActive) {
             attempt++
             try {
+                val statCmd = buildCmd(claudeSessionIdProvider())
                 val raw = SshSessionHelper.withSession(server, timeout = 10_000) { sess ->
                     val ch = sess.openChannel("exec") as com.jcraft.jsch.ChannelExec
                     ch.setCommand(statCmd)
@@ -183,10 +190,15 @@ class SessionStatusPoller(
         if (body.isNullOrBlank()) return 0
         return try {
             val obj = json.parseToJsonElement(body) as? JsonObject ?: return 0
-            // OMC tracks {"agents": {"id": {...}, ...}} or {"active": [...]}.
-            obj["agents"]?.jsonObject?.size
-                ?: (obj["active"] as? kotlinx.serialization.json.JsonArray)?.size
-                ?: 0
+            // OMC writes {"agents": [{agent_id, status, ...}, ...], ...}.
+            // Count entries whose status isn't "completed"/"failed" —
+            // those are the in-flight ones the statusline shows.
+            val agents = obj["agents"] as? kotlinx.serialization.json.JsonArray ?: return 0
+            agents.count { entry ->
+                val o = entry as? JsonObject ?: return@count false
+                val s = o["status"]?.jsonPrimitive?.contentOrNull
+                s != null && s != "completed" && s != "failed"
+            }
         } catch (_: Throwable) { 0 }
     }
 
