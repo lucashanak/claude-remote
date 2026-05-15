@@ -261,6 +261,20 @@ class MainActivity : FragmentActivity() {
                     if (buffer.isNotEmpty()) {
                         terminalHandle?.replay(buffer.toByteArray(Charsets.UTF_8))
                     }
+                    // After the buffer is replayed, force tmux to fully repaint
+                    // the pane. Coming back from the transcript view, the
+                    // local emulator has the byte history but tmux hasn't
+                    // refreshed its render — without a SIGWINCH kick the user
+                    // sees a near-empty terminal with only the latest line
+                    // until they type or click the tab.
+                    val handle = terminalHandle ?: return@App
+                    handle.view.post {
+                        val (cols, rows) = handle.currentSize() ?: return@post
+                        if (cols <= 0 || rows <= 1) return@post
+                        val conn = sessionOrchestrator.getConnection(activeId) ?: return@post
+                        conn.resize(cols, rows - 1)
+                        handle.view.postDelayed({ conn.resize(cols, rows) }, 80)
+                    }
                 },
                 onApplyFontSize = { size ->
                     terminalHandle?.applyFontSize(size)
