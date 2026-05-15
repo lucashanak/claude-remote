@@ -35,6 +35,7 @@ import com.clauderemote.model.ClaudeSession
 import com.clauderemote.model.SessionStatus
 import com.clauderemote.session.CommandFetcher
 import com.clauderemote.session.SlashCommand
+import com.clauderemote.session.transcript.TranscriptEntry
 import kotlinx.coroutines.launch
 
 private data class SessionItem(
@@ -79,8 +80,10 @@ fun TerminalScreen(
     invertColors: Boolean = false,
     onToggleInvertColors: (() -> Unit)? = null,
     terminalContent: @Composable (Modifier) -> Unit,
-    splitTerminalContent: (@Composable (Modifier) -> Unit)? = null
+    splitTerminalContent: (@Composable (Modifier) -> Unit)? = null,
+    transcriptEntries: List<TranscriptEntry> = emptyList()
 ) {
+    var transcriptMode by rememberSaveable(activeTabId) { mutableStateOf(false) }
     var showControlBar by remember { mutableStateOf(true) }
     var compactMode by remember { mutableStateOf(false) }
     var showCommandPicker by remember { mutableStateOf(false) }
@@ -340,6 +343,20 @@ fun TerminalScreen(
                         )
                     }
                 }
+                // Transcript / Terminal view toggle
+                if (activeSession != null) {
+                    IconButton(
+                        onClick = { transcriptMode = !transcriptMode },
+                        modifier = Modifier.size(36.dp)
+                    ) {
+                        Text(
+                            if (transcriptMode) "\u25A4" else "\u00B6",
+                            style = MaterialTheme.typography.titleMedium,
+                            color = if (transcriptMode) MaterialTheme.colorScheme.primary
+                                   else LocalContentColor.current
+                        )
+                    }
+                }
                 // More menu button
                 IconButton(onClick = {
                     if (onShowNativeMenu != null) onShowNativeMenu.invoke()
@@ -579,8 +596,12 @@ fun TerminalScreen(
             )
         }
 
-        // Terminal content (with optional split view)
-        if (splitActive && splitTerminalContent != null && wideMode) {
+        // Terminal content (with optional split view) or read-only transcript view
+        if (transcriptMode) {
+            Box(modifier = Modifier.fillMaxWidth().weight(1f)) {
+                TranscriptView(transcriptEntries, Modifier.fillMaxSize())
+            }
+        } else if (splitActive && splitTerminalContent != null && wideMode) {
             Row(modifier = Modifier.fillMaxWidth().weight(1f)) {
                 Box(modifier = Modifier.weight(1f).fillMaxHeight()) {
                     terminalContent(Modifier.fillMaxSize())

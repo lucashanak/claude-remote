@@ -2,6 +2,8 @@ package com.clauderemote.session
 
 import com.clauderemote.connection.SshManager
 import com.clauderemote.model.*
+import com.clauderemote.session.transcript.TranscriptEntry
+import com.clauderemote.session.transcript.TranscriptStream
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.update
@@ -27,6 +29,10 @@ class SessionOrchestrator(
 ) {
     private val connections = mutableMapOf<String, SshManager>()
     private val moshConnections = mutableMapOf<String, com.clauderemote.connection.MoshManager>()
+
+    // Per-session transcript streams (JSONL tail readers).
+    private val transcriptStreams = mutableMapOf<String, TranscriptStream>()
+    private val transcriptLock = Any()
 
     // Per-session terminal output buffer (ring buffer, capped at MAX_BUFFER)
     private val outputBuffers = mutableMapOf<String, StringBuilder>()
@@ -209,6 +215,7 @@ class SessionOrchestrator(
                             FileLogger.log(TAG, "Session $sessionId UUID synced from server: ${tab.claudeSessionId} -> $realUuid")
                             tabManager.updateClaudeSessionId(sessionId, realUuid)
                             sessionStorage.upsert(SessionStorage.fromClaudeSession(tab.copy(claudeSessionId = realUuid)))
+                            notifyClaudeSessionIdChanged(sessionId, realUuid)
                         }
                     }
                 } catch (_: Exception) {}
@@ -573,6 +580,38 @@ else:
     private val reconnectScope = kotlinx.coroutines.CoroutineScope(
         kotlinx.coroutines.Dispatchers.IO + kotlinx.coroutines.SupervisorJob()
     )
+
+    /**
+     * Lazy transcript stream for a session. First access opens an SSH `tail -F`
+     * against `~/.claude/projects/<encoded-cwd>/<uuid>.jsonl` and starts
+     * incremental parsing. Subsequent calls return the same flow.
+     *
+     * Returns an empty flow if the tab does not exist yet or has no
+     * claudeSessionId — callers should re-collect after the session connects.
+     */
+    fun transcriptFlow(sessionId: String): kotlinx.coroutines.flow.StateFlow<List<TranscriptEntry>> {
+        val tab = tabManager.getTab(sessionId)
+            ?: return kotlinx.coroutines.flow.MutableStateFlow(emptyList())
+        val uuid = tab.claudeSessionId
+            ?: return kotlinx.coroutines.flow.MutableStateFlow(emptyList())
+        val stream = synchronized(transcriptLock) {
+            transcriptStreams.getOrPut(sessionId) {
+                TranscriptStream(tab.server, tab.folder, reconnectScope)
+            }
+        }
+        stream.start(uuid)
+        return stream.entries
+    }
+
+    /**
+     * Called when the Claude Code session UUID rotates (e.g. user invoked
+     * `/resume` or `/clear`). Restarts the transcript stream against the new
+     * file so the UI keeps showing the active conversation.
+     */
+    private fun notifyClaudeSessionIdChanged(sessionId: String, newUuid: String?) {
+        val stream = synchronized(transcriptLock) { transcriptStreams[sessionId] } ?: return
+        if (newUuid != null) stream.start(newUuid)
+    }
 
     private suspend fun connectSsh(session: ClaudeSession, isNewTmuxSession: Boolean) {
         val sshManager = SshManager(serverStorage)
@@ -1162,6 +1201,11 @@ else:
         moshConnections[sessionId]?.disconnect()
         moshConnections.remove(sessionId)
         synchronized(bufferLock) { outputBuffers.remove(sessionId) }
+        synchronized(transcriptLock) {
+            transcriptStreams.remove(sessionId)?.let { stream ->
+                reconnectScope.launch { stream.stop() }
+            }
+        }
         promptDetector.removeSession(sessionId)
         pendingInputs.remove(sessionId)
         terminalSizes.remove(sessionId)

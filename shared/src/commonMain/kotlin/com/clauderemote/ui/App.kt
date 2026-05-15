@@ -669,7 +669,11 @@ fun App(
                                 else -> Screen.LAUNCHER
                             }
                         },
-                        terminalContent = terminalContent
+                        terminalContent = terminalContent,
+                        transcriptEntries = activeTabId?.let { id ->
+                            val flow = remember(id) { sessionOrchestrator.transcriptFlow(id) }
+                            flow.collectAsState().value
+                        } ?: emptyList()
                     )
                 }
 
