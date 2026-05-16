@@ -1,6 +1,7 @@
 package com.clauderemote.ui
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.interaction.MutableInteractionSource
@@ -8,12 +9,14 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Color
@@ -23,6 +26,8 @@ import androidx.compose.ui.unit.dp
 import com.clauderemote.model.ClaudeModel
 import com.clauderemote.model.ClaudeSession
 import com.clauderemote.session.SlashCommand
+import com.clauderemote.ui.theme.CRTheme
+import com.clauderemote.ui.theme.CRType
 
 data class PaletteAction(
     val id: String,
@@ -63,7 +68,7 @@ fun buildPaletteActions(
 
     // Mode switching
     actions.add(PaletteAction("mode_toggle", "Toggle mode (Shift+Tab)", "Mode", "Shift+Tab") {
-        onSendCommand("\u001B[Z")
+        onSendCommand("[Z")
     })
 
     // Model switching
@@ -97,8 +102,8 @@ fun buildPaletteActions(
 
     // Terminal controls
     actions.add(PaletteAction("escape", "Send Escape", "Terminal", "Esc") { onSendEscape() })
-    actions.add(PaletteAction("ctrl_c", "Send Ctrl+C", "Terminal") { onSendCommand("\u0003") })
-    actions.add(PaletteAction("clear", "Clear terminal", "Terminal") { onSendCommand("\u001Bc") })
+    actions.add(PaletteAction("ctrl_c", "Send Ctrl+C", "Terminal") { onSendCommand("") })
+    actions.add(PaletteAction("clear", "Clear terminal", "Terminal") { onSendCommand("c") })
     actions.add(PaletteAction("approve_yes", "Approve (y)", "Terminal") { onSendCommand("y\r") })
     actions.add(PaletteAction("approve_no", "Reject (n)", "Terminal") { onSendCommand("n\r") })
 
@@ -112,13 +117,20 @@ fun buildPaletteActions(
 }
 
 /**
- * Fuzzy-searchable command palette dialog.
+ * Fuzzy-searchable command palette overlay, styled with CRTheme.
+ *
+ * Rendered as an in-window Box overlay (not a system Dialog) to avoid
+ * Compose Desktop / skiko window-layering issues where Dialog content
+ * never renders on macOS.
  */
 @Composable
 fun CommandPaletteDialog(
     actions: List<PaletteAction>,
     onDismiss: () -> Unit
 ) {
+    val c = CRTheme.colors
+    val m = CRTheme.metrics
+
     var filter by remember { mutableStateOf("") }
     var selectedIndex by remember { mutableStateOf(0) }
 
@@ -133,96 +145,124 @@ fun CommandPaletteDialog(
 
     LaunchedEffect(filter) { selectedIndex = 0 }
 
-    // Inline overlay rather than Dialog/AlertDialog: both of those spawn a
-    // separate OS-level window under Compose Desktop, and on macOS inside this
-    // app (JediTerm SwingPanel + skiko) the dialog window's content never
-    // rendered — the app darkened (scrim) but the palette was invisible.
-    // A Box rendered directly in the parent window avoids the issue entirely.
     Box(
         modifier = Modifier
             .fillMaxSize()
-            .background(Color.Black.copy(alpha = 0.5f))
+            .background(Color.Black.copy(alpha = 0.6f))
             .pointerInput(Unit) { detectTapGestures(onTap = { onDismiss() }) },
         contentAlignment = Alignment.TopCenter
     ) {
-        Surface(
+        val panelShape = RoundedCornerShape(m.cardRadius * 2)
+        Box(
             modifier = Modifier
-                .padding(top = 72.dp, start = 24.dp, end = 24.dp)
-                .widthIn(min = 400.dp, max = 720.dp)
-                .heightIn(max = 500.dp)
-                .pointerInput(Unit) { detectTapGestures { /* swallow */ } },
-            shape = MaterialTheme.shapes.medium,
-            tonalElevation = 8.dp,
-            shadowElevation = 8.dp
+                .padding(top = 64.dp, start = 20.dp, end = 20.dp)
+                .widthIn(min = 360.dp, max = 680.dp)
+                .heightIn(max = 520.dp)
+                .background(c.surface, panelShape)
+                .border(1.dp, c.border, panelShape)
+                .pointerInput(Unit) { detectTapGestures { /* swallow taps inside panel */ } }
         ) {
-                Column(modifier = Modifier.fillMaxWidth()) {
-                    val filterFocus = remember { FocusRequester() }
-                    LaunchedEffect(Unit) { filterFocus.requestFocus() }
+            Column(modifier = Modifier.fillMaxWidth()) {
+                // ── Search row ────────────────────────────────────────────
+                val filterFocus = remember { FocusRequester() }
+                LaunchedEffect(Unit) { filterFocus.requestFocus() }
 
-                    Row(
-                        modifier = Modifier.fillMaxWidth().padding(8.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        OutlinedTextField(
-                            value = filter,
-                            onValueChange = { filter = it },
-                            placeholder = { Text("Search actions...") },
-                            modifier = Modifier.weight(1f)
-                                .focusRequester(filterFocus)
-                                .onPreviewKeyEvent { event ->
-                                    if (event.type == KeyEventType.KeyDown) {
-                                        when (event.key) {
-                                            Key.DirectionDown -> {
-                                                selectedIndex = (selectedIndex + 1).coerceAtMost(filtered.size - 1)
-                                                true
-                                            }
-                                            Key.DirectionUp -> {
-                                                selectedIndex = (selectedIndex - 1).coerceAtLeast(0)
-                                                true
-                                            }
-                                            Key.Enter -> {
-                                                if (filtered.isNotEmpty() && selectedIndex in filtered.indices) {
-                                                    filtered[selectedIndex].onExecute()
-                                                    onDismiss()
-                                                }
-                                                true
-                                            }
-                                            Key.Escape -> { onDismiss(); true }
-                                            else -> false
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .background(c.surface)
+                        .padding(horizontal = 12.dp, vertical = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    OutlinedTextField(
+                        value = filter,
+                        onValueChange = { filter = it },
+                        placeholder = { Text("Search actions…", style = CRType.cardTitle, color = c.textDim) },
+                        modifier = Modifier
+                            .weight(1f)
+                            .focusRequester(filterFocus)
+                            .onPreviewKeyEvent { event ->
+                                if (event.type == KeyEventType.KeyDown) {
+                                    when (event.key) {
+                                        Key.DirectionDown -> {
+                                            selectedIndex = (selectedIndex + 1).coerceAtMost(filtered.size - 1)
+                                            true
                                         }
-                                    } else false
-                                },
-                            singleLine = true,
-                            textStyle = MaterialTheme.typography.bodyMedium
+                                        Key.DirectionUp -> {
+                                            selectedIndex = (selectedIndex - 1).coerceAtLeast(0)
+                                            true
+                                        }
+                                        Key.Enter -> {
+                                            if (filtered.isNotEmpty() && selectedIndex in filtered.indices) {
+                                                filtered[selectedIndex].onExecute()
+                                                onDismiss()
+                                            }
+                                            true
+                                        }
+                                        Key.Escape -> { onDismiss(); true }
+                                        else -> false
+                                    }
+                                } else false
+                            },
+                        singleLine = true,
+                        textStyle = CRType.cardTitle,
+                        colors = OutlinedTextFieldDefaults.colors(
+                            unfocusedBorderColor = c.border,
+                            focusedBorderColor = c.accent,
+                            cursorColor = c.accent,
+                            unfocusedTextColor = c.text,
+                            focusedTextColor = c.text,
+                            unfocusedContainerColor = c.surface,
+                            focusedContainerColor = c.surface,
                         )
-                        Spacer(Modifier.width(8.dp))
-                        IconButton(onClick = onDismiss) { Icon(Icons.Default.Close, "Close") }
+                    )
+                    IconButton(onClick = onDismiss) {
+                        Icon(Icons.Default.Close, "Close", tint = c.textDim)
                     }
+                }
 
-                    val listState = rememberLazyListState()
-                    LaunchedEffect(selectedIndex) {
-                        if (selectedIndex in filtered.indices) {
-                            listState.animateScrollToItem(selectedIndex)
-                        }
-                    }
+                HorizontalDivider(color = c.border)
 
-                    // Precompute which indices start a new category
-                    val categoryStarts = remember(filtered) {
-                        val starts = mutableSetOf<Int>()
-                        var prev = ""
-                        filtered.forEachIndexed { i, action ->
-                            if (action.category != prev) { starts.add(i); prev = action.category }
-                        }
-                        starts
+                // ── Results ───────────────────────────────────────────────
+                val listState = rememberLazyListState()
+                LaunchedEffect(selectedIndex) {
+                    if (selectedIndex in filtered.indices) {
+                        listState.animateScrollToItem(selectedIndex)
                     }
-                    LazyColumn(modifier = Modifier.fillMaxWidth(), state = listState) {
+                }
+
+                val categoryStarts = remember(filtered) {
+                    val starts = mutableSetOf<Int>()
+                    var prev = ""
+                    filtered.forEachIndexed { i, action ->
+                        if (action.category != prev) { starts.add(i); prev = action.category }
+                    }
+                    starts
+                }
+
+                if (filtered.isEmpty()) {
+                    Box(
+                        Modifier.fillMaxWidth().padding(24.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text("No results for \"$filter\"", style = CRType.bodyDim, color = c.textDim)
+                    }
+                } else {
+                    LazyColumn(
+                        modifier = Modifier.fillMaxWidth(),
+                        state = listState,
+                        contentPadding = PaddingValues(bottom = 8.dp),
+                    ) {
                         itemsIndexed(filtered) { index, action ->
                             if (index in categoryStarts) {
                                 Text(
-                                    action.category,
-                                    style = MaterialTheme.typography.labelSmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp)
+                                    action.category.uppercase(),
+                                    style = CRType.sectionH,
+                                    color = c.textDim,
+                                    modifier = Modifier
+                                        .padding(horizontal = 16.dp)
+                                        .padding(top = 12.dp, bottom = 4.dp)
                                 )
                             }
                             val isSelected = index == selectedIndex
@@ -230,41 +270,46 @@ fun CommandPaletteDialog(
                                 modifier = Modifier
                                     .fillMaxWidth()
                                     .background(
-                                        if (isSelected) MaterialTheme.colorScheme.primaryContainer
-                                        else Color.Transparent
+                                        if (isSelected) c.tintAccent else Color.Transparent
                                     )
-                                    .clickable {
+                                    .clickable(
+                                        interactionSource = remember { MutableInteractionSource() },
+                                        indication = null,
+                                    ) {
                                         action.onExecute()
                                         onDismiss()
                                     }
-                                    .padding(horizontal = 16.dp, vertical = 10.dp),
+                                    .padding(horizontal = 16.dp, vertical = 9.dp),
                                 horizontalArrangement = Arrangement.SpaceBetween,
-                                verticalAlignment = Alignment.CenterVertically
+                                verticalAlignment = Alignment.CenterVertically,
                             ) {
                                 Text(
                                     action.label,
-                                    style = MaterialTheme.typography.bodyMedium,
-                                    color = if (isSelected) MaterialTheme.colorScheme.onPrimaryContainer
-                                           else MaterialTheme.colorScheme.onSurface
+                                    style = CRType.cardTitle,
+                                    color = if (isSelected) c.accent else c.text,
+                                    modifier = Modifier.weight(1f),
                                 )
                                 if (action.shortcutHint.isNotBlank()) {
-                                    Surface(
-                                        shape = MaterialTheme.shapes.small,
-                                        color = MaterialTheme.colorScheme.surfaceVariant
+                                    Spacer(Modifier.width(8.dp))
+                                    Box(
+                                        Modifier
+                                            .clip(RoundedCornerShape(4.dp))
+                                            .background(c.surface2)
+                                            .border(1.dp, c.border, RoundedCornerShape(4.dp))
+                                            .padding(horizontal = 6.dp, vertical = 2.dp)
                                     ) {
                                         Text(
                                             action.shortcutHint,
-                                            style = MaterialTheme.typography.labelSmall,
-                                            modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
-                                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                                            style = CRType.keyboardKey,
+                                            color = c.textDim,
                                         )
                                     }
                                 }
                             }
-                            HorizontalDivider()
                         }
                     }
                 }
+            }
         }
     }
 }

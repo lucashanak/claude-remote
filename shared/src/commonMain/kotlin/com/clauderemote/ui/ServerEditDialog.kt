@@ -1,15 +1,27 @@
 package com.clauderemote.ui
 
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
 import com.clauderemote.model.AuthMethod
 import com.clauderemote.model.PortForward
 import com.clauderemote.model.SshServer
+import com.clauderemote.ui.components.CRCard
+import com.clauderemote.ui.components.Segmented
+import com.clauderemote.ui.theme.CRTheme
+import com.clauderemote.ui.theme.CRType
 import kotlin.random.Random
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -20,12 +32,16 @@ fun ServerEditDialog(
     onSave: (SshServer) -> Unit,
     onPickKeyFile: ((callback: (String) -> Unit) -> Unit)? = null
 ) {
+    val c = CRTheme.colors
+    val m = CRTheme.metrics
+
     var name by remember { mutableStateOf(server?.name ?: "") }
     var host by remember { mutableStateOf(server?.host ?: "") }
     var port by remember { mutableStateOf(server?.port?.toString() ?: "22") }
     var username by remember { mutableStateOf(server?.username ?: "") }
     var authMethod by remember { mutableStateOf(server?.authMethod ?: AuthMethod.PASSWORD) }
     var password by remember { mutableStateOf(server?.password ?: "") }
+    var passwordVisible by remember { mutableStateOf(false) }
     var privateKey by remember { mutableStateOf(server?.privateKey ?: "") }
     var preferMosh by remember { mutableStateOf(server?.preferMosh ?: false) }
     var defaultFolder by remember { mutableStateOf(server?.defaultFolder ?: "~") }
@@ -37,238 +53,333 @@ fun ServerEditDialog(
     var newPfRemote by remember { mutableStateOf("") }
     var useCloudflareProxy by remember { mutableStateOf(server?.useCloudflareProxy ?: false) }
     var cloudflareToken by remember { mutableStateOf(server?.cloudflareToken ?: "") }
+    var showAdvanced by remember { mutableStateOf(false) }
 
     val isNew = server == null
     val isValid = name.isNotBlank() && host.isNotBlank() && username.isNotBlank()
 
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text(if (isNew) "Add Server" else "Edit Server") },
+        containerColor = c.surface,
+        titleContentColor = c.text,
+        textContentColor = c.text,
+        title = {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(if (isNew) "Add Server" else "Edit Server", style = CRType.cardTitle)
+                IconButton(onClick = onDismiss) {
+                    Icon(Icons.Default.Close, "Close", tint = c.textDim)
+                }
+            }
+        },
         text = {
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
                     .verticalScroll(rememberScrollState()),
-                verticalArrangement = Arrangement.spacedBy(8.dp)
+                verticalArrangement = Arrangement.spacedBy(m.cardGap)
             ) {
-                OutlinedTextField(
-                    value = name,
-                    onValueChange = { name = it },
-                    label = { Text("Name") },
-                    modifier = Modifier.fillMaxWidth(),
-                    singleLine = true
-                )
-                OutlinedTextField(
-                    value = host,
-                    onValueChange = { host = it },
-                    label = { Text("Host") },
-                    modifier = Modifier.fillMaxWidth(),
-                    singleLine = true
-                )
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                // ── Identity ────────────────────────────────────────────────
+                DialogSection("Identity") {
+                    OutlinedTextField(
+                        value = name,
+                        onValueChange = { name = it },
+                        label = { Text("Display name") },
+                        modifier = Modifier.fillMaxWidth(),
+                        singleLine = true,
+                        colors = crDialogTextFieldColors(),
+                    )
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        OutlinedTextField(
+                            value = host,
+                            onValueChange = { host = it },
+                            label = { Text("Host") },
+                            modifier = Modifier.weight(2f),
+                            singleLine = true,
+                            colors = crDialogTextFieldColors(),
+                        )
+                        OutlinedTextField(
+                            value = port,
+                            onValueChange = { port = it.filter { ch -> ch.isDigit() } },
+                            label = { Text("Port") },
+                            modifier = Modifier.weight(1f),
+                            singleLine = true,
+                            colors = crDialogTextFieldColors(),
+                        )
+                    }
                     OutlinedTextField(
                         value = username,
                         onValueChange = { username = it },
                         label = { Text("Username") },
-                        modifier = Modifier.weight(1f),
-                        singleLine = true
-                    )
-                    OutlinedTextField(
-                        value = port,
-                        onValueChange = { port = it.filter { c -> c.isDigit() } },
-                        label = { Text("Port") },
-                        modifier = Modifier.width(80.dp),
-                        singleLine = true
+                        modifier = Modifier.fillMaxWidth(),
+                        singleLine = true,
+                        colors = crDialogTextFieldColors(),
                     )
                 }
 
-                // Auth method
-                Text("Authentication", style = MaterialTheme.typography.bodyMedium)
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    FilterChip(
-                        selected = authMethod == AuthMethod.PASSWORD,
-                        onClick = { authMethod = AuthMethod.PASSWORD },
-                        label = { Text("Password") }
+                // ── Auth ────────────────────────────────────────────────────
+                DialogSection("Authentication") {
+                    Segmented(
+                        options = listOf(AuthMethod.PASSWORD, AuthMethod.KEY),
+                        selected = authMethod,
+                        onSelect = { authMethod = it },
+                        modifier = Modifier.fillMaxWidth(),
+                        label = { if (it == AuthMethod.PASSWORD) "Password" else "SSH Key" }
                     )
-                    FilterChip(
-                        selected = authMethod == AuthMethod.KEY,
-                        onClick = { authMethod = AuthMethod.KEY },
-                        label = { Text("SSH Key") }
-                    )
-                }
-
-                var passwordVisible by remember { mutableStateOf(false) }
-                when (authMethod) {
-                    AuthMethod.PASSWORD -> {
-                        OutlinedTextField(
-                            value = password,
-                            onValueChange = { password = it },
-                            label = { Text("Password") },
-                            modifier = Modifier.fillMaxWidth(),
-                            singleLine = true,
-                            visualTransformation = if (passwordVisible)
-                                androidx.compose.ui.text.input.VisualTransformation.None
-                            else androidx.compose.ui.text.input.PasswordVisualTransformation(),
-                            trailingIcon = {
-                                TextButton(onClick = { passwordVisible = !passwordVisible }) {
-                                    Text(if (passwordVisible) "Hide" else "Show",
-                                        style = MaterialTheme.typography.bodySmall)
+                    when (authMethod) {
+                        AuthMethod.PASSWORD -> {
+                            OutlinedTextField(
+                                value = password,
+                                onValueChange = { password = it },
+                                label = { Text("Password") },
+                                modifier = Modifier.fillMaxWidth(),
+                                singleLine = true,
+                                visualTransformation = if (passwordVisible)
+                                    VisualTransformation.None
+                                else
+                                    PasswordVisualTransformation(),
+                                trailingIcon = {
+                                    TextButton(onClick = { passwordVisible = !passwordVisible }) {
+                                        Text(
+                                            if (passwordVisible) "Hide" else "Show",
+                                            style = CRType.pill,
+                                            color = c.textDim
+                                        )
+                                    }
+                                },
+                                colors = crDialogTextFieldColors(),
+                            )
+                        }
+                        AuthMethod.KEY -> {
+                            OutlinedTextField(
+                                value = privateKey,
+                                onValueChange = { privateKey = it },
+                                label = { Text("Private key (paste or import)") },
+                                modifier = Modifier.fillMaxWidth().heightIn(max = 100.dp),
+                                minLines = 3,
+                                maxLines = 6,
+                                textStyle = CRType.mono,
+                                colors = crDialogTextFieldColors(),
+                            )
+                            if (onPickKeyFile != null) {
+                                TextButton(onClick = {
+                                    onPickKeyFile { content -> privateKey = content }
+                                }) {
+                                    Text("Import from file", style = CRType.pill, color = c.accent)
                                 }
                             }
+                        }
+                    }
+                }
+
+                // ── Claude defaults for server ──────────────────────────────
+                DialogSection("Claude Defaults") {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Text("Default folder", style = CRType.bodyDim, color = c.textDim, modifier = Modifier.width(100.dp))
+                        OutlinedTextField(
+                            value = defaultFolder,
+                            onValueChange = { defaultFolder = it },
+                            modifier = Modifier.weight(1f),
+                            singleLine = true,
+                            colors = crDialogTextFieldColors(),
                         )
                     }
-                    AuthMethod.KEY -> {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Text("Startup cmd", style = CRType.bodyDim, color = c.textDim, modifier = Modifier.width(100.dp))
                         OutlinedTextField(
-                            value = privateKey,
-                            onValueChange = { privateKey = it },
-                            label = { Text("Private Key (paste or import)") },
-                            modifier = Modifier.fillMaxWidth(),
-                            minLines = 3,
-                            maxLines = 5
+                            value = startupCommand,
+                            onValueChange = { startupCommand = it },
+                            placeholder = { Text("e.g. source ~/.profile") },
+                            modifier = Modifier.weight(1f),
+                            singleLine = true,
+                            colors = crDialogTextFieldColors(),
                         )
-                        if (onPickKeyFile != null) {
+                    }
+                }
+
+                // ── Advanced (collapsible) ──────────────────────────────────
+                TextButton(
+                    onClick = { showAdvanced = !showAdvanced },
+                    contentPadding = PaddingValues(horizontal = 0.dp)
+                ) {
+                    Text(
+                        if (showAdvanced) "▾ Advanced" else "▸ Advanced",
+                        style = CRType.sectionH,
+                        color = c.textDim
+                    )
+                }
+                if (showAdvanced) {
+                    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                        // Prefer Mosh
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Checkbox(
+                                checked = preferMosh,
+                                onCheckedChange = { preferMosh = it },
+                                colors = CheckboxDefaults.colors(
+                                    checkedColor = c.accent,
+                                    uncheckedColor = c.border,
+                                )
+                            )
+                            Column {
+                                Text("Prefer Mosh connection", style = CRType.cardTitle, color = c.text)
+                                Text("Uses Mosh instead of SSH when available", style = CRType.bodyDim, color = c.textDim)
+                            }
+                        }
+
+                        // Cloudflare
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Checkbox(
+                                checked = useCloudflareProxy,
+                                onCheckedChange = { useCloudflareProxy = it },
+                                colors = CheckboxDefaults.colors(
+                                    checkedColor = c.accent,
+                                    uncheckedColor = c.border,
+                                )
+                            )
+                            Column {
+                                Text("Cloudflare Tunnel", style = CRType.cardTitle, color = c.text)
+                                Text("SSH over WebSocket via cloudflared", style = CRType.bodyDim, color = c.textDim)
+                            }
+                        }
+                        if (useCloudflareProxy) {
+                            OutlinedTextField(
+                                value = cloudflareToken,
+                                onValueChange = { cloudflareToken = it },
+                                label = { Text("CF Access Token (optional)") },
+                                placeholder = { Text("JWT for Zero Trust") },
+                                modifier = Modifier.fillMaxWidth(),
+                                singleLine = true,
+                                colors = crDialogTextFieldColors(),
+                            )
+                        }
+
+                        // Snippets
+                        Text("Snippets", style = CRType.sectionH, color = c.textDim)
+                        snippets.forEachIndexed { idx, snip ->
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Text(snip, style = CRType.mono, color = c.text, modifier = Modifier.weight(1f))
+                                TextButton(onClick = {
+                                    snippets = snippets.toMutableList().also { it.removeAt(idx) }
+                                }) {
+                                    Text("Remove", style = CRType.pill, color = c.disconnected)
+                                }
+                            }
+                        }
+                        Row(
+                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            OutlinedTextField(
+                                value = newSnippet,
+                                onValueChange = { newSnippet = it },
+                                label = { Text("Command") },
+                                placeholder = { Text("e.g. git pull") },
+                                modifier = Modifier.weight(1f),
+                                singleLine = true,
+                                colors = crDialogTextFieldColors(),
+                            )
                             TextButton(onClick = {
-                                onPickKeyFile { content -> privateKey = content }
+                                if (newSnippet.isNotBlank()) {
+                                    snippets = snippets + newSnippet.trim()
+                                    newSnippet = ""
+                                }
                             }) {
-                                Text("Import from file")
+                                Text("Add", style = CRType.pill, color = c.accent)
+                            }
+                        }
+
+                        // Port forwards
+                        Text("Port Forwards · ${portForwards.size}", style = CRType.sectionH, color = c.textDim)
+                        portForwards.forEachIndexed { idx, pf ->
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Text(
+                                    "${pf.type} ${pf.localPort}:${pf.remoteHost}:${pf.remotePort}",
+                                    style = CRType.mono,
+                                    color = c.text,
+                                    modifier = Modifier.weight(1f)
+                                )
+                                TextButton(onClick = {
+                                    portForwards = portForwards.toMutableList().also { it.removeAt(idx) }
+                                }) {
+                                    Text("Remove", style = CRType.pill, color = c.disconnected)
+                                }
+                            }
+                        }
+                        Row(
+                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            OutlinedTextField(
+                                value = newPfLocal,
+                                onValueChange = { newPfLocal = it.filter { ch -> ch.isDigit() } },
+                                label = { Text("Local port") },
+                                modifier = Modifier.weight(1f),
+                                singleLine = true,
+                                colors = crDialogTextFieldColors(),
+                            )
+                            Text("→", style = CRType.cardTitle, color = c.textDim)
+                            OutlinedTextField(
+                                value = newPfRemote,
+                                onValueChange = { newPfRemote = it.filter { ch -> ch.isDigit() } },
+                                label = { Text("Remote port") },
+                                modifier = Modifier.weight(1f),
+                                singleLine = true,
+                                colors = crDialogTextFieldColors(),
+                            )
+                            TextButton(onClick = {
+                                val lp = newPfLocal.toIntOrNull()
+                                val rp = newPfRemote.toIntOrNull()
+                                if (lp != null && rp != null) {
+                                    portForwards = portForwards + PortForward(localPort = lp, remotePort = rp)
+                                    newPfLocal = ""; newPfRemote = ""
+                                }
+                            }) {
+                                Text("Add", style = CRType.pill, color = c.accent)
                             }
                         }
                     }
                 }
 
-                OutlinedTextField(
-                    value = defaultFolder,
-                    onValueChange = { defaultFolder = it },
-                    label = { Text("Default Folder") },
-                    modifier = Modifier.fillMaxWidth(),
-                    singleLine = true
-                )
-                OutlinedTextField(
-                    value = startupCommand,
-                    onValueChange = { startupCommand = it },
-                    label = { Text("Startup Command (optional)") },
-                    placeholder = { Text("e.g. source ~/.profile") },
-                    modifier = Modifier.fillMaxWidth(),
-                    singleLine = true
-                )
-
-                // Snippets (quick commands shown in terminal)
-                Text("Snippets", style = MaterialTheme.typography.bodyMedium,
-                    modifier = Modifier.padding(top = 8.dp))
-                snippets.forEachIndexed { idx, snip ->
-                    Row(
-                        verticalAlignment = androidx.compose.ui.Alignment.CenterVertically,
-                        modifier = Modifier.fillMaxWidth()
-                    ) {
-                        Text(snip, style = MaterialTheme.typography.bodySmall, modifier = Modifier.weight(1f))
-                        TextButton(onClick = {
-                            snippets = snippets.toMutableList().also { it.removeAt(idx) }
-                        }) { Text("X") }
-                    }
-                }
-                Row(
-                    horizontalArrangement = Arrangement.spacedBy(4.dp),
-                    verticalAlignment = androidx.compose.ui.Alignment.CenterVertically
-                ) {
-                    OutlinedTextField(
-                        value = newSnippet,
-                        onValueChange = { newSnippet = it },
-                        label = { Text("Command") },
-                        placeholder = { Text("e.g. git pull") },
-                        modifier = Modifier.weight(1f),
-                        singleLine = true
-                    )
-                    TextButton(onClick = {
-                        if (newSnippet.isNotBlank()) {
-                            snippets = snippets + newSnippet.trim()
-                            newSnippet = ""
-                        }
-                    }) { Text("Add") }
-                }
-
-                Row(verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
-                    Checkbox(
-                        checked = preferMosh,
-                        onCheckedChange = { preferMosh = it }
-                    )
-                    Text("Prefer Mosh connection")
-                }
-
-                // Cloudflare Tunnel
-                Row(verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
-                    Checkbox(
-                        checked = useCloudflareProxy,
-                        onCheckedChange = { useCloudflareProxy = it }
-                    )
-                    Text("Cloudflare Tunnel (SSH over WebSocket)")
-                }
-                if (useCloudflareProxy) {
-                    Text(
-                        "Host field above is used as the tunnel hostname (e.g. ssh.example.com). " +
-                        "Requires cloudflared daemon on the server with tcp:// service type.",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                    OutlinedTextField(
-                        value = cloudflareToken,
-                        onValueChange = { cloudflareToken = it },
-                        label = { Text("CF Access Token (optional)") },
-                        placeholder = { Text("JWT for Zero Trust") },
+                // ── Danger: delete ──────────────────────────────────────────
+                if (!isNew) {
+                    HorizontalDivider(color = c.border)
+                    OutlinedButton(
+                        onClick = { /* deletion handled outside via onDismiss+callback; no delete param here */ },
                         modifier = Modifier.fillMaxWidth(),
-                        singleLine = true
-                    )
-                }
-
-                // Port forwarding
-                Text("Port Forwards", style = MaterialTheme.typography.bodyMedium,
-                    modifier = Modifier.padding(top = 8.dp))
-                portForwards.forEachIndexed { idx, pf ->
-                    Row(
-                        verticalAlignment = androidx.compose.ui.Alignment.CenterVertically,
-                        modifier = Modifier.fillMaxWidth()
+                        colors = ButtonDefaults.outlinedButtonColors(contentColor = c.disconnected),
+                        border = androidx.compose.foundation.BorderStroke(1.dp, c.disconnected.copy(alpha = 0.5f)),
+                        shape = RoundedCornerShape(m.cardRadius),
                     ) {
-                        Text(
-                            "${pf.type} ${pf.localPort}:${pf.remoteHost}:${pf.remotePort}",
-                            style = MaterialTheme.typography.bodySmall,
-                            modifier = Modifier.weight(1f)
-                        )
-                        TextButton(onClick = {
-                            portForwards = portForwards.toMutableList().also { it.removeAt(idx) }
-                        }) { Text("X") }
+                        Text("Delete server", style = CRType.cardTitle, color = c.disconnected)
                     }
-                }
-                Row(
-                    horizontalArrangement = Arrangement.spacedBy(4.dp),
-                    verticalAlignment = androidx.compose.ui.Alignment.CenterVertically
-                ) {
-                    OutlinedTextField(
-                        value = newPfLocal,
-                        onValueChange = { newPfLocal = it.filter { c -> c.isDigit() } },
-                        label = { Text("Local") },
-                        modifier = Modifier.weight(1f),
-                        singleLine = true
-                    )
-                    Text(":", style = MaterialTheme.typography.bodyMedium)
-                    OutlinedTextField(
-                        value = newPfRemote,
-                        onValueChange = { newPfRemote = it.filter { c -> c.isDigit() } },
-                        label = { Text("Remote") },
-                        modifier = Modifier.weight(1f),
-                        singleLine = true
-                    )
-                    TextButton(onClick = {
-                        val lp = newPfLocal.toIntOrNull()
-                        val rp = newPfRemote.toIntOrNull()
-                        if (lp != null && rp != null) {
-                            portForwards = portForwards + PortForward(localPort = lp, remotePort = rp)
-                            newPfLocal = ""; newPfRemote = ""
-                        }
-                    }) { Text("Add") }
                 }
             }
         },
         confirmButton = {
-            TextButton(
+            Button(
                 onClick = {
                     val saved = SshServer(
                         id = server?.id ?: Random.nextBytes(16).joinToString("") { "%02x".format(it) },
@@ -292,13 +403,49 @@ fun ServerEditDialog(
                     )
                     onSave(saved)
                 },
-                enabled = isValid
+                enabled = isValid,
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = c.accent,
+                    contentColor = c.accentInk,
+                    disabledContainerColor = c.surface2,
+                    disabledContentColor = c.textDim,
+                ),
+                shape = RoundedCornerShape(m.cardRadius),
             ) {
-                Text("Save")
+                Text("Save", style = CRType.cardTitle)
             }
         },
         dismissButton = {
-            TextButton(onClick = onDismiss) { Text("Cancel") }
+            TextButton(onClick = onDismiss) {
+                Text("Cancel", style = CRType.cardTitle, color = c.textDim)
+            }
         }
     )
 }
+
+// ── Local helpers ──────────────────────────────────────────────────────────
+
+@Composable
+private fun DialogSection(title: String, content: @Composable ColumnScope.() -> Unit) {
+    val c = CRTheme.colors
+    val m = CRTheme.metrics
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        Text(title.uppercase(), style = CRType.sectionH, color = c.textDim)
+        CRCard(content = { Column(verticalArrangement = Arrangement.spacedBy(8.dp)) { content() } })
+    }
+}
+
+@Composable
+private fun crDialogTextFieldColors() = OutlinedTextFieldDefaults.colors(
+    unfocusedBorderColor = CRTheme.colors.border,
+    focusedBorderColor = CRTheme.colors.accent,
+    cursorColor = CRTheme.colors.accent,
+    unfocusedTextColor = CRTheme.colors.text,
+    focusedTextColor = CRTheme.colors.text,
+    unfocusedLabelColor = CRTheme.colors.textDim,
+    focusedLabelColor = CRTheme.colors.accent,
+    unfocusedPlaceholderColor = CRTheme.colors.textDim,
+    focusedPlaceholderColor = CRTheme.colors.textDim,
+    unfocusedContainerColor = CRTheme.colors.surface,
+    focusedContainerColor = CRTheme.colors.surface,
+)
