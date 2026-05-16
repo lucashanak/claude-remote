@@ -347,7 +347,7 @@ private fun SessionLauncherCard(
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     ActivityHeatmap(
-                        values = List(16) { 0f },
+                        values = session.history,
                         modifier = Modifier.weight(1f).height(14.dp),
                         color = c.accent,
                     )

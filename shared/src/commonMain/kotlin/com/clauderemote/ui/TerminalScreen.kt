@@ -153,6 +153,8 @@ fun TerminalScreen(
     val scope = rememberCoroutineScope()
     var showPalette by remember { mutableStateOf(false) }
     var splitActive by remember { mutableStateOf(false) }
+    var showSessionDrawer by remember { mutableStateOf(false) }
+    var showExpanded by remember { mutableStateOf(false) }
 
     // Replay terminal buffer when switching back from transcript
     LaunchedEffect(terminalView, activeTabId) {
@@ -281,7 +283,7 @@ fun TerminalScreen(
                         allSessions = allFlat,
                         index = idx,
                         total = total,
-                        onOpenDrawer = onMenuOpen,
+                        onOpenDrawer = { showSessionDrawer = true },
                         onPrev = {
                             if (idx > 0) {
                                 val prev = allFlat[idx - 1]
@@ -634,7 +636,8 @@ fun TerminalScreen(
                             },
                             onSendCommand = onSendCommand,
                             onAttachFile = onAttachFile,
-                            inputFocusRequester = inputFocusRequester
+                            inputFocusRequester = inputFocusRequester,
+                            onExpand = { showExpanded = true }
                         )
                     }
 
@@ -673,6 +676,33 @@ fun TerminalScreen(
 
             } // end Column
         } // end Row
+
+        // ── SessionDrawer overlay ──────────────────────────────────────────
+        SessionDrawer(
+            open = showSessionDrawer,
+            sessions = tabs,
+            activities = sessionActivities,
+            activeId = activeTabId ?: "",
+            onPick = { id ->
+                onTabSwitch(id)
+                showSessionDrawer = false
+            },
+            onNew = {
+                onNewTab()
+                showSessionDrawer = false
+            },
+            onClose = { showSessionDrawer = false },
+        )
+
+        // ── ExpandedInput overlay ──────────────────────────────────────────
+        if (showExpanded) {
+            ExpandedInput(
+                onSend = { text ->
+                    onSendCommand("[200~" + text + "[201~\r")
+                },
+                onDismiss = { showExpanded = false },
+            )
+        }
     } // end BoxWithConstraints
 }
 
@@ -1401,7 +1431,8 @@ private fun PromptInputBar(
     onSend: (String) -> Unit,
     onSendCommand: (String) -> Unit,
     onAttachFile: (suspend () -> String?)? = null,
-    inputFocusRequester: FocusRequester? = null
+    inputFocusRequester: FocusRequester? = null,
+    onExpand: (() -> Unit)? = null
 ) {
     val c = CRTheme.colors
     val m = CRTheme.metrics
@@ -1690,7 +1721,7 @@ private fun PromptInputBar(
                 )
 
                 // Expand
-                IconButton(onClick = { expanded = true }, modifier = Modifier.size(32.dp)) {
+                IconButton(onClick = { if (onExpand != null) onExpand() else expanded = true }, modifier = Modifier.size(32.dp)) {
                     Text("⤢", style = MaterialTheme.typography.titleMedium, color = c.textDim)
                 }
 

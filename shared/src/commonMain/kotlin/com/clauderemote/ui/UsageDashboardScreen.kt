@@ -1,5 +1,6 @@
 package com.clauderemote.ui
 
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.*
@@ -36,6 +37,7 @@ fun UsageDashboardScreen(
     sessionUsagePercent: Int?,
     weekUsagePercent: Int?,
     usageTokens: CostCalculator.UsageTokens?,
+    daily: List<Float> = emptyList(),
     onBack: () -> Unit
 ) {
     val c = CRTheme.colors
@@ -91,6 +93,32 @@ fun UsageDashboardScreen(
                         value = formatTokenCount(totalTokens),
                         caption = "this session",
                     )
+                }
+            }
+
+            // ── Daily cost bars ─────────────────────────────────────────────
+            if (daily.isNotEmpty()) {
+                DashSection("Daily Usage") {
+                    val accentColor = c.accent
+                    val maxVal = daily.max().coerceAtLeast(0.001f)
+                    Canvas(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(48.dp)
+                    ) {
+                        val barCount = daily.size
+                        val gap = 2.dp.toPx()
+                        val barWidth = (size.width - gap * (barCount - 1)) / barCount
+                        daily.forEachIndexed { i, value ->
+                            val barHeight = (value / maxVal) * size.height
+                            val x = i * (barWidth + gap)
+                            drawRect(
+                                color = accentColor,
+                                topLeft = androidx.compose.ui.geometry.Offset(x, size.height - barHeight),
+                                size = androidx.compose.ui.geometry.Size(barWidth, barHeight)
+                            )
+                        }
+                    }
                 }
             }
 

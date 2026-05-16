@@ -743,7 +743,12 @@ fun App(
                     refreshServers()
                     showServerDialog = false
                 },
-                onPickKeyFile = onPickKeyFile
+                onPickKeyFile = onPickKeyFile,
+                onDelete = { server ->
+                    serverStorage.deleteServer(server.id)
+                    refreshServers()
+                    showServerDialog = false
+                }
             )
         }
 

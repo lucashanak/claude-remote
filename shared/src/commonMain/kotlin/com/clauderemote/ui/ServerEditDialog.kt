@@ -30,7 +30,8 @@ fun ServerEditDialog(
     server: SshServer? = null,
     onDismiss: () -> Unit,
     onSave: (SshServer) -> Unit,
-    onPickKeyFile: ((callback: (String) -> Unit) -> Unit)? = null
+    onPickKeyFile: ((callback: (String) -> Unit) -> Unit)? = null,
+    onDelete: ((SshServer) -> Unit)? = null
 ) {
     val c = CRTheme.colors
     val m = CRTheme.metrics
@@ -367,7 +368,7 @@ fun ServerEditDialog(
                 if (!isNew) {
                     HorizontalDivider(color = c.border)
                     OutlinedButton(
-                        onClick = { /* deletion handled outside via onDismiss+callback; no delete param here */ },
+                        onClick = { if (onDelete != null && server != null) onDelete(server) },
                         modifier = Modifier.fillMaxWidth(),
                         colors = ButtonDefaults.outlinedButtonColors(contentColor = c.disconnected),
                         border = androidx.compose.foundation.BorderStroke(1.dp, c.disconnected.copy(alpha = 0.5f)),
