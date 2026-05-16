@@ -788,12 +788,3 @@ fun App(
     }
     }
 }
-
-@Composable
-fun rememberAppearanceController(appSettings: AppSettings): Pair<AppearanceState, (AppearanceState) -> Unit> {
-    var state by remember { mutableStateOf(appSettings.loadAppearance()) }
-    return state to { next ->
-        state = next
-        appSettings.saveAppearance(next)
-    }
-}
