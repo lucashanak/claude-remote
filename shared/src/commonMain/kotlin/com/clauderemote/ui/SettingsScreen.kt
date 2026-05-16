@@ -15,6 +15,13 @@ import com.clauderemote.model.ClaudeMode
 import com.clauderemote.model.ClaudeModel
 import com.clauderemote.model.ConnectionType
 import com.clauderemote.storage.AppSettings
+import com.clauderemote.ui.theme.AppearanceState
+import com.clauderemote.ui.theme.CRAccent
+import com.clauderemote.ui.theme.CRDensity
+import com.clauderemote.ui.theme.CRStatusViz
+import com.clauderemote.ui.theme.CRTerminalScheme
+import com.clauderemote.ui.theme.CRTerminalView
+import com.clauderemote.ui.theme.CRVariant
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
@@ -25,7 +32,9 @@ fun SettingsScreen(
     onCheckUpdate: (() -> Unit)? = null,
     onExportServers: (() -> Unit)? = null,
     onImportServers: (() -> Unit)? = null,
-    sshKeyManager: com.clauderemote.connection.SshKeyManager? = null
+    sshKeyManager: com.clauderemote.connection.SshKeyManager? = null,
+    appearance: AppearanceState = settings.loadAppearance(),
+    onAppearanceChange: (AppearanceState) -> Unit = { settings.saveAppearance(it) }
 ) {
     var fontSize by remember { mutableStateOf(settings.terminalFontSize) }
     var scrollback by remember { mutableStateOf(settings.terminalScrollback) }
@@ -67,6 +76,78 @@ fun SettingsScreen(
                         selected = themeMode == value,
                         onClick = { themeMode = value; settings.themeMode = value },
                         label = { Text(label) }
+                    )
+                }
+            }
+
+            // CRTheme: Variant
+            Text("Variant", style = MaterialTheme.typography.labelLarge, modifier = Modifier.padding(top = 8.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                CRVariant.entries.forEach { v ->
+                    FilterChip(
+                        selected = appearance.variant == v,
+                        onClick = { onAppearanceChange(appearance.copy(variant = v)) },
+                        label = { Text(v.name) }
+                    )
+                }
+            }
+
+            // CRTheme: Density
+            Text("Density", style = MaterialTheme.typography.labelLarge, modifier = Modifier.padding(top = 8.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                CRDensity.entries.forEach { d ->
+                    FilterChip(
+                        selected = appearance.density == d,
+                        onClick = { onAppearanceChange(appearance.copy(density = d)) },
+                        label = { Text(d.name) }
+                    )
+                }
+            }
+
+            // CRTheme: Accent
+            Text("Accent", style = MaterialTheme.typography.labelLarge, modifier = Modifier.padding(top = 8.dp))
+            FlowRow(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                CRAccent.entries.forEach { a ->
+                    FilterChip(
+                        selected = appearance.accent == a,
+                        onClick = { onAppearanceChange(appearance.copy(accent = a)) },
+                        label = { Text(a.label) }
+                    )
+                }
+            }
+
+            // CRTheme: Status viz
+            Text("Status indicator", style = MaterialTheme.typography.labelLarge, modifier = Modifier.padding(top = 8.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                CRStatusViz.entries.forEach { sv ->
+                    FilterChip(
+                        selected = appearance.statusViz == sv,
+                        onClick = { onAppearanceChange(appearance.copy(statusViz = sv)) },
+                        label = { Text(sv.name) }
+                    )
+                }
+            }
+
+            // CRTheme: Terminal view
+            Text("Terminal view", style = MaterialTheme.typography.labelLarge, modifier = Modifier.padding(top = 8.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                CRTerminalView.entries.forEach { tv ->
+                    FilterChip(
+                        selected = appearance.terminalView == tv,
+                        onClick = { onAppearanceChange(appearance.copy(terminalView = tv)) },
+                        label = { Text(tv.name) }
+                    )
+                }
+            }
+
+            // CRTheme: Terminal scheme
+            Text("Terminal color scheme", style = MaterialTheme.typography.labelLarge, modifier = Modifier.padding(top = 8.dp))
+            FlowRow(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                CRTerminalScheme.entries.forEach { ts ->
+                    FilterChip(
+                        selected = appearance.terminalScheme == ts,
+                        onClick = { onAppearanceChange(appearance.copy(terminalScheme = ts)) },
+                        label = { Text(ts.label) }
                     )
                 }
             }

@@ -21,6 +21,8 @@ import com.clauderemote.session.SessionOrchestrator
 import com.clauderemote.session.TabManager
 import com.clauderemote.storage.AppSettings
 import com.clauderemote.storage.ServerStorage
+import com.clauderemote.ui.theme.AppearanceState
+import com.clauderemote.ui.theme.CRTheme
 import com.clauderemote.ui.theme.ClaudeRemoteTheme
 import com.clauderemote.util.FileLogger
 import com.clauderemote.util.UpdateChecker
@@ -304,6 +306,13 @@ fun App(
         else -> androidx.compose.foundation.isSystemInDarkTheme()
     }
 
+    var appearance by remember { mutableStateOf(appSettings.loadAppearance()) }
+    val updateAppearance: (AppearanceState) -> Unit = { next ->
+        appearance = next
+        appSettings.saveAppearance(next)
+    }
+
+    CRTheme(appearance = appearance) {
     ClaudeRemoteTheme(darkTheme = darkTheme) {
         val insets = if (currentScreen == Screen.TERMINAL) {
             WindowInsets.systemBars.only(WindowInsetsSides.Top + WindowInsetsSides.Horizontal)
@@ -683,6 +692,8 @@ fun App(
                         settings = appSettings,
                         appVersion = appVersion,
                         sshKeyManager = sshKeyManager,
+                        appearance = appearance,
+                        onAppearanceChange = updateAppearance,
                         onBack = { currentScreen = Screen.LAUNCHER },
                         onCheckUpdate = { checkForUpdate() },
                         onExportServers = {
@@ -769,5 +780,15 @@ fun App(
                 }
             )
         }
+    }
+    }
+}
+
+@Composable
+fun rememberAppearanceController(appSettings: AppSettings): Pair<AppearanceState, (AppearanceState) -> Unit> {
+    var state by remember { mutableStateOf(appSettings.loadAppearance()) }
+    return state to { next ->
+        state = next
+        appSettings.saveAppearance(next)
     }
 }

@@ -1,0 +1,126 @@
+/* ============================================================
+   Actions — Design System tokens
+   Extracted from src/actions/web/templates/base.html
+   ============================================================ */
+
+:root {
+  /* -------- Surfaces / neutrals (dark slate) -------- */
+  --bg:         #0f172a;  /* page background — slate-900 */
+  --surface:    #1e293b;  /* cards, nav, tables — slate-800 */
+  --surface2:   #283548;  /* table headers, inset panels */
+  --border:     #334155;  /* dividers + input borders — slate-700 */
+
+  /* -------- Foreground / text -------- */
+  --text:       #e2e8f0;  /* primary text — slate-200 */
+  --text-dim:   #94a3b8;  /* secondary / labels — slate-400 */
+
+  /* -------- Brand / accent -------- */
+  --accent:     #38bdf8;  /* sky-400 — brand, links, primary CTA */
+  --accent-ink: var(--bg); /* text on accent fills */
+
+  /* -------- Semantic signals -------- */
+  --green:   #4ade80;  /* price / OK / deal — "cheapest" */
+  --red:     #f87171;  /* discount %, errors, destructive */
+  --yellow:  #fbbf24;  /* valid-until / warnings / running */
+  --purple:  #a78bfa;  /* queued / neutral tertiary */
+  --orange:  #fb923c;  /* deep-search / secondary action */
+  --teal:    #2dd4bf;  /* chart series */
+  --pink:    #f472b6;  /* chart series */
+
+  /* Translucent tints for badge fills (15% alpha of signal color) */
+  --tint-accent:  rgba(56, 189, 248, 0.15);
+  --tint-green:   rgba(74, 222, 128, 0.15);
+  --tint-red:     rgba(248, 113, 113, 0.15);
+  --tint-yellow:  rgba(251, 191, 36, 0.15);
+  --tint-purple:  rgba(167, 139, 250, 0.15);
+  --hover-tint:   rgba(56, 189, 248, 0.04); /* table-row hover */
+
+  /* -------- Typography -------- */
+  --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+
+  --fs-micro:   0.7rem;   /* live-badge */
+  --fs-xs:      0.75rem;  /* badges */
+  --fs-sm:      0.8rem;   /* stat labels, timestamps, kbd */
+  --fs-base:    0.85rem;  /* nav, secondary meta */
+  --fs-md:      0.9rem;   /* body default in components */
+  --fs-lg:      0.95rem;  /* inputs, td default */
+  --fs-xl:      1.05rem;  /* card titles */
+  --fs-2xl:     1.25rem;  /* h2 */
+  --fs-3xl:     1.3rem;   /* brand wordmark */
+  --fs-4xl:     1.6rem;   /* page h1 */
+  --fs-5xl:     2rem;     /* stat numbers */
+
+  --fw-regular: 400;
+  --fw-semibold:600;
+  --fw-bold:    700;
+  --fw-black:   800;
+
+  --leading-body:  1.6;
+  --leading-tight: 1.4;
+
+  /* -------- Spacing (used ad-hoc in the app) -------- */
+  --sp-1: 0.25rem;
+  --sp-2: 0.5rem;
+  --sp-3: 0.75rem;
+  --sp-4: 1rem;
+  --sp-5: 1.25rem;
+  --sp-6: 1.5rem;
+  --sp-8: 2rem;
+  --sp-12: 3rem;
+
+  /* -------- Radii -------- */
+  --r-sm:  0.25rem;  /* live-badge */
+  --r-md:  0.5rem;   /* buttons, inputs, small cards */
+  --r-lg:  0.75rem;  /* stat cards, tables, prominent cards */
+  --r-pill: 1rem;    /* badges */
+
+  /* -------- Transitions -------- */
+  --t-fast: 0.15s;
+  --t-base: 0.2s;
+  --t-slow: 0.3s;
+
+  /* -------- Layout -------- */
+  --container-max: 1280px;
+  --container-pad: 1.5rem;
+}
+
+/* ============================================================
+   Semantic element styles — match base.html exactly
+   ============================================================ */
+
+html, body {
+  font-family: var(--font-sans);
+  background: var(--bg);
+  color: var(--text);
+  line-height: var(--leading-body);
+  margin: 0;
+  padding: 0;
+}
+
+h1 { font-size: var(--fs-4xl); font-weight: var(--fw-black); letter-spacing: -0.5px; margin: 0; }
+h2 { font-size: var(--fs-2xl); font-weight: var(--fw-bold); margin: var(--sp-8) 0 var(--sp-4); }
+p  { font-size: var(--fs-lg); line-height: var(--leading-body); }
+
+a       { color: var(--accent); text-decoration: none; transition: color var(--t-base); }
+a:hover { text-decoration: underline; }
+
+code, .kbd, pre {
+  font-family: var(--font-mono);
+  font-size: var(--fs-base);
+  background: var(--surface2);
+  padding: 0.1rem 0.4rem;
+  border-radius: var(--r-sm);
+}
+
+/* ============================================================
+   Token classes — use as utility specimens
+   ============================================================ */
+
+.t-brand      { font-size: var(--fs-3xl); font-weight: var(--fw-black); color: var(--accent); letter-spacing: -0.5px; }
+.t-price      { font-weight: var(--fw-bold); color: var(--green); }
+.t-price-orig { color: var(--text-dim); text-decoration: line-through; font-size: var(--fs-base); }
+.t-discount   { color: var(--red); font-weight: var(--fw-bold); }
+.t-label      { color: var(--text-dim); font-size: var(--fs-sm); text-transform: uppercase; letter-spacing: 0.5px; }
+.t-meta       { color: var(--text-dim); font-size: var(--fs-base); }
+.t-stat-num   { font-size: var(--fs-5xl); font-weight: var(--fw-bold); color: var(--accent); line-height: 1; }

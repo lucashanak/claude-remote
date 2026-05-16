@@ -3,6 +3,13 @@ package com.clauderemote.storage
 import com.clauderemote.model.ClaudeMode
 import com.clauderemote.model.ClaudeModel
 import com.clauderemote.model.ConnectionType
+import com.clauderemote.ui.theme.AppearanceState
+import com.clauderemote.ui.theme.CRAccent
+import com.clauderemote.ui.theme.CRDensity
+import com.clauderemote.ui.theme.CRStatusViz
+import com.clauderemote.ui.theme.CRTerminalScheme
+import com.clauderemote.ui.theme.CRTerminalView
+import com.clauderemote.ui.theme.CRVariant
 
 class AppSettings(private val prefs: PlatformPreferences) {
 
@@ -95,4 +102,47 @@ class AppSettings(private val prefs: PlatformPreferences) {
     var invertColors: Boolean
         get() = prefs.getBoolean("invert_colors", false)
         set(value) = prefs.putBoolean("invert_colors", value)
+
+    // Appearance (CRTheme)
+    var crVariant: CRVariant
+        get() = runCatching { CRVariant.valueOf(prefs.getString("cr_variant", "Classic")) }.getOrDefault(CRVariant.Classic)
+        set(value) = prefs.putString("cr_variant", value.name)
+
+    var crDensity: CRDensity
+        get() = runCatching { CRDensity.valueOf(prefs.getString("cr_density", "Regular")) }.getOrDefault(CRDensity.Regular)
+        set(value) = prefs.putString("cr_density", value.name)
+
+    var crAccent: CRAccent
+        get() = runCatching { CRAccent.valueOf(prefs.getString("cr_accent", "Sky")) }.getOrDefault(CRAccent.Sky)
+        set(value) = prefs.putString("cr_accent", value.name)
+
+    var crStatusViz: CRStatusViz
+        get() = runCatching { CRStatusViz.valueOf(prefs.getString("cr_status_viz", "Pill")) }.getOrDefault(CRStatusViz.Pill)
+        set(value) = prefs.putString("cr_status_viz", value.name)
+
+    var crTerminalView: CRTerminalView
+        get() = runCatching { CRTerminalView.valueOf(prefs.getString("cr_terminal_view", "Raw")) }.getOrDefault(CRTerminalView.Raw)
+        set(value) = prefs.putString("cr_terminal_view", value.name)
+
+    var crTerminalScheme: CRTerminalScheme
+        get() = runCatching { CRTerminalScheme.valueOf(prefs.getString("cr_terminal_scheme", "Default")) }.getOrDefault(CRTerminalScheme.Default)
+        set(value) = prefs.putString("cr_terminal_scheme", value.name)
+
+    fun loadAppearance(): AppearanceState = AppearanceState(
+        variant = crVariant,
+        density = crDensity,
+        accent = crAccent,
+        statusViz = crStatusViz,
+        terminalView = crTerminalView,
+        terminalScheme = crTerminalScheme,
+    )
+
+    fun saveAppearance(state: AppearanceState) {
+        crVariant = state.variant
+        crDensity = state.density
+        crAccent = state.accent
+        crStatusViz = state.statusViz
+        crTerminalView = state.terminalView
+        crTerminalScheme = state.terminalScheme
+    }
 }
