@@ -749,9 +749,6 @@ private fun RichBody(text: String) {
     val padding = com.mikepenz.markdown.model.markdownPadding(
         block = 2.dp,
         list = 2.dp,
-        listItemTop = 0.dp,
-        listItemBottom = 0.dp,
-        listIndent = 12.dp,
         indentList = 12.dp
     )
     val colors = com.mikepenz.markdown.m3.markdownColor(
