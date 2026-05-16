@@ -115,74 +115,110 @@ fun ConnectScreen(
             // ── Folder ─────────────────────────────────────────────────────
             SectionLabel("Folder", c.textDim)
             CRCard {
-                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                var dropdownOpen by remember { mutableStateOf(false) }
+                ExposedDropdownMenuBox(
+                    expanded = dropdownOpen,
+                    onExpandedChange = { wantOpen ->
+                        dropdownOpen = wantOpen
+                        if (wantOpen && onBrowseFolders != null && browseFolders.isEmpty() && !browseLoading) {
+                            browseLoading = true
+                            scope.launch {
+                                browseFolders = onBrowseFolders.invoke(folder)
+                                browseLoading = false
+                            }
+                        }
+                    }
+                ) {
+                    OutlinedTextField(
+                        value = folder,
+                        onValueChange = { folder = it },
+                        label = { Text("Remote path") },
+                        modifier = Modifier
+                            .menuAnchor(MenuAnchorType.PrimaryEditable)
+                            .fillMaxWidth(),
+                        singleLine = true,
+                        keyboardOptions = launchKeyboardOptions,
+                        keyboardActions = launchKeyboardActions,
+                        colors = crTextFieldColors(),
+                        trailingIcon = {
+                            if (browseLoading) {
+                                CircularProgressIndicator(
+                                    modifier = Modifier.size(16.dp),
+                                    strokeWidth = 2.dp,
+                                    color = c.accent
+                                )
+                            } else {
+                                ExposedDropdownMenuDefaults.TrailingIcon(expanded = dropdownOpen)
+                            }
+                        }
+                    )
+                    ExposedDropdownMenu(
+                        expanded = dropdownOpen,
+                        onDismissRequest = { dropdownOpen = false },
+                        modifier = Modifier.heightIn(max = 360.dp)
                     ) {
-                        OutlinedTextField(
-                            value = folder,
-                            onValueChange = { folder = it },
-                            label = { Text("Remote path") },
-                            modifier = Modifier.weight(1f),
-                            singleLine = true,
-                            keyboardOptions = launchKeyboardOptions,
-                            keyboardActions = launchKeyboardActions,
-                            colors = crTextFieldColors(),
-                        )
+                        val recents = server.recentFolders.take(8)
+                        if (recents.isNotEmpty()) {
+                            DropdownMenuItem(
+                                enabled = false,
+                                text = { Text("RECENT", style = CRType.sectionH, color = c.textDim) },
+                                onClick = {}
+                            )
+                            recents.forEach { recent ->
+                                DropdownMenuItem(
+                                    text = { Text(recent, style = CRType.pill, color = c.text) },
+                                    onClick = {
+                                        folder = recent
+                                        dropdownOpen = false
+                                    }
+                                )
+                            }
+                        }
                         if (onBrowseFolders != null) {
-                            FilledTonalButton(
+                            DropdownMenuItem(
+                                enabled = false,
+                                text = { Text("SUBDIRS OF ${folder.ifBlank { "~" }}", style = CRType.sectionH, color = c.textDim) },
+                                onClick = {}
+                            )
+                            if (browseLoading && browseFolders.isEmpty()) {
+                                DropdownMenuItem(
+                                    enabled = false,
+                                    text = { Text("Loading…", style = CRType.pill, color = c.textDim) },
+                                    onClick = {}
+                                )
+                            } else if (browseFolders.isEmpty()) {
+                                DropdownMenuItem(
+                                    enabled = false,
+                                    text = { Text("(none — type a path)", style = CRType.pill, color = c.textDim) },
+                                    onClick = {}
+                                )
+                            } else {
+                                browseFolders.forEach { sub ->
+                                    DropdownMenuItem(
+                                        text = { Text(sub.substringAfterLast('/').ifBlank { sub }, style = CRType.pill, color = c.text) },
+                                        onClick = {
+                                            folder = sub
+                                            dropdownOpen = false
+                                            // Pre-fetch the next level for snappier drill-down.
+                                            browseLoading = true
+                                            scope.launch {
+                                                browseFolders = onBrowseFolders.invoke(sub)
+                                                browseLoading = false
+                                            }
+                                        }
+                                    )
+                                }
+                            }
+                            DropdownMenuItem(
+                                text = { Text("↻ Refresh subdirs", style = CRType.pill, color = c.accent) },
                                 onClick = {
                                     browseLoading = true
                                     scope.launch {
                                         browseFolders = onBrowseFolders.invoke(folder)
                                         browseLoading = false
                                     }
-                                },
-                                enabled = !browseLoading,
-                                colors = ButtonDefaults.filledTonalButtonColors(
-                                    containerColor = c.surface2,
-                                    contentColor = c.text,
-                                )
-                            ) {
-                                if (browseLoading) {
-                                    CircularProgressIndicator(
-                                        modifier = Modifier.size(16.dp),
-                                        strokeWidth = 2.dp,
-                                        color = c.accent
-                                    )
-                                } else {
-                                    Text("Browse", style = CRType.pill)
                                 }
-                            }
-                        }
-                    }
-
-                    if (browseFolders.isNotEmpty()) {
-                        Text("Subdirectories", style = CRType.sectionH, color = c.textDim)
-                        Row(
-                            modifier = Modifier.horizontalScroll(rememberScrollState()),
-                            horizontalArrangement = Arrangement.spacedBy(6.dp)
-                        ) {
-                            browseFolders.forEach { sub ->
-                                FolderChip(
-                                    label = sub.substringAfterLast('/'),
-                                    onClick = { folder = sub; browseFolders = emptyList() }
-                                )
-                            }
-                        }
-                    }
-
-                    if (server.recentFolders.isNotEmpty()) {
-                        Text("Recent", style = CRType.sectionH, color = c.textDim)
-                        Row(
-                            modifier = Modifier.horizontalScroll(rememberScrollState()),
-                            horizontalArrangement = Arrangement.spacedBy(6.dp)
-                        ) {
-                            server.recentFolders.take(5).forEach { recent ->
-                                FolderChip(label = recent, onClick = { folder = recent })
-                            }
+                            )
                         }
                     }
                 }

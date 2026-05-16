@@ -634,7 +634,22 @@ fun TerminalScreen(
                         PromptInputBar(
                             commands = commands,
                             onSend = { text ->
-                                onSendCommand("[200~" + text + "[201~\r")
+                                // Body + Enter as TWO writes with a short gap.
+                                // Claude Code detects pastes by burst speed —
+                                // single text+\r writes land in the prompt as
+                                // multi-line paste, trailing \r is treated as
+                                // newline inside the paste, so user has to
+                                // press Send twice. Splitting closes the burst
+                                // window before the Enter, so it's a fresh
+                                // submit. Bracketed paste markers were the
+                                // wrong fix: claude in the tmux PTY never
+                                // negotiated \e[?2004h and rendered '[200~'
+                                // literally inside the message text.
+                                scope.launch {
+                                    onSendCommand(text)
+                                    kotlinx.coroutines.delay(40)
+                                    onSendCommand("\r")
+                                }
                             },
                             onSendCommand = onSendCommand,
                             onAttachFile = onAttachFile,
