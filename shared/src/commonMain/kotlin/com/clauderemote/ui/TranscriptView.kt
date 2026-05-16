@@ -715,11 +715,59 @@ private fun RoleHeader(role: String, timestamp: String?) {
 /**
  * Render a chunk of markdown using multiplatform-markdown-renderer.
  * Handles headers, lists, tables, bold/italic, inline code, code fences,
- * blockquotes, and links — all theme-aware via the M3 wrapper.
+ * blockquotes, and links. Typography and colors are tuned for a denser,
+ * terminal-tinted look: tighter line-height on body, monospace inline
+ * code blocks, and accent colors borrowed from a typical terminal
+ * palette (green for emphasis, cyan for links).
  */
 @Composable
 private fun RichBody(text: String) {
-    Markdown(content = text)
+    val base = MaterialTheme.typography
+    val mono = androidx.compose.ui.text.font.FontFamily.Monospace
+    val body = base.bodyMedium.copy(
+        lineHeight = base.bodyMedium.fontSize * 1.25f
+    )
+    val typography = com.mikepenz.markdown.m3.markdownTypography(
+        h1 = base.titleLarge.copy(fontWeight = FontWeight.Bold),
+        h2 = base.titleMedium.copy(fontWeight = FontWeight.Bold),
+        h3 = base.titleSmall.copy(fontWeight = FontWeight.Bold),
+        h4 = base.titleSmall,
+        h5 = base.labelLarge,
+        h6 = base.labelMedium,
+        text = body,
+        paragraph = body,
+        quote = body.copy(fontStyle = androidx.compose.ui.text.font.FontStyle.Italic),
+        code = base.bodySmall.copy(fontFamily = mono),
+        inlineCode = base.bodySmall.copy(fontFamily = mono),
+        list = body,
+        link = body.copy(
+            color = androidx.compose.ui.graphics.Color(0xFF6FB8FF),
+            textDecoration = androidx.compose.ui.text.style.TextDecoration.Underline
+        ),
+        table = base.bodySmall.copy(fontFamily = mono),
+        textLink = androidx.compose.ui.text.TextLinkStyles(
+            style = androidx.compose.ui.text.SpanStyle(
+                color = androidx.compose.ui.graphics.Color(0xFF6FB8FF),
+                textDecoration = androidx.compose.ui.text.style.TextDecoration.Underline
+            )
+        )
+    )
+    val colors = com.mikepenz.markdown.m3.markdownColor(
+        text = MaterialTheme.colorScheme.onSurface,
+        codeText = androidx.compose.ui.graphics.Color(0xFFE5C07B),     // terminal yellow
+        inlineCodeText = androidx.compose.ui.graphics.Color(0xFFE5C07B),
+        linkText = androidx.compose.ui.graphics.Color(0xFF6FB8FF),
+        codeBackground = MaterialTheme.colorScheme.surfaceContainerHighest,
+        inlineCodeBackground = MaterialTheme.colorScheme.surfaceContainerHighest,
+        dividerColor = MaterialTheme.colorScheme.outline.copy(alpha = 0.4f),
+        tableText = MaterialTheme.colorScheme.onSurface,
+        tableBackground = MaterialTheme.colorScheme.surfaceContainer
+    )
+    Markdown(
+        content = text,
+        colors = colors,
+        typography = typography
+    )
 }
 
 @Composable
