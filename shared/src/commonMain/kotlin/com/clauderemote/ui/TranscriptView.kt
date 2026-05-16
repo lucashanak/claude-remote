@@ -743,13 +743,6 @@ private fun RichBody(text: String) {
         link = body.copy(
             color = androidx.compose.ui.graphics.Color(0xFF6FB8FF),
             textDecoration = androidx.compose.ui.text.style.TextDecoration.Underline
-        ),
-        table = base.bodySmall.copy(fontFamily = mono),
-        textLink = androidx.compose.ui.text.TextLinkStyles(
-            style = androidx.compose.ui.text.SpanStyle(
-                color = androidx.compose.ui.graphics.Color(0xFF6FB8FF),
-                textDecoration = androidx.compose.ui.text.style.TextDecoration.Underline
-            )
         )
     )
     val colors = com.mikepenz.markdown.m3.markdownColor(
@@ -759,9 +752,7 @@ private fun RichBody(text: String) {
         linkText = androidx.compose.ui.graphics.Color(0xFF6FB8FF),
         codeBackground = MaterialTheme.colorScheme.surfaceContainerHighest,
         inlineCodeBackground = MaterialTheme.colorScheme.surfaceContainerHighest,
-        dividerColor = MaterialTheme.colorScheme.outline.copy(alpha = 0.4f),
-        tableText = MaterialTheme.colorScheme.onSurface,
-        tableBackground = MaterialTheme.colorScheme.surfaceContainer
+        dividerColor = MaterialTheme.colorScheme.outline.copy(alpha = 0.4f)
     )
     Markdown(
         content = text,
