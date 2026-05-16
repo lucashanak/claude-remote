@@ -3,6 +3,7 @@ package com.clauderemote.ui
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.interaction.MutableInteractionSource
@@ -17,6 +18,8 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Close
@@ -44,8 +47,10 @@ import com.clauderemote.session.CommandFetcher
 import com.clauderemote.session.SlashCommand
 import com.clauderemote.session.status.RemoteSessionStatus
 import com.clauderemote.session.transcript.TranscriptEntry
+import com.clauderemote.ui.components.CRCard
 import com.clauderemote.ui.components.CRStatus
 import com.clauderemote.ui.components.Pill
+import com.clauderemote.ui.components.ServerGlyph
 import com.clauderemote.ui.components.StatusIndicator
 import com.clauderemote.ui.components.color
 import com.clauderemote.ui.theme.CRTerminalView
@@ -1286,7 +1291,7 @@ private fun CRControlBar(
 }
 
 // ---------------------------------------------------------------------------
-// SESSION SIDE PANEL (unchanged logic, restyled)
+// SESSION SIDE PANEL — redesigned (CRCard + group-by-server)
 // ---------------------------------------------------------------------------
 
 @Composable
@@ -1304,9 +1309,12 @@ private fun SessionSidePanel(
     modifier: Modifier = Modifier
 ) {
     val c = CRTheme.colors
+    val m = CRTheme.metrics
+    val dense = m.sessionCardOneLine
     var renamingItem by remember { mutableStateOf<SessionItem?>(null) }
     var renameText by remember { mutableStateOf("") }
 
+    // Rename dialog (compose-only path)
     if (onNativeRenameDialog == null) {
         renamingItem?.let { item ->
             AlertDialog(
@@ -1334,108 +1342,284 @@ private fun SessionSidePanel(
         }
     }
 
-    Surface(
-        color = c.surface,
-        tonalElevation = 0.dp,
+    // Re-group flat items by server id/name
+    val allFlat: List<SessionItem> = remember(allSessions) { allSessions.values.flatten() }
+    val byServer: Map<String, List<SessionItem>> = remember(allFlat) {
+        allFlat.groupBy { item ->
+            item.tab?.server?.id ?: item.remote?.server?.id ?: "unknown"
+        }
+    }
+
+    Column(
         modifier = modifier
+            .fillMaxSize()
+            .background(c.surface)
     ) {
-        Column(modifier = Modifier.fillMaxSize()) {
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .background(c.surface)
-                    .padding(8.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                IconButton(onClick = onMenuOpen, modifier = Modifier.size(32.dp)) {
-                    Icon(Icons.Default.Menu, "Menu", tint = c.textDim, modifier = Modifier.size(18.dp))
+        // ── Panel header ────────────────────────────────────────────────────
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .background(c.surface)
+                .padding(horizontal = 8.dp, vertical = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(4.dp),
+        ) {
+            IconButton(onClick = onMenuOpen, modifier = Modifier.size(32.dp)) {
+                Icon(Icons.Default.Menu, "Menu", tint = c.textDim, modifier = Modifier.size(18.dp))
+            }
+            Text(
+                "Sessions",
+                style = CRType.cardTitle,
+                color = c.text,
+                modifier = Modifier.weight(1f),
+            )
+            IconButton(onClick = onNewTab, modifier = Modifier.size(32.dp)) {
+                Icon(Icons.Default.Add, "New", tint = c.accent, modifier = Modifier.size(18.dp))
+            }
+        }
+        HorizontalDivider(color = c.border, thickness = 1.dp)
+
+        // ── Session list grouped by server ──────────────────────────────────
+        LazyColumn(modifier = Modifier.fillMaxSize()) {
+            byServer.forEach { (_, items) ->
+                val server = items.first().tab?.server ?: items.first().remote?.server
+                if (server != null) {
+                    item(key = "server_${server.id}") {
+                        SidePanelGroupLabel(
+                            serverName = server.name,
+                            count = items.size,
+                        )
+                    }
                 }
-                Text("Sessions", style = CRType.cardTitle, color = c.text, modifier = Modifier.weight(1f))
-                IconButton(onClick = onNewTab, modifier = Modifier.size(32.dp)) {
-                    Icon(Icons.Default.Add, "New", tint = c.accent, modifier = Modifier.size(18.dp))
+                items(items, key = { it.id }) { item ->
+                    SidePanelSessionRow(
+                        item = item,
+                        isActive = item.tab?.id == activeTabId,
+                        activity = sessionActivities[item.id],
+                        dense = dense,
+                        onTabSwitch = onTabSwitch,
+                        onTabClose = onTabClose,
+                        onAttachRemote = onAttachRemote,
+                        onRename = if (onRenameSession != null) { label ->
+                            if (onNativeRenameDialog != null && item.tab != null) {
+                                onNativeRenameDialog.invoke(item.tab.id, label)
+                            } else {
+                                renameText = label
+                                renamingItem = item
+                            }
+                        } else null,
+                    )
                 }
             }
-            HorizontalDivider(color = c.border)
 
-            Column(modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState())) {
-                allSessions.entries.forEachIndexed { index, (folder, items) ->
-                    if (index > 0) Spacer(Modifier.height(4.dp))
+            // Footer: new session button
+            item(key = "footer") {
+                HorizontalDivider(color = c.border, thickness = 1.dp)
+                val shape = RoundedCornerShape(8.dp)
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 10.dp, vertical = 8.dp)
+                        .clip(shape)
+                        .border(1.dp, c.border, shape)
+                        .clickable(onClick = onNewTab)
+                        .padding(horizontal = 12.dp, vertical = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                ) {
+                    Icon(Icons.Default.Add, null, tint = c.accent, modifier = Modifier.size(14.dp))
+                    Text("New session", style = CRType.bodyDim, color = c.accent)
+                }
+            }
+        }
+    }
+}
+
+// ── Group label (mirrors DrawerGroupLabel) ────────────────────────────────────
+
+@Composable
+private fun SidePanelGroupLabel(serverName: String, count: Int) {
+    val c = CRTheme.colors
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(start = 10.dp, end = 10.dp, top = 10.dp, bottom = 4.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+        ServerGlyph(name = serverName, modifier = Modifier.size(14.dp))
+        Text(
+            serverName,
+            style = CRType.sectionH,
+            color = c.textDim,
+            modifier = Modifier.weight(1f),
+            maxLines = 1,
+            overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+        )
+        Pill(
+            text = "$count",
+            background = c.surface2,
+            foreground = c.textDim,
+        )
+    }
+}
+
+// ── Per-session row ───────────────────────────────────────────────────────────
+
+@Composable
+private fun SidePanelSessionRow(
+    item: SessionItem,
+    isActive: Boolean,
+    activity: com.clauderemote.model.SessionActivity?,
+    dense: Boolean,
+    onTabSwitch: (String) -> Unit,
+    onTabClose: (String) -> Unit,
+    onAttachRemote: ((com.clauderemote.model.RemoteSession) -> Unit)?,
+    onRename: ((String) -> Unit)?,
+) {
+    val c = CRTheme.colors
+    val crStatus = activity.sidePanelToCRStatus(item.isConnected)
+    val mode = item.tab?.mode
+
+    // Folder basename · alias label
+    val folderBase = item.folder.trimEnd('/').substringAfterLast('/').ifBlank { item.folder }
+    val rowLabel = buildString {
+        append(folderBase)
+        val alias = item.tab?.alias?.ifBlank { null }
+        if (alias != null) append(" · $alias")
+    }
+
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(if (isActive) c.tintAccent else Color.Transparent)
+            .clickable {
+                if (item.isConnected && item.tab != null) onTabSwitch(item.tab.id)
+                else if (item.remote != null) onAttachRemote?.invoke(item.remote)
+            }
+            .height(IntrinsicSize.Min),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        // 3 dp accent bar for active row
+        Box(
+            Modifier
+                .width(3.dp)
+                .fillMaxHeight()
+                .background(if (isActive) c.accent else Color.Transparent),
+        )
+
+        if (dense) {
+            // ── Dense: single line ──────────────────────────────────────────
+            Row(
+                modifier = Modifier
+                    .weight(1f)
+                    .padding(horizontal = 10.dp, vertical = 6.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                StatusIndicator(
+                    status = crStatus,
+                    modifier = Modifier.size(8.dp),
+                    viz = com.clauderemote.ui.theme.CRStatusViz.Dot,
+                )
+                Text(
+                    rowLabel,
+                    style = CRType.bodyDim,
+                    color = if (isActive) c.text else c.textDim,
+                    maxLines = 1,
+                    overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f),
+                )
+                if (isActive && item.isConnected) {
+                    IconButton(
+                        onClick = { item.tab?.let { onTabClose(it.id) } },
+                        modifier = Modifier.size(20.dp),
+                    ) { Icon(Icons.Default.Close, "Close", tint = c.textDim, modifier = Modifier.size(12.dp)) }
+                }
+            }
+        } else {
+            // ── Regular / Compact: two-line with ServerGlyph ────────────────
+            Row(
+                modifier = Modifier
+                    .weight(1f)
+                    .padding(start = 8.dp, end = 4.dp, top = 8.dp, bottom = 8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                // ServerGlyph block
+                val serverName = item.tab?.server?.name ?: item.remote?.server?.name ?: "?"
+                ServerGlyph(name = serverName, modifier = Modifier.size(28.dp))
+
+                Column(modifier = Modifier.weight(1f)) {
                     Text(
-                        folder,
-                        style = CRType.sectionH,
-                        color = c.textDim,
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .background(c.surface2)
-                            .padding(start = 12.dp, end = 12.dp, top = 6.dp, bottom = 6.dp)
+                        rowLabel,
+                        style = CRType.cardTitle,
+                        color = if (isActive) c.text else c.textDim,
+                        maxLines = 1,
+                        overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
                     )
-                    items.forEach { item ->
-                        val isActive = item.tab?.id == activeTabId
-                        val dotColor = if (!item.isConnected) c.idle
-                            else activityDotColor(
-                                sessionActivities[item.id],
-                                item.status ?: SessionStatus.ACTIVE
-                            )
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .background(
-                                    if (isActive) c.tintAccent else Color.Transparent
-                                )
-                                .clickable {
-                                    if (item.isConnected && item.tab != null) onTabSwitch(item.tab.id)
-                                    else if (item.remote != null) onAttachRemote?.invoke(item.remote)
-                                }
-                                .height(IntrinsicSize.Min),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Box(
-                                modifier = Modifier
-                                    .width(3.dp)
-                                    .fillMaxHeight()
-                                    .background(
-                                        if (isActive) c.accent else Color.Transparent
-                                    )
-                            )
-                            Row(
-                                modifier = Modifier
-                                    .weight(1f)
-                                    .padding(start = 17.dp, end = 4.dp, top = 6.dp, bottom = 6.dp),
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                Box(modifier = Modifier.size(8.dp).background(dotColor, CircleShape))
-                                Spacer(Modifier.width(8.dp))
-                                Text(
-                                    item.label,
-                                    style = CRType.bodyDim,
-                                    color = if (isActive) c.text else c.textDim,
-                                    modifier = Modifier.weight(1f)
-                                )
-                                if (isActive && item.isConnected && onRenameSession != null) {
-                                    IconButton(
-                                        onClick = {
-                                            if (onNativeRenameDialog != null && item.tab != null) {
-                                                onNativeRenameDialog.invoke(item.tab.id, item.label)
-                                            } else {
-                                                renameText = item.label
-                                                renamingItem = item
-                                            }
-                                        },
-                                        modifier = Modifier.size(20.dp)
-                                    ) { Text("✎", style = CRType.monoTiny, color = c.textDim) }
-                                }
-                                if (isActive && item.isConnected) {
-                                    IconButton(
-                                        onClick = { item.tab?.let { onTabClose(it.id) } },
-                                        modifier = Modifier.size(20.dp)
-                                    ) { Icon(Icons.Default.Close, "Close", tint = c.textDim, modifier = Modifier.size(12.dp)) }
-                                }
-                            }
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(4.dp),
+                    ) {
+                        StatusIndicator(
+                            status = crStatus,
+                            modifier = Modifier.size(8.dp),
+                            viz = com.clauderemote.ui.theme.CRStatusViz.Dot,
+                        )
+                        if (mode != null) {
+                            SidePanelModePill(mode = mode)
                         }
+                    }
+                }
+
+                Column(
+                    horizontalAlignment = Alignment.End,
+                    verticalArrangement = Arrangement.spacedBy(2.dp),
+                ) {
+                    if (isActive && onRename != null && item.isConnected) {
+                        IconButton(
+                            onClick = { onRename(item.label) },
+                            modifier = Modifier.size(18.dp),
+                        ) { Text("✎", style = CRType.monoTiny, color = c.textDim) }
+                    }
+                    if (isActive && item.isConnected) {
+                        IconButton(
+                            onClick = { item.tab?.let { onTabClose(it.id) } },
+                            modifier = Modifier.size(18.dp),
+                        ) { Icon(Icons.Default.Close, "Close", tint = c.textDim, modifier = Modifier.size(12.dp)) }
                     }
                 }
             }
         }
+    }
+}
+
+// ── Mode pill for side panel ──────────────────────────────────────────────────
+
+@Composable
+private fun SidePanelModePill(mode: ClaudeMode) {
+    val c = CRTheme.colors
+    val (bg, fg, label) = when (mode) {
+        ClaudeMode.YOLO        -> Triple(c.tintRed,    c.modeYolo,   "YOLO")
+        ClaudeMode.PLAN        -> Triple(c.tintPurple, c.modePlan,   "PLAN")
+        ClaudeMode.AUTO_ACCEPT -> Triple(c.tintGreen,  c.modeAuto,   "AUTO")
+        ClaudeMode.NORMAL      -> Triple(c.surface2,   c.modeNormal, "NORM")
+    }
+    Pill(text = label, background = bg, foreground = fg)
+}
+
+// ── SessionActivity → CRStatus for side panel ────────────────────────────────
+
+private fun com.clauderemote.model.SessionActivity?.sidePanelToCRStatus(isConnected: Boolean): CRStatus {
+    if (!isConnected) return CRStatus.Disconnected
+    return when (this) {
+        com.clauderemote.model.SessionActivity.WORKING           -> CRStatus.Working
+        com.clauderemote.model.SessionActivity.WAITING_FOR_INPUT -> CRStatus.Ready
+        com.clauderemote.model.SessionActivity.APPROVAL_NEEDED   -> CRStatus.Approval
+        com.clauderemote.model.SessionActivity.IDLE              -> CRStatus.Idle
+        com.clauderemote.model.SessionActivity.DISCONNECTED      -> CRStatus.Disconnected
+        null                                                     -> CRStatus.Idle
     }
 }
 

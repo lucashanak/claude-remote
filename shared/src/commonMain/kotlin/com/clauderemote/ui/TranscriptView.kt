@@ -1,6 +1,7 @@
 package com.clauderemote.ui
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
@@ -8,12 +9,15 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -22,13 +26,14 @@ import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.lazy.LazyListScope
-import androidx.compose.ui.draw.alpha
-import androidx.compose.ui.graphics.Color
 import com.clauderemote.model.SessionActivity
 import com.clauderemote.session.status.RemoteSessionStatus
 import com.clauderemote.session.transcript.TranscriptEntry
+import com.clauderemote.ui.components.CRCard
+import com.clauderemote.ui.components.Pill
+import com.clauderemote.ui.theme.CRTheme
+import com.clauderemote.ui.theme.CRType
 import com.mikepenz.markdown.m3.Markdown
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -87,7 +92,6 @@ fun TranscriptView(
         }
     }
     // Find the most recent TodoWrite tool_use to derive an open-todo count.
-    // Cheap: scans backwards from the end and stops at the first match.
     val todoPending = remember(entries) { countOpenTodos(entries) }
 
     // Decay a stuck WORKING state. The prompt detector that drives `activity`
@@ -143,22 +147,18 @@ fun TranscriptView(
             ) {
                 Text(
                     "Waiting for transcript…",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                    style = CRType.bodyDim,
+                    color = CRTheme.colors.textDim
                 )
             }
             return@Column
         }
 
         val baseDensity = LocalDensity.current
+        val cardGap = CRTheme.metrics.cardGap
         // Pre-group consecutive ToolCalls so a run of Read/Edit/Bash collapses
-        // to one tight stack instead of N bordered cards. Other entries pass
-        // through unchanged as singletons.
+        // to one tight stack instead of N bordered cards.
         val rendered = remember(filtered) { groupConsecutiveTools(filtered) }
-        // Auto-scroll based on the *rendered* list size (post-grouping +
-        // skeleton), not the filtered entry count — grouping fuses runs of
-        // ToolCalls into one LazyColumn item, so filtered.size and the
-        // actual item count diverge.
         var didInitialJump by remember { mutableStateOf(false) }
         val itemsCount = rendered.size + if (skeletonShowing) 1 else 0
         LaunchedEffect(itemsCount) {
@@ -186,7 +186,7 @@ fun TranscriptView(
                 LazyColumn(
                     state = listState,
                     modifier = Modifier.fillMaxSize().padding(horizontal = 8.dp),
-                    verticalArrangement = Arrangement.spacedBy(2.dp),
+                    verticalArrangement = Arrangement.spacedBy(cardGap),
                     contentPadding = PaddingValues(vertical = 8.dp)
                 ) {
                     items(
@@ -222,80 +222,116 @@ fun TranscriptView(
 
 @Composable
 private fun UserPromptCard(entry: TranscriptEntry.UserPrompt) {
+    val c = CRTheme.colors
+    val m = CRTheme.metrics
     Row(
-        modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
+        modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp),
         horizontalArrangement = Arrangement.End
     ) {
-        Surface(
-            modifier = Modifier.widthIn(max = 600.dp),
-            color = MaterialTheme.colorScheme.primary,
-            contentColor = MaterialTheme.colorScheme.onPrimary,
-            shape = RoundedCornerShape(topStart = 14.dp, topEnd = 14.dp, bottomStart = 14.dp, bottomEnd = 4.dp)
+        Column(
+            modifier = Modifier
+                .widthIn(max = 600.dp)
+                .background(c.tintAccent, RoundedCornerShape(topStart = 14.dp, topEnd = 14.dp, bottomStart = 14.dp, bottomEnd = 4.dp))
+                .border(1.dp, c.accent.copy(alpha = 0.35f), RoundedCornerShape(topStart = 14.dp, topEnd = 14.dp, bottomStart = 14.dp, bottomEnd = 4.dp))
+                .padding(horizontal = m.cardPadH, vertical = m.cardPadV)
         ) {
-            Column(modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp)) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween,
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Pill(text = "USER", background = c.tintAccent, foreground = c.accent)
                 if (entry.timestamp != null) {
                     Text(
                         formatTimestamp(entry.timestamp),
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onPrimary.copy(alpha = 0.7f)
+                        style = CRType.monoTiny,
+                        color = c.textDim
                     )
-                    Spacer(Modifier.height(2.dp))
                 }
-                RichBody(entry.text)
             }
+            Spacer(Modifier.height(4.dp))
+            RichBody(entry.text)
         }
     }
 }
 
 @Composable
 private fun SlashCommandRow(entry: TranscriptEntry.SlashCommand) {
-    Surface(
-        modifier = Modifier.fillMaxWidth(),
-        color = MaterialTheme.colorScheme.tertiaryContainer,
-        shape = RoundedCornerShape(6.dp)
+    val c = CRTheme.colors
+    val m = CRTheme.metrics
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(c.surface2, RoundedCornerShape(6.dp))
+            .border(1.dp, c.border, RoundedCornerShape(6.dp))
+            .padding(horizontal = m.cardPadH, vertical = 4.dp)
     ) {
         Text(
             "/${entry.name}${if (entry.args.isNotBlank()) " ${entry.args}" else ""}",
-            modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp),
-            style = MaterialTheme.typography.labelMedium,
-            fontFamily = FontFamily.Monospace
+            style = CRType.mono,
+            color = c.accent
         )
     }
 }
 
 @Composable
 private fun AssistantTextCard(entry: TranscriptEntry.AssistantText) {
+    val c = CRTheme.colors
+    val m = CRTheme.metrics
     Column(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(horizontal = 4.dp, vertical = 4.dp)
+            .background(c.surface2, RoundedCornerShape(m.cardRadius))
+            .border(1.dp, c.border, RoundedCornerShape(m.cardRadius))
+            .padding(horizontal = m.cardPadH, vertical = m.cardPadV)
     ) {
-        RoleHeader(entry.model ?: "Claude", entry.timestamp)
-        Spacer(Modifier.height(2.dp))
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween,
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Pill(text = "ASSISTANT", background = c.tintAccent, foreground = c.accent)
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
+                if (entry.model != null) {
+                    Text(entry.model, style = CRType.monoTiny, color = c.textDim)
+                }
+                if (entry.timestamp != null) {
+                    Text(formatTimestamp(entry.timestamp), style = CRType.monoTiny, color = c.textDim)
+                }
+            }
+        }
+        Spacer(Modifier.height(6.dp))
         RichBody(entry.text)
     }
 }
 
 @Composable
 private fun ThinkingCard(entry: TranscriptEntry.AssistantThinking) {
+    val c = CRTheme.colors
+    val m = CRTheme.metrics
     var expanded by remember { mutableStateOf(false) }
-    Surface(
-        modifier = Modifier.fillMaxWidth().clickable { expanded = !expanded },
-        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
-        shape = RoundedCornerShape(6.dp)
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(c.surface, RoundedCornerShape(6.dp))
+            .border(1.dp, c.border.copy(alpha = 0.5f), RoundedCornerShape(6.dp))
+            .clickable { expanded = !expanded }
     ) {
-        Column(modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp)) {
+        Column(modifier = Modifier.padding(horizontal = m.cardPadH, vertical = 6.dp)) {
             Text(
                 if (expanded) "▼ thinking" else "▶ thinking",
-                style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
+                style = CRType.monoTiny,
+                color = c.textDim
             )
             if (expanded) {
                 Spacer(Modifier.height(4.dp))
                 Text(
                     entry.text,
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                    style = CRType.mono,
+                    color = c.textDim
                 )
             }
         }
@@ -304,77 +340,85 @@ private fun ThinkingCard(entry: TranscriptEntry.AssistantThinking) {
 
 /**
  * Compact one-line tool row: glyph · name · summary · status indicator.
- * Expanded reveals input + result indented under the row, no card framing.
+ * Expanded reveals input + result indented under the row, wrapped in CRCard.
  */
 @Composable
 private fun ToolRow(
     entry: TranscriptEntry.ToolCall,
     result: TranscriptEntry.ToolResult?
 ) {
+    val c = CRTheme.colors
+    val m = CRTheme.metrics
     var expanded by remember { mutableStateOf(false) }
     val errorTint = result?.isError == true
+    val categoryTint = toolCategoryTint(entry.name, c)
     val accent = when {
-        errorTint -> MaterialTheme.colorScheme.error
-        result == null -> MaterialTheme.colorScheme.tertiary
-        else -> MaterialTheme.colorScheme.onSurfaceVariant
+        errorTint -> c.disconnected
+        result == null -> c.working
+        else -> categoryTint
     }
-    Column {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .clickable { expanded = !expanded }
-                .padding(horizontal = 4.dp, vertical = 2.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Text(
-                glyphFor(entry.name),
-                style = MaterialTheme.typography.labelMedium,
-                fontFamily = FontFamily.Monospace,
-                color = accent,
-                modifier = Modifier.padding(end = 6.dp)
-            )
-            Text(
-                entry.name,
-                style = MaterialTheme.typography.labelMedium,
-                color = accent,
-                modifier = Modifier.padding(end = 8.dp)
-            )
-            Text(
-                entry.inputSummary,
-                style = MaterialTheme.typography.bodySmall,
-                fontFamily = FontFamily.Monospace,
-                maxLines = 1,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier.weight(1f).horizontalScroll(rememberScrollState())
-            )
-            if (result == null) {
-                val t = rememberInfiniteTransition(label = "tool-pending")
-                val pulseAlpha by t.animateFloat(
-                    initialValue = 0.35f,
-                    targetValue = 1f,
-                    animationSpec = infiniteRepeatable(
-                        animation = tween(900),
-                        repeatMode = RepeatMode.Reverse
-                    ),
-                    label = "tool-pending-alpha"
+
+    CRCard(
+        background = c.surface,
+        borderColor = accent.copy(alpha = 0.35f),
+        padding = PaddingValues(horizontal = m.cardPadH, vertical = 4.dp)
+    ) {
+        Column {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable { expanded = !expanded }
+                    .padding(vertical = 2.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Pill(
+                    text = "TOOL",
+                    background = categoryTint.copy(alpha = 0.18f),
+                    foreground = categoryTint
+                )
+                Spacer(Modifier.width(6.dp))
+                Text(
+                    entry.name,
+                    style = CRType.cardTitle,
+                    color = accent,
+                    modifier = Modifier.padding(end = 8.dp)
                 )
                 Text(
-                    "●",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.primary,
-                    modifier = Modifier.padding(start = 4.dp).alpha(pulseAlpha)
+                    entry.inputSummary,
+                    style = CRType.mono,
+                    maxLines = 1,
+                    color = c.textDim,
+                    modifier = Modifier.weight(1f).horizontalScroll(rememberScrollState())
                 )
-            } else if (errorTint) {
-                Text(
-                    "!",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.error,
-                    modifier = Modifier.padding(start = 4.dp)
-                )
+                if (result == null) {
+                    val t = rememberInfiniteTransition(label = "tool-pending")
+                    val pulseAlpha by t.animateFloat(
+                        initialValue = 0.35f,
+                        targetValue = 1f,
+                        animationSpec = infiniteRepeatable(
+                            animation = tween(900),
+                            repeatMode = RepeatMode.Reverse
+                        ),
+                        label = "tool-pending-alpha"
+                    )
+                    Text(
+                        "●",
+                        style = CRType.monoTiny,
+                        color = c.working,
+                        modifier = Modifier.padding(start = 4.dp).alpha(pulseAlpha)
+                    )
+                } else if (errorTint) {
+                    Text(
+                        "!",
+                        style = CRType.monoTiny,
+                        color = c.disconnected,
+                        modifier = Modifier.padding(start = 4.dp)
+                    )
+                }
             }
-        }
-        if (expanded) {
-            ToolExpandedDetail(entry, result)
+            if (expanded) {
+                ToolExpandedDetail(entry, result)
+            }
         }
     }
 }
@@ -384,6 +428,7 @@ private fun ToolExpandedDetail(
     entry: TranscriptEntry.ToolCall,
     result: TranscriptEntry.ToolResult?
 ) {
+    val c = CRTheme.colors
     val errorTint = result?.isError == true
     Column(
         modifier = Modifier
@@ -399,9 +444,8 @@ private fun ToolExpandedDetail(
             Spacer(Modifier.height(4.dp))
             Text(
                 if (errorTint) "error" else "result",
-                style = MaterialTheme.typography.labelSmall,
-                color = if (errorTint) MaterialTheme.colorScheme.error
-                       else MaterialTheme.colorScheme.onSurfaceVariant,
+                style = CRType.monoTiny,
+                color = if (errorTint) c.disconnected else c.textDim,
                 modifier = Modifier.padding(bottom = 2.dp)
             )
             IndentedMono(result.text, error = errorTint)
@@ -416,6 +460,7 @@ private fun ToolExpandedDetail(
  */
 @Composable
 private fun EditDiffBlock(fullInput: String) {
+    val c = CRTheme.colors
     val parsed = remember(fullInput) { parseEditInput(fullInput) }
     if (parsed == null) {
         IndentedMono(fullInput)
@@ -426,9 +471,8 @@ private fun EditDiffBlock(fullInput: String) {
         if (path.isNotBlank()) {
             Text(
                 path,
-                style = MaterialTheme.typography.labelSmall,
-                fontFamily = FontFamily.Monospace,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
+                style = CRType.monoTiny,
+                color = c.textDim
             )
             Spacer(Modifier.height(2.dp))
         }
@@ -438,6 +482,7 @@ private fun EditDiffBlock(fullInput: String) {
 
 @Composable
 private fun WriteDiffBlock(fullInput: String) {
+    val c = CRTheme.colors
     val parsed = remember(fullInput) { parseWriteInput(fullInput) }
     if (parsed == null) {
         IndentedMono(fullInput)
@@ -448,9 +493,8 @@ private fun WriteDiffBlock(fullInput: String) {
         if (path.isNotBlank()) {
             Text(
                 path,
-                style = MaterialTheme.typography.labelSmall,
-                fontFamily = FontFamily.Monospace,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
+                style = CRType.monoTiny,
+                color = c.textDim
             )
             Spacer(Modifier.height(2.dp))
         }
@@ -460,10 +504,12 @@ private fun WriteDiffBlock(fullInput: String) {
 
 @Composable
 private fun DiffPane(removed: String, added: String) {
-    val errorBg = MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.35f)
-    val addBg = androidx.compose.ui.graphics.Color(0xFF1E4620).copy(alpha = 0.45f)
-    val errorFg = MaterialTheme.colorScheme.error
-    val addFg = androidx.compose.ui.graphics.Color(0xFF7EE787)
+    val c = CRTheme.colors
+    // Error (red) bg for removed lines, green tint for added lines
+    val errorBg = c.disconnected.copy(alpha = 0.15f)
+    val addBg = c.ready.copy(alpha = 0.12f)
+    val errorFg = c.disconnected
+    val addFg = c.ready
     Column(
         modifier = Modifier
             .fillMaxWidth()
@@ -486,8 +532,8 @@ private fun DiffPane(removed: String, added: String) {
 private fun DiffLine(
     prefix: String,
     text: String,
-    prefixColor: androidx.compose.ui.graphics.Color,
-    background: androidx.compose.ui.graphics.Color
+    prefixColor: Color,
+    background: Color
 ) {
     Row(
         modifier = Modifier
@@ -497,16 +543,14 @@ private fun DiffLine(
     ) {
         Text(
             prefix,
-            style = MaterialTheme.typography.bodySmall,
-            fontFamily = FontFamily.Monospace,
+            style = CRType.mono,
             color = prefixColor,
             modifier = Modifier.padding(end = 6.dp)
         )
         Text(
             text,
-            style = MaterialTheme.typography.bodySmall,
-            fontFamily = FontFamily.Monospace,
-            color = MaterialTheme.colorScheme.onSurface
+            style = CRType.mono,
+            color = CRTheme.colors.text
         )
     }
 }
@@ -547,8 +591,8 @@ private fun parseWriteInput(json: String): Pair<String, String>? {
 
 @Composable
 private fun IndentedMono(text: String, error: Boolean = false) {
-    val border = if (error) MaterialTheme.colorScheme.error.copy(alpha = 0.6f)
-                 else MaterialTheme.colorScheme.outline.copy(alpha = 0.5f)
+    val c = CRTheme.colors
+    val border = if (error) c.disconnected.copy(alpha = 0.6f) else c.border.copy(alpha = 0.5f)
     Row(modifier = Modifier.fillMaxWidth()) {
         Box(
             modifier = Modifier
@@ -564,9 +608,8 @@ private fun IndentedMono(text: String, error: Boolean = false) {
         ) {
             Text(
                 text,
-                style = MaterialTheme.typography.bodySmall,
-                fontFamily = FontFamily.Monospace,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
+                style = CRType.mono,
+                color = if (error) c.disconnected else c.textDim
             )
         }
     }
@@ -577,18 +620,14 @@ private fun ToolGroupBlock(
     calls: List<TranscriptEntry.ToolCall>,
     results: Map<String, TranscriptEntry.ToolResult>
 ) {
-    Column {
+    val c = CRTheme.colors
+    val m = CRTheme.metrics
+    Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
         for (call in calls) {
             ToolRow(call, results[call.toolUseId])
         }
     }
 }
-
-// Single neutral glyph for every tool. Status (pending/error/done) is
-// communicated via color and the trailing indicator, not via the prefix
-// shape — matches the codicon-style restraint of the Claude Code chat
-// panel where every tool call leads with the same arrow.
-private fun glyphFor(name: String): String = "▸"
 
 private sealed class RenderItem {
     data class Single(val entry: TranscriptEntry) : RenderItem()
@@ -597,9 +636,7 @@ private sealed class RenderItem {
 
 /**
  * Walk the entries and fuse any run of two-or-more consecutive ToolCall
- * entries into a single ToolGroup item. Single tool calls render as
- * standalone rows (avoids creating a singleton group around an isolated
- * tool call between two assistant text blocks).
+ * entries into a single ToolGroup item.
  */
 private fun groupConsecutiveTools(entries: List<TranscriptEntry>): List<RenderItem> {
     val out = ArrayList<RenderItem>(entries.size)
@@ -625,44 +662,47 @@ private fun groupConsecutiveTools(entries: List<TranscriptEntry>): List<RenderIt
 
 @Composable
 private fun ToolResultCard(entry: TranscriptEntry.ToolResult) {
+    val c = CRTheme.colors
+    val m = CRTheme.metrics
     var expanded by remember { mutableStateOf(false) }
     val lines = entry.text.lines()
     val preview = lines.take(3).joinToString("\n")
     val hasMore = lines.size > 3 || entry.text.length > preview.length
-    val bg =
-        if (entry.isError) MaterialTheme.colorScheme.errorContainer
-        else MaterialTheme.colorScheme.surfaceVariant
-    Surface(
-        modifier = Modifier.fillMaxWidth().padding(start = 16.dp),
-        color = bg,
-        shape = RoundedCornerShape(6.dp)
+    val bg = if (entry.isError) c.disconnected.copy(alpha = 0.12f) else c.surface2
+    val borderCol = if (entry.isError) c.disconnected.copy(alpha = 0.4f) else c.border
+
+    CRCard(
+        background = bg,
+        borderColor = borderCol,
+        padding = PaddingValues(horizontal = m.cardPadH, vertical = 6.dp),
+        modifier = Modifier.padding(start = 16.dp)
     ) {
-        Column(modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp)) {
+        Column {
             Row(
                 modifier = Modifier.fillMaxWidth().clickable(enabled = hasMore) { expanded = !expanded },
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Text(
-                    if (entry.isError) "✗ result" else "↳ result",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = if (entry.isError) MaterialTheme.colorScheme.error
-                           else MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.padding(end = 6.dp)
+                Pill(
+                    text = if (entry.isError) "ERROR" else "RESULT",
+                    background = if (entry.isError) c.disconnected.copy(alpha = 0.18f) else c.tintAccent,
+                    foreground = if (entry.isError) c.disconnected else c.accent
                 )
+                Spacer(Modifier.width(6.dp))
                 if (hasMore) {
                     Text(
                         if (expanded) "▼" else "▶",
-                        style = MaterialTheme.typography.labelSmall
+                        style = CRType.monoTiny,
+                        color = c.textDim
                     )
                 }
             }
-            Spacer(Modifier.height(2.dp))
+            Spacer(Modifier.height(4.dp))
             MonospaceBlock(if (expanded) entry.text else preview)
             if (!expanded && hasMore) {
                 Text(
                     "(${lines.size - 3} more lines — tap to expand)",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                    style = CRType.monoTiny,
+                    color = c.textDim
                 )
             }
         }
@@ -671,70 +711,51 @@ private fun ToolResultCard(entry: TranscriptEntry.ToolResult) {
 
 @Composable
 private fun SystemNoteRow(entry: TranscriptEntry.SystemNote) {
-    Surface(
-        modifier = Modifier.fillMaxWidth(),
-        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f),
-        shape = RoundedCornerShape(4.dp)
+    val c = CRTheme.colors
+    val m = CRTheme.metrics
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(c.surface.copy(alpha = 0.4f), RoundedCornerShape(4.dp))
+            .border(1.dp, c.border.copy(alpha = 0.3f), RoundedCornerShape(4.dp))
+            .padding(horizontal = m.cardPadH, vertical = 4.dp)
     ) {
-        Column(modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp)) {
+        Column {
             Text(
                 "system · ${entry.subtype}",
-                style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
+                style = CRType.monoTiny,
+                color = c.textDim
             )
             if (entry.text.isNotBlank()) {
                 Text(
                     entry.text.take(500),
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                    style = CRType.mono,
+                    color = c.textDim
                 )
             }
         }
     }
 }
 
-@Composable
-private fun RoleHeader(role: String, timestamp: String?) {
-    Row(verticalAlignment = Alignment.CenterVertically) {
-        Text(
-            role,
-            style = MaterialTheme.typography.labelMedium,
-            fontWeight = FontWeight.Bold
-        )
-        if (timestamp != null) {
-            Spacer(Modifier.width(8.dp))
-            Text(
-                formatTimestamp(timestamp),
-                style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
-        }
-    }
-}
-
 /**
  * Render a chunk of markdown using multiplatform-markdown-renderer.
- * Handles headers, lists, tables, bold/italic, inline code, code fences,
- * blockquotes, and links. Typography and colors are tuned for a denser,
- * terminal-tinted look: tighter line-height on body, monospace inline
- * code blocks, and accent colors borrowed from a typical terminal
- * palette (green for emphasis, cyan for links).
+ * Typography and colors use CRTheme tokens.
  */
 @Composable
 private fun RichBody(text: String) {
-    val base = MaterialTheme.typography
-    val mono = androidx.compose.ui.text.font.FontFamily.Monospace
-    val body = base.bodySmall.copy(
-        lineHeight = base.bodySmall.fontSize * 1.15f
+    val c = CRTheme.colors
+    val mono = FontFamily.Monospace
+    val body = CRType.bodyDim.copy(
+        lineHeight = CRType.bodyDim.fontSize * 1.15f
     )
-    val codeStyle = base.labelSmall.copy(fontFamily = mono)
+    val codeStyle = CRType.monoTiny
     val typography = com.mikepenz.markdown.m3.markdownTypography(
-        h1 = body.copy(fontWeight = FontWeight.Bold, fontSize = base.titleSmall.fontSize),
-        h2 = body.copy(fontWeight = FontWeight.Bold, fontSize = base.titleSmall.fontSize),
-        h3 = body.copy(fontWeight = FontWeight.Bold),
-        h4 = body.copy(fontWeight = FontWeight.Bold),
-        h5 = body.copy(fontWeight = FontWeight.Bold),
-        h6 = body.copy(fontWeight = FontWeight.Bold),
+        h1 = CRType.sectionH.copy(fontWeight = FontWeight.Bold, fontSize = CRType.xl),
+        h2 = CRType.sectionH.copy(fontWeight = FontWeight.Bold, fontSize = CRType.lg),
+        h3 = CRType.sectionH.copy(fontWeight = FontWeight.Bold),
+        h4 = CRType.sectionH.copy(fontWeight = FontWeight.Bold),
+        h5 = CRType.sectionH.copy(fontWeight = FontWeight.Bold),
+        h6 = CRType.sectionH.copy(fontWeight = FontWeight.Bold),
         text = body,
         paragraph = body,
         quote = body.copy(fontStyle = androidx.compose.ui.text.font.FontStyle.Italic),
@@ -742,7 +763,7 @@ private fun RichBody(text: String) {
         inlineCode = codeStyle,
         list = body,
         link = body.copy(
-            color = androidx.compose.ui.graphics.Color(0xFF6FB8FF),
+            color = c.accent,
             textDecoration = androidx.compose.ui.text.style.TextDecoration.Underline
         )
     )
@@ -752,13 +773,13 @@ private fun RichBody(text: String) {
         indentList = 12.dp
     )
     val colors = com.mikepenz.markdown.m3.markdownColor(
-        text = MaterialTheme.colorScheme.onSurface,
-        codeText = androidx.compose.ui.graphics.Color(0xFFE5C07B),     // terminal yellow
-        inlineCodeText = androidx.compose.ui.graphics.Color(0xFFE5C07B),
-        linkText = androidx.compose.ui.graphics.Color(0xFF6FB8FF),
-        codeBackground = MaterialTheme.colorScheme.surfaceContainerHighest,
-        inlineCodeBackground = MaterialTheme.colorScheme.surfaceContainerHighest,
-        dividerColor = MaterialTheme.colorScheme.outline.copy(alpha = 0.4f)
+        text = c.text,
+        codeText = c.working,
+        inlineCodeText = c.working,
+        linkText = c.accent,
+        codeBackground = c.surface2,
+        inlineCodeBackground = c.surface2,
+        dividerColor = c.border.copy(alpha = 0.4f)
     )
     Markdown(
         content = text,
@@ -770,20 +791,20 @@ private fun RichBody(text: String) {
 
 @Composable
 private fun MonospaceBlock(text: String) {
-    Surface(
-        modifier = Modifier.fillMaxWidth(),
-        color = MaterialTheme.colorScheme.surfaceContainerHighest,
-        shape = RoundedCornerShape(4.dp)
+    val c = CRTheme.colors
+    val m = CRTheme.metrics
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(c.surface2, RoundedCornerShape(4.dp))
+            .horizontalScroll(rememberScrollState())
     ) {
-        Box(modifier = Modifier.horizontalScroll(rememberScrollState())) {
-            Text(
-                text,
-                modifier = Modifier.padding(horizontal = 8.dp, vertical = 6.dp),
-                style = MaterialTheme.typography.bodySmall,
-                fontFamily = FontFamily.Monospace,
-                color = MaterialTheme.colorScheme.onSurface
-            )
-        }
+        Text(
+            text,
+            modifier = Modifier.padding(horizontal = 8.dp, vertical = 6.dp),
+            style = CRType.mono,
+            color = c.text
+        )
     }
 }
 
@@ -813,10 +834,13 @@ private fun StatusBar(
     fontScale: Float,
     onFontScaleDelta: (Float) -> Unit
 ) {
+    val c = CRTheme.colors
     var filterMenu by remember { mutableStateOf(false) }
-    Surface(
-        modifier = Modifier.fillMaxWidth(),
-        color = MaterialTheme.colorScheme.surfaceContainer
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(c.surface)
+            .border(width = 1.dp, color = c.border, shape = RoundedCornerShape(0.dp))
     ) {
         Row(
             modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp),
@@ -846,8 +870,8 @@ private fun StatusBar(
                 ) {
                     Text(
                         "▾",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                        style = CRType.monoTiny,
+                        color = c.textDim
                     )
                 }
                 DropdownMenu(
@@ -886,12 +910,13 @@ private fun StatusBar(
 
 @Composable
 private fun ActivityIndicator(activity: SessionActivity?) {
+    val c = CRTheme.colors
     val (color, label) = when (activity) {
-        SessionActivity.WORKING -> Color(0xFFFFC107) to "working"
-        SessionActivity.WAITING_FOR_INPUT -> Color(0xFF4CAF50) to "ready"
-        SessionActivity.APPROVAL_NEEDED -> Color(0xFFFF5722) to "approval"
-        SessionActivity.DISCONNECTED -> Color(0xFFB0BEC5) to "offline"
-        SessionActivity.IDLE -> Color(0xFF78909C) to "idle"
+        SessionActivity.WORKING -> c.working to "working"
+        SessionActivity.WAITING_FOR_INPUT -> c.ready to "ready"
+        SessionActivity.APPROVAL_NEEDED -> c.approval to "approval"
+        SessionActivity.DISCONNECTED -> c.disconnected to "offline"
+        SessionActivity.IDLE -> c.idle to "idle"
         null -> return
     }
     val alpha = if (activity == SessionActivity.WORKING || activity == SessionActivity.APPROVAL_NEEDED) {
@@ -910,22 +935,24 @@ private fun ActivityIndicator(activity: SessionActivity?) {
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(4.dp)
     ) {
-        Surface(
-            modifier = Modifier.size(8.dp).alpha(alpha),
-            color = color,
-            shape = CircleShape
-        ) {}
+        Box(
+            modifier = Modifier
+                .size(8.dp)
+                .alpha(alpha)
+                .background(color, CircleShape)
+        )
         Text(
             label,
-            style = MaterialTheme.typography.labelSmall,
-            fontFamily = FontFamily.Monospace,
-            color = MaterialTheme.colorScheme.onSurfaceVariant
+            style = CRType.mono,
+            color = c.textDim
         )
     }
 }
 
 @Composable
 private fun WorkingSkeletonCard() {
+    val c = CRTheme.colors
+    val m = CRTheme.metrics
     val t = rememberInfiniteTransition(label = "skeleton")
     val alpha by t.animateFloat(
         initialValue = 0.3f,
@@ -936,26 +963,25 @@ private fun WorkingSkeletonCard() {
         ),
         label = "skeleton-alpha"
     )
-    Card(
-        modifier = Modifier.fillMaxWidth(),
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-        shape = RoundedCornerShape(8.dp)
+    CRCard(
+        background = c.surface,
+        borderColor = c.border,
+        padding = PaddingValues(horizontal = m.cardPadH, vertical = m.cardPadV)
     ) {
         Row(
-            modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(8.dp)
         ) {
-            Surface(
-                modifier = Modifier.size(8.dp).alpha(alpha),
-                color = MaterialTheme.colorScheme.primary,
-                shape = CircleShape
-            ) {}
+            Box(
+                modifier = Modifier
+                    .size(8.dp)
+                    .alpha(alpha)
+                    .background(c.working, CircleShape)
+            )
             Text(
                 "Claude is working…",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = alpha),
-                fontFamily = FontFamily.Monospace
+                style = CRType.mono,
+                color = c.textDim.copy(alpha = alpha)
             )
         }
     }
@@ -965,21 +991,40 @@ private fun WorkingSkeletonCard() {
 private fun StatusChip(text: String) {
     Text(
         text,
-        style = MaterialTheme.typography.labelSmall,
-        fontFamily = FontFamily.Monospace,
-        color = MaterialTheme.colorScheme.onSurfaceVariant
+        style = CRType.mono,
+        color = CRTheme.colors.textDim
     )
 }
 
 /**
- * Walk the entries backwards to find the most recent TodoWrite tool_use,
- * parse its `todos` array, and return the count of items whose status is
- * not "completed". Returns 0 if no TodoWrite has been issued yet.
+ * Map tool name to a category tint color from CRTheme.
+ * Read tools → tintGreen, Write/Edit → tintOrange, Bash/exec → tintPurple,
+ * others → tintAccent.
  */
+private fun toolCategoryTint(name: String, c: com.clauderemote.ui.theme.CRColorScheme): Color =
+    when (name.lowercase()) {
+        "read", "ls", "glob", "grep", "find", "search" -> c.tintGreen
+        "write", "create", "multiedit" -> c.tintOrange
+        "edit", "str_replace_editor", "str_replace_based_edit_tool" -> c.tintOrange
+        "bash", "execute", "run", "shell", "cmd" -> c.tintPurple
+        "todowrite", "todoread" -> c.tintYellow
+        else -> c.tintAccent
+    }.let {
+        // Return the base signal color (not the 15% tint) for text/pill foreground.
+        // The caller wraps it in .copy(alpha=0.18f) for the bg tint as needed.
+        // But here we return the full-alpha signal color for legibility.
+        when (name.lowercase()) {
+            "read", "ls", "glob", "grep", "find", "search" -> c.ready
+            "write", "create", "multiedit" -> c.approval
+            "edit", "str_replace_editor", "str_replace_based_edit_tool" -> c.approval
+            "bash", "execute", "run", "shell", "cmd" -> c.modePlan
+            "todowrite", "todoread" -> c.working
+            else -> c.accent
+        }
+    }
+
 /**
  * Format a usage chip label combining percentage and time-to-reset.
- * Either piece is optional; '—' is rendered when nothing is known so the
- * chip's intent stays visible.
  */
 private fun buildUsageLabel(prefix: String, pct: Int?, resetMin: Int?): String {
     val pctPart = pct?.let { "$it%" } ?: "—"
@@ -999,8 +1044,6 @@ private fun countOpenTodos(entries: List<TranscriptEntry>): Int {
     } as? TranscriptEntry.ToolCall ?: return 0
     val json = last.fullInput
     if (json.isBlank()) return 0
-    // Cheap: count `"status": "pending"` and `"status": "in_progress"`
-    // occurrences. Avoids dragging the json parser into the UI layer.
     val pending = Regex("\"status\"\\s*:\\s*\"(pending|in_progress)\"")
         .findAll(json).count()
     return pending
