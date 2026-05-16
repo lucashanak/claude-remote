@@ -198,7 +198,7 @@ fun ConnectScreen(
                                     },
                                     onClick = {}
                                 )
-                                HorizontalDivider(color = c.outline.copy(alpha = 0.4f))
+                                HorizontalDivider(color = c.border.copy(alpha = 0.4f))
                                 if (browseLoading && visibleSubdirs.isEmpty()) {
                                     DropdownMenuItem(
                                         enabled = false,
