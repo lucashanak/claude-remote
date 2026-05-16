@@ -724,26 +724,35 @@ private fun RoleHeader(role: String, timestamp: String?) {
 private fun RichBody(text: String) {
     val base = MaterialTheme.typography
     val mono = androidx.compose.ui.text.font.FontFamily.Monospace
-    val body = base.bodyMedium.copy(
-        lineHeight = base.bodyMedium.fontSize * 1.25f
+    val body = base.bodySmall.copy(
+        lineHeight = base.bodySmall.fontSize * 1.15f
     )
+    val codeStyle = base.labelSmall.copy(fontFamily = mono)
     val typography = com.mikepenz.markdown.m3.markdownTypography(
-        h1 = base.titleLarge.copy(fontWeight = FontWeight.Bold),
-        h2 = base.titleMedium.copy(fontWeight = FontWeight.Bold),
-        h3 = base.titleSmall.copy(fontWeight = FontWeight.Bold),
-        h4 = base.titleSmall,
-        h5 = base.labelLarge,
-        h6 = base.labelMedium,
+        h1 = body.copy(fontWeight = FontWeight.Bold, fontSize = base.titleSmall.fontSize),
+        h2 = body.copy(fontWeight = FontWeight.Bold, fontSize = base.titleSmall.fontSize),
+        h3 = body.copy(fontWeight = FontWeight.Bold),
+        h4 = body.copy(fontWeight = FontWeight.Bold),
+        h5 = body.copy(fontWeight = FontWeight.Bold),
+        h6 = body.copy(fontWeight = FontWeight.Bold),
         text = body,
         paragraph = body,
         quote = body.copy(fontStyle = androidx.compose.ui.text.font.FontStyle.Italic),
-        code = base.bodySmall.copy(fontFamily = mono),
-        inlineCode = base.bodySmall.copy(fontFamily = mono),
+        code = codeStyle,
+        inlineCode = codeStyle,
         list = body,
         link = body.copy(
             color = androidx.compose.ui.graphics.Color(0xFF6FB8FF),
             textDecoration = androidx.compose.ui.text.style.TextDecoration.Underline
         )
+    )
+    val padding = com.mikepenz.markdown.model.markdownPadding(
+        block = 2.dp,
+        list = 2.dp,
+        listItemTop = 0.dp,
+        listItemBottom = 0.dp,
+        listIndent = 12.dp,
+        indentList = 12.dp
     )
     val colors = com.mikepenz.markdown.m3.markdownColor(
         text = MaterialTheme.colorScheme.onSurface,
@@ -757,7 +766,8 @@ private fun RichBody(text: String) {
     Markdown(
         content = text,
         colors = colors,
-        typography = typography
+        typography = typography,
+        padding = padding
     )
 }
 
