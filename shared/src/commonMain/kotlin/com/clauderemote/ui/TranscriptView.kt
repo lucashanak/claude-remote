@@ -3,6 +3,7 @@ package com.clauderemote.ui
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.scrollBy
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
@@ -164,16 +165,28 @@ fun TranscriptView(
         LaunchedEffect(itemsCount) {
             if (itemsCount <= 0) return@LaunchedEffect
             val lastIdx = itemsCount - 1
-            if (!didInitialJump) {
-                didInitialJump = true
-                listState.scrollToItem(lastIdx)
-                return@LaunchedEffect
-            }
             val info = listState.layoutInfo
             val lastVisible = info.visibleItemsInfo.lastOrNull()?.index ?: -1
-            val nearBottom = lastVisible >= lastIdx - 3
-            if (nearBottom) {
-                scope.launch { listState.animateScrollToItem(lastIdx) }
+            // 'Near bottom' is satisfied either by index proximity OR by the
+            // viewport already being scrolled fully down (so user reading
+            // current screen still gets auto-followed when the tail item is
+            // big enough to fill the viewport on its own).
+            val nearBottom = lastVisible >= lastIdx - 3 || !listState.canScrollForward
+            val shouldStick = !didInitialJump || nearBottom
+            if (shouldStick) {
+                // Two-step: scrollToItem anchors the last entry at the TOP of
+                // the viewport (LazyColumn has no native "anchor at bottom"
+                // for unknown-height items). Then push by a large delta so
+                // the item's content actually bottom-aligns. LazyColumn caps
+                // the scroll at the end so an oversized scrollBy is safe.
+                listState.scrollToItem(lastIdx)
+                // Yield so the new item gets composed and measured before
+                // we try to push past it.
+                kotlinx.coroutines.yield()
+                if (listState.canScrollForward) {
+                    listState.scrollBy(100_000f)
+                }
+                didInitialJump = true
             }
         }
         CompositionLocalProvider(
