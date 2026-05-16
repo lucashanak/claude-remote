@@ -63,7 +63,7 @@ object CRColorTokens {
     )
 
     private fun glass(a: CRAccent) = classic(a).copy(
-        bg = Color(0xFF06070B),
+        bg = Color(0xFF050816),
         surface = Color(0xFF1E293B).copy(alpha = 0.55f),
         surface2 = Color(0xFF283548).copy(alpha = 0.65f),
         border = Color(0xFF334155).copy(alpha = 0.6f),

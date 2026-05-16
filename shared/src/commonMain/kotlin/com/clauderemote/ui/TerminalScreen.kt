@@ -121,6 +121,7 @@ fun TerminalScreen(
     onSplitView: ((secondSessionId: String?) -> Unit)? = null,
     invertColors: Boolean = false,
     onToggleInvertColors: (() -> Unit)? = null,
+    onTerminalViewChange: ((CRTerminalView) -> Unit)? = null,
     terminalContent: @Composable (Modifier) -> Unit,
     splitTerminalContent: (@Composable (Modifier) -> Unit)? = null,
     transcriptEntries: List<TranscriptEntry> = emptyList(),
@@ -265,6 +266,7 @@ fun TerminalScreen(
                     onNewTab = onNewTab,
                     onAttachRemote = onAttachRemote,
                     onToggleInvertColors = onToggleInvertColors,
+                    onTerminalViewChange = onTerminalViewChange,
                     onToggleCompact = { compactMode = !compactMode },
                     onToggleControlBar = { showControlBar = !showControlBar },
                     onMoreMenu = {
@@ -733,6 +735,7 @@ private fun CRTopBar(
     onNewTab: () -> Unit,
     onAttachRemote: ((com.clauderemote.model.RemoteSession) -> Unit)?,
     onToggleInvertColors: (() -> Unit)?,
+    onTerminalViewChange: ((CRTerminalView) -> Unit)?,
     onToggleCompact: () -> Unit,
     onToggleControlBar: () -> Unit,
     onMoreMenu: () -> Unit,
@@ -859,6 +862,17 @@ private fun CRTopBar(
                     if (sessionUsagePercent != null) MiniBar("5h", sessionUsagePercent)
                     if (weekUsagePercent != null) MiniBar("Wk", weekUsagePercent)
                 }
+            }
+
+            // Terminal view toggle (Raw / Transcript)
+            if (onTerminalViewChange != null) {
+                com.clauderemote.ui.components.Segmented(
+                    options = CRTerminalView.entries.toList(),
+                    selected = terminalView,
+                    onSelect = onTerminalViewChange,
+                    modifier = Modifier.padding(horizontal = 2.dp),
+                    label = { if (it == CRTerminalView.Raw) "Raw" else "Chat" },
+                )
             }
 
             // Compact toggle

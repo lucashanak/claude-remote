@@ -674,6 +674,7 @@ fun App(
                                 else -> Screen.LAUNCHER
                             }
                         },
+                        onTerminalViewChange = { tv -> updateAppearance(appearance.copy(terminalView = tv)) },
                         terminalContent = terminalContent,
                         transcriptEntries = activeTabId?.let { id ->
                             val flow = remember(id) { sessionOrchestrator.transcriptFlow(id) }
