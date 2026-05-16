@@ -278,6 +278,7 @@ fun TerminalScreen(
                         if (onShowNativeMenu != null) onShowNativeMenu.invoke()
                         else moreMenu = true
                     },
+                    onOpenDrawer = { showSessionDrawer = true },
                 )
 
                 // ── Crumb bar (36 dp) ──────────────────────────────────────
@@ -759,6 +760,7 @@ private fun CRTopBar(
     onToggleCompact: () -> Unit,
     onToggleControlBar: () -> Unit,
     onMoreMenu: () -> Unit,
+    onOpenDrawer: () -> Unit,
 ) {
     val c = CRTheme.colors
     val m = CRTheme.metrics
@@ -778,14 +780,13 @@ private fun CRTopBar(
                 }
             }
 
-            // Session title / dropdown
-            var sessionDropdown by remember { mutableStateOf(false) }
+            // Session title — tapping opens the slide-in SessionDrawer
             Box(modifier = Modifier.weight(1f)) {
                 Row(
                     modifier = Modifier.clickable(
                         interactionSource = remember { MutableInteractionSource() },
                         indication = null,
-                    ) { if (hasMultiple && !wideMode) sessionDropdown = true },
+                    ) { if (hasMultiple && !wideMode) onOpenDrawer() },
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(6.dp)
                 ) {
@@ -803,63 +804,6 @@ private fun CRTopBar(
                     if (hasMultiple && !wideMode) {
                         Text("(${tabs.size})", style = CRType.monoTiny, color = c.textDim)
                         Text("▾", style = CRType.bodyDim, color = c.textDim)
-                    }
-                }
-
-                if (!wideMode) {
-                    DropdownMenu(
-                        expanded = sessionDropdown,
-                        onDismissRequest = { sessionDropdown = false }
-                    ) {
-                        allSessions.forEach { (folder, items) ->
-                            if (allSessions.size > 1) {
-                                Text(
-                                    folder,
-                                    style = CRType.sectionH,
-                                    color = c.textDim,
-                                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp)
-                                )
-                            }
-                            items.forEach { item ->
-                                val dotColor = when {
-                                    !item.isConnected -> c.idle
-                                    item.status == SessionStatus.ACTIVE -> c.ready
-                                    item.status == SessionStatus.CONNECTING -> c.working
-                                    else -> c.disconnected
-                                }
-                                DropdownMenuItem(
-                                    text = {
-                                        Row(verticalAlignment = Alignment.CenterVertically) {
-                                            Box(modifier = Modifier.size(8.dp).background(dotColor, CircleShape))
-                                            Spacer(Modifier.width(8.dp))
-                                            Text(item.label, style = CRType.bodyDim, color = c.text)
-                                        }
-                                    },
-                                    onClick = {
-                                        sessionDropdown = false
-                                        if (item.isConnected && item.tab != null) onTabSwitch(item.tab.id)
-                                        else if (item.remote != null) onAttachRemote?.invoke(item.remote)
-                                    },
-                                    trailingIcon = if (item.isConnected) { {
-                                        IconButton(
-                                            onClick = { sessionDropdown = false; item.tab?.let { onTabClose(it.id) } },
-                                            modifier = Modifier.size(24.dp)
-                                        ) { Icon(Icons.Default.Close, "Close", modifier = Modifier.size(14.dp)) }
-                                    } } else null
-                                )
-                            }
-                        }
-                        HorizontalDivider()
-                        DropdownMenuItem(
-                            text = {
-                                Row(verticalAlignment = Alignment.CenterVertically) {
-                                    Icon(Icons.Default.Add, "New", modifier = Modifier.size(16.dp))
-                                    Spacer(Modifier.width(8.dp))
-                                    Text("New session", style = CRType.bodyDim)
-                                }
-                            },
-                            onClick = { sessionDropdown = false; onNewTab() }
-                        )
                     }
                 }
             }
