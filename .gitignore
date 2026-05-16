@@ -24,3 +24,4 @@ androidApp/src/main/jniLibs/
 
 ## KCEF cache
 .claude-remote/kcef/
+.kotlin/

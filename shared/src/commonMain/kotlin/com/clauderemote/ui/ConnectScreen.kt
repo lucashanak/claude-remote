@@ -1,25 +1,31 @@
 package com.clauderemote.ui
 
 import com.clauderemote.model.TmuxNameParser
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.selection.selectable
-import androidx.compose.foundation.selection.selectableGroup
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material3.*
 import androidx.compose.material3.MenuAnchorType
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.unit.dp
 import com.clauderemote.model.*
 import com.clauderemote.storage.AppSettings
+import com.clauderemote.ui.components.CRCard
+import com.clauderemote.ui.components.Segmented
+import com.clauderemote.ui.components.ServerGlyph
+import com.clauderemote.ui.theme.CRTheme
+import com.clauderemote.ui.theme.CRType
 import kotlinx.coroutines.launch
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
@@ -33,6 +39,9 @@ fun ConnectScreen(
     onBrowseFolders: (suspend (String) -> List<String>)? = null,
     onLaunch: (folder: String, mode: ClaudeMode, model: ClaudeModel, connectionType: ConnectionType, tmuxSession: String, isNewTmuxSession: Boolean) -> Unit
 ) {
+    val c = CRTheme.colors
+    val m = CRTheme.metrics
+
     var folder by remember { mutableStateOf(server.defaultFolder) }
     var selectedMode by remember { mutableStateOf(appSettings.defaultClaudeMode) }
     var selectedModel by remember { mutableStateOf(appSettings.defaultClaudeModel) }
@@ -45,7 +54,7 @@ fun ConnectScreen(
     var browseFolders by remember { mutableStateOf<List<String>>(emptyList()) }
     var browseLoading by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
-    // Auto-update tmux name when folder, mode, or alias changes
+
     LaunchedEffect(folder, selectedMode, sessionAlias) {
         if (!useExistingTmux) {
             tmuxSessionName = TmuxNameParser.build(
@@ -53,7 +62,6 @@ fun ConnectScreen(
             )
         }
     }
-    var modelExpanded by remember { mutableStateOf(false) }
 
     val launch: () -> Unit = {
         onLaunch(folder, selectedMode, selectedModel, connectionType, tmuxSessionName, !useExistingTmux)
@@ -61,13 +69,36 @@ fun ConnectScreen(
     val launchKeyboardOptions = KeyboardOptions(imeAction = ImeAction.Go)
     val launchKeyboardActions = KeyboardActions(onGo = { launch() })
 
+    // Build will-run preview command
+    val willRunPreview = buildString {
+        val attachFlag = if (useExistingTmux) "-t" else "new -A -s"
+        append("$ tmux $attachFlag '${tmuxSessionName}'\n")
+        append("$ cd $folder && claude")
+        if (selectedModel != ClaudeModel.DEFAULT) append(" --model ${selectedModel.cliValue}")
+        selectedMode.cliFlag?.let { append(" $it") }
+    }
+
     Scaffold(
+        containerColor = c.bg,
         topBar = {
             TopAppBar(
-                title = { Text(server.name) },
+                colors = TopAppBarDefaults.topAppBarColors(
+                    containerColor = c.surface,
+                    titleContentColor = c.text,
+                    navigationIconContentColor = c.textDim,
+                ),
+                title = {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        ServerGlyph(server.name, modifier = Modifier.size(26.dp))
+                        Text(server.name, style = CRType.cardTitle)
+                    }
+                },
                 navigationIcon = {
                     IconButton(onClick = onBack) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back")
+                        Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back", tint = c.textDim)
                     }
                 }
             )
@@ -77,18 +108,18 @@ fun ConnectScreen(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(padding)
-                .padding(horizontal = 16.dp)
-                .verticalScroll(rememberScrollState()),
-            verticalArrangement = Arrangement.spacedBy(16.dp)
+                .verticalScroll(rememberScrollState())
+                .padding(horizontal = m.sectionPad, vertical = m.sectionTopGap),
+            verticalArrangement = Arrangement.spacedBy(m.cardGap)
         ) {
-            // Folder
-            Card(modifier = Modifier.fillMaxWidth()) {
-                Column(modifier = Modifier.padding(16.dp)) {
-                    Text("Folder", style = MaterialTheme.typography.titleSmall)
-                    Spacer(Modifier.height(8.dp))
+            // ── Folder ─────────────────────────────────────────────────────
+            SectionLabel("Folder", c.textDim)
+            CRCard {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     Row(
                         modifier = Modifier.fillMaxWidth(),
-                        verticalAlignment = Alignment.CenterVertically
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
                         OutlinedTextField(
                             value = folder,
@@ -97,10 +128,10 @@ fun ConnectScreen(
                             modifier = Modifier.weight(1f),
                             singleLine = true,
                             keyboardOptions = launchKeyboardOptions,
-                            keyboardActions = launchKeyboardActions
+                            keyboardActions = launchKeyboardActions,
+                            colors = crTextFieldColors(),
                         )
                         if (onBrowseFolders != null) {
-                            Spacer(Modifier.width(8.dp))
                             FilledTonalButton(
                                 onClick = {
                                     browseLoading = true
@@ -109,250 +140,258 @@ fun ConnectScreen(
                                         browseLoading = false
                                     }
                                 },
-                                enabled = !browseLoading
+                                enabled = !browseLoading,
+                                colors = ButtonDefaults.filledTonalButtonColors(
+                                    containerColor = c.surface2,
+                                    contentColor = c.text,
+                                )
                             ) {
                                 if (browseLoading) {
-                                    CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
+                                    CircularProgressIndicator(
+                                        modifier = Modifier.size(16.dp),
+                                        strokeWidth = 2.dp,
+                                        color = c.accent
+                                    )
                                 } else {
-                                    Text("Browse")
+                                    Text("Browse", style = CRType.pill)
                                 }
                             }
                         }
                     }
 
                     if (browseFolders.isNotEmpty()) {
-                        Spacer(Modifier.height(8.dp))
-                        Text("Subdirectories:", style = MaterialTheme.typography.bodySmall)
-                        FlowRow(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                        Text("Subdirectories", style = CRType.sectionH, color = c.textDim)
+                        Row(
+                            modifier = Modifier.horizontalScroll(rememberScrollState()),
+                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
                             browseFolders.forEach { sub ->
-                                AssistChip(
-                                    onClick = {
-                                        folder = sub
-                                        browseFolders = emptyList()
-                                    },
-                                    label = {
-                                        Text(
-                                            sub.substringAfterLast('/'),
-                                            style = MaterialTheme.typography.bodySmall
-                                        )
-                                    }
+                                FolderChip(
+                                    label = sub.substringAfterLast('/'),
+                                    onClick = { folder = sub; browseFolders = emptyList() }
                                 )
                             }
                         }
                     }
 
                     if (server.recentFolders.isNotEmpty()) {
-                        Spacer(Modifier.height(8.dp))
-                        Text("Recent:", style = MaterialTheme.typography.bodySmall)
-                        FlowRow(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                            server.recentFolders.take(5).forEach { recent ->
-                                AssistChip(
-                                    onClick = { folder = recent },
-                                    label = { Text(recent, style = MaterialTheme.typography.bodySmall) }
-                                )
-                            }
-                        }
-                    }
-                }
-            }
-
-            // Claude Options
-            Card(modifier = Modifier.fillMaxWidth()) {
-                Column(modifier = Modifier.padding(16.dp)) {
-                    Text("Claude Options", style = MaterialTheme.typography.titleSmall)
-                    Spacer(Modifier.height(8.dp))
-
-                    // Mode
-                    Text("Mode", style = MaterialTheme.typography.bodyMedium)
-                    Column(modifier = Modifier.selectableGroup()) {
-                        ClaudeMode.entries.forEach { mode ->
-                            Row(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .height(40.dp)
-                                    .selectable(
-                                        selected = selectedMode == mode,
-                                        onClick = { selectedMode = mode },
-                                        role = Role.RadioButton
-                                    ),
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                RadioButton(
-                                    selected = selectedMode == mode,
-                                    onClick = null
-                                )
-                                Spacer(Modifier.width(8.dp))
-                                Text(mode.displayName)
-                                if (mode == ClaudeMode.YOLO) {
-                                    Spacer(Modifier.width(4.dp))
-                                    Text(
-                                        "(--dangerously-skip-permissions)",
-                                        style = MaterialTheme.typography.bodySmall,
-                                        color = MaterialTheme.colorScheme.error
-                                    )
-                                }
-                            }
-                        }
-                    }
-
-                    HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
-
-                    // Model
-                    Text("Model", style = MaterialTheme.typography.bodyMedium)
-                    Spacer(Modifier.height(4.dp))
-                    ExposedDropdownMenuBox(
-                        expanded = modelExpanded,
-                        onExpandedChange = { modelExpanded = it }
-                    ) {
-                        OutlinedTextField(
-                            value = selectedModel.displayName,
-                            onValueChange = {},
-                            readOnly = true,
-                            trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(modelExpanded) },
-                            modifier = Modifier.menuAnchor(MenuAnchorType.PrimaryNotEditable).fillMaxWidth()
-                        )
-                        ExposedDropdownMenu(
-                            expanded = modelExpanded,
-                            onDismissRequest = { modelExpanded = false }
+                        Text("Recent", style = CRType.sectionH, color = c.textDim)
+                        Row(
+                            modifier = Modifier.horizontalScroll(rememberScrollState()),
+                            horizontalArrangement = Arrangement.spacedBy(6.dp)
                         ) {
-                            ClaudeModel.entries.forEach { model ->
-                                DropdownMenuItem(
-                                    text = { Text(model.displayName) },
-                                    onClick = {
-                                        selectedModel = model
-                                        modelExpanded = false
-                                    }
-                                )
+                            server.recentFolders.take(5).forEach { recent ->
+                                FolderChip(label = recent, onClick = { folder = recent })
                             }
                         }
-                    }
-
-                    HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
-
-                    // Connection type
-                    Text("Connection", style = MaterialTheme.typography.bodyMedium)
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        FilterChip(
-                            selected = connectionType == ConnectionType.SSH,
-                            onClick = { connectionType = ConnectionType.SSH },
-                            label = { Text("SSH") }
-                        )
-                        FilterChip(
-                            selected = connectionType == ConnectionType.MOSH,
-                            onClick = { connectionType = ConnectionType.MOSH },
-                            label = { Text("Mosh") },
-                            enabled = !server.useCloudflareProxy
-                        )
                     }
                 }
             }
 
-            // Tmux Session
-            Card(modifier = Modifier.fillMaxWidth()) {
-                Column(modifier = Modifier.padding(16.dp)) {
-                    Text("Tmux Session", style = MaterialTheme.typography.titleSmall)
-                    Spacer(Modifier.height(8.dp))
-
-                    // New session
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .height(40.dp)
-                            .selectable(
-                                selected = !useExistingTmux,
-                                onClick = { useExistingTmux = false },
-                                role = Role.RadioButton
-                            ),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        RadioButton(selected = !useExistingTmux, onClick = null)
-                        Spacer(Modifier.width(8.dp))
-                        Text("New session")
+            // ── Claude options ─────────────────────────────────────────────
+            SectionLabel("Claude Options", c.textDim)
+            CRCard {
+                Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                    LabeledRow("Mode") {
+                        Segmented(
+                            options = ClaudeMode.entries,
+                            selected = selectedMode,
+                            onSelect = { selectedMode = it },
+                            modifier = Modifier.fillMaxWidth(),
+                            label = { it.displayName }
+                        )
                     }
-
-                    if (!useExistingTmux) {
+                    LabeledRow("Model") {
+                        Segmented(
+                            options = ClaudeModel.entries,
+                            selected = selectedModel,
+                            onSelect = { selectedModel = it },
+                            modifier = Modifier.fillMaxWidth(),
+                            label = { it.displayName }
+                        )
+                    }
+                    LabeledRow("Connection") {
+                        Segmented(
+                            options = if (server.useCloudflareProxy)
+                                listOf(ConnectionType.SSH)
+                            else
+                                listOf(ConnectionType.SSH, ConnectionType.MOSH),
+                            selected = connectionType,
+                            onSelect = { connectionType = it },
+                            label = { it.displayName }
+                        )
+                    }
+                    LabeledRow("Alias") {
                         OutlinedTextField(
                             value = sessionAlias,
                             onValueChange = { sessionAlias = it },
-                            label = { Text("Alias (optional)") },
-                            placeholder = { Text("e.g. bugfix, refactor...") },
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(start = 40.dp),
+                            placeholder = { Text("e.g. bugfix, refactor…") },
+                            modifier = Modifier.fillMaxWidth(),
                             singleLine = true,
                             keyboardOptions = launchKeyboardOptions,
-                            keyboardActions = launchKeyboardActions
+                            keyboardActions = launchKeyboardActions,
+                            colors = crTextFieldColors(),
                         )
-                        OutlinedTextField(
-                            value = tmuxSessionName,
-                            onValueChange = { tmuxSessionName = it },
-                            label = { Text("Session name") },
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(start = 40.dp),
-                            singleLine = true,
-                            keyboardOptions = launchKeyboardOptions,
-                            keyboardActions = launchKeyboardActions
-                        )
-                    }
-
-                    // Existing sessions
-                    tmuxSessions.forEach { tmux ->
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .height(40.dp)
-                                .selectable(
-                                    selected = useExistingTmux && tmuxSessionName == tmux.name,
-                                    onClick = {
-                                        useExistingTmux = true
-                                        tmuxSessionName = tmux.name
-                                    },
-                                    role = Role.RadioButton
-                                ),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            RadioButton(
-                                selected = useExistingTmux && tmuxSessionName == tmux.name,
-                                onClick = null
-                            )
-                            Spacer(Modifier.width(8.dp))
-                            Text(
-                                "${tmux.name} (${tmux.windows}w)",
-                                modifier = Modifier.weight(1f)
-                            )
-                            if (tmux.attached) {
-                                Text(
-                                    "attached",
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.primary
-                                )
-                                Spacer(Modifier.width(4.dp))
-                            }
-                            if (onKillTmux != null) {
-                                TextButton(
-                                    onClick = { onKillTmux(tmux.name) },
-                                    contentPadding = PaddingValues(horizontal = 8.dp)
-                                ) {
-                                    Text("Kill", color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
-                                }
-                            }
-                        }
                     }
                 }
             }
 
-            // Launch button
+            // ── Tmux session ────────────────────────────────────────────────
+            SectionLabel("Tmux · ${tmuxSessions.size} on server", c.textDim)
+            CRCard {
+                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    TmuxRadioRow(
+                        selected = !useExistingTmux,
+                        label = "New session",
+                        onClick = { useExistingTmux = false }
+                    )
+                    if (!useExistingTmux) {
+                        Text(
+                            tmuxSessionName,
+                            style = CRType.mono,
+                            color = c.textDim,
+                            modifier = Modifier.padding(start = 32.dp, bottom = 4.dp)
+                        )
+                    }
+                    tmuxSessions.forEach { tmux ->
+                        TmuxRadioRow(
+                            selected = useExistingTmux && tmuxSessionName == tmux.name,
+                            label = "${tmux.name} (${tmux.windows}w)",
+                            attached = tmux.attached,
+                            onClick = {
+                                useExistingTmux = true
+                                tmuxSessionName = tmux.name
+                            },
+                            onKill = if (onKillTmux != null) ({ onKillTmux(tmux.name) }) else null
+                        )
+                    }
+                }
+            }
+
+            // ── Will-run preview ────────────────────────────────────────────
+            SectionLabel("Will run", c.textDim)
+            Box(
+                Modifier
+                    .fillMaxWidth()
+                    .background(c.surface2, RoundedCornerShape(m.cardRadius))
+                    .border(1.dp, c.border, RoundedCornerShape(m.cardRadius))
+                    .padding(12.dp)
+            ) {
+                Text(willRunPreview, style = CRType.mono, color = c.textDim)
+            }
+
+            // ── Launch ──────────────────────────────────────────────────────
             Button(
                 onClick = launch,
                 modifier = Modifier
                     .fillMaxWidth()
-                    .height(56.dp)
+                    .height(m.rowHeight),
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = c.accent,
+                    contentColor = c.accentInk,
+                ),
+                shape = RoundedCornerShape(m.cardRadius),
             ) {
-                Text("Launch Claude", style = MaterialTheme.typography.titleMedium)
+                Text("▶  Launch Claude", style = CRType.cardTitle)
             }
 
             Spacer(Modifier.height(16.dp))
         }
     }
 }
+
+// ── Local helpers ──────────────────────────────────────────────────────────
+
+@Composable
+private fun SectionLabel(text: String, color: androidx.compose.ui.graphics.Color) {
+    Text(
+        text.uppercase(),
+        style = CRType.sectionH,
+        color = color,
+        modifier = Modifier.padding(horizontal = 2.dp)
+    )
+}
+
+@Composable
+private fun LabeledRow(label: String, content: @Composable () -> Unit) {
+    val c = CRTheme.colors
+    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        Text(label, style = CRType.bodyDim, color = c.textDim)
+        content()
+    }
+}
+
+@Composable
+private fun FolderChip(label: String, onClick: () -> Unit) {
+    val c = CRTheme.colors
+    val shape = RoundedCornerShape(999.dp)
+    Box(
+        Modifier
+            .background(c.surface2, shape)
+            .border(1.dp, c.border, shape)
+            .padding(horizontal = 10.dp, vertical = 5.dp)
+            .then(Modifier.then(
+                androidx.compose.ui.Modifier
+                    .then(Modifier)
+            ))
+    ) {
+        TextButton(onClick = onClick, contentPadding = PaddingValues(0.dp)) {
+            Text(label, style = CRType.mono, color = c.text)
+        }
+    }
+}
+
+@Composable
+private fun TmuxRadioRow(
+    selected: Boolean,
+    label: String,
+    attached: Boolean = false,
+    onClick: () -> Unit,
+    onKill: (() -> Unit)? = null,
+) {
+    val c = CRTheme.colors
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(40.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        RadioButton(
+            selected = selected,
+            onClick = onClick,
+            colors = RadioButtonDefaults.colors(
+                selectedColor = c.accent,
+                unselectedColor = c.textDim,
+            )
+        )
+        Spacer(Modifier.width(6.dp))
+        Text(label, style = CRType.cardTitle, color = c.text, modifier = Modifier.weight(1f))
+        if (attached) {
+            Text("attached", style = CRType.pill, color = c.ready)
+            Spacer(Modifier.width(6.dp))
+        }
+        if (onKill != null) {
+            TextButton(
+                onClick = onKill,
+                contentPadding = PaddingValues(horizontal = 8.dp)
+            ) {
+                Text("Kill", style = CRType.pill, color = c.disconnected)
+            }
+        }
+    }
+}
+
+@Composable
+private fun crTextFieldColors() = OutlinedTextFieldDefaults.colors(
+    unfocusedBorderColor = CRTheme.colors.border,
+    focusedBorderColor = CRTheme.colors.accent,
+    cursorColor = CRTheme.colors.accent,
+    unfocusedTextColor = CRTheme.colors.text,
+    focusedTextColor = CRTheme.colors.text,
+    unfocusedLabelColor = CRTheme.colors.textDim,
+    focusedLabelColor = CRTheme.colors.accent,
+    unfocusedPlaceholderColor = CRTheme.colors.textDim,
+    focusedPlaceholderColor = CRTheme.colors.textDim,
+    unfocusedContainerColor = CRTheme.colors.surface,
+    focusedContainerColor = CRTheme.colors.surface,
+)

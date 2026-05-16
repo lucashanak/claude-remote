@@ -1,0 +1,277 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Claude Remote — Redesign</title>
+
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter+Tight:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap">
+
+<link rel="stylesheet" href="styles/tokens.css" />
+<link rel="stylesheet" href="styles/app.css" />
+
+<style>
+  :root {
+    --font-sans: "Inter Tight", -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+    --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+</style>
+
+<script src="https://unpkg.com/react@18.3.1/umd/react.development.js" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" integrity="sha384-m08KidiNqLdpJqLq95G/LEi8Qvjl/xUYll3QILypMoQ65QorJ9Lvtp2RXYGBFj1y" crossorigin="anonymous"></script>
+
+<script type="text/babel" src="frames/android-frame.jsx"></script>
+<script type="text/babel" src="frames/tweaks-panel.jsx"></script>
+<script type="text/babel" src="data.jsx"></script>
+<script type="text/babel" src="components.jsx"></script>
+<script type="text/babel" src="screens-main.jsx"></script>
+<script type="text/babel" src="screens-terminal.jsx"></script>
+<script type="text/babel" src="screens-aux.jsx"></script>
+</head>
+<body data-screen-label="Claude Remote">
+
+<div id="root"></div>
+
+<script type="text/babel" data-presets="react">
+const { useState, useEffect } = React;
+
+const TWEAK_DEFAULTS = /*EDITMODE-BEGIN*/{
+  "variant": "glass",
+  "accent": "sky",
+  "density": "dense",
+  "controlBar": "bottom",
+  "terminalView": "transcript",
+  "statusViz": "bar",
+  "colorScheme": "default"
+}/*EDITMODE-END*/;
+
+// Map accent name → hex
+const ACCENT_MAP = {
+  sky:    '#38bdf8',
+  mint:   '#4ade80',
+  amber:  '#fbbf24',
+  violet: '#a78bfa',
+  rose:   '#f472b6',
+};
+
+function App() {
+  const [tweaks, setTweak] = useTweaks(TWEAK_DEFAULTS);
+  const [platform, setPlatform] = useState('android'); // 'android' | 'desktop'
+  const [screen, setScreen] = useState('launcher');
+  const [screenArg, setScreenArg] = useState(null);
+  const [palette, setPalette] = useState(false);
+  const [expand, setExpand] = useState(false);
+
+  // Apply accent globally
+  useEffect(() => {
+    document.documentElement.style.setProperty('--accent', ACCENT_MAP[tweaks.accent] || ACCENT_MAP.sky);
+  }, [tweaks.accent]);
+
+  // Keyboard: ⌘K / Ctrl+K → palette
+  useEffect(() => {
+    const onKey = (e) => {
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
+        e.preventDefault();
+        setPalette((v) => !v);
+      } else if (e.key === 'Escape') {
+        setPalette(false); setExpand(false);
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, []);
+
+  const nav = (s, arg) => { setScreen(s); setScreenArg(arg ?? null); };
+
+  // Inner app (variant-scoped)
+  const variantClass = `variant-${tweaks.variant} density-${tweaks.density}`;
+  const inner = (
+    <div className={`app ${variantClass}`}>
+      {screen === 'launcher' && (
+        <LauncherScreen
+          statusViz={tweaks.statusViz}
+          density={tweaks.density}
+          onNav={nav}
+          onOpenSession={(id) => nav('terminal', id)}
+          onOpenServer={(id) => nav('connect', id)}
+          onOpenSettings={() => nav('settings')}
+          onOpenUsage={() => nav('usage')}
+          onOpenPalette={() => setPalette(true)}
+        />
+      )}
+      {screen === 'connect' && (
+        <ConnectScreen
+          serverId={screenArg}
+          onBack={() => nav('launcher')}
+          onLaunch={() => nav('terminal', 'sess-1')}
+        />
+      )}
+      {screen === 'terminal' && (
+        <TerminalScreen
+          sessionId={screenArg}
+          tweaks={tweaks}
+          onBack={() => nav('launcher')}
+          onOpenPalette={() => setPalette(true)}
+          onOpenInput={() => setExpand(true)}
+        />
+      )}
+      {screen === 'settings' && (
+        <SettingsScreen onBack={() => nav('launcher')} tweaks={tweaks} />
+      )}
+      {screen === 'server-edit' && (
+        <ServerEditScreen serverId={screenArg} onBack={() => nav('launcher')} onSave={() => nav('launcher')} />
+      )}
+      {screen === 'usage' && (
+        <UsageScreen onBack={() => nav('launcher')} />
+      )}
+
+      {palette && <CommandPalette onClose={() => setPalette(false)} />}
+      {expand  && <ExpandedInput  onClose={() => setExpand(false)} />}
+    </div>
+  );
+
+  return (
+    <div className="stage">
+      <PlatformToggle platform={platform} onChange={setPlatform} />
+      <ScreenStrip screen={screen} onPick={(s) => nav(s, s === 'terminal' ? 'sess-1' : s === 'connect' ? 's1' : null)} />
+
+      {platform === 'android' ? (
+        <AndroidDevice width={412} height={892} dark>
+          {inner}
+        </AndroidDevice>
+      ) : (
+        <DesktopShell>{inner}</DesktopShell>
+      )}
+
+      <TweaksPanel title="Tweaks · Claude Remote">
+        <TweakSection label="Variant" />
+        <TweakRadio label="Style" value={tweaks.variant}
+          options={['classic', 'glass']}
+          onChange={(v) => setTweak('variant', v)} />
+        <TweakRadio label="Density" value={tweaks.density}
+          options={['compact', 'regular', 'dense']}
+          onChange={(v) => setTweak('density', v)} />
+        <TweakColor label="Accent" value={tweaks.accent}
+          options={Object.keys(ACCENT_MAP).map((k) => ACCENT_MAP[k])}
+          onChange={(hex) => {
+            const found = Object.entries(ACCENT_MAP).find(([k,v]) => v === hex);
+            setTweak('accent', found ? found[0] : 'sky');
+          }} />
+
+        <TweakSection label="Terminal" />
+        <TweakRadio label="View" value={tweaks.terminalView}
+          options={['raw', 'transcript']}
+          onChange={(v) => setTweak('terminalView', v)} />
+        <TweakSelect label="Color scheme" value={tweaks.colorScheme}
+          options={['default', 'solarized-dark', 'dracula', 'monokai', 'linux']}
+          onChange={(v) => setTweak('colorScheme', v)} />
+        <TweakRadio label="Control bar" value={tweaks.controlBar}
+          options={['bottom', 'top']}
+          onChange={(v) => setTweak('controlBar', v)} />
+
+        <TweakSection label="Status viz" />
+        <TweakRadio label="Style" value={tweaks.statusViz}
+          options={['dot', 'pill', 'bar']}
+          onChange={(v) => setTweak('statusViz', v)} />
+
+        <TweakSection label="Platform" />
+        <TweakRadio label="Frame" value={platform}
+          options={['android', 'desktop']}
+          onChange={setPlatform} />
+      </TweaksPanel>
+    </div>
+  );
+}
+
+function PlatformToggle({ platform, onChange }) {
+  return (
+    <div className="platform-toggle">
+      <button className={platform === 'android' ? 'active' : ''} onClick={() => onChange('android')}>Android</button>
+      <button className={platform === 'desktop' ? 'active' : ''} onClick={() => onChange('desktop')}>Desktop</button>
+    </div>
+  );
+}
+
+function ScreenStrip({ screen, onPick }) {
+  const screens = [
+    ['launcher',    'Launcher'],
+    ['connect',     'Connect'],
+    ['terminal',    'Terminal'],
+    ['settings',    'Settings'],
+    ['server-edit', 'Server'],
+    ['usage',       'Usage'],
+  ];
+  return (
+    <div className="strip">
+      {screens.map(([k, label]) => (
+        <button key={k} className={screen === k ? 'active' : ''} onClick={() => onPick(k)}>
+          {label}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+function DesktopShell({ children }) {
+  // Just chrome — content inside scales down to fit the 1100x720 window
+  return (
+    <div className="macwin">
+      <div className="macwin-chrome">
+        <div className="macwin-lights">
+          <span className="red"/><span className="yellow"/><span className="green"/>
+        </div>
+        <div className="macwin-title">Claude Remote</div>
+        <div style={{ width: 50 }}/>
+      </div>
+      <div style={{ flex: 1, display: 'flex', overflow: 'hidden' }}>
+        <DesktopSidebar/>
+        <div style={{ flex: 1, overflow: 'hidden', position: 'relative' }}>
+          {children}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function DesktopSidebar() {
+  return (
+    <div style={{
+      width: 56, background: 'rgba(20,24,36,0.5)',
+      borderRight: '1px solid rgba(255,255,255,0.06)',
+      display: 'flex', flexDirection: 'column', alignItems: 'center', padding: '12px 0', gap: 6,
+      flexShrink: 0,
+    }}>
+      {[
+        { i: 'menu',     active: true,  label: 'Sessions' },
+        { i: 'server',   active: false, label: 'Servers' },
+        { i: 'cpu',      active: false, label: 'Usage' },
+        { i: 'sliders',  active: false, label: 'Settings' },
+      ].map((b) => (
+        <button key={b.label} title={b.label}
+          style={{
+            width: 36, height: 36, borderRadius: 10, border: 0, cursor: 'pointer',
+            background: b.active ? 'rgba(56,189,248,0.15)' : 'transparent',
+            color: b.active ? '#7dd3fc' : 'rgba(255,255,255,0.55)',
+            display: 'grid', placeItems: 'center',
+          }}>
+          <Icon name={b.i} size={18} />
+        </button>
+      ))}
+      <div style={{ flex: 1 }} />
+      <div style={{
+        width: 28, height: 28, borderRadius: '50%',
+        background: 'linear-gradient(135deg, #d97757, #b8654a)',
+        display: 'grid', placeItems: 'center',
+        color: '#fff', fontWeight: 700, fontSize: 11,
+      }}>LH</div>
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById('root')).render(<App/>);
+</script>
+</body>
+</html>

@@ -1,43 +1,78 @@
 package com.clauderemote.ui
 
+import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
-import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.KeyboardArrowLeft
+import androidx.compose.material.icons.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.focus.FocusRequester
-import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.input.key.*
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
-import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import com.clauderemote.model.ClaudeModel
+import com.clauderemote.model.ClaudeMode
 import com.clauderemote.model.ClaudeSession
+import com.clauderemote.model.SessionActivity
 import com.clauderemote.model.SessionStatus
 import com.clauderemote.session.CommandFetcher
 import com.clauderemote.session.SlashCommand
 import com.clauderemote.session.status.RemoteSessionStatus
 import com.clauderemote.session.transcript.TranscriptEntry
+import com.clauderemote.ui.components.CRStatus
+import com.clauderemote.ui.components.Pill
+import com.clauderemote.ui.components.StatusIndicator
+import com.clauderemote.ui.components.color
+import com.clauderemote.ui.theme.CRTerminalView
+import com.clauderemote.ui.theme.CRTheme
+import com.clauderemote.ui.theme.CRType
+import com.clauderemote.ui.theme.LocalCRTerminalView
 import kotlinx.coroutines.launch
+
+// ---------------------------------------------------------------------------
+// Special key enum (spec §6.3)
+// ---------------------------------------------------------------------------
+
+enum class SpecialKey(val bytes: ByteArray) {
+    Esc(   byteArrayOf(0x1B)),
+    Tab(   byteArrayOf(0x09)),
+    Up(    byteArrayOf(0x1B, '['.code.toByte(), 'A'.code.toByte())),
+    Down(  byteArrayOf(0x1B, '['.code.toByte(), 'B'.code.toByte())),
+    Right( byteArrayOf(0x1B, '['.code.toByte(), 'C'.code.toByte())),
+    Left(  byteArrayOf(0x1B, '['.code.toByte(), 'D'.code.toByte())),
+    Slash( byteArrayOf('/'.code.toByte())),
+    CtrlC( byteArrayOf(0x03)),
+    CtrlD( byteArrayOf(0x04)),
+}
+
+// ---------------------------------------------------------------------------
+// Private session list item (unchanged from original)
+// ---------------------------------------------------------------------------
 
 private data class SessionItem(
     val id: String, val label: String, val folder: String,
@@ -45,6 +80,10 @@ private data class SessionItem(
     val status: SessionStatus?, val tab: ClaudeSession?,
     val remote: com.clauderemote.model.RemoteSession?
 )
+
+// ---------------------------------------------------------------------------
+// TerminalScreen — primary entry point
+// ---------------------------------------------------------------------------
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -65,8 +104,8 @@ fun TerminalScreen(
     onSaveClaudeMd: (suspend (String) -> Unit)? = null,
     onFetchCommands: (suspend () -> List<SlashCommand>)? = null,
     onFontSizeChange: ((Int) -> Unit)? = null,
-    onShowNativeMenu: (() -> Unit)? = null, // Desktop: show menu via Swing (bypasses SwingPanel z-order)
-    onNativeRenameDialog: ((sessionId: String, currentAlias: String) -> Unit)? = null, // Desktop: rename via Swing dialog
+    onShowNativeMenu: (() -> Unit)? = null,
+    onNativeRenameDialog: ((sessionId: String, currentAlias: String) -> Unit)? = null,
     onAttachRemote: ((com.clauderemote.model.RemoteSession) -> Unit)? = null,
     remoteSessions: List<com.clauderemote.model.RemoteSession> = emptyList(),
     contextPercent: Int? = null,
@@ -88,13 +127,11 @@ fun TerminalScreen(
     remoteStatus: RemoteSessionStatus? = null,
     onTerminalContentVisible: (() -> Unit)? = null
 ) {
-    var transcriptMode by rememberSaveable(activeTabId) { mutableStateOf(false) }
-    // Replay terminal buffer when toggling back from transcript view — the
-    // terminal widget loses its rendered scrollback when it leaves
-    // composition and remounts blank otherwise.
-    LaunchedEffect(transcriptMode, activeTabId) {
-        if (!transcriptMode) onTerminalContentVisible?.invoke()
-    }
+    val c = CRTheme.colors
+    val m = CRTheme.metrics
+    val terminalView = LocalCRTerminalView.current
+
+    // State — preserved from original
     var showControlBar by remember { mutableStateOf(true) }
     var compactMode by remember { mutableStateOf(false) }
     var showCommandPicker by remember { mutableStateOf(false) }
@@ -116,13 +153,19 @@ fun TerminalScreen(
     val scope = rememberCoroutineScope()
     var showPalette by remember { mutableStateOf(false) }
     var splitActive by remember { mutableStateOf(false) }
+    var showSessionDrawer by remember { mutableStateOf(false) }
+    var showExpanded by remember { mutableStateOf(false) }
 
-    // Unified session list: active tabs + remote (unconnected) sessions, grouped by folder
+    // Replay terminal buffer when switching back from transcript
+    LaunchedEffect(terminalView, activeTabId) {
+        if (terminalView == CRTerminalView.Raw) onTerminalContentVisible?.invoke()
+    }
+
+    // Unified session list
     val allSessions = remember(tabs, remoteSessions) {
         val connectedTmux = tabs.map { it.tmuxSessionName }.toSet()
         fun parseFolder(raw: String): String {
             var f = raw.trimEnd('/').substringAfterLast('/').ifBlank { raw }
-            // Strip yolo/yolo2/etc. suffix for grouping
             f = f.replace(Regex("-yolo\\d*$"), "")
             return f.ifBlank { "~" }
         }
@@ -132,25 +175,24 @@ fun TerminalScreen(
             val folder = parseFolder(tab.folder)
             val label = alias.ifBlank {
                 val rawName = tab.folder.trimEnd('/').substringAfterLast('/').ifBlank { tab.folder }
-                if (parsed.isYolo || tab.mode == com.clauderemote.model.ClaudeMode.YOLO) "$rawName \u26A1" else rawName
+                if (parsed.isYolo || tab.mode == ClaudeMode.YOLO) "$rawName ⚡" else rawName
             }
             SessionItem(tab.id, label, folder, true, tab.status, tab, null)
         }
         val remoteItems = remoteSessions.filter { remote ->
-            // Only filter by exact tmux name match
             remote.tmuxSession.name !in connectedTmux
         }.map { remote ->
             val parsed = com.clauderemote.model.TmuxNameParser.parse(remote.tmuxSession.name, remote.server.name)
             val folder = parseFolder(parsed.folder)
             val label = parsed.alias.ifBlank {
-                if (parsed.isYolo) "${parsed.folder} \u26A1" else parsed.folder
+                if (parsed.isYolo) "${parsed.folder} ⚡" else parsed.folder
             }
             SessionItem(remote.tmuxSession.name, label, folder, false, null, null, remote)
         }
         (activeSessions + remoteItems).groupBy { it.folder }.toSortedMap()
     }
 
-    // Keyboard shortcut handler
+    // Keyboard shortcuts
     fun handleShortcut(event: KeyEvent): Boolean {
         if (event.type != KeyEventType.KeyDown) return false
         if (event.isCtrlPressed || event.isMetaPressed) {
@@ -181,7 +223,7 @@ fun TerminalScreen(
         val wideMode = maxWidth > 700.dp && hasMultiple
 
         Row(modifier = Modifier.fillMaxSize()) {
-            // Side panel on wide displays
+            // Wide-screen side panel
             if (wideMode) {
                 SessionSidePanel(
                     allSessions = allSessions,
@@ -198,46 +240,550 @@ fun TerminalScreen(
                 )
             }
 
-    Column(modifier = Modifier.weight(1f).fillMaxHeight()) {
-        // Top bar
-        Surface(color = MaterialTheme.colorScheme.surfaceVariant, tonalElevation = 2.dp) {
-            Row(
-                modifier = Modifier.fillMaxWidth().padding(horizontal = 4.dp, vertical = 2.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                if (!wideMode) {
-                    IconButton(onClick = onMenuOpen, modifier = Modifier.size(36.dp)) {
-                        Icon(Icons.Default.Menu, "Menu", modifier = Modifier.size(20.dp))
+            Column(modifier = Modifier.weight(1f).fillMaxHeight().background(c.bg)) {
+
+                // ── Topbar (56 dp) ─────────────────────────────────────────
+                CRTopBar(
+                    activeSession = activeSession,
+                    sessionActivities = sessionActivities,
+                    hasMultiple = hasMultiple,
+                    wideMode = wideMode,
+                    tabs = tabs,
+                    allSessions = allSessions,
+                    activeTabId = activeTabId,
+                    invertColors = invertColors,
+                    terminalView = terminalView,
+                    latencyMs = latencyMs,
+                    contextPercent = contextPercent,
+                    sessionUsagePercent = sessionUsagePercent,
+                    weekUsagePercent = weekUsagePercent,
+                    compactMode = compactMode,
+                    showControlBar = showControlBar,
+                    onMenuOpen = onMenuOpen,
+                    onTabSwitch = onTabSwitch,
+                    onTabClose = onTabClose,
+                    onNewTab = onNewTab,
+                    onAttachRemote = onAttachRemote,
+                    onToggleInvertColors = onToggleInvertColors,
+                    onToggleCompact = { compactMode = !compactMode },
+                    onToggleControlBar = { showControlBar = !showControlBar },
+                    onMoreMenu = {
+                        if (onShowNativeMenu != null) onShowNativeMenu.invoke()
+                        else moreMenu = true
+                    },
+                )
+
+                // ── Crumb bar (36 dp) ──────────────────────────────────────
+                if (activeSession != null) {
+                    val allFlat = remember(allSessions) { allSessions.values.flatten() }
+                    val idx = allFlat.indexOfFirst { it.tab?.id == activeTabId }.coerceAtLeast(0)
+                    val total = allFlat.size.coerceAtLeast(1)
+                    CrumbBar(
+                        session = activeSession,
+                        allSessions = allFlat,
+                        index = idx,
+                        total = total,
+                        onOpenDrawer = { showSessionDrawer = true },
+                        onPrev = {
+                            if (idx > 0) {
+                                val prev = allFlat[idx - 1]
+                                if (prev.tab != null) onTabSwitch(prev.tab.id)
+                                else if (prev.remote != null) onAttachRemote?.invoke(prev.remote)
+                            }
+                        },
+                        onNext = {
+                            if (idx < total - 1) {
+                                val next = allFlat[idx + 1]
+                                if (next.tab != null) onTabSwitch(next.tab.id)
+                                else if (next.remote != null) onAttachRemote?.invoke(next.remote)
+                            }
+                        },
+                    )
+                }
+
+                // ── More / rename / command dialogs ────────────────────────
+                if (moreMenu) {
+                    AlertDialog(
+                        onDismissRequest = { moreMenu = false },
+                        confirmButton = {},
+                        containerColor = c.surface,
+                        text = {
+                            Column {
+                                TextButton(onClick = {
+                                    moreMenu = false
+                                    showPalette = true
+                                    if (onFetchCommands != null) {
+                                        scope.launch { commands = onFetchCommands.invoke() }
+                                    }
+                                }, modifier = Modifier.fillMaxWidth()) { Text("Command Palette", color = c.text) }
+                                if (onFetchClaudeMd != null) {
+                                    TextButton(onClick = {
+                                        moreMenu = false
+                                        scope.launch { claudeMdContent = onFetchClaudeMd.invoke(); showClaudeMd = true }
+                                    }, modifier = Modifier.fillMaxWidth()) { Text("View CLAUDE.md", color = c.text) }
+                                }
+                                TextButton(onClick = { moreMenu = false; onSendCommand("c") },
+                                    modifier = Modifier.fillMaxWidth()) { Text("Reset terminal", color = c.text) }
+                                if (splitTerminalContent != null && tabs.size > 1) {
+                                    TextButton(onClick = {
+                                        moreMenu = false
+                                        splitActive = !splitActive
+                                        if (splitActive) {
+                                            val otherId = tabs.firstOrNull { it.id != activeTabId }?.id
+                                            onSplitView?.invoke(otherId)
+                                        } else {
+                                            onSplitView?.invoke(null)
+                                        }
+                                    }, modifier = Modifier.fillMaxWidth()) {
+                                        Text(if (splitActive) "Close Split View" else "Split View", color = c.text)
+                                    }
+                                }
+                                HorizontalDivider(color = c.border, modifier = Modifier.padding(vertical = 4.dp))
+                                // Font size
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp)
+                                ) {
+                                    Text("Font: ", style = CRType.bodyDim, color = c.textDim)
+                                    FilledTonalButton(
+                                        onClick = { currentFontSize = (currentFontSize - 1).coerceIn(8, 32); onFontSizeChange?.invoke(currentFontSize) },
+                                        modifier = Modifier.size(32.dp), contentPadding = PaddingValues(0.dp)
+                                    ) { Text("A-") }
+                                    Spacer(Modifier.width(12.dp))
+                                    Text("$currentFontSize", style = CRType.cardTitle, color = c.text)
+                                    Spacer(Modifier.width(12.dp))
+                                    FilledTonalButton(
+                                        onClick = { currentFontSize = (currentFontSize + 1).coerceIn(8, 32); onFontSizeChange?.invoke(currentFontSize) },
+                                        modifier = Modifier.size(32.dp), contentPadding = PaddingValues(0.dp)
+                                    ) { Text("A+") }
+                                }
+                                if (activeSession != null) {
+                                    HorizontalDivider(color = c.border, modifier = Modifier.padding(vertical = 4.dp))
+                                    TextButton(onClick = {
+                                        moreMenu = false
+                                        renameText = activeSession.alias.ifBlank { activeSession.displayLabel }
+                                        showRenameDialog = true
+                                    }, modifier = Modifier.fillMaxWidth()) { Text("Rename session", color = c.text) }
+                                    if (activeSession.status == SessionStatus.DISCONNECTED || activeSession.status == SessionStatus.ERROR) {
+                                        TextButton(onClick = { moreMenu = false; onReconnect?.invoke(activeSession.id) },
+                                            modifier = Modifier.fillMaxWidth()) { Text("Reconnect", color = c.text) }
+                                    }
+                                    TextButton(onClick = { moreMenu = false; onTabClose(activeSession.id) },
+                                        modifier = Modifier.fillMaxWidth()) {
+                                        Text("Close session", color = c.disconnected)
+                                    }
+                                }
+                            }
+                        }
+                    )
+                }
+
+                // Disconnected banner
+                if (activeSession?.status == SessionStatus.DISCONNECTED || activeSession?.status == SessionStatus.ERROR) {
+                    Surface(color = c.tintRed) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 6.dp),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text("Disconnected", style = CRType.bodyDim, color = c.disconnected)
+                            if (onReconnect != null && activeSession != null) {
+                                TextButton(onClick = { onReconnect(activeSession.id) }) {
+                                    Text("Reconnect", color = c.accent)
+                                }
+                            }
+                        }
                     }
                 }
 
-                // Session dropdown (narrow mode only)
-                var sessionDropdown by remember { mutableStateOf(false) }
-                Box(modifier = Modifier.weight(1f)) {
-                    Row(
-                        modifier = Modifier.clickable { if (hasMultiple && !wideMode) sessionDropdown = true },
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        if (activeSession != null) {
-                            val activity = sessionActivities[activeSession.id]
-                            val dotColor = activityDotColor(activity, activeSession.status)
-                            Box(modifier = Modifier.size(8.dp).background(dotColor, shape = CircleShape))
-                            Spacer(Modifier.width(6.dp))
-                        }
-                        Text(
-                            activeSession?.tabTitle ?: "",
-                            style = MaterialTheme.typography.bodyMedium
-                        )
-                        if (hasMultiple && !wideMode) {
-                            Text(
-                                " (${tabs.size})",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                // Rename dialog
+                if (showRenameDialog && activeSession != null) {
+                    AlertDialog(
+                        onDismissRequest = { showRenameDialog = false },
+                        containerColor = c.surface,
+                        title = { Text("Rename session", color = c.text) },
+                        text = {
+                            OutlinedTextField(
+                                value = renameText,
+                                onValueChange = { renameText = it },
+                                label = { Text("Alias") },
+                                singleLine = true,
+                                modifier = Modifier.fillMaxWidth()
                             )
-                            Text(" \u25BE", style = MaterialTheme.typography.bodySmall)
+                        },
+                        confirmButton = {
+                            TextButton(onClick = {
+                                showRenameDialog = false
+                                onRenameSession?.invoke(activeSession.id, renameText.trim())
+                            }) { Text("Save", color = c.accent) }
+                        },
+                        dismissButton = {
+                            TextButton(onClick = { showRenameDialog = false }) { Text("Cancel", color = c.textDim) }
+                        }
+                    )
+                }
+
+                if (showCommandPicker) {
+                    AlertDialog(
+                        onDismissRequest = {
+                            showCommandPicker = false
+                            commandFilter = ""
+                            try { inputFocusRequester.requestFocus() } catch (_: Exception) {}
+                        },
+                        containerColor = c.surface,
+                        confirmButton = {},
+                        text = {
+                            CommandPicker(
+                                commands = commands,
+                                filter = commandFilter,
+                                onFilterChange = { commandFilter = it },
+                                onSelect = { cmd ->
+                                    showCommandPicker = false
+                                    commandFilter = ""
+                                    onSendCommand(cmd.command + "\r")
+                                },
+                                onDismiss = {
+                                    showCommandPicker = false
+                                    commandFilter = ""
+                                    try { inputFocusRequester.requestFocus() } catch (_: Exception) {}
+                                }
+                            )
+                        }
+                    )
+                }
+
+                // Command palette
+                if (showPalette) {
+                    val paletteActions = remember(tabs, activeTabId, commands) {
+                        buildPaletteActions(
+                            tabs = tabs,
+                            activeTabId = activeTabId,
+                            slashCommands = commands,
+                            onSendCommand = onSendCommand,
+                            onTabSwitch = onTabSwitch,
+                            onTabClose = onTabClose,
+                            onNewTab = onNewTab,
+                            onReconnect = onReconnect,
+                            onSwitchModel = onSwitchModel,
+                            onSendEscape = onSendEscape,
+                            onNavigate = { target -> onNavigate?.invoke(target) }
+                        )
+                    }
+                    CommandPaletteDialog(
+                        actions = paletteActions,
+                        onDismiss = { showPalette = false }
+                    )
+                }
+
+                // CLAUDE.md editor dialog
+                if (showClaudeMd) {
+                    var editMode by remember { mutableStateOf(false) }
+                    var editText by remember(claudeMdContent) { mutableStateOf(claudeMdContent) }
+                    var saving by remember { mutableStateOf(false) }
+                    AlertDialog(
+                        onDismissRequest = { showClaudeMd = false; editMode = false },
+                        containerColor = c.surface,
+                        confirmButton = {
+                            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                if (editMode) {
+                                    TextButton(
+                                        onClick = {
+                                            saving = true
+                                            scope.launch {
+                                                onSaveClaudeMd?.invoke(editText)
+                                                saving = false
+                                                editMode = false
+                                                claudeMdContent = editText
+                                            }
+                                        },
+                                        enabled = !saving
+                                    ) { Text(if (saving) "Saving..." else "Save", color = c.accent) }
+                                    TextButton(onClick = { editMode = false; editText = claudeMdContent }) {
+                                        Text("Cancel", color = c.textDim)
+                                    }
+                                } else {
+                                    if (claudeMdContent.isNotBlank() && claudeMdContent != "(no CLAUDE.md found)" && claudeMdContent != "(no connection)") {
+                                        TextButton(onClick = { editMode = true }) { Text("Edit", color = c.accent) }
+                                    }
+                                    TextButton(onClick = { showClaudeMd = false }) { Text("Close", color = c.textDim) }
+                                }
+                            }
+                        },
+                        title = { Text(if (editMode) "Edit CLAUDE.md" else "CLAUDE.md", color = c.text) },
+                        text = {
+                            if (editMode) {
+                                OutlinedTextField(
+                                    value = editText,
+                                    onValueChange = { editText = it },
+                                    modifier = Modifier.fillMaxWidth().heightIn(min = 200.dp, max = 400.dp),
+                                    textStyle = MaterialTheme.typography.bodySmall.copy(
+                                        fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace
+                                    ),
+                                    maxLines = Int.MAX_VALUE
+                                )
+                            } else {
+                                androidx.compose.foundation.text.selection.SelectionContainer {
+                                    Text(
+                                        text = claudeMdContent.ifBlank { "(not found)" },
+                                        modifier = Modifier.heightIn(max = 400.dp).verticalScroll(rememberScrollState()),
+                                        style = MaterialTheme.typography.bodySmall,
+                                        fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
+                                        color = c.text
+                                    )
+                                }
+                            }
+                        }
+                    )
+                }
+
+                // ── Terminal body ─────────────────────────────────────────
+                val isTranscript = terminalView == CRTerminalView.Transcript
+                if (isTranscript) {
+                    Box(modifier = Modifier.fillMaxWidth().weight(1f).background(c.bg)) {
+                        TranscriptView(
+                            entries = transcriptEntries,
+                            modifier = Modifier.fillMaxSize(),
+                            contextPercent = contextPercent,
+                            sessionUsagePercent = sessionUsagePercent,
+                            weekUsagePercent = weekUsagePercent,
+                            sessionResetMin = sessionResetMin,
+                            weekResetMin = weekResetMin,
+                            latencyMs = latencyMs,
+                            remoteStatus = remoteStatus,
+                            activity = activeTabId?.let { sessionActivities[it] }
+                        )
+                    }
+                } else if (splitActive && splitTerminalContent != null && wideMode) {
+                    Row(modifier = Modifier.fillMaxWidth().weight(1f)) {
+                        Box(modifier = Modifier.weight(1f).fillMaxHeight().background(c.bg)) {
+                            terminalContent(Modifier.fillMaxSize())
+                        }
+                        VerticalDivider(modifier = Modifier.fillMaxHeight().width(1.dp), color = c.border)
+                        Box(modifier = Modifier.weight(1f).fillMaxHeight().background(c.bg)) {
+                            splitTerminalContent(Modifier.fillMaxSize())
                         }
                     }
-                    if (!wideMode) {
+                } else {
+                    Box(modifier = Modifier.fillMaxWidth().weight(1f).background(c.bg)) {
+                        terminalContent(Modifier.fillMaxSize())
+                    }
+                }
+
+                if (!compactMode) {
+                    // Snippet bar
+                    val snippets = activeSession?.server?.snippets ?: emptyList()
+                    if (snippets.isNotEmpty()) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .background(c.surface)
+                                .padding(horizontal = 8.dp, vertical = 2.dp)
+                                .horizontalScroll(rememberScrollState()),
+                            horizontalArrangement = Arrangement.spacedBy(4.dp)
+                        ) {
+                            snippets.forEach { snip ->
+                                AssistChip(
+                                    onClick = { onSendCommand(snip + "\r") },
+                                    label = {
+                                        Text(
+                                            if (snip.length > 20) snip.take(18) + ".." else snip,
+                                            style = CRType.pill
+                                        )
+                                    },
+                                    modifier = Modifier.height(28.dp)
+                                )
+                            }
+                        }
+                    }
+
+                    // Pending input indicator
+                    if (pendingInputCount > 0) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .background(c.tintYellow)
+                                .padding(horizontal = 12.dp, vertical = 4.dp),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                "$pendingInputCount message(s) queued — will send on reconnect",
+                                style = CRType.bodyDim,
+                                color = c.working
+                            )
+                            if (onClearPending != null) {
+                                TextButton(onClick = onClearPending) {
+                                    Text("Clear", style = CRType.bodyDim, color = c.accent)
+                                }
+                            }
+                        }
+                    }
+
+                    // ── Status row ─────────────────────────────────────────
+                    if (activeSession != null) {
+                        StatusRow(
+                            session = activeSession,
+                            activity = sessionActivities[activeSession.id],
+                        )
+                    }
+
+                    // ── Prompt input ────────────────────────────────────────
+                    if (activeSession != null) {
+                        PromptInputBar(
+                            commands = commands,
+                            onSend = { text ->
+                                onSendCommand("[200~" + text + "[201~\r")
+                            },
+                            onSendCommand = onSendCommand,
+                            onAttachFile = onAttachFile,
+                            inputFocusRequester = inputFocusRequester,
+                            onExpand = { showExpanded = true }
+                        )
+                    }
+
+                    // ── Special keys row (spec §6.3 CRITICAL) ──────────────
+                    if (activeSession != null) {
+                        SpecialKeysRow(
+                            onKey = { key ->
+                                onSendCommand(String(key.bytes.map { it.toInt().toChar() }.toCharArray()))
+                            },
+                            onMore = {
+                                showPalette = true
+                                if (onFetchCommands != null) {
+                                    scope.launch { commands = onFetchCommands.invoke() }
+                                }
+                            },
+                        )
+                    }
+
+                    // ── Control bar ─────────────────────────────────────────
+                    if (showControlBar && activeSession != null) {
+                        CRControlBar(
+                            session = activeSession,
+                            onSendCommand = onSendCommand,
+                            onSendEscape = onSendEscape,
+                            onSwitchModel = onSwitchModel,
+                            onOpenCommands = {
+                                showCommandPicker = true
+                                commandFilter = ""
+                                if (onFetchCommands != null) {
+                                    scope.launch { commands = onFetchCommands.invoke() }
+                                }
+                            }
+                        )
+                    }
+                }
+
+            } // end Column
+        } // end Row
+
+        // ── SessionDrawer overlay ──────────────────────────────────────────
+        SessionDrawer(
+            open = showSessionDrawer,
+            sessions = tabs,
+            activities = sessionActivities,
+            activeId = activeTabId ?: "",
+            onPick = { id ->
+                onTabSwitch(id)
+                showSessionDrawer = false
+            },
+            onNew = {
+                onNewTab()
+                showSessionDrawer = false
+            },
+            onClose = { showSessionDrawer = false },
+        )
+
+        // ── ExpandedInput overlay ──────────────────────────────────────────
+        if (showExpanded) {
+            ExpandedInput(
+                onSend = { text ->
+                    onSendCommand("[200~" + text + "[201~\r")
+                },
+                onDismiss = { showExpanded = false },
+            )
+        }
+    } // end BoxWithConstraints
+}
+
+// ---------------------------------------------------------------------------
+// CRTopBar
+// ---------------------------------------------------------------------------
+
+@Composable
+private fun CRTopBar(
+    activeSession: ClaudeSession?,
+    sessionActivities: Map<String, com.clauderemote.model.SessionActivity>,
+    hasMultiple: Boolean,
+    wideMode: Boolean,
+    tabs: List<ClaudeSession>,
+    allSessions: Map<String, List<SessionItem>>,
+    activeTabId: String?,
+    invertColors: Boolean,
+    terminalView: CRTerminalView,
+    latencyMs: Long?,
+    contextPercent: Int?,
+    sessionUsagePercent: Int?,
+    weekUsagePercent: Int?,
+    compactMode: Boolean,
+    showControlBar: Boolean,
+    onMenuOpen: () -> Unit,
+    onTabSwitch: (String) -> Unit,
+    onTabClose: (String) -> Unit,
+    onNewTab: () -> Unit,
+    onAttachRemote: ((com.clauderemote.model.RemoteSession) -> Unit)?,
+    onToggleInvertColors: (() -> Unit)?,
+    onToggleCompact: () -> Unit,
+    onToggleControlBar: () -> Unit,
+    onMoreMenu: () -> Unit,
+) {
+    val c = CRTheme.colors
+    val m = CRTheme.metrics
+
+    Surface(
+        color = c.surface,
+        tonalElevation = 0.dp,
+        modifier = Modifier.fillMaxWidth().height(m.rowHeight)
+    ) {
+        Row(
+            modifier = Modifier.fillMaxSize().padding(horizontal = 4.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            if (!wideMode) {
+                IconButton(onClick = onMenuOpen, modifier = Modifier.size(36.dp)) {
+                    Icon(Icons.Default.Menu, "Sessions", tint = c.textDim, modifier = Modifier.size(20.dp))
+                }
+            }
+
+            // Session title / dropdown
+            var sessionDropdown by remember { mutableStateOf(false) }
+            Box(modifier = Modifier.weight(1f)) {
+                Row(
+                    modifier = Modifier.clickable(
+                        interactionSource = remember { MutableInteractionSource() },
+                        indication = null,
+                    ) { if (hasMultiple && !wideMode) sessionDropdown = true },
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    if (activeSession != null) {
+                        val activity = sessionActivities[activeSession.id]
+                        val dotColor = activityDotColor(activity, activeSession.status)
+                        Box(modifier = Modifier.size(8.dp).background(dotColor, CircleShape))
+                    }
+                    Text(
+                        activeSession?.tabTitle ?: "",
+                        style = CRType.cardTitle,
+                        color = c.text,
+                        maxLines = 1,
+                    )
+                    if (hasMultiple && !wideMode) {
+                        Text("(${tabs.size})", style = CRType.monoTiny, color = c.textDim)
+                        Text("▾", style = CRType.bodyDim, color = c.textDim)
+                    }
+                }
+
+                if (!wideMode) {
                     DropdownMenu(
                         expanded = sessionDropdown,
                         onDismissRequest = { sessionDropdown = false }
@@ -246,37 +792,30 @@ fun TerminalScreen(
                             if (allSessions.size > 1) {
                                 Text(
                                     folder,
-                                    style = MaterialTheme.typography.labelSmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    style = CRType.sectionH,
+                                    color = c.textDim,
                                     modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp)
                                 )
                             }
                             items.forEach { item ->
                                 val dotColor = when {
-                                    !item.isConnected -> Color(0xFF666666)
-                                    item.status == SessionStatus.ACTIVE -> Color(0xFF4CAF50)
-                                    item.status == SessionStatus.CONNECTING -> Color(0xFFFF9800)
-                                    else -> Color(0xFFF44336)
+                                    !item.isConnected -> c.idle
+                                    item.status == SessionStatus.ACTIVE -> c.ready
+                                    item.status == SessionStatus.CONNECTING -> c.working
+                                    else -> c.disconnected
                                 }
                                 DropdownMenuItem(
                                     text = {
                                         Row(verticalAlignment = Alignment.CenterVertically) {
-                                            Box(modifier = Modifier.size(8.dp).background(dotColor, shape = CircleShape))
+                                            Box(modifier = Modifier.size(8.dp).background(dotColor, CircleShape))
                                             Spacer(Modifier.width(8.dp))
-                                            Text(
-                                                item.label,
-                                                style = if (item.tab?.id == activeTabId) MaterialTheme.typography.bodyMedium
-                                                       else MaterialTheme.typography.bodySmall
-                                            )
+                                            Text(item.label, style = CRType.bodyDim, color = c.text)
                                         }
                                     },
                                     onClick = {
                                         sessionDropdown = false
-                                        if (item.isConnected && item.tab != null) {
-                                            onTabSwitch(item.tab.id)
-                                        } else if (item.remote != null) {
-                                            onAttachRemote?.invoke(item.remote)
-                                        }
+                                        if (item.isConnected && item.tab != null) onTabSwitch(item.tab.id)
+                                        else if (item.remote != null) onAttachRemote?.invoke(item.remote)
                                     },
                                     trailingIcon = if (item.isConnected) { {
                                         IconButton(
@@ -293,441 +832,433 @@ fun TerminalScreen(
                                 Row(verticalAlignment = Alignment.CenterVertically) {
                                     Icon(Icons.Default.Add, "New", modifier = Modifier.size(16.dp))
                                     Spacer(Modifier.width(8.dp))
-                                    Text("New session")
+                                    Text("New session", style = CRType.bodyDim)
                                 }
                             },
                             onClick = { sessionDropdown = false; onNewTab() }
                         )
                     }
-                    } // end !wideMode dropdown
                 }
-                // Latency indicator
-                if (latencyMs != null) {
-                    Spacer(Modifier.width(4.dp))
-                    val latColor = when {
-                        latencyMs < 100 -> Color(0xFF4CAF50)
-                        latencyMs < 300 -> Color(0xFFFF9800)
-                        else -> Color(0xFFF44336)
-                    }
+            }
+
+            // Latency
+            if (latencyMs != null) {
+                val latColor = when {
+                    latencyMs < 100 -> c.ready
+                    latencyMs < 300 -> c.working
+                    else -> c.disconnected
+                }
+                Text("${latencyMs}ms", style = CRType.monoTiny, color = latColor,
+                    modifier = Modifier.padding(horizontal = 4.dp))
+            }
+
+            // Usage mini bars
+            if (contextPercent != null || sessionUsagePercent != null || weekUsagePercent != null) {
+                Column(verticalArrangement = Arrangement.spacedBy(1.dp), modifier = Modifier.padding(horizontal = 4.dp)) {
+                    if (contextPercent != null) MiniBar("Ctx", contextPercent)
+                    if (sessionUsagePercent != null) MiniBar("5h", sessionUsagePercent)
+                    if (weekUsagePercent != null) MiniBar("Wk", weekUsagePercent)
+                }
+            }
+
+            // Compact toggle
+            TextButton(onClick = onToggleCompact) {
+                Text(if (compactMode) "Full" else "Min", style = CRType.bodyDim, color = c.textDim)
+            }
+            if (!compactMode) {
+                TextButton(onClick = onToggleControlBar) {
+                    Text(if (showControlBar) "Hide" else "Ctrl", style = CRType.bodyDim, color = c.textDim)
+                }
+            }
+
+            // Invert colors (sunlight-readable)
+            if (onToggleInvertColors != null) {
+                IconButton(onClick = onToggleInvertColors, modifier = Modifier.size(36.dp)) {
                     Text(
-                        "${latencyMs}ms",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = latColor
+                        if (invertColors) "☾" else "☀",
+                        style = MaterialTheme.typography.titleMedium,
+                        color = c.textDim
                     )
                 }
-                // Context + usage bars
-                if (contextPercent != null || sessionUsagePercent != null || weekUsagePercent != null) {
-                    Spacer(Modifier.width(4.dp))
-                    Column(verticalArrangement = Arrangement.spacedBy(1.dp)) {
-                        if (contextPercent != null) {
-                            MiniBar("Ctx", contextPercent)
-                        }
-                        if (sessionUsagePercent != null) {
-                            MiniBar("5h", sessionUsagePercent)
-                        }
-                        if (weekUsagePercent != null) {
-                            MiniBar("Wk", weekUsagePercent)
-                        }
-                    }
-                }
-
-                // Compact/Full toggle
-                TextButton(onClick = { compactMode = !compactMode }) {
-                    Text(if (compactMode) "Full" else "Min", style = MaterialTheme.typography.bodySmall)
-                }
-                if (!compactMode) {
-                    TextButton(onClick = { showControlBar = !showControlBar }) {
-                        Text(if (showControlBar) "Hide" else "Ctrl", style = MaterialTheme.typography.bodySmall)
-                    }
-                }
-                // Sunlight-readable toggle (global color inversion)
-                if (onToggleInvertColors != null) {
-                    IconButton(
-                        onClick = onToggleInvertColors,
-                        modifier = Modifier.size(36.dp),
-                    ) {
-                        // ☀ U+2600 when off, ☾ U+263E when on — Unicode glyphs
-                        // keep us icon-library-agnostic and render in a TextButton.
-                        Text(
-                            if (invertColors) "\u263E" else "\u2600",
-                            style = MaterialTheme.typography.titleMedium,
-                        )
-                    }
-                }
-                // Transcript / Terminal view toggle
-                if (activeSession != null) {
-                    IconButton(
-                        onClick = { transcriptMode = !transcriptMode },
-                        modifier = Modifier.size(36.dp)
-                    ) {
-                        Text(
-                            if (transcriptMode) "\u25A4" else "\u00B6",
-                            style = MaterialTheme.typography.titleMedium,
-                            color = if (transcriptMode) MaterialTheme.colorScheme.primary
-                                   else LocalContentColor.current
-                        )
-                    }
-                }
-                // More menu button
-                IconButton(onClick = {
-                    if (onShowNativeMenu != null) onShowNativeMenu.invoke()
-                    else moreMenu = true
-                }, modifier = Modifier.size(36.dp)) {
-                    Text("\u22EE", style = MaterialTheme.typography.titleMedium)
-                }
-            }
-        }
-
-        if (moreMenu) {
-            AlertDialog(
-                onDismissRequest = { moreMenu = false },
-                confirmButton = {},
-                text = {
-                    Column {
-                        TextButton(onClick = {
-                            moreMenu = false
-                            showPalette = true
-                            if (onFetchCommands != null) {
-                                scope.launch { commands = onFetchCommands.invoke() }
-                            }
-                        }, modifier = Modifier.fillMaxWidth()) { Text("Command Palette") }
-                        if (onFetchClaudeMd != null) {
-                            TextButton(onClick = {
-                                moreMenu = false
-                                scope.launch { claudeMdContent = onFetchClaudeMd.invoke(); showClaudeMd = true }
-                            }, modifier = Modifier.fillMaxWidth()) { Text("View CLAUDE.md") }
-                        }
-                        TextButton(onClick = { moreMenu = false; onSendCommand("\u001Bc") },
-                            modifier = Modifier.fillMaxWidth()) { Text("Reset terminal") }
-                        if (splitTerminalContent != null && tabs.size > 1) {
-                            TextButton(onClick = {
-                                moreMenu = false
-                                splitActive = !splitActive
-                                if (splitActive) {
-                                    val otherId = tabs.firstOrNull { it.id != activeTabId }?.id
-                                    onSplitView?.invoke(otherId)
-                                } else {
-                                    onSplitView?.invoke(null)
-                                }
-                            }, modifier = Modifier.fillMaxWidth()) {
-                                Text(if (splitActive) "Close Split View" else "Split View")
-                            }
-                        }
-                        HorizontalDivider(modifier = Modifier.padding(vertical = 4.dp))
-                        // Font size
-                        Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp)) {
-                            Text("Font: ", style = MaterialTheme.typography.bodyMedium)
-                            FilledTonalButton(
-                                onClick = { currentFontSize = (currentFontSize - 1).coerceIn(8, 32); onFontSizeChange?.invoke(currentFontSize) },
-                                modifier = Modifier.size(32.dp), contentPadding = PaddingValues(0.dp)
-                            ) { Text("A-") }
-                            Spacer(Modifier.width(12.dp))
-                            Text("$currentFontSize", style = MaterialTheme.typography.titleMedium)
-                            Spacer(Modifier.width(12.dp))
-                            FilledTonalButton(
-                                onClick = { currentFontSize = (currentFontSize + 1).coerceIn(8, 32); onFontSizeChange?.invoke(currentFontSize) },
-                                modifier = Modifier.size(32.dp), contentPadding = PaddingValues(0.dp)
-                            ) { Text("A+") }
-                        }
-                        if (activeSession != null) {
-                            HorizontalDivider(modifier = Modifier.padding(vertical = 4.dp))
-                            TextButton(onClick = {
-                                moreMenu = false
-                                renameText = activeSession.alias.ifBlank { activeSession.displayLabel }
-                                showRenameDialog = true
-                            }, modifier = Modifier.fillMaxWidth()) { Text("Rename session") }
-                            if (activeSession.status == SessionStatus.DISCONNECTED || activeSession.status == SessionStatus.ERROR) {
-                                TextButton(onClick = { moreMenu = false; onReconnect?.invoke(activeSession.id) },
-                                    modifier = Modifier.fillMaxWidth()) { Text("Reconnect") }
-                            }
-                            TextButton(onClick = { moreMenu = false; onTabClose(activeSession.id) },
-                                modifier = Modifier.fillMaxWidth()) {
-                                Text("Close session", color = MaterialTheme.colorScheme.error)
-                            }
-                        }
-                    }
-                }
-            )
-        }
-
-        // Disconnected banner
-        if (activeSession?.status == SessionStatus.DISCONNECTED || activeSession?.status == SessionStatus.ERROR) {
-            Surface(color = MaterialTheme.colorScheme.errorContainer) {
-                Row(
-                    modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 6.dp),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Text(
-                        "Disconnected",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onErrorContainer
-                    )
-                    if (onReconnect != null && activeSession != null) {
-                        TextButton(onClick = { onReconnect(activeSession.id) }) {
-                            Text("Reconnect")
-                        }
-                    }
-                }
-            }
-        }
-
-        // Command picker as dialog (works over SwingPanel on desktop)
-        // Rename session dialog
-        if (showRenameDialog && activeSession != null) {
-            AlertDialog(
-                onDismissRequest = { showRenameDialog = false },
-                title = { Text("Rename session") },
-                text = {
-                    OutlinedTextField(
-                        value = renameText,
-                        onValueChange = { renameText = it },
-                        label = { Text("Alias") },
-                        singleLine = true,
-                        modifier = Modifier.fillMaxWidth()
-                    )
-                },
-                confirmButton = {
-                    TextButton(onClick = {
-                        showRenameDialog = false
-                        onRenameSession?.invoke(activeSession.id, renameText.trim())
-                    }) { Text("Save") }
-                },
-                dismissButton = {
-                    TextButton(onClick = { showRenameDialog = false }) { Text("Cancel") }
-                }
-            )
-        }
-
-        if (showCommandPicker) {
-            AlertDialog(
-                onDismissRequest = {
-                    showCommandPicker = false
-                    commandFilter = ""
-                    try { inputFocusRequester.requestFocus() } catch (_: Exception) {}
-                },
-                confirmButton = {},
-                text = {
-                    CommandPicker(
-                        commands = commands,
-                        filter = commandFilter,
-                        onFilterChange = { commandFilter = it },
-                        onSelect = { cmd ->
-                            showCommandPicker = false
-                            commandFilter = ""
-                            onSendCommand(cmd.command + "\r")
-                        },
-                        onDismiss = {
-                            showCommandPicker = false
-                            commandFilter = ""
-                            try { inputFocusRequester.requestFocus() } catch (_: Exception) {}
-                        }
-                    )
-                }
-            )
-        }
-
-        // Command palette
-        if (showPalette) {
-            val paletteActions = remember(tabs, activeTabId, commands) {
-                buildPaletteActions(
-                    tabs = tabs,
-                    activeTabId = activeTabId,
-                    slashCommands = commands,
-                    onSendCommand = onSendCommand,
-                    onTabSwitch = onTabSwitch,
-                    onTabClose = onTabClose,
-                    onNewTab = onNewTab,
-                    onReconnect = onReconnect,
-                    onSwitchModel = onSwitchModel,
-                    onSendEscape = onSendEscape,
-                    onNavigate = { target -> onNavigate?.invoke(target) }
-                )
-            }
-            CommandPaletteDialog(
-                actions = paletteActions,
-                onDismiss = { showPalette = false }
-            )
-        }
-
-        // CLAUDE.md editor dialog
-        if (showClaudeMd) {
-            var editMode by remember { mutableStateOf(false) }
-            var editText by remember(claudeMdContent) { mutableStateOf(claudeMdContent) }
-            var saving by remember { mutableStateOf(false) }
-            AlertDialog(
-                onDismissRequest = { showClaudeMd = false; editMode = false },
-                confirmButton = {
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        if (editMode) {
-                            TextButton(
-                                onClick = {
-                                    saving = true
-                                    scope.launch {
-                                        onSaveClaudeMd?.invoke(editText)
-                                        saving = false
-                                        editMode = false
-                                        claudeMdContent = editText
-                                    }
-                                },
-                                enabled = !saving
-                            ) { Text(if (saving) "Saving..." else "Save") }
-                            TextButton(onClick = { editMode = false; editText = claudeMdContent }) { Text("Cancel") }
-                        } else {
-                            if (claudeMdContent.isNotBlank() && claudeMdContent != "(no CLAUDE.md found)" && claudeMdContent != "(no connection)") {
-                                TextButton(onClick = { editMode = true }) { Text("Edit") }
-                            }
-                            TextButton(onClick = { showClaudeMd = false }) { Text("Close") }
-                        }
-                    }
-                },
-                title = { Text(if (editMode) "Edit CLAUDE.md" else "CLAUDE.md") },
-                text = {
-                    if (editMode) {
-                        OutlinedTextField(
-                            value = editText,
-                            onValueChange = { editText = it },
-                            modifier = Modifier.fillMaxWidth().heightIn(min = 200.dp, max = 400.dp),
-                            textStyle = MaterialTheme.typography.bodySmall.copy(
-                                fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace
-                            ),
-                            maxLines = Int.MAX_VALUE
-                        )
-                    } else {
-                        androidx.compose.foundation.text.selection.SelectionContainer {
-                            Text(
-                                text = claudeMdContent.ifBlank { "(not found)" },
-                                modifier = Modifier.heightIn(max = 400.dp).verticalScroll(rememberScrollState()),
-                                style = MaterialTheme.typography.bodySmall,
-                                fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace
-                            )
-                        }
-                    }
-                }
-            )
-        }
-
-        // Terminal content (with optional split view) or read-only transcript view
-        if (transcriptMode) {
-            Box(modifier = Modifier.fillMaxWidth().weight(1f)) {
-                TranscriptView(
-                    entries = transcriptEntries,
-                    modifier = Modifier.fillMaxSize(),
-                    contextPercent = contextPercent,
-                    sessionUsagePercent = sessionUsagePercent,
-                    weekUsagePercent = weekUsagePercent,
-                    sessionResetMin = sessionResetMin,
-                    weekResetMin = weekResetMin,
-                    latencyMs = latencyMs,
-                    remoteStatus = remoteStatus,
-                    activity = activeTabId?.let { sessionActivities[it] }
-                )
-            }
-        } else if (splitActive && splitTerminalContent != null && wideMode) {
-            Row(modifier = Modifier.fillMaxWidth().weight(1f)) {
-                Box(modifier = Modifier.weight(1f).fillMaxHeight()) {
-                    terminalContent(Modifier.fillMaxSize())
-                }
-                VerticalDivider(modifier = Modifier.fillMaxHeight().width(2.dp))
-                Box(modifier = Modifier.weight(1f).fillMaxHeight()) {
-                    splitTerminalContent(Modifier.fillMaxSize())
-                }
-            }
-        } else {
-            Box(modifier = Modifier.fillMaxWidth().weight(1f)) {
-                terminalContent(Modifier.fillMaxSize())
-            }
-        }
-
-        if (!compactMode) {
-            // Snippet bar (per-server quick commands)
-            val snippets = activeSession?.server?.snippets ?: emptyList()
-            if (snippets.isNotEmpty()) {
-                Surface(color = MaterialTheme.colorScheme.surfaceVariant, tonalElevation = 1.dp) {
-                    Row(
-                        modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 2.dp),
-                        horizontalArrangement = Arrangement.spacedBy(4.dp)
-                    ) {
-                        snippets.forEach { snip ->
-                            AssistChip(
-                                onClick = { onSendCommand(snip + "\r") },
-                                label = {
-                                    Text(
-                                        if (snip.length > 20) snip.take(18) + ".." else snip,
-                                        style = MaterialTheme.typography.labelSmall
-                                    )
-                                },
-                                modifier = Modifier.height(28.dp)
-                            )
-                        }
-                    }
-                }
             }
 
-            // Pending input queue indicator
-            if (pendingInputCount > 0) {
-                Surface(color = Color(0xFFFFF3E0)) {
-                    Row(
-                        modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Text(
-                            "$pendingInputCount message(s) queued — will send on reconnect",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = Color(0xFFE65100)
-                        )
-                        if (onClearPending != null) {
-                            TextButton(onClick = onClearPending) {
-                                Text("Clear", style = MaterialTheme.typography.bodySmall)
-                            }
-                        }
-                    }
-                }
-            }
-
-            // Prompt input with inline slash autocomplete
-            if (activeSession != null) {
-                PromptInputBar(
-                    commands = commands,
-                    onSend = { text ->
-                        // Wrap in bracketed paste so Claude Code's prompt
-                        // commits the content as a paste block, then submits
-                        // on the trailing CR rather than treating it as a
-                        // newline-inside-paste. Without this, longer or
-                        // multi-line inputs sometimes land in the prompt
-                        // buffer but never submit — user has to press Send
-                        // again to fire a bare \r.
-                        onSendCommand("[200~" + text + "[201~\r")
-                    },
-                    onSendCommand = onSendCommand,
-                    onAttachFile = onAttachFile,
-                    inputFocusRequester = inputFocusRequester
-                )
+            // More menu
+            IconButton(onClick = onMoreMenu, modifier = Modifier.size(36.dp)) {
+                Text("⋮", style = MaterialTheme.typography.titleMedium, color = c.textDim)
             }
         }
-
-        // Control bar
-        if (!compactMode && showControlBar && activeSession != null) {
-            ClaudeControlBar(
-                onSendCommand = onSendCommand,
-                onSendEscape = onSendEscape,
-                onOpenCommands = {
-                    showCommandPicker = true
-                    commandFilter = ""
-                    if (onFetchCommands != null) {
-                        scope.launch { commands = onFetchCommands.invoke() }
-                    }
-                }
-            )
-        }
-
-    } // end Column
-    } // end Row
-    } // end BoxWithConstraints
+    }
 }
 
-// ======================== SESSION SIDE PANEL ========================
+// ---------------------------------------------------------------------------
+// CrumbBar (spec §6.3)
+// ---------------------------------------------------------------------------
+
+@Composable
+private fun CrumbBar(
+    session: ClaudeSession,
+    allSessions: List<SessionItem>,
+    index: Int,
+    total: Int,
+    onOpenDrawer: () -> Unit,
+    onPrev: () -> Unit,
+    onNext: () -> Unit,
+) {
+    val c = CRTheme.colors
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(36.dp)
+            .background(c.bg)
+            .padding(horizontal = 10.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+        // Sessions button
+        Row(
+            modifier = Modifier
+                .background(c.surface, RoundedCornerShape(6.dp))
+                .clickable(
+                    interactionSource = remember { MutableInteractionSource() },
+                    indication = null,
+                ) { onOpenDrawer() }
+                .padding(horizontal = 8.dp, vertical = 4.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(4.dp),
+        ) {
+            Icon(Icons.Default.Menu, null, tint = c.textDim, modifier = Modifier.size(12.dp))
+            Text("Sessions", style = CRType.monoTiny, color = c.textDim)
+        }
+
+        // Server : folder · alias
+        val folderName = session.folder.trimEnd('/').substringAfterLast('/').ifBlank { session.folder }
+        Row(
+            modifier = Modifier.weight(1f),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(2.dp),
+        ) {
+            Text(session.server.name, style = CRType.mono, color = c.textDim, maxLines = 1)
+            Text(":", style = CRType.mono, color = c.border)
+            Text(folderName, style = CRType.mono, color = c.text, maxLines = 1)
+            if (session.alias.isNotBlank()) {
+                Text("·", style = CRType.mono, color = c.border)
+                Text(session.alias, style = CRType.mono, color = c.accent, maxLines = 1)
+            }
+        }
+
+        // Prev / counter / next
+        IconButton(
+            onClick = onPrev,
+            enabled = index > 0,
+            modifier = Modifier.size(24.dp)
+        ) {
+            Icon(Icons.Default.KeyboardArrowLeft, null, tint = if (index > 0) c.textDim else c.border,
+                modifier = Modifier.size(14.dp))
+        }
+        Text("${index + 1}/$total", style = CRType.monoTiny, color = c.textDim)
+        IconButton(
+            onClick = onNext,
+            enabled = index < total - 1,
+            modifier = Modifier.size(24.dp)
+        ) {
+            Icon(Icons.Default.KeyboardArrowRight, null, tint = if (index < total - 1) c.textDim else c.border,
+                modifier = Modifier.size(14.dp))
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// StatusRow — activity + last line + cost
+// ---------------------------------------------------------------------------
+
+@Composable
+private fun StatusRow(
+    session: ClaudeSession,
+    activity: SessionActivity?,
+) {
+    val c = CRTheme.colors
+    val crStatus = activity.toCRStatus()
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(c.surface)
+            .padding(horizontal = 10.dp, vertical = 4.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        StatusIndicator(status = crStatus)
+        Spacer(Modifier.weight(1f))
+    }
+}
+
+private fun SessionActivity?.toCRStatus(): CRStatus = when (this) {
+    SessionActivity.WORKING -> CRStatus.Working
+    SessionActivity.WAITING_FOR_INPUT -> CRStatus.Ready
+    SessionActivity.APPROVAL_NEEDED -> CRStatus.Approval
+    SessionActivity.IDLE -> CRStatus.Idle
+    SessionActivity.DISCONNECTED -> CRStatus.Disconnected
+    null -> CRStatus.Idle
+}
+
+// ---------------------------------------------------------------------------
+// SpecialKeysRow (spec §6.3 CRITICAL)
+// ---------------------------------------------------------------------------
+
+@Composable
+private fun SpecialKeysRow(
+    onKey: (SpecialKey) -> Unit,
+    onMore: () -> Unit,
+) {
+    val c = CRTheme.colors
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(c.surface)
+            .padding(horizontal = 12.dp, vertical = 6.dp),
+        horizontalArrangement = Arrangement.spacedBy(4.dp),
+    ) {
+        SpecialKeyBtn("Esc",  Modifier.weight(1f)) { onKey(SpecialKey.Esc)   }
+        SpecialKeyBtn("Tab",  Modifier.weight(1f)) { onKey(SpecialKey.Tab)   }
+        SpecialKeyBtn("↑",    Modifier.weight(1f)) { onKey(SpecialKey.Up)    }
+        SpecialKeyBtn("↓",    Modifier.weight(1f)) { onKey(SpecialKey.Down)  }
+        SpecialKeyBtn("←",    Modifier.weight(1f)) { onKey(SpecialKey.Left)  }
+        SpecialKeyBtn("→",    Modifier.weight(1f)) { onKey(SpecialKey.Right) }
+        SpecialKeyBtn("/",    Modifier.weight(1f)) { onKey(SpecialKey.Slash) }
+        SpecialKeyBtn("⌃C",   Modifier.weight(1f)) { onKey(SpecialKey.CtrlC) }
+        SpecialKeyBtn("⌃D",   Modifier.weight(1f)) { onKey(SpecialKey.CtrlD) }
+        SpecialKeyBtn("···",  Modifier.weight(1f)) { onMore()                }
+    }
+}
+
+@Composable
+private fun SpecialKeyBtn(
+    label: String,
+    modifier: Modifier = Modifier,
+    onClick: () -> Unit,
+) {
+    val c = CRTheme.colors
+    val haptic = androidx.compose.ui.hapticfeedback.HapticFeedbackType.TextHandleMove
+    val hapticFeedback = androidx.compose.ui.platform.LocalHapticFeedback.current
+
+    var pressed by remember { mutableStateOf(false) }
+    val bgColor by animateColorAsState(
+        targetValue = if (pressed) c.accent.copy(alpha = 0.25f) else c.surface2,
+        animationSpec = tween(if (pressed) 0 else 100),
+        label = "keyBg"
+    )
+
+    Surface(
+        modifier = modifier
+            .height(32.dp)
+            .clickable(
+                interactionSource = remember { MutableInteractionSource() },
+                indication = null,
+            ) {
+                hapticFeedback.performHapticFeedback(haptic)
+                pressed = true
+                onClick()
+            },
+        color = bgColor,
+        shape = RoundedCornerShape(6.dp),
+        tonalElevation = 0.dp,
+    ) {
+        Box(contentAlignment = Alignment.Center) {
+            Text(label, style = CRType.keyboardKey, color = c.text)
+        }
+    }
+
+    // Reset pressed state after flash
+    LaunchedEffect(pressed) {
+        if (pressed) {
+            kotlinx.coroutines.delay(100)
+            pressed = false
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// CRControlBar — mode/model chips + escape + slash commands
+// ---------------------------------------------------------------------------
+
+@Composable
+private fun CRControlBar(
+    session: ClaudeSession,
+    onSendCommand: (String) -> Unit,
+    onSendEscape: () -> Unit,
+    onSwitchModel: (ClaudeModel) -> Unit,
+    onOpenCommands: () -> Unit,
+) {
+    val c = CRTheme.colors
+
+    var showModePop by remember { mutableStateOf(false) }
+    var showModelPop by remember { mutableStateOf(false) }
+
+    Box(modifier = Modifier.fillMaxWidth()) {
+        // Mode popup
+        if (showModePop) {
+            Surface(
+                modifier = Modifier
+                    .align(Alignment.BottomStart)
+                    .fillMaxWidth()
+                    .padding(horizontal = 12.dp, vertical = 4.dp),
+                color = c.surface,
+                shape = RoundedCornerShape(12.dp),
+                tonalElevation = 8.dp,
+            ) {
+                Column(modifier = Modifier.padding(8.dp)) {
+                    Text("MODE", style = CRType.sectionH, color = c.textDim,
+                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp))
+                    ClaudeMode.entries.forEach { mode ->
+                        val isActive = session.mode == mode
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .background(
+                                    if (isActive) c.tintAccent else Color.Transparent,
+                                    RoundedCornerShape(8.dp)
+                                )
+                                .clickable(
+                                    interactionSource = remember { MutableInteractionSource() },
+                                    indication = null,
+                                ) {
+                                    showModePop = false
+                                    // mode switching is handled by sending the shift-tab toggle command
+                                    onSendCommand("[Z")
+                                }
+                                .padding(horizontal = 10.dp, vertical = 8.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        ) {
+                            Text(mode.displayName, style = CRType.bodyDim,
+                                color = if (isActive) c.accent else c.text,
+                                modifier = Modifier.weight(1f))
+                        }
+                    }
+                }
+            }
+        }
+
+        // Model popup
+        if (showModelPop) {
+            Surface(
+                modifier = Modifier
+                    .align(Alignment.BottomStart)
+                    .fillMaxWidth()
+                    .padding(horizontal = 12.dp, vertical = 4.dp),
+                color = c.surface,
+                shape = RoundedCornerShape(12.dp),
+                tonalElevation = 8.dp,
+            ) {
+                Column(modifier = Modifier.padding(8.dp)) {
+                    Text("MODEL", style = CRType.sectionH, color = c.textDim,
+                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp))
+                    ClaudeModel.entries.forEach { model ->
+                        val isActive = session.model == model
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .background(
+                                    if (isActive) c.tintAccent else Color.Transparent,
+                                    RoundedCornerShape(8.dp)
+                                )
+                                .clickable(
+                                    interactionSource = remember { MutableInteractionSource() },
+                                    indication = null,
+                                ) {
+                                    showModelPop = false
+                                    onSwitchModel(model)
+                                }
+                                .padding(horizontal = 10.dp, vertical = 8.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Text(model.displayName, style = CRType.bodyDim,
+                                color = if (isActive) c.accent else c.text,
+                                modifier = Modifier.weight(1f))
+                        }
+                    }
+                }
+            }
+        }
+
+        // Actual bar
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .background(c.surface)
+                .padding(horizontal = 10.dp, vertical = 6.dp),
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            // Mode chip
+            val modeColor = when (session.mode) {
+                ClaudeMode.YOLO -> c.modeYolo
+                ClaudeMode.PLAN -> c.modePlan
+                ClaudeMode.AUTO_ACCEPT -> c.modeAuto
+                ClaudeMode.NORMAL -> c.modeNormal
+            }
+            val modeShort = when (session.mode) {
+                ClaudeMode.YOLO -> "YOLO"
+                ClaudeMode.PLAN -> "PLAN"
+                ClaudeMode.AUTO_ACCEPT -> "AUTO"
+                ClaudeMode.NORMAL -> "NORM"
+            }
+            Surface(
+                onClick = { showModePop = !showModePop; showModelPop = false },
+                color = modeColor.copy(alpha = 0.12f),
+                shape = RoundedCornerShape(6.dp),
+            ) {
+                Row(
+                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(4.dp),
+                ) {
+                    Text("mode", style = CRType.monoTiny, color = c.textDim)
+                    Text(modeShort, style = CRType.pill, color = modeColor)
+                }
+            }
+
+            // Model chip
+            Surface(
+                onClick = { showModelPop = !showModelPop; showModePop = false },
+                color = c.tintAccent,
+                shape = RoundedCornerShape(6.dp),
+            ) {
+                Row(
+                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(4.dp),
+                ) {
+                    Text("model", style = CRType.monoTiny, color = c.textDim)
+                    Text(session.model.displayName.uppercase(), style = CRType.pill, color = c.accent)
+                }
+            }
+
+            Spacer(Modifier.weight(1f))
+
+            // /cmd
+            Surface(
+                onClick = onOpenCommands,
+                color = c.surface2,
+                shape = RoundedCornerShape(6.dp),
+            ) {
+                Text("/cmd", style = CRType.pill, color = c.textDim,
+                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp))
+            }
+
+            // Esc
+            CtrlButton("Esc") { onSendEscape() }
+            // C-c
+            CtrlButton("C-c") { onSendCommand("") }
+            // y / n
+            CtrlButton("y") { onSendCommand("y\r") }
+            CtrlButton("n") { onSendCommand("n\r") }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// SESSION SIDE PANEL (unchanged logic, restyled)
+// ---------------------------------------------------------------------------
 
 @Composable
 private fun SessionSidePanel(
@@ -743,16 +1274,16 @@ private fun SessionSidePanel(
     onNativeRenameDialog: ((sessionId: String, currentAlias: String) -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
+    val c = CRTheme.colors
     var renamingItem by remember { mutableStateOf<SessionItem?>(null) }
     var renameText by remember { mutableStateOf("") }
 
-    // Rename dialog — on desktop use native Swing dialog (AlertDialog renders
-    // behind the heavyweight JediTerm SwingPanel); on Android use Compose AlertDialog.
     if (onNativeRenameDialog == null) {
         renamingItem?.let { item ->
             AlertDialog(
                 onDismissRequest = { renamingItem = null },
-                title = { Text("Rename session") },
+                containerColor = c.surface,
+                title = { Text("Rename session", color = c.text) },
                 text = {
                     OutlinedTextField(
                         value = renameText,
@@ -765,123 +1296,110 @@ private fun SessionSidePanel(
                     TextButton(onClick = {
                         item.tab?.let { onRenameSession?.invoke(it.id, renameText.trim()) }
                         renamingItem = null
-                    }) { Text("OK") }
+                    }) { Text("OK", color = c.accent) }
                 },
                 dismissButton = {
-                    TextButton(onClick = { renamingItem = null }) { Text("Cancel") }
+                    TextButton(onClick = { renamingItem = null }) { Text("Cancel", color = c.textDim) }
                 }
             )
         }
     }
 
     Surface(
-        color = MaterialTheme.colorScheme.surfaceVariant,
-        tonalElevation = 4.dp,
+        color = c.surface,
+        tonalElevation = 0.dp,
         modifier = modifier
     ) {
         Column(modifier = Modifier.fillMaxSize()) {
             Row(
-                modifier = Modifier.fillMaxWidth().padding(8.dp),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .background(c.surface)
+                    .padding(8.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 IconButton(onClick = onMenuOpen, modifier = Modifier.size(32.dp)) {
-                    Icon(Icons.Default.Menu, "Menu", modifier = Modifier.size(18.dp))
+                    Icon(Icons.Default.Menu, "Menu", tint = c.textDim, modifier = Modifier.size(18.dp))
                 }
-                Text("Sessions", style = MaterialTheme.typography.titleSmall, modifier = Modifier.weight(1f))
+                Text("Sessions", style = CRType.cardTitle, color = c.text, modifier = Modifier.weight(1f))
                 IconButton(onClick = onNewTab, modifier = Modifier.size(32.dp)) {
-                    Icon(Icons.Default.Add, "New", modifier = Modifier.size(18.dp))
+                    Icon(Icons.Default.Add, "New", tint = c.accent, modifier = Modifier.size(18.dp))
                 }
             }
-            HorizontalDivider()
+            HorizontalDivider(color = c.border)
 
             Column(modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState())) {
                 allSessions.entries.forEachIndexed { index, (folder, items) ->
                     if (index > 0) Spacer(Modifier.height(4.dp))
-                    Surface(
-                        color = MaterialTheme.colorScheme.secondaryContainer,
-                        modifier = Modifier.fillMaxWidth()
-                    ) {
-                        Text(
-                            folder,
-                            style = MaterialTheme.typography.titleSmall.copy(
-                                fontWeight = androidx.compose.ui.text.font.FontWeight.Bold
-                            ),
-                            color = MaterialTheme.colorScheme.onSecondaryContainer,
-                            modifier = Modifier.padding(
-                                start = 12.dp,
-                                end = 12.dp,
-                                top = 6.dp,
-                                bottom = 6.dp
-                            )
-                        )
-                    }
+                    Text(
+                        folder,
+                        style = CRType.sectionH,
+                        color = c.textDim,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .background(c.surface2)
+                            .padding(start = 12.dp, end = 12.dp, top = 6.dp, bottom = 6.dp)
+                    )
                     items.forEach { item ->
                         val isActive = item.tab?.id == activeTabId
-                        val dotColor = if (!item.isConnected) Color(0xFF666666)
+                        val dotColor = if (!item.isConnected) c.idle
                             else activityDotColor(
                                 sessionActivities[item.id],
                                 item.status ?: SessionStatus.ACTIVE
                             )
-                        Surface(
-                            color = if (isActive) MaterialTheme.colorScheme.primaryContainer
-                                   else Color.Transparent,
-                            modifier = Modifier.fillMaxWidth().clickable {
-                                if (item.isConnected && item.tab != null) onTabSwitch(item.tab.id)
-                                else if (item.remote != null) onAttachRemote?.invoke(item.remote)
-                            }
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .background(
+                                    if (isActive) c.tintAccent else Color.Transparent
+                                )
+                                .clickable {
+                                    if (item.isConnected && item.tab != null) onTabSwitch(item.tab.id)
+                                    else if (item.remote != null) onAttachRemote?.invoke(item.remote)
+                                }
+                                .height(IntrinsicSize.Min),
+                            verticalAlignment = Alignment.CenterVertically
                         ) {
+                            Box(
+                                modifier = Modifier
+                                    .width(3.dp)
+                                    .fillMaxHeight()
+                                    .background(
+                                        if (isActive) c.accent else Color.Transparent
+                                    )
+                            )
                             Row(
-                                modifier = Modifier.height(IntrinsicSize.Min),
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .padding(start = 17.dp, end = 4.dp, top = 6.dp, bottom = 6.dp),
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
-                                Box(
-                                    modifier = Modifier
-                                        .width(3.dp)
-                                        .fillMaxHeight()
-                                        .background(
-                                            if (isActive) MaterialTheme.colorScheme.primary
-                                            else Color.Transparent
-                                        )
+                                Box(modifier = Modifier.size(8.dp).background(dotColor, CircleShape))
+                                Spacer(Modifier.width(8.dp))
+                                Text(
+                                    item.label,
+                                    style = CRType.bodyDim,
+                                    color = if (isActive) c.text else c.textDim,
+                                    modifier = Modifier.weight(1f)
                                 )
-                                Row(
-                                    modifier = Modifier
-                                        .weight(1f)
-                                        .padding(start = 17.dp, end = 4.dp, top = 2.dp, bottom = 2.dp),
-                                    verticalAlignment = Alignment.CenterVertically
-                                ) {
-                                    Box(modifier = Modifier.size(8.dp).background(dotColor, shape = CircleShape))
-                                    Spacer(Modifier.width(8.dp))
-                                    Text(
-                                        item.label,
-                                        style = if (isActive)
-                                            MaterialTheme.typography.bodySmall.copy(
-                                                fontWeight = androidx.compose.ui.text.font.FontWeight.Medium
-                                            )
-                                        else MaterialTheme.typography.bodySmall,
-                                        color = if (!item.isConnected)
-                                            MaterialTheme.colorScheme.onSurfaceVariant
-                                        else MaterialTheme.colorScheme.onSurface,
-                                        modifier = Modifier.weight(1f)
-                                    )
-                                    if (isActive && item.isConnected && onRenameSession != null) {
-                                        IconButton(
-                                            onClick = {
-                                                if (onNativeRenameDialog != null && item.tab != null) {
-                                                    onNativeRenameDialog.invoke(item.tab.id, item.label)
-                                                } else {
-                                                    renameText = item.label
-                                                    renamingItem = item
-                                                }
-                                            },
-                                            modifier = Modifier.size(20.dp)
-                                        ) { Text("\u270E", style = MaterialTheme.typography.labelSmall) }
-                                    }
-                                    if (isActive && item.isConnected) {
-                                        IconButton(
-                                            onClick = { item.tab?.let { onTabClose(it.id) } },
-                                            modifier = Modifier.size(20.dp)
-                                        ) { Icon(Icons.Default.Close, "Close", modifier = Modifier.size(12.dp)) }
-                                    }
+                                if (isActive && item.isConnected && onRenameSession != null) {
+                                    IconButton(
+                                        onClick = {
+                                            if (onNativeRenameDialog != null && item.tab != null) {
+                                                onNativeRenameDialog.invoke(item.tab.id, item.label)
+                                            } else {
+                                                renameText = item.label
+                                                renamingItem = item
+                                            }
+                                        },
+                                        modifier = Modifier.size(20.dp)
+                                    ) { Text("✎", style = CRType.monoTiny, color = c.textDim) }
+                                }
+                                if (isActive && item.isConnected) {
+                                    IconButton(
+                                        onClick = { item.tab?.let { onTabClose(it.id) } },
+                                        modifier = Modifier.size(20.dp)
+                                    ) { Icon(Icons.Default.Close, "Close", tint = c.textDim, modifier = Modifier.size(12.dp)) }
                                 }
                             }
                         }
@@ -892,7 +1410,9 @@ private fun SessionSidePanel(
     }
 }
 
-// ======================== PROMPT INPUT ========================
+// ---------------------------------------------------------------------------
+// PROMPT INPUT BAR (logic preserved, chrome restyled)
+// ---------------------------------------------------------------------------
 
 private val PROMPT_TEMPLATES = listOf(
     "Fix bug in ",
@@ -911,9 +1431,12 @@ private fun PromptInputBar(
     onSend: (String) -> Unit,
     onSendCommand: (String) -> Unit,
     onAttachFile: (suspend () -> String?)? = null,
-    inputFocusRequester: FocusRequester? = null
+    inputFocusRequester: FocusRequester? = null,
+    onExpand: (() -> Unit)? = null
 ) {
-    // Auto-focus input when first shown
+    val c = CRTheme.colors
+    val m = CRTheme.metrics
+
     LaunchedEffect(Unit) {
         try { inputFocusRequester?.requestFocus() } catch (_: Exception) {}
     }
@@ -922,17 +1445,15 @@ private fun PromptInputBar(
     var attachedFilesRaw by rememberSaveable { mutableStateOf("") }
     val attachedFiles: List<String> = if (attachedFilesRaw.isBlank()) emptyList() else attachedFilesRaw.split('\n')
     var uploading by remember { mutableStateOf(false) }
-    var expanded by remember { mutableStateOf(false) } // full-screen editor
+    var expanded by remember { mutableStateOf(false) }
     var showTemplates by remember { mutableStateOf(false) }
     var showHistory by remember { mutableStateOf(false) }
     val promptScope = rememberCoroutineScope()
 
-    // History (in-memory, persists across recompositions via saveable)
     var historyRaw by rememberSaveable { mutableStateOf("") }
     val history: List<String> = if (historyRaw.isBlank()) emptyList()
-        else historyRaw.split("\u0000").filter { it.isNotBlank() }
+    else historyRaw.split(" ").filter { it.isNotBlank() }
 
-    // Slash suggestions
     val suggestions = if (text.startsWith("/") && text.length > 1 && !text.contains("\n")) {
         commands.filter { it.command.contains(text.trim(), ignoreCase = true) }.take(5)
     } else emptyList()
@@ -940,7 +1461,7 @@ private fun PromptInputBar(
     fun addToHistory(msg: String) {
         if (msg.isBlank()) return
         val updated = (listOf(msg) + history.filter { it != msg }).take(50)
-        historyRaw = updated.joinToString("\u0000")
+        historyRaw = updated.joinToString(" ")
     }
 
     fun buildAndSend() {
@@ -962,34 +1483,27 @@ private fun PromptInputBar(
         expanded = false
     }
 
-    // Full-screen editor mode
+    // Full-screen expanded editor
     if (expanded) {
         Surface(
             modifier = Modifier.fillMaxWidth(),
-            color = MaterialTheme.colorScheme.surface,
+            color = c.surface,
             tonalElevation = 4.dp
         ) {
             Column(modifier = Modifier.fillMaxWidth()) {
-                // Toolbar
                 Row(
                     modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 4.dp),
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                        TextButton(onClick = { expanded = false }) { Text("Collapse") }
-                        TextButton(onClick = { showTemplates = !showTemplates }) { Text("Templates") }
-                        TextButton(onClick = { showHistory = !showHistory }) { Text("History") }
+                        TextButton(onClick = { expanded = false }) { Text("Collapse", color = c.textDim) }
+                        TextButton(onClick = { showTemplates = !showTemplates }) { Text("Templates", color = c.textDim) }
+                        TextButton(onClick = { showHistory = !showHistory }) { Text("History", color = c.textDim) }
                     }
-                    // Char count
-                    Text(
-                        "${text.length} chars",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
+                    Text("${text.length} chars", style = CRType.monoTiny, color = c.textDim)
                 }
 
-                // Templates dropdown
                 if (showTemplates) {
                     Row(
                         modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 2.dp)
@@ -999,34 +1513,29 @@ private fun PromptInputBar(
                         PROMPT_TEMPLATES.forEach { tmpl ->
                             AssistChip(
                                 onClick = { text = tmpl; showTemplates = false },
-                                label = { Text(tmpl.trimEnd(), style = MaterialTheme.typography.labelSmall) }
+                                label = { Text(tmpl.trimEnd(), style = CRType.pill) }
                             )
                         }
                     }
                 }
 
-                // History dropdown
                 if (showHistory && history.isNotEmpty()) {
                     Column(
-                        modifier = Modifier.fillMaxWidth().heightIn(max = 150.dp)
-                            .verticalScroll(rememberScrollState())
+                        modifier = Modifier.fillMaxWidth().heightIn(max = 150.dp).verticalScroll(rememberScrollState())
                     ) {
                         history.take(10).forEach { item ->
                             Text(
                                 text = if (item.length > 60) item.take(57) + "..." else item,
-                                modifier = Modifier
-                                    .fillMaxWidth()
+                                modifier = Modifier.fillMaxWidth()
                                     .clickable { text = item; showHistory = false }
                                     .padding(horizontal = 12.dp, vertical = 8.dp),
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurface
+                                style = CRType.bodyDim, color = c.text
                             )
-                            HorizontalDivider()
+                            HorizontalDivider(color = c.border)
                         }
                     }
                 }
 
-                // Attached files
                 if (attachedFiles.isNotEmpty()) {
                     Row(
                         modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 2.dp),
@@ -1035,7 +1544,7 @@ private fun PromptInputBar(
                         attachedFiles.forEachIndexed { idx, path ->
                             InputChip(
                                 selected = true, onClick = {},
-                                label = { Text(path.substringAfterLast('/'), style = MaterialTheme.typography.labelSmall) },
+                                label = { Text(path.substringAfterLast('/'), style = CRType.pill) },
                                 trailingIcon = {
                                     Icon(Icons.Default.Close, "Remove",
                                         modifier = Modifier.size(14.dp).clickable {
@@ -1048,7 +1557,6 @@ private fun PromptInputBar(
                     }
                 }
 
-                // Big text editor
                 BasicTextField(
                     value = text,
                     onValueChange = { text = it },
@@ -1061,10 +1569,8 @@ private fun PromptInputBar(
                                 buildAndSend(); true
                             } else false
                         },
-                    textStyle = MaterialTheme.typography.bodyMedium.copy(
-                        color = MaterialTheme.colorScheme.onSurface
-                    ),
-                    cursorBrush = SolidColor(Color(0xFFAAAAAA)),
+                    textStyle = CRType.bodyDim.copy(color = c.text),
+                    cursorBrush = SolidColor(c.accent),
                     decorationBox = { innerTextField ->
                         OutlinedTextFieldDefaults.DecorationBox(
                             value = text,
@@ -1072,17 +1578,16 @@ private fun PromptInputBar(
                             enabled = true,
                             singleLine = false,
                             visualTransformation = androidx.compose.ui.text.input.VisualTransformation.None,
-                            interactionSource = remember { androidx.compose.foundation.interaction.MutableInteractionSource() },
+                            interactionSource = remember { MutableInteractionSource() },
                             contentPadding = PaddingValues(horizontal = 10.dp, vertical = 8.dp),
-                            placeholder = { Text("Type your message...\n\nEnter = new line\nSend button = submit") },
+                            placeholder = { Text("Type your message...\n\nEnter = new line\nSend button = submit", style = CRType.bodyDim, color = c.textDim) },
                             container = {
                                 OutlinedTextFieldDefaults.ContainerBox(
-                                    enabled = true,
-                                    isError = false,
-                                    interactionSource = remember { androidx.compose.foundation.interaction.MutableInteractionSource() },
+                                    enabled = true, isError = false,
+                                    interactionSource = remember { MutableInteractionSource() },
                                     colors = OutlinedTextFieldDefaults.colors(
-                                        focusedContainerColor = MaterialTheme.colorScheme.surface,
-                                        unfocusedContainerColor = MaterialTheme.colorScheme.surface
+                                        focusedContainerColor = c.surface,
+                                        unfocusedContainerColor = c.surface
                                     )
                                 )
                             }
@@ -1090,7 +1595,6 @@ private fun PromptInputBar(
                     }
                 )
 
-                // Bottom action row
                 Row(
                     modifier = Modifier.fillMaxWidth().padding(8.dp),
                     horizontalArrangement = Arrangement.SpaceBetween,
@@ -1106,27 +1610,26 @@ private fun PromptInputBar(
                                             try {
                                                 val path = onAttachFile.invoke()
                                                 if (path != null) attachedFilesRaw = (attachedFiles + path.split('\n').filter { it.isNotEmpty() }).joinToString("\n")
-                                            } finally {
-                                                uploading = false
-                                            }
+                                            } finally { uploading = false }
                                         }
                                     }
                                 },
                                 modifier = Modifier.size(36.dp), enabled = !uploading
                             ) {
-                                if (uploading) CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
-                                else Icon(Icons.Default.Add, "Attach", modifier = Modifier.size(20.dp))
+                                if (uploading) CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp, color = c.accent)
+                                else Icon(Icons.Default.Add, "Attach", tint = c.textDim, modifier = Modifier.size(20.dp))
                             }
                         }
                         if (text.isNotBlank()) {
                             IconButton(onClick = { text = "" }, modifier = Modifier.size(36.dp)) {
-                                Icon(Icons.Default.Close, "Clear", modifier = Modifier.size(16.dp))
+                                Icon(Icons.Default.Close, "Clear", tint = c.textDim, modifier = Modifier.size(16.dp))
                             }
                         }
                     }
                     Button(
                         onClick = { buildAndSend() },
-                        contentPadding = PaddingValues(horizontal = 24.dp)
+                        contentPadding = PaddingValues(horizontal = 24.dp),
+                        colors = ButtonDefaults.buttonColors(containerColor = c.accent, contentColor = c.accentInk)
                     ) { Text("Send") }
                 }
             }
@@ -1134,9 +1637,8 @@ private fun PromptInputBar(
         return
     }
 
-    // ======================== COMPACT MODE (default) ========================
-
-    Surface(color = MaterialTheme.colorScheme.surfaceVariant, tonalElevation = 2.dp) {
+    // ── Compact mode (default) ───────────────────────────────────────────────
+    Surface(color = c.surface, tonalElevation = 0.dp) {
         Column(modifier = Modifier.fillMaxWidth()) {
             // Slash suggestions
             if (suggestions.isNotEmpty()) {
@@ -1147,7 +1649,7 @@ private fun PromptInputBar(
                     suggestions.forEach { cmd ->
                         AssistChip(
                             onClick = { onSendCommand(cmd.command + "\r"); text = "" },
-                            label = { Text(cmd.command, style = MaterialTheme.typography.bodySmall) }
+                            label = { Text(cmd.command, style = CRType.mono) }
                         )
                     }
                 }
@@ -1167,16 +1669,14 @@ private fun PromptInputBar(
                                     try {
                                         val path = onAttachFile.invoke()
                                         if (path != null) attachedFilesRaw = (attachedFiles + path).joinToString("\n")
-                                    } finally {
-                                        uploading = false
-                                    }
+                                    } finally { uploading = false }
                                 }
                             }
                         },
                         modifier = Modifier.size(32.dp), enabled = !uploading
                     ) {
-                        if (uploading) CircularProgressIndicator(modifier = Modifier.size(14.dp), strokeWidth = 2.dp)
-                        else Icon(Icons.Default.Add, "Attach", modifier = Modifier.size(18.dp))
+                        if (uploading) CircularProgressIndicator(modifier = Modifier.size(14.dp), strokeWidth = 2.dp, color = c.accent)
+                        else Icon(Icons.Default.Add, "Attach", tint = c.textDim, modifier = Modifier.size(18.dp))
                     }
                 }
 
@@ -1192,10 +1692,8 @@ private fun PromptInputBar(
                                 buildAndSend(); true
                             } else false
                         },
-                    textStyle = MaterialTheme.typography.bodySmall.copy(
-                        color = MaterialTheme.colorScheme.onSurface
-                    ),
-                    cursorBrush = SolidColor(Color(0xFFAAAAAA)),
+                    textStyle = CRType.bodyDim.copy(color = c.text),
+                    cursorBrush = SolidColor(c.accent),
                     maxLines = 4,
                     keyboardOptions = KeyboardOptions(imeAction = ImeAction.None),
                     decorationBox = { innerTextField ->
@@ -1205,17 +1703,16 @@ private fun PromptInputBar(
                             enabled = true,
                             singleLine = false,
                             visualTransformation = androidx.compose.ui.text.input.VisualTransformation.None,
-                            interactionSource = remember { androidx.compose.foundation.interaction.MutableInteractionSource() },
+                            interactionSource = remember { MutableInteractionSource() },
                             contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp),
-                            placeholder = { Text("Message or /command...", style = MaterialTheme.typography.bodySmall) },
+                            placeholder = { Text("Message or /command...", style = CRType.bodyDim, color = c.textDim) },
                             container = {
                                 OutlinedTextFieldDefaults.ContainerBox(
-                                    enabled = true,
-                                    isError = false,
-                                    interactionSource = remember { androidx.compose.foundation.interaction.MutableInteractionSource() },
+                                    enabled = true, isError = false,
+                                    interactionSource = remember { MutableInteractionSource() },
                                     colors = OutlinedTextFieldDefaults.colors(
-                                        focusedContainerColor = MaterialTheme.colorScheme.surface,
-                                        unfocusedContainerColor = MaterialTheme.colorScheme.surface
+                                        focusedContainerColor = c.surface2,
+                                        unfocusedContainerColor = c.surface2
                                     )
                                 )
                             }
@@ -1223,35 +1720,31 @@ private fun PromptInputBar(
                     }
                 )
 
-                // Expand button
-                IconButton(
-                    onClick = { expanded = true },
-                    modifier = Modifier.size(32.dp)
-                ) {
-                    Text("\u2922", style = MaterialTheme.typography.titleMedium) // expand arrows
+                // Expand
+                IconButton(onClick = { if (onExpand != null) onExpand() else expanded = true }, modifier = Modifier.size(32.dp)) {
+                    Text("⤢", style = MaterialTheme.typography.titleMedium, color = c.textDim)
                 }
 
-                // History button
+                // History
                 if (history.isNotEmpty()) {
-                    IconButton(
-                        onClick = { showHistory = !showHistory },
-                        modifier = Modifier.size(32.dp)
-                    ) {
-                        Text("\u2191", style = MaterialTheme.typography.titleMedium) // up arrow
+                    IconButton(onClick = { showHistory = !showHistory }, modifier = Modifier.size(32.dp)) {
+                        Text("↑", style = MaterialTheme.typography.titleMedium, color = c.textDim)
                     }
                 }
 
                 Button(
                     onClick = { buildAndSend() },
                     modifier = Modifier.height(40.dp),
-                    contentPadding = PaddingValues(horizontal = 12.dp)
+                    contentPadding = PaddingValues(horizontal = 12.dp),
+                    colors = ButtonDefaults.buttonColors(containerColor = c.accent, contentColor = c.accentInk)
                 ) { Text("Send") }
             }
 
-            // History popup in compact mode
+            // History popup
             if (showHistory && history.isNotEmpty()) {
                 Surface(
                     tonalElevation = 8.dp,
+                    color = c.surface2,
                     modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp)
                 ) {
                     Column(modifier = Modifier.heightIn(max = 120.dp).verticalScroll(rememberScrollState())) {
@@ -1261,15 +1754,15 @@ private fun PromptInputBar(
                                 modifier = Modifier.fillMaxWidth()
                                     .clickable { text = item; showHistory = false }
                                     .padding(horizontal = 12.dp, vertical = 6.dp),
-                                style = MaterialTheme.typography.bodySmall
+                                style = CRType.bodyDim, color = c.text
                             )
-                            HorizontalDivider()
+                            HorizontalDivider(color = c.border)
                         }
                     }
                 }
             }
 
-            // Attached files in compact
+            // Attached files
             if (attachedFiles.isNotEmpty()) {
                 Row(
                     modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 2.dp),
@@ -1278,7 +1771,7 @@ private fun PromptInputBar(
                     attachedFiles.forEachIndexed { idx, path ->
                         InputChip(
                             selected = true, onClick = {},
-                            label = { Text(path.substringAfterLast('/'), style = MaterialTheme.typography.labelSmall) },
+                            label = { Text(path.substringAfterLast('/'), style = CRType.pill) },
                             trailingIcon = {
                                 Icon(Icons.Default.Close, "Remove",
                                     modifier = Modifier.size(14.dp).clickable {
@@ -1294,7 +1787,9 @@ private fun PromptInputBar(
     }
 }
 
-// ======================== COMMAND PICKER ========================
+// ---------------------------------------------------------------------------
+// COMMAND PICKER (logic preserved)
+// ---------------------------------------------------------------------------
 
 @Composable
 private fun CommandPicker(
@@ -1304,18 +1799,19 @@ private fun CommandPicker(
     onSelect: (SlashCommand) -> Unit,
     onDismiss: () -> Unit
 ) {
+    val c = CRTheme.colors
     val filtered = if (filter.isBlank()) commands
     else commands.filter {
         it.command.contains(filter, ignoreCase = true) ||
         it.description.contains(filter, ignoreCase = true)
     }
     var selectedIndex by remember { mutableStateOf(0) }
-    // Reset selection when filter changes
     LaunchedEffect(filter) { selectedIndex = 0 }
 
     Surface(
         modifier = Modifier.fillMaxWidth().fillMaxHeight(0.6f).padding(8.dp),
         shape = MaterialTheme.shapes.medium,
+        color = c.surface,
         tonalElevation = 8.dp,
         shadowElevation = 8.dp
     ) {
@@ -1329,24 +1825,16 @@ private fun CommandPicker(
                 OutlinedTextField(
                     value = filter,
                     onValueChange = onFilterChange,
-                    placeholder = { Text("Filter commands...") },
+                    placeholder = { Text("Filter commands...", color = c.textDim) },
                     modifier = Modifier.weight(1f)
                         .focusRequester(filterFocus)
                         .onPreviewKeyEvent { event ->
                             if (event.type == KeyEventType.KeyDown) {
                                 when (event.key) {
-                                    Key.DirectionDown -> {
-                                        selectedIndex = (selectedIndex + 1).coerceAtMost(filtered.size - 1)
-                                        true
-                                    }
-                                    Key.DirectionUp -> {
-                                        selectedIndex = (selectedIndex - 1).coerceAtLeast(0)
-                                        true
-                                    }
+                                    Key.DirectionDown -> { selectedIndex = (selectedIndex + 1).coerceAtMost(filtered.size - 1); true }
+                                    Key.DirectionUp   -> { selectedIndex = (selectedIndex - 1).coerceAtLeast(0); true }
                                     Key.Enter -> {
-                                        if (filtered.isNotEmpty() && selectedIndex in filtered.indices) {
-                                            onSelect(filtered[selectedIndex])
-                                        }
+                                        if (filtered.isNotEmpty() && selectedIndex in filtered.indices) onSelect(filtered[selectedIndex])
                                         true
                                     }
                                     Key.Escape -> { onDismiss(); true }
@@ -1355,17 +1843,15 @@ private fun CommandPicker(
                             } else false
                         },
                     singleLine = true,
-                    textStyle = MaterialTheme.typography.bodyMedium
+                    textStyle = CRType.bodyDim.copy(color = c.text)
                 )
                 Spacer(Modifier.width(8.dp))
-                IconButton(onClick = onDismiss) { Icon(Icons.Default.Close, "Close") }
+                IconButton(onClick = onDismiss) { Icon(Icons.Default.Close, "Close", tint = c.textDim) }
             }
 
             val listState = rememberLazyListState()
             LaunchedEffect(selectedIndex) {
-                if (selectedIndex in filtered.indices) {
-                    listState.animateScrollToItem(selectedIndex)
-                }
+                if (selectedIndex in filtered.indices) listState.animateScrollToItem(selectedIndex)
             }
 
             LazyColumn(modifier = Modifier.fillMaxSize(), state = listState) {
@@ -1374,113 +1860,77 @@ private fun CommandPicker(
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .background(
-                                if (isSelected) MaterialTheme.colorScheme.primaryContainer
-                                else Color.Transparent
-                            )
+                            .background(if (isSelected) c.tintAccent else Color.Transparent)
                             .clickable { onSelect(cmd) }
                             .padding(horizontal = 16.dp, vertical = 10.dp),
                         horizontalArrangement = Arrangement.SpaceBetween
                     ) {
-                        Text(cmd.command, style = MaterialTheme.typography.bodyMedium,
-                            color = if (isSelected) MaterialTheme.colorScheme.onPrimaryContainer
-                                   else MaterialTheme.colorScheme.primary)
-                        Text(cmd.description, style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Text(cmd.command, style = CRType.mono,
+                            color = if (isSelected) c.accent else c.accent.copy(alpha = 0.85f))
+                        Text(cmd.description, style = CRType.bodyDim, color = c.textDim)
                     }
-                    HorizontalDivider()
+                    HorizontalDivider(color = c.border)
                 }
             }
         }
     }
 }
 
-// ======================== CONTROL BAR ========================
-
-@Composable
-private fun ClaudeControlBar(
-    onSendCommand: (String) -> Unit,
-    onSendEscape: () -> Unit,
-    onOpenCommands: () -> Unit
-) {
-    Surface(color = MaterialTheme.colorScheme.surfaceVariant, tonalElevation = 4.dp) {
-        Row(
-            horizontalArrangement = Arrangement.spacedBy(4.dp),
-            modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 4.dp)
-        ) {
-            CtrlButton("Mode") { onSendCommand("\u001B[Z") }
-            CtrlButton("/") { onOpenCommands() }
-            CtrlButton("Esc") { onSendEscape() }
-            CtrlButton("C-c") { onSendCommand("\u0003") }
-            CtrlButton("\u2190") { onSendCommand("\u001B[D") }
-            CtrlButton("\u2193") { onSendCommand("\u001B[B") }
-            CtrlButton("\u2191") { onSendCommand("\u001B[A") }
-            CtrlButton("\u2192") { onSendCommand("\u001B[C") }
-            Spacer(Modifier.weight(1f))
-            CtrlButton("y") { onSendCommand("y\r") }
-            CtrlButton("n") { onSendCommand("n\r") }
-        }
-    }
-}
+// ---------------------------------------------------------------------------
+// Mini helpers
+// ---------------------------------------------------------------------------
 
 @Composable
 private fun MiniBar(label: String, percent: Int) {
+    val c = CRTheme.colors
     Row(verticalAlignment = Alignment.CenterVertically) {
-        Text(label, style = MaterialTheme.typography.labelSmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-            modifier = Modifier.width(20.dp))
+        Text(label, style = CRType.monoTiny, color = c.textDim, modifier = Modifier.width(20.dp))
         Box(
             modifier = Modifier.width(40.dp).height(4.dp)
-                .background(MaterialTheme.colorScheme.surface.copy(alpha = 0.3f), CircleShape)
+                .background(c.surface2, CircleShape)
         ) {
             val pct = percent.coerceIn(0, 100)
             val color = when {
-                pct < 50 -> Color(0xFF4CAF50)
-                pct < 80 -> Color(0xFFFF9800)
-                else -> Color(0xFFF44336)
+                pct < 50 -> c.ready
+                pct < 80 -> c.working
+                else -> c.disconnected
             }
             Box(modifier = Modifier.fillMaxHeight().fillMaxWidth(pct / 100f).background(color, CircleShape))
         }
-        Text("${percent}%", style = MaterialTheme.typography.labelSmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-            modifier = Modifier.padding(start = 2.dp))
+        Text("${percent}%", style = CRType.monoTiny, color = c.textDim, modifier = Modifier.padding(start = 2.dp))
     }
 }
 
 @Composable
 private fun CtrlButton(label: String, onClick: () -> Unit) {
+    val c = CRTheme.colors
     val haptic = androidx.compose.ui.hapticfeedback.HapticFeedbackType.TextHandleMove
     val hapticFeedback = androidx.compose.ui.platform.LocalHapticFeedback.current
     FilledTonalButton(
-        onClick = {
-            hapticFeedback.performHapticFeedback(haptic)
-            onClick()
-        },
-        modifier = Modifier.height(32.dp),
-        contentPadding = PaddingValues(horizontal = 10.dp)
+        onClick = { hapticFeedback.performHapticFeedback(haptic); onClick() },
+        modifier = Modifier.height(28.dp),
+        contentPadding = PaddingValues(horizontal = 8.dp),
+        colors = ButtonDefaults.filledTonalButtonColors(containerColor = c.surface2)
     ) {
-        Text(label, style = MaterialTheme.typography.bodySmall)
+        Text(label, style = CRType.keyboardKey, color = c.text)
     }
 }
 
 /**
  * Map SessionActivity (or fallback to SessionStatus) to a dot color.
- * Green=waiting/idle, Yellow=working, Blue=approval, Red=disconnected.
  */
 private fun activityDotColor(
     activity: com.clauderemote.model.SessionActivity?,
     status: SessionStatus
 ): Color = when (activity) {
-    com.clauderemote.model.SessionActivity.WAITING_FOR_INPUT -> Color(0xFF4CAF50) // green
-    com.clauderemote.model.SessionActivity.WORKING -> Color(0xFFFF9800)           // yellow/amber
-    com.clauderemote.model.SessionActivity.APPROVAL_NEEDED -> Color(0xFF2196F3)   // blue
-    com.clauderemote.model.SessionActivity.IDLE -> Color(0xFF4CAF50)              // green
-    com.clauderemote.model.SessionActivity.DISCONNECTED -> Color(0xFFF44336)      // red
+    SessionActivity.WAITING_FOR_INPUT -> Color(0xFF4ADE80)
+    SessionActivity.WORKING           -> Color(0xFFFBBF24)
+    SessionActivity.APPROVAL_NEEDED   -> Color(0xFFFB923C)
+    SessionActivity.IDLE              -> Color(0xFF94A3B8)
+    SessionActivity.DISCONNECTED      -> Color(0xFFF87171)
     null -> when (status) {
-        SessionStatus.ACTIVE -> Color(0xFF4CAF50)
-        SessionStatus.CONNECTING -> Color(0xFFFF9800)
-        SessionStatus.DISCONNECTED, SessionStatus.ERROR -> Color(0xFFF44336)
+        SessionStatus.ACTIVE       -> Color(0xFF4ADE80)
+        SessionStatus.CONNECTING   -> Color(0xFFFBBF24)
+        SessionStatus.DISCONNECTED, SessionStatus.ERROR -> Color(0xFFF87171)
     }
 }
-
-// ======================== TAB BAR ========================

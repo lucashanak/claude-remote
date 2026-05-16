@@ -16,7 +16,9 @@ data class ClaudeSession(
      * resume the same conversation via `claude --resume <uuid>` after a server reboot
      * or app restart. Null only for sessions launched before this field existed.
      */
-    val claudeSessionId: String? = null
+    val claudeSessionId: String? = null,
+    /** Per-session cost history samples (normalised 0–1) for sparkline display. */
+    val history: List<Float> = emptyList()
 ) {
     val tabTitle: String get() {
         if (alias.isNotBlank()) return alias
