@@ -12,6 +12,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.DateRange
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Settings
@@ -75,7 +76,7 @@ fun LauncherScreen(
                 actions = {
                     if (onUsageDashboard != null) {
                         IconButton(onClick = onUsageDashboard) {
-                            Icon(Icons.Default.Settings, contentDescription = "Usage", tint = c.textDim)
+                            Icon(Icons.Default.DateRange, contentDescription = "Usage", tint = c.textDim)
                         }
                     }
                     IconButton(onClick = onSettings) {
@@ -251,11 +252,14 @@ private fun SessionLauncherCard(
     val c = CRTheme.colors
     val m = CRTheme.metrics
 
+    val folderBasename = session.folder.trimEnd('/').substringAfterLast('/').ifBlank { session.folder }
+    val sessionAlias = session.alias.ifBlank { null }
+
     CRCard(
         modifier = Modifier.clickable(onClick = onClick),
     ) {
         if (m.sessionCardOneLine) {
-            // Dense: single row
+            // Dense: single row — folder · alias (folder first)
             Row(
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -265,7 +269,7 @@ private fun SessionLauncherCard(
                     modifier = Modifier.size(8.dp),
                 )
                 Text(
-                    session.displayLabel,
+                    if (sessionAlias != null) "$folderBasename · $sessionAlias" else folderBasename,
                     style = CRType.cardTitle,
                     color = c.text,
                     maxLines = 1,
@@ -287,7 +291,7 @@ private fun SessionLauncherCard(
                 )
             }
         } else {
-            // Regular / Compact: full card
+            // Regular / Compact: folder as title, alias as subtitle secondary
             Row(
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(12.dp),
@@ -300,7 +304,7 @@ private fun SessionLauncherCard(
                         horizontalArrangement = Arrangement.spacedBy(6.dp),
                     ) {
                         Text(
-                            session.displayLabel,
+                            folderBasename,
                             style = CRType.cardTitle,
                             color = c.text,
                             maxLines = 1,
@@ -311,7 +315,10 @@ private fun SessionLauncherCard(
                     }
                     Spacer(Modifier.height(2.dp))
                     Text(
-                        "${session.server.name}:${session.folder}",
+                        buildString {
+                            append(session.server.name)
+                            if (sessionAlias != null) { append(" · "); append(sessionAlias) }
+                        },
                         style = CRType.mono,
                         color = c.textDim,
                         maxLines = 1,

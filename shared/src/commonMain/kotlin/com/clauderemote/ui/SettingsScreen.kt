@@ -1,5 +1,7 @@
 package com.clauderemote.ui
 
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
@@ -15,12 +17,17 @@ import com.clauderemote.model.ClaudeMode
 import com.clauderemote.model.ClaudeModel
 import com.clauderemote.model.ConnectionType
 import com.clauderemote.storage.AppSettings
+import com.clauderemote.ui.components.CRCard
+import com.clauderemote.ui.components.Pill
+import com.clauderemote.ui.components.Segmented
 import com.clauderemote.ui.theme.AppearanceState
 import com.clauderemote.ui.theme.CRAccent
 import com.clauderemote.ui.theme.CRDensity
 import com.clauderemote.ui.theme.CRStatusViz
 import com.clauderemote.ui.theme.CRTerminalScheme
 import com.clauderemote.ui.theme.CRTerminalView
+import com.clauderemote.ui.theme.CRTheme
+import com.clauderemote.ui.theme.CRType
 import com.clauderemote.ui.theme.CRVariant
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
@@ -36,9 +43,10 @@ fun SettingsScreen(
     appearance: AppearanceState = settings.loadAppearance(),
     onAppearanceChange: (AppearanceState) -> Unit = { settings.saveAppearance(it) }
 ) {
+    val c = CRTheme.colors
+
     var fontSize by remember { mutableStateOf(settings.terminalFontSize) }
     var scrollback by remember { mutableStateOf(settings.terminalScrollback) }
-    var colorScheme by remember { mutableStateOf(settings.terminalColorScheme) }
     var defaultMode by remember { mutableStateOf(settings.defaultClaudeMode) }
     var defaultModel by remember { mutableStateOf(settings.defaultClaudeModel) }
     var defaultConnection by remember { mutableStateOf(settings.defaultConnectionType) }
@@ -46,16 +54,22 @@ fun SettingsScreen(
     var keepAlive by remember { mutableStateOf(settings.keepAliveEnabled) }
     var notifications by remember { mutableStateOf(settings.notificationsEnabled) }
     var connectTimeout by remember { mutableStateOf(settings.sshConnectTimeout) }
+    var themeMode by remember { mutableStateOf(settings.themeMode) }
 
     Scaffold(
+        containerColor = c.bg,
         topBar = {
             TopAppBar(
-                title = { Text("Settings") },
+                title = { Text("Settings", style = CRType.cardTitle, color = c.text) },
                 navigationIcon = {
                     IconButton(onClick = onBack) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back")
+                        Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back", tint = c.textDim)
                     }
-                }
+                },
+                colors = TopAppBarDefaults.topAppBarColors(
+                    containerColor = c.surface,
+                    scrolledContainerColor = c.surface,
+                ),
             )
         }
     ) { padding ->
@@ -65,344 +79,392 @@ fun SettingsScreen(
                 .padding(padding)
                 .padding(horizontal = 16.dp)
                 .verticalScroll(rememberScrollState()),
-            verticalArrangement = Arrangement.spacedBy(8.dp)
+            verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
-            // Appearance
-            Text("Appearance", style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(top = 8.dp))
-            var themeMode by remember { mutableStateOf(settings.themeMode) }
-            Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                listOf("system" to "System", "dark" to "Dark", "light" to "Light").forEach { (value, label) ->
-                    FilterChip(
-                        selected = themeMode == value,
-                        onClick = { themeMode = value; settings.themeMode = value },
-                        label = { Text(label) }
-                    )
-                }
-            }
+            Spacer(Modifier.height(4.dp))
 
-            // CRTheme: Variant
-            Text("Variant", style = MaterialTheme.typography.labelLarge, modifier = Modifier.padding(top = 8.dp))
-            Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                CRVariant.entries.forEach { v ->
-                    FilterChip(
-                        selected = appearance.variant == v,
-                        onClick = { onAppearanceChange(appearance.copy(variant = v)) },
-                        label = { Text(v.name) }
-                    )
-                }
-            }
+            // ── Appearance ─────────────────────────────────────────────────
+            SectionHeader("Appearance")
+            CRCard {
+                Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {
 
-            // CRTheme: Density
-            Text("Density", style = MaterialTheme.typography.labelLarge, modifier = Modifier.padding(top = 8.dp))
-            Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                CRDensity.entries.forEach { d ->
-                    FilterChip(
-                        selected = appearance.density == d,
-                        onClick = { onAppearanceChange(appearance.copy(density = d)) },
-                        label = { Text(d.name) }
-                    )
-                }
-            }
+                    // Theme mode
+                    SettingsRow(label = "Theme") {
+                        Segmented(
+                            options = listOf("system", "dark", "light"),
+                            selected = themeMode,
+                            onSelect = { themeMode = it; settings.themeMode = it },
+                            label = { it.replaceFirstChar { c -> c.uppercase() } },
+                        )
+                    }
 
-            // CRTheme: Accent
-            Text("Accent", style = MaterialTheme.typography.labelLarge, modifier = Modifier.padding(top = 8.dp))
-            FlowRow(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                CRAccent.entries.forEach { a ->
-                    FilterChip(
-                        selected = appearance.accent == a,
-                        onClick = { onAppearanceChange(appearance.copy(accent = a)) },
-                        label = { Text(a.label) }
-                    )
-                }
-            }
-
-            // CRTheme: Status viz
-            Text("Status indicator", style = MaterialTheme.typography.labelLarge, modifier = Modifier.padding(top = 8.dp))
-            Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                CRStatusViz.entries.forEach { sv ->
-                    FilterChip(
-                        selected = appearance.statusViz == sv,
-                        onClick = { onAppearanceChange(appearance.copy(statusViz = sv)) },
-                        label = { Text(sv.name) }
-                    )
-                }
-            }
-
-            // CRTheme: Terminal view
-            Text("Terminal view", style = MaterialTheme.typography.labelLarge, modifier = Modifier.padding(top = 8.dp))
-            Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                CRTerminalView.entries.forEach { tv ->
-                    FilterChip(
-                        selected = appearance.terminalView == tv,
-                        onClick = { onAppearanceChange(appearance.copy(terminalView = tv)) },
-                        label = { Text(tv.name) }
-                    )
-                }
-            }
-
-            // CRTheme: Terminal scheme
-            Text("Terminal color scheme", style = MaterialTheme.typography.labelLarge, modifier = Modifier.padding(top = 8.dp))
-            FlowRow(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                CRTerminalScheme.entries.forEach { ts ->
-                    FilterChip(
-                        selected = appearance.terminalScheme == ts,
-                        onClick = { onAppearanceChange(appearance.copy(terminalScheme = ts)) },
-                        label = { Text(ts.label) }
-                    )
-                }
-            }
-
-            HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
-
-            // Terminal
-            Text("Terminal", style = MaterialTheme.typography.titleMedium)
-
-            SettingsSlider(
-                label = "Font Size",
-                value = fontSize,
-                range = 8..32,
-                onValueChange = { fontSize = it; settings.terminalFontSize = it }
-            )
-
-            SettingsSlider(
-                label = "Scrollback (lines)",
-                value = scrollback,
-                range = 1000..50000,
-                step = 1000,
-                onValueChange = { scrollback = it; settings.terminalScrollback = it }
-            )
-
-            Text("Color Scheme", style = MaterialTheme.typography.bodyMedium, modifier = Modifier.padding(top = 8.dp))
-            val schemes = listOf("default", "solarized-dark", "dracula", "monokai", "linux")
-            FlowRow(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                schemes.forEach { scheme ->
-                    FilterChip(
-                        selected = colorScheme == scheme,
-                        onClick = { colorScheme = scheme; settings.terminalColorScheme = scheme },
-                        label = { Text(scheme) }
-                    )
-                }
-            }
-
-            HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
-
-            // Claude Defaults
-            Text("Claude Defaults", style = MaterialTheme.typography.titleMedium)
-
-            Text("Default Mode", style = MaterialTheme.typography.bodyMedium)
-            Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                ClaudeMode.entries.forEach { mode ->
-                    FilterChip(
-                        selected = defaultMode == mode,
-                        onClick = { defaultMode = mode; settings.defaultClaudeMode = mode },
-                        label = { Text(mode.displayName, style = MaterialTheme.typography.bodySmall) }
-                    )
-                }
-            }
-
-            Text("Default Model", style = MaterialTheme.typography.bodyMedium)
-            Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                ClaudeModel.entries.forEach { model ->
-                    FilterChip(
-                        selected = defaultModel == model,
-                        onClick = { defaultModel = model; settings.defaultClaudeModel = model },
-                        label = { Text(model.displayName) }
-                    )
-                }
-            }
-
-            HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
-
-            // Connection
-            Text("Connection", style = MaterialTheme.typography.titleMedium)
-
-            Text("Default Connection Type", style = MaterialTheme.typography.bodyMedium)
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                ConnectionType.entries.forEach { type ->
-                    FilterChip(
-                        selected = defaultConnection == type,
-                        onClick = { defaultConnection = type; settings.defaultConnectionType = type },
-                        label = { Text(type.displayName) }
-                    )
-                }
-            }
-
-            SettingsSwitch(
-                label = "Auto-reconnect",
-                checked = autoReconnect,
-                onCheckedChange = { autoReconnect = it; settings.sshAutoReconnect = it }
-            )
-
-            SettingsSwitch(
-                label = "Keep alive (background)",
-                checked = keepAlive,
-                onCheckedChange = { keepAlive = it; settings.keepAliveEnabled = it }
-            )
-
-            SettingsSwitch(
-                label = "Notify when Claude is ready",
-                checked = notifications,
-                onCheckedChange = { notifications = it; settings.notificationsEnabled = it }
-            )
-
-            var notifyTaskComplete by remember { mutableStateOf(settings.notifyOnTaskComplete) }
-            SettingsSwitch(
-                label = "Notify on task complete",
-                checked = notifyTaskComplete,
-                onCheckedChange = { notifyTaskComplete = it; settings.notifyOnTaskComplete = it }
-            )
-
-            SettingsSlider(
-                label = "Connect timeout (seconds)",
-                value = connectTimeout,
-                range = 5..60,
-                onValueChange = { connectTimeout = it; settings.sshConnectTimeout = it }
-            )
-
-            HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
-
-            // SSH Keys
-            if (sshKeyManager != null) {
-                HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
-                Text("SSH Keys", style = MaterialTheme.typography.titleMedium)
-
-                var keys by remember { mutableStateOf(sshKeyManager.loadKeys()) }
-                var showGenDialog by remember { mutableStateOf(false) }
-                var genName by remember { mutableStateOf("") }
-                var genType by remember { mutableStateOf("ed25519") }
-
-                if (keys.isEmpty()) {
-                    Text("No managed keys", style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant)
-                } else {
-                    keys.forEach { key ->
-                        Row(
-                            modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Column(modifier = Modifier.weight(1f)) {
-                                Text(key.name, style = MaterialTheme.typography.bodyMedium)
-                                Text(
-                                    "${key.type.uppercase()} - ${key.fingerprint}",
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                    // Variant pills
+                    SettingsRow(label = "Variant") {
+                        FlowRow(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                            CRVariant.entries.forEach { v ->
+                                val selected = appearance.variant == v
+                                Pill(
+                                    text = v.name,
+                                    background = if (selected) c.tintAccent else c.surface2,
+                                    foreground = if (selected) c.accent else c.textDim,
+                                    modifier = Modifier.clickableNoRipple { onAppearanceChange(appearance.copy(variant = v)) },
                                 )
                             }
-                            IconButton(onClick = {
-                                sshKeyManager.deleteKey(key.id)
-                                keys = sshKeyManager.loadKeys()
-                            }) {
-                                Icon(Icons.Default.Delete, "Delete")
+                        }
+                    }
+
+                    // Density
+                    SettingsRow(label = "Density") {
+                        Segmented(
+                            options = CRDensity.entries.toList(),
+                            selected = appearance.density,
+                            onSelect = { onAppearanceChange(appearance.copy(density = it)) },
+                            label = { it.name },
+                        )
+                    }
+
+                    // Accent
+                    SettingsRow(label = "Accent") {
+                        FlowRow(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                            CRAccent.entries.forEach { a ->
+                                val selected = appearance.accent == a
+                                Pill(
+                                    text = a.label,
+                                    background = if (selected) a.color.copy(alpha = 0.25f) else c.surface2,
+                                    foreground = if (selected) a.color else c.textDim,
+                                    modifier = Modifier.clickableNoRipple { onAppearanceChange(appearance.copy(accent = a)) },
+                                )
+                            }
+                        }
+                    }
+
+                    // Status viz
+                    SettingsRow(label = "Status") {
+                        Segmented(
+                            options = CRStatusViz.entries.toList(),
+                            selected = appearance.statusViz,
+                            onSelect = { onAppearanceChange(appearance.copy(statusViz = it)) },
+                            label = { it.name },
+                        )
+                    }
+                }
+            }
+
+            // ── Terminal ────────────────────────────────────────────────────
+            SectionHeader("Terminal")
+            CRCard {
+                Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {
+
+                    // Terminal view
+                    SettingsRow(label = "View") {
+                        Segmented(
+                            options = CRTerminalView.entries.toList(),
+                            selected = appearance.terminalView,
+                            onSelect = { onAppearanceChange(appearance.copy(terminalView = it)) },
+                            label = { if (it == CRTerminalView.Raw) "Raw" else "Chat" },
+                        )
+                    }
+
+                    // Terminal color scheme
+                    SettingsRow(label = "Scheme") {
+                        FlowRow(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                            CRTerminalScheme.entries.forEach { ts ->
+                                val selected = appearance.terminalScheme == ts
+                                Pill(
+                                    text = ts.label,
+                                    background = if (selected) c.tintAccent else c.surface2,
+                                    foreground = if (selected) c.accent else c.textDim,
+                                    modifier = Modifier.clickableNoRipple { onAppearanceChange(appearance.copy(terminalScheme = ts)) },
+                                )
+                            }
+                        }
+                    }
+
+                    SettingsSlider(
+                        label = "Font size",
+                        value = fontSize,
+                        range = 8..32,
+                        onValueChange = { fontSize = it; settings.terminalFontSize = it }
+                    )
+
+                    SettingsSlider(
+                        label = "Scrollback",
+                        value = scrollback,
+                        range = 1000..50000,
+                        step = 1000,
+                        onValueChange = { scrollback = it; settings.terminalScrollback = it }
+                    )
+                }
+            }
+
+            // ── Claude Defaults ─────────────────────────────────────────────
+            SectionHeader("Claude Defaults")
+            CRCard {
+                Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {
+
+                    SettingsRow(label = "Mode") {
+                        Segmented(
+                            options = ClaudeMode.entries.toList(),
+                            selected = defaultMode,
+                            onSelect = { defaultMode = it; settings.defaultClaudeMode = it },
+                            label = { it.displayName },
+                        )
+                    }
+
+                    SettingsRow(label = "Model") {
+                        FlowRow(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                            ClaudeModel.entries.forEach { model ->
+                                val selected = defaultModel == model
+                                Pill(
+                                    text = model.displayName,
+                                    background = if (selected) c.tintAccent else c.surface2,
+                                    foreground = if (selected) c.accent else c.textDim,
+                                    modifier = Modifier.clickableNoRipple { defaultModel = model; settings.defaultClaudeModel = model },
+                                )
                             }
                         }
                     }
                 }
+            }
 
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Button(onClick = { showGenDialog = true }) { Text("Generate Key") }
-                }
+            // ── SSH / Connection ────────────────────────────────────────────
+            SectionHeader("SSH / Connection")
+            CRCard {
+                Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
 
-                if (showGenDialog) {
-                    AlertDialog(
-                        onDismissRequest = { showGenDialog = false },
-                        title = { Text("Generate SSH Key") },
-                        text = {
-                            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                                OutlinedTextField(
-                                    value = genName,
-                                    onValueChange = { genName = it },
-                                    label = { Text("Key name") },
-                                    singleLine = true,
-                                    modifier = Modifier.fillMaxWidth()
-                                )
-                                Text("Key type", style = MaterialTheme.typography.bodyMedium)
-                                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                                    listOf("ed25519", "rsa").forEach { type ->
-                                        FilterChip(
-                                            selected = genType == type,
-                                            onClick = { genType = type },
-                                            label = { Text(type.uppercase()) }
+                    SettingsRow(label = "Type") {
+                        Segmented(
+                            options = ConnectionType.entries.toList(),
+                            selected = defaultConnection,
+                            onSelect = { defaultConnection = it; settings.defaultConnectionType = it },
+                            label = { it.displayName },
+                        )
+                    }
+
+                    SettingsSwitch(
+                        label = "Auto-reconnect",
+                        checked = autoReconnect,
+                        onCheckedChange = { autoReconnect = it; settings.sshAutoReconnect = it }
+                    )
+
+                    SettingsSwitch(
+                        label = "Keep alive (background)",
+                        checked = keepAlive,
+                        onCheckedChange = { keepAlive = it; settings.keepAliveEnabled = it }
+                    )
+
+                    SettingsSlider(
+                        label = "Connect timeout (s)",
+                        value = connectTimeout,
+                        range = 5..60,
+                        onValueChange = { connectTimeout = it; settings.sshConnectTimeout = it }
+                    )
+
+                    // SSH Keys
+                    if (sshKeyManager != null) {
+                        HorizontalDivider(color = c.border, modifier = Modifier.padding(vertical = 4.dp))
+                        Text("SSH Keys", style = CRType.sectionH, color = c.textDim)
+
+                        var keys by remember { mutableStateOf(sshKeyManager.loadKeys()) }
+                        var showGenDialog by remember { mutableStateOf(false) }
+                        var genName by remember { mutableStateOf("") }
+                        var genType by remember { mutableStateOf("ed25519") }
+
+                        if (keys.isEmpty()) {
+                            Text("No managed keys", style = CRType.bodyDim, color = c.textDim)
+                        } else {
+                            keys.forEach { key ->
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Column(modifier = Modifier.weight(1f)) {
+                                        Text(key.name, style = CRType.cardTitle, color = c.text)
+                                        Text(
+                                            "${key.type.uppercase()} · ${key.fingerprint}",
+                                            style = CRType.monoTiny,
+                                            color = c.textDim,
                                         )
                                     }
-                                }
-                            }
-                        },
-                        confirmButton = {
-                            TextButton(
-                                onClick = {
-                                    if (genName.isNotBlank()) {
-                                        sshKeyManager.generateKey(genName, genType)
+                                    IconButton(onClick = {
+                                        sshKeyManager.deleteKey(key.id)
                                         keys = sshKeyManager.loadKeys()
-                                        showGenDialog = false
-                                        genName = ""
+                                    }) {
+                                        Icon(Icons.Default.Delete, "Delete", tint = c.textDim)
                                     }
                                 }
-                            ) { Text("Generate") }
-                        },
-                        dismissButton = {
-                            TextButton(onClick = { showGenDialog = false }) { Text("Cancel") }
+                            }
                         }
+
+                        TextButton(onClick = { showGenDialog = true }) {
+                            Text("Generate key", color = c.accent, style = CRType.bodyDim)
+                        }
+
+                        if (showGenDialog) {
+                            AlertDialog(
+                                onDismissRequest = { showGenDialog = false },
+                                containerColor = c.surface,
+                                title = { Text("Generate SSH Key", color = c.text) },
+                                text = {
+                                    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                                        OutlinedTextField(
+                                            value = genName,
+                                            onValueChange = { genName = it },
+                                            label = { Text("Key name") },
+                                            singleLine = true,
+                                            modifier = Modifier.fillMaxWidth()
+                                        )
+                                        Segmented(
+                                            options = listOf("ed25519", "rsa"),
+                                            selected = genType,
+                                            onSelect = { genType = it },
+                                            label = { it.uppercase() },
+                                        )
+                                    }
+                                },
+                                confirmButton = {
+                                    TextButton(onClick = {
+                                        if (genName.isNotBlank()) {
+                                            sshKeyManager.generateKey(genName, genType)
+                                            keys = sshKeyManager.loadKeys()
+                                            showGenDialog = false
+                                            genName = ""
+                                        }
+                                    }) { Text("Generate", color = c.accent) }
+                                },
+                                dismissButton = {
+                                    TextButton(onClick = { showGenDialog = false }) { Text("Cancel", color = c.textDim) }
+                                }
+                            )
+                        }
+                    }
+                }
+            }
+
+            // ── Notifications ───────────────────────────────────────────────
+            SectionHeader("Notifications")
+            CRCard {
+                Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                    SettingsSwitch(
+                        label = "Notify when Claude is ready",
+                        checked = notifications,
+                        onCheckedChange = { notifications = it; settings.notificationsEnabled = it }
+                    )
+                    var notifyTaskComplete by remember { mutableStateOf(settings.notifyOnTaskComplete) }
+                    SettingsSwitch(
+                        label = "Notify on task complete",
+                        checked = notifyTaskComplete,
+                        onCheckedChange = { notifyTaskComplete = it; settings.notifyOnTaskComplete = it }
                     )
                 }
             }
 
-            // Keyboard Shortcuts
-            HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
-            Text("Keyboard Shortcuts", style = MaterialTheme.typography.titleMedium)
-            Text(
-                "Ctrl+K: Command Palette  |  Ctrl+Tab: Next Tab\nCtrl+Shift+Tab: Prev Tab  |  Ctrl+W: Close Tab\nCtrl+N: New Session",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
-
-            // Security
-            Text("Security", style = MaterialTheme.typography.titleMedium)
-
-            var biometricLock by remember { mutableStateOf(settings.biometricLockEnabled) }
-            SettingsSwitch(
-                label = "Biometric lock",
-                checked = biometricLock,
-                onCheckedChange = { biometricLock = it; settings.biometricLockEnabled = it }
-            )
-
-            // Update check
-            if (onCheckUpdate != null) {
-                HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
-                Text("Updates", style = MaterialTheme.typography.titleMedium)
-                Button(onClick = onCheckUpdate) {
-                    Text("Check for update")
-                }
-            }
-
-            // Backup
-            if (onExportServers != null || onImportServers != null) {
-                HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
-                Text("Backup", style = MaterialTheme.typography.titleMedium)
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    if (onExportServers != null) {
-                        Button(onClick = onExportServers) { Text("Export Servers") }
-                    }
-                    if (onImportServers != null) {
-                        OutlinedButton(onClick = onImportServers) { Text("Import Servers") }
-                    }
-                }
-            }
-
-            // Version
-            if (appVersion.isNotBlank()) {
-                HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
-                Text(
-                    "Claude Remote v$appVersion",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
+            // ── Security ────────────────────────────────────────────────────
+            SectionHeader("Security")
+            CRCard {
+                var biometricLock by remember { mutableStateOf(settings.biometricLockEnabled) }
+                SettingsSwitch(
+                    label = "Biometric lock",
+                    checked = biometricLock,
+                    onCheckedChange = { biometricLock = it; settings.biometricLockEnabled = it }
                 )
+            }
+
+            // ── About ───────────────────────────────────────────────────────
+            SectionHeader("About")
+            CRCard {
+                Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+
+                    // Keyboard shortcuts reference
+                    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                        Text("Keyboard shortcuts", style = CRType.sectionH, color = c.textDim)
+                        Spacer(Modifier.height(4.dp))
+                        listOf(
+                            "Ctrl+K" to "Command Palette",
+                            "Ctrl+Tab" to "Next Tab",
+                            "Ctrl+Shift+Tab" to "Prev Tab",
+                            "Ctrl+W" to "Close Tab",
+                            "Ctrl+N" to "New Session",
+                        ).forEach { (key, desc) ->
+                            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                Text(key, style = CRType.mono, color = c.accent, modifier = Modifier.width(120.dp))
+                                Text(desc, style = CRType.bodyDim, color = c.textDim)
+                            }
+                        }
+                    }
+
+                    if (onCheckUpdate != null || onExportServers != null || onImportServers != null) {
+                        HorizontalDivider(color = c.border)
+                    }
+
+                    if (onCheckUpdate != null) {
+                        OutlinedButton(
+                            onClick = onCheckUpdate,
+                            modifier = Modifier.fillMaxWidth(),
+                        ) { Text("Check for update", color = c.accent) }
+                    }
+
+                    if (onExportServers != null || onImportServers != null) {
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            if (onExportServers != null) {
+                                OutlinedButton(onClick = onExportServers, modifier = Modifier.weight(1f)) {
+                                    Text("Export servers", color = c.accent)
+                                }
+                            }
+                            if (onImportServers != null) {
+                                OutlinedButton(onClick = onImportServers, modifier = Modifier.weight(1f)) {
+                                    Text("Import servers", color = c.textDim)
+                                }
+                            }
+                        }
+                    }
+
+                    if (appVersion.isNotBlank()) {
+                        Text(
+                            "Claude Remote v$appVersion",
+                            style = CRType.monoTiny,
+                            color = c.textDim,
+                        )
+                    }
+                }
             }
 
             Spacer(Modifier.height(32.dp))
         }
     }
 }
+
+// ── Section header ─────────────────────────────────────────────────────────────
+
+@Composable
+private fun SectionHeader(title: String) {
+    Text(
+        title.uppercase(),
+        style = CRType.sectionH,
+        color = CRTheme.colors.textDim,
+        modifier = Modifier.padding(start = 2.dp, top = 4.dp),
+    )
+}
+
+// ── Settings row (label + trailing control) ────────────────────────────────────
+
+@Composable
+private fun SettingsRow(
+    label: String,
+    content: @Composable () -> Unit,
+) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(label, style = CRType.bodyDim, color = CRTheme.colors.textDim, modifier = Modifier.weight(1f))
+        content()
+    }
+}
+
+// ── Settings switch ────────────────────────────────────────────────────────────
 
 @Composable
 private fun SettingsSwitch(
@@ -415,10 +477,12 @@ private fun SettingsSwitch(
         horizontalArrangement = Arrangement.SpaceBetween,
         verticalAlignment = Alignment.CenterVertically
     ) {
-        Text(label, style = MaterialTheme.typography.bodyMedium)
+        Text(label, style = CRType.bodyDim, color = CRTheme.colors.text, modifier = Modifier.weight(1f))
         Switch(checked = checked, onCheckedChange = onCheckedChange)
     }
 }
+
+// ── Settings slider ────────────────────────────────────────────────────────────
 
 @Composable
 private fun SettingsSlider(
@@ -428,13 +492,14 @@ private fun SettingsSlider(
     step: Int = 1,
     onValueChange: (Int) -> Unit
 ) {
+    val c = CRTheme.colors
     Column {
         Row(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.SpaceBetween
         ) {
-            Text(label, style = MaterialTheme.typography.bodyMedium)
-            Text(value.toString(), style = MaterialTheme.typography.bodyMedium)
+            Text(label, style = CRType.bodyDim, color = c.text)
+            Text(value.toString(), style = CRType.mono, color = c.accent)
         }
         Slider(
             value = value.toFloat(),
@@ -444,3 +509,13 @@ private fun SettingsSlider(
         )
     }
 }
+
+// ── Click helpers ──────────────────────────────────────────────────────────────
+
+@Composable
+private fun Modifier.clickableNoRipple(onClick: () -> Unit): Modifier =
+    this.clickable(
+        interactionSource = remember { MutableInteractionSource() },
+        indication = null,
+        onClick = onClick,
+    )
