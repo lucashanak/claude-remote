@@ -95,11 +95,21 @@ fun SessionDrawer(
             BoxWithConstraints {
                 val drawerWidth: Dp = (maxWidth * 0.86f).coerceAtMost(320.dp)
 
+                val drawerBrush = if (CRTheme.variant == com.clauderemote.ui.theme.CRVariant.Glass) {
+                    androidx.compose.ui.graphics.Brush.verticalGradient(
+                        listOf(
+                            c.surface.copy(alpha = 0.92f),
+                            c.bg.copy(alpha = 0.92f),
+                        ),
+                    )
+                } else {
+                    androidx.compose.ui.graphics.SolidColor(c.bg)
+                }
                 Column(
                     Modifier
                         .width(drawerWidth)
                         .fillMaxHeight()
-                        .background(c.surface)
+                        .background(drawerBrush)
                         .border(1.dp, c.border, RoundedCornerShape(0.dp)),
                 ) {
                     DrawerHeader(count = sessions.size, onClose = onClose)
