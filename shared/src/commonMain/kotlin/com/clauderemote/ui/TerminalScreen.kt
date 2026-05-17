@@ -131,7 +131,8 @@ fun TerminalScreen(
     splitTerminalContent: (@Composable (Modifier) -> Unit)? = null,
     transcriptEntries: List<TranscriptEntry> = emptyList(),
     remoteStatus: RemoteSessionStatus? = null,
-    onTerminalContentVisible: (() -> Unit)? = null
+    onTerminalContentVisible: (() -> Unit)? = null,
+    activeClaudeSessionId: String? = null
 ) {
     val c = CRTheme.colors
     val m = CRTheme.metrics
@@ -558,7 +559,8 @@ fun TerminalScreen(
                             weekResetMin = weekResetMin,
                             latencyMs = latencyMs,
                             remoteStatus = remoteStatus,
-                            activity = activeTabId?.let { sessionActivities[it] }
+                            activity = activeTabId?.let { sessionActivities[it] },
+                            claudeSessionId = activeClaudeSessionId
                         )
                     }
                 } else if (splitActive && splitTerminalContent != null && wideMode) {

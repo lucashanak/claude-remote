@@ -684,7 +684,10 @@ fun App(
                             val flow = remember(id) { sessionOrchestrator.remoteStatusFlow(id) }
                             flow.collectAsState().value
                         },
-                        onTerminalContentVisible = onTerminalScreenVisible
+                        onTerminalContentVisible = onTerminalScreenVisible,
+                        activeClaudeSessionId = activeTabId?.let { id ->
+                            tabs.firstOrNull { it.id == id }?.claudeSessionId
+                        }
                     )
                 }
 

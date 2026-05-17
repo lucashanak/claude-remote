@@ -59,7 +59,8 @@ fun TranscriptView(
     weekResetMin: Int? = null,
     latencyMs: Long? = null,
     remoteStatus: RemoteSessionStatus? = null,
-    activity: SessionActivity? = null
+    activity: SessionActivity? = null,
+    claudeSessionId: String? = null
 ) {
     val listState = rememberLazyListState()
     val scope = rememberCoroutineScope()
@@ -146,11 +147,24 @@ fun TranscriptView(
                 modifier = Modifier.fillMaxSize(),
                 contentAlignment = Alignment.Center
             ) {
-                Text(
-                    "Waiting for transcript…",
-                    style = CRType.bodyDim,
-                    color = CRTheme.colors.textDim
-                )
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    Text(
+                        if (claudeSessionId.isNullOrBlank())
+                            "Waiting for Claude session id…"
+                        else
+                            "Waiting for transcript…",
+                        style = CRType.bodyDim,
+                        color = CRTheme.colors.textDim
+                    )
+                    if (!claudeSessionId.isNullOrBlank()) {
+                        Spacer(Modifier.height(4.dp))
+                        Text(
+                            "uuid: ${claudeSessionId.take(8)}",
+                            style = CRType.bodyDim,
+                            color = CRTheme.colors.textDim
+                        )
+                    }
+                }
             }
             return@Column
         }
