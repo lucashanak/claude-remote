@@ -1296,16 +1296,25 @@ private fun SessionSidePanel(
         }
     }
 
+    val panelBrush = if (CRTheme.variant == com.clauderemote.ui.theme.CRVariant.Glass) {
+        androidx.compose.ui.graphics.Brush.verticalGradient(
+            listOf(
+                c.surface.copy(alpha = 0.92f),
+                c.bg.copy(alpha = 0.92f),
+            ),
+        )
+    } else {
+        androidx.compose.ui.graphics.SolidColor(c.bg)
+    }
     Column(
         modifier = modifier
             .fillMaxSize()
-            .background(c.surface)
+            .background(panelBrush)
     ) {
         // ── Panel header ────────────────────────────────────────────────────
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .background(c.surface)
                 .padding(horizontal = 8.dp, vertical = 8.dp),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(4.dp),
