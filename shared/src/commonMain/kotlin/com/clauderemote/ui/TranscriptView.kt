@@ -62,7 +62,12 @@ fun TranscriptView(
     activity: SessionActivity? = null,
     claudeSessionId: String? = null
 ) {
-    val listState = rememberLazyListState()
+    // Key list+scroll state on the session uuid so switching tabs resets
+    // scroll position and stickiness — otherwise the new session inherits
+    // the previous one's "user scrolled up" flag and never auto-scrolls
+    // to the latest entry on open.
+    val sessionKey = claudeSessionId ?: ""
+    val listState = remember(sessionKey) { androidx.compose.foundation.lazy.LazyListState(0, 0) }
     val scope = rememberCoroutineScope()
     var showSystem by remember { mutableStateOf(false) }
     var showThinking by remember { mutableStateOf(false) }
@@ -185,13 +190,29 @@ fun TranscriptView(
         // misses, exactly matching the user-reported "sometimes doesn't
         // follow" symptom. Driving stickiness only off user scroll end
         // makes it deterministic and immune to add-then-measure races.
-        var stickToBottom by remember { mutableStateOf(true) }
+        var stickToBottom by remember(sessionKey) { mutableStateOf(true) }
+        // Track whether the user has ever physically scrolled — initial
+        // layout would otherwise flip stickToBottom off before our first
+        // scroll-to-end runs (visibleItemsInfo is empty pre-layout, so
+        // `lastVisible = -1 < lastIdx` evaluates as "not at bottom" even
+        // though the user hasn't interacted at all). We only consult
+        // user-scroll signals once a real scroll gesture has happened.
+        // Both flags key on sessionKey so switching tabs resets them.
+        var userHasScrolled by remember(sessionKey) { mutableStateOf(false) }
         LaunchedEffect(listState) {
             snapshotFlow { listState.isScrollInProgress }.collect { inProgress ->
-                if (inProgress) return@collect
+                if (inProgress) {
+                    userHasScrolled = true
+                    return@collect
+                }
+                if (!userHasScrolled) return@collect
                 val info = listState.layoutInfo
                 val lastIdx = info.totalItemsCount - 1
                 if (lastIdx < 0) return@collect
+                // Ignore the "scroll ended" tick if the list has no
+                // measured items yet — that's a pre-layout snapshot, not
+                // a real position observation.
+                if (info.visibleItemsInfo.isEmpty()) return@collect
                 val lastVisible = info.visibleItemsInfo.lastOrNull()?.index ?: -1
                 stickToBottom = lastVisible >= lastIdx || !listState.canScrollForward
             }
