@@ -851,8 +851,8 @@ private fun CRTopBar(
                 }
             }
 
-            // Invert colors (sunlight-readable) — Android only (no desktop implementation)
-            if (isMobile && onToggleInvertColors != null) {
+            // Invert colors (sunlight-readable)
+            if (onToggleInvertColors != null) {
                 IconButton(onClick = onToggleInvertColors, modifier = Modifier.size(36.dp)) {
                     Text(
                         if (invertColors) "☾" else "☀",
