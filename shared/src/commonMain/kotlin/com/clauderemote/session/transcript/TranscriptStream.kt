@@ -76,12 +76,19 @@ class TranscriptStream(
             append("case \"\$F\" in \"~\"*) F=\"\$HOME\${F#\"~\"}\";; esac; ")
             append("ENC=\$(cd \"\$F\" 2>/dev/null && pwd | sed 's|/|-|g'); ")
             append("[ -z \"\$ENC\" ] && exit 0; ")
+            // Try the UUID-targeted file first; if it doesn't exist (claude
+            // rotated session id via /clear or /resume and our drift
+            // reconcile hasn't caught up), fall back to the newest *.jsonl
+            // in the encoded-cwd dir so the chat view shows *something*
+            // useful instead of hanging on "Waiting for transcript…".
+            append("DIR=\"\$HOME/.claude/projects/\$ENC\"; ")
+            append("T=\"\$DIR/").append(safeUuid).append(".jsonl\"; ")
+            append("[ ! -f \"\$T\" ] && T=\$(ls -t \"\$DIR\"/*.jsonl 2>/dev/null | head -1); ")
+            append("[ -z \"\$T\" ] && exit 0; ")
             // tail -n N -F: emit the last N lines, then follow appends and
             // rotations. Capped to bound startup time / RAM on long sessions.
-            // 2>/dev/null suppresses transient "file truncated" / missing-file
-            // messages — tail -F will wait for the file to appear.
             append("tail -n ").append(INITIAL_LINES)
-            append(" -F \"\$HOME/.claude/projects/\$ENC/").append(safeUuid).append(".jsonl\" 2>/dev/null")
+            append(" -F \"\$T\" 2>/dev/null")
         }
         var attempt = 0
         while (scope.isActive) {
