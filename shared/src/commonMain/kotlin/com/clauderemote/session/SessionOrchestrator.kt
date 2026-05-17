@@ -230,16 +230,23 @@ class SessionOrchestrator(
             while (isActive) {
                 try {
                     val remote = fetchSessionsFromServer(sshManager)
-                    if (remote != null) {
-                        val entry = remote.firstOrNull { it.tmuxSessionName == tmuxName }
-                        val realUuid = entry?.claudeSessionId
-                        val tab = tabManager.getTab(sessionId)
-                        if (tab != null && !realUuid.isNullOrBlank() && tab.claudeSessionId != realUuid) {
-                            FileLogger.log(TAG, "Session $sessionId UUID synced from server: ${tab.claudeSessionId} -> $realUuid")
-                            tabManager.updateClaudeSessionId(sessionId, realUuid)
-                            sessionStorage.upsert(SessionStorage.fromClaudeSession(tab.copy(claudeSessionId = realUuid)))
-                            notifyClaudeSessionIdChanged(sessionId, realUuid)
-                        }
+                    val entry = remote?.firstOrNull { it.tmuxSessionName == tmuxName }
+                    // Server-as-truth via drift daemon when available, but
+                    // fall back to a direct per-pid probe of
+                    // ~/.claude/sessions/<pid>.json when the daemon is not
+                    // installed / hasn't recorded this tmux session yet —
+                    // otherwise tab.claudeSessionId stays frozen at the
+                    // value generated client-side at launch and the
+                    // transcript view tails a non-existent JSONL.
+                    val realUuid = entry?.claudeSessionId.takeUnless { it.isNullOrBlank() }
+                        ?: readRealSessionId(sshManager, tmuxName)
+                    val tab = tabManager.getTab(sessionId)
+                    if (tab != null && !realUuid.isNullOrBlank() && tab.claudeSessionId != realUuid) {
+                        val source = if (entry?.claudeSessionId == realUuid) "server" else "pid-probe"
+                        FileLogger.log(TAG, "Session $sessionId UUID synced from $source: ${tab.claudeSessionId} -> $realUuid")
+                        tabManager.updateClaudeSessionId(sessionId, realUuid)
+                        sessionStorage.upsert(SessionStorage.fromClaudeSession(tab.copy(claudeSessionId = realUuid)))
+                        notifyClaudeSessionIdChanged(sessionId, realUuid)
                     }
                 } catch (_: Exception) {}
                 kotlinx.coroutines.delay(60_000)
