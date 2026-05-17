@@ -145,7 +145,11 @@ fun LauncherScreen(
                     }
                 } else {
                     val sortedActive = activeSessions.sortedWith(
-                        compareBy({ it.server.name.lowercase() }, { it.displayLabel.lowercase() })
+                        compareBy(
+                            { it.server.name.lowercase() },
+                            { it.folder.trimEnd('/').substringAfterLast('/').lowercase() },
+                            { it.alias.lowercase() },
+                        )
                     )
                     items(sortedActive, key = { it.id }) { session ->
                         SessionLauncherCard(

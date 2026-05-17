@@ -162,7 +162,12 @@ fun SessionDrawer(
                             sortedServerIds.forEach { sid ->
                                 val server = serverById[sid] ?: return@forEach
                                 val activeGroup = (activeByServer[sid] ?: emptyList())
-                                    .sortedBy { it.displayLabel.lowercase() }
+                                    .sortedWith(
+                                        compareBy(
+                                            { it.folder.trimEnd('/').substringAfterLast('/').lowercase() },
+                                            { it.alias.lowercase() },
+                                        )
+                                    )
                                 val remoteGroup = (remoteByServer[sid] ?: emptyList())
                                     .sortedBy {
                                         TmuxNameParser.parse(it.tmuxSession.name, server.name)
