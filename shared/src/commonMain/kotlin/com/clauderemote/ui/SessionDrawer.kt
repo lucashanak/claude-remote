@@ -35,8 +35,10 @@ import androidx.compose.ui.unit.coerceAtMost
 import androidx.compose.ui.unit.dp
 import com.clauderemote.model.ClaudeMode
 import com.clauderemote.model.ClaudeSession
+import com.clauderemote.model.RemoteSession
 import com.clauderemote.model.SessionActivity
 import com.clauderemote.model.SshServer
+import com.clauderemote.model.TmuxNameParser
 import com.clauderemote.ui.components.CRStatus
 import com.clauderemote.ui.components.Pill
 import com.clauderemote.ui.components.ServerGlyph
@@ -55,11 +57,13 @@ fun SessionDrawer(
     sessions: List<ClaudeSession>,
     activities: Map<String, SessionActivity> = emptyMap(),
     activeId: String = "",
+    remoteSessions: List<RemoteSession> = emptyList(),
     onPick: (id: String) -> Unit = {},
+    onAttachRemote: ((RemoteSession) -> Unit)? = null,
     onNew: () -> Unit = {},
     onClose: () -> Unit = {},
 ) {
-    if (!open && sessions.isEmpty()) return  // skip composition when not needed
+    if (!open && sessions.isEmpty() && remoteSessions.isEmpty()) return  // skip composition when not needed
 
     val c = CRTheme.colors
     var query by remember { mutableStateOf("") }
@@ -117,10 +121,29 @@ fun SessionDrawer(
                     DrawerSearch(query = query, onQuery = { query = it })
                     HorizontalDivider(color = c.border, thickness = 1.dp)
 
-                    val filtered = filterSessions(sessions, query)
-                    val groups = filtered.groupBy { it.server.id }
+                    val filteredActive = filterSessions(sessions, query)
+                    val attachedTmuxByServer: Map<String, Set<String>> =
+                        sessions.groupBy { it.server.id }
+                            .mapValues { (_, list) -> list.map { it.tmuxSessionName }.toSet() }
+                    val filteredRemote = filterRemote(
+                        remoteSessions.filter { rs ->
+                            rs.tmuxSession.name !in (attachedTmuxByServer[rs.server.id] ?: emptySet())
+                        },
+                        query
+                    )
 
-                    if (filtered.isEmpty()) {
+                    val activeByServer = filteredActive.groupBy { it.server.id }
+                    val remoteByServer = filteredRemote.groupBy { it.server.id }
+                    val serverIds = (activeByServer.keys + remoteByServer.keys).toList()
+                    val serverById: Map<String, SshServer> = (
+                        filteredActive.map { it.server } + filteredRemote.map { it.server }
+                    ).associateBy { it.id }
+                    val sortedServerIds = serverIds.sortedBy {
+                        serverById[it]?.name?.lowercase() ?: it
+                    }
+                    val totalItems = filteredActive.size + filteredRemote.size
+
+                    if (totalItems == 0) {
                         Box(
                             Modifier
                                 .weight(1f)
@@ -128,25 +151,43 @@ fun SessionDrawer(
                             contentAlignment = Alignment.Center,
                         ) {
                             Text(
-                                "No sessions match \"$query\"",
+                                if (query.isBlank()) "No sessions"
+                                else "No sessions match \"$query\"",
                                 style = CRType.bodyDim,
                                 color = c.textDim,
                             )
                         }
                     } else {
                         LazyColumn(Modifier.weight(1f)) {
-                            groups.forEach { (_, group) ->
-                                val server = group.first().server
+                            sortedServerIds.forEach { sid ->
+                                val server = serverById[sid] ?: return@forEach
+                                val activeGroup = (activeByServer[sid] ?: emptyList())
+                                    .sortedBy { it.displayLabel.lowercase() }
+                                val remoteGroup = (remoteByServer[sid] ?: emptyList())
+                                    .sortedBy {
+                                        TmuxNameParser.parse(it.tmuxSession.name, server.name)
+                                            .folder.lowercase()
+                                    }
+                                val groupCount = activeGroup.size + remoteGroup.size
                                 item(key = "group_${server.id}") {
-                                    DrawerGroupLabel(server = server, count = group.size)
+                                    DrawerGroupLabel(server = server, count = groupCount)
                                 }
-                                items(group, key = { it.id }) { session ->
+                                items(activeGroup, key = { it.id }) { session ->
                                     DrawerItem(
                                         session = session,
                                         activity = activities[session.id] ?: SessionActivity.IDLE,
                                         selected = session.id == activeId,
                                         onClick = {
                                             onPick(session.id)
+                                            onClose()
+                                        },
+                                    )
+                                }
+                                items(remoteGroup, key = { "remote_${server.id}_${it.tmuxSession.name}" }) { remote ->
+                                    DrawerRemoteItem(
+                                        remote = remote,
+                                        onClick = {
+                                            onAttachRemote?.invoke(remote)
                                             onClose()
                                         },
                                     )
@@ -325,6 +366,64 @@ private fun DrawerItem(
     }
 }
 
+// ── Remote (un-attached) session row ──────────────────────────────────────────
+
+@Composable
+private fun DrawerRemoteItem(
+    remote: RemoteSession,
+    onClick: () -> Unit,
+) {
+    val c = CRTheme.colors
+    val parsed = TmuxNameParser.parse(remote.tmuxSession.name, remote.server.name)
+    val label = parsed.alias.ifBlank { parsed.folder.trimEnd('/').substringAfterLast('/').ifBlank { parsed.folder } }
+
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onClick),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Box(Modifier.width(3.dp).height(48.dp))
+
+        Row(
+            Modifier
+                .weight(1f)
+                .padding(horizontal = 10.dp, vertical = 10.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            StatusIndicator(status = CRStatus.Idle, modifier = Modifier.size(8.dp))
+
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    label,
+                    style = CRType.cardTitle,
+                    color = c.textDim,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                Text(
+                    parsed.folder,
+                    style = CRType.monoTiny,
+                    color = c.textDim,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+
+            Column(horizontalAlignment = Alignment.End) {
+                DrawerModePill(mode = if (parsed.isYolo) ClaudeMode.YOLO else ClaudeMode.NORMAL)
+                Spacer(Modifier.height(2.dp))
+                Text(
+                    if (remote.tmuxSession.attached) "attached" else "detached",
+                    style = CRType.monoTiny,
+                    color = c.textDim,
+                )
+            }
+        }
+    }
+}
+
 // ── Mode mini-pill in drawer ──────────────────────────────────────────────────
 
 @Composable
@@ -388,6 +487,18 @@ private fun filterSessions(sessions: List<ClaudeSession>, query: String): List<C
             s.alias.lowercase().contains(q) ||
             s.server.name.lowercase().contains(q) ||
             s.mode.name.lowercase().contains(q)
+    }
+}
+
+private fun filterRemote(remote: List<RemoteSession>, query: String): List<RemoteSession> {
+    if (query.isBlank()) return remote
+    val q = query.lowercase()
+    return remote.filter { r ->
+        val parsed = TmuxNameParser.parse(r.tmuxSession.name, r.server.name)
+        parsed.folder.lowercase().contains(q) ||
+            parsed.alias.lowercase().contains(q) ||
+            r.server.name.lowercase().contains(q) ||
+            r.tmuxSession.name.lowercase().contains(q)
     }
 }
 

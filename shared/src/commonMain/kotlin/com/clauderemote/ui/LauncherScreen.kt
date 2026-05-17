@@ -30,6 +30,7 @@ import com.clauderemote.model.ClaudeSession
 import com.clauderemote.model.RemoteSession
 import com.clauderemote.model.SessionStatus
 import com.clauderemote.model.SshServer
+import com.clauderemote.model.TmuxNameParser
 import com.clauderemote.ui.components.ActivityHeatmap
 import com.clauderemote.ui.components.CRCard
 import com.clauderemote.ui.components.Pill
@@ -143,7 +144,10 @@ fun LauncherScreen(
                         }
                     }
                 } else {
-                    items(activeSessions, key = { it.id }) { session ->
+                    val sortedActive = activeSessions.sortedWith(
+                        compareBy({ it.server.name.lowercase() }, { it.displayLabel.lowercase() })
+                    )
+                    items(sortedActive, key = { it.id }) { session ->
                         SessionLauncherCard(
                             session = session,
                             onClick = { onResumeSession(session) },
@@ -156,6 +160,13 @@ fun LauncherScreen(
                 val filteredRemote = remoteSessions
                     .filter { it.tmuxSession.name !in connectedTmuxNames }
                     .distinctBy { "${it.server.id}:${it.tmuxSession.name}" }
+                    .sortedWith(
+                        compareBy(
+                            { it.server.name.lowercase() },
+                            { TmuxNameParser.parse(it.tmuxSession.name, it.server.name).folder.lowercase() },
+                            { it.tmuxSession.name.lowercase() },
+                        )
+                    )
 
                 if (filteredRemote.isNotEmpty() || remoteSessionsLoading) {
                     item(key = "header_remote") {

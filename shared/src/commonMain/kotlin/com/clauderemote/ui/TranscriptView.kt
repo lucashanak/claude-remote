@@ -174,34 +174,45 @@ fun TranscriptView(
         // Pre-group consecutive ToolCalls so a run of Read/Edit/Bash collapses
         // to one tight stack instead of N bordered cards.
         val rendered = remember(filtered) { groupConsecutiveTools(filtered) }
-        var didInitialJump by remember { mutableStateOf(false) }
         val itemsCount = rendered.size + if (skeletonShowing) 1 else 0
-        LaunchedEffect(itemsCount) {
-            if (itemsCount <= 0) return@LaunchedEffect
-            val lastIdx = itemsCount - 1
-            val info = listState.layoutInfo
-            val lastVisible = info.visibleItemsInfo.lastOrNull()?.index ?: -1
-            // 'Near bottom' is satisfied either by index proximity OR by the
-            // viewport already being scrolled fully down (so user reading
-            // current screen still gets auto-followed when the tail item is
-            // big enough to fill the viewport on its own).
-            val nearBottom = lastVisible >= lastIdx - 3 || !listState.canScrollForward
-            val shouldStick = !didInitialJump || nearBottom
-            if (shouldStick) {
-                // Two-step: scrollToItem anchors the last entry at the TOP of
-                // the viewport (LazyColumn has no native "anchor at bottom"
-                // for unknown-height items). Then push by a large delta so
-                // the item's content actually bottom-aligns. LazyColumn caps
-                // the scroll at the end so an oversized scrollBy is safe.
-                listState.scrollToItem(lastIdx)
-                // Yield so the new item gets composed and measured before
-                // we try to push past it.
-                kotlinx.coroutines.yield()
-                if (listState.canScrollForward) {
-                    listState.scrollBy(100_000f)
-                }
-                didInitialJump = true
+
+        // Stickiness is decided by user scroll gestures, not by snapshotting
+        // layoutInfo at the moment a content effect fires. Previous logic
+        // sampled `lastVisible` right when a new item arrived — but at that
+        // tick the new item hasn't been composed yet, so `lastVisible` could
+        // legitimately be `lastIdx - 1` and still pass the threshold OR
+        // could be stale and fail it depending on timing. Result: random
+        // misses, exactly matching the user-reported "sometimes doesn't
+        // follow" symptom. Driving stickiness only off user scroll end
+        // makes it deterministic and immune to add-then-measure races.
+        var stickToBottom by remember { mutableStateOf(true) }
+        LaunchedEffect(listState) {
+            snapshotFlow { listState.isScrollInProgress }.collect { inProgress ->
+                if (inProgress) return@collect
+                val info = listState.layoutInfo
+                val lastIdx = info.totalItemsCount - 1
+                if (lastIdx < 0) return@collect
+                val lastVisible = info.visibleItemsInfo.lastOrNull()?.index ?: -1
+                stickToBottom = lastVisible >= lastIdx || !listState.canScrollForward
             }
+        }
+
+        LaunchedEffect(itemsCount, stickToBottom) {
+            if (itemsCount <= 0 || !stickToBottom) return@LaunchedEffect
+            val lastIdx = itemsCount - 1
+            // Wait two frames so the just-appended item is composed and
+            // measured before we anchor — without this, scrollToItem may
+            // race a not-yet-laid-out tail and leave a gap.
+            kotlinx.coroutines.yield()
+            kotlinx.coroutines.yield()
+            listState.scrollToItem(lastIdx)
+            // scrollToItem anchors lastIdx at the TOP of the viewport.
+            // Push by a saturating delta so the item bottom-aligns; the
+            // LazyColumn clamps forward scroll at the content end, so an
+            // oversized push is safe and lands at true bottom regardless
+            // of the tail item's height.
+            kotlinx.coroutines.yield()
+            listState.scrollBy(Float.MAX_VALUE)
         }
         CompositionLocalProvider(
             LocalDensity provides Density(

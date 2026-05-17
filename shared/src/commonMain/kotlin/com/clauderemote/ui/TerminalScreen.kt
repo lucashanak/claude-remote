@@ -708,9 +708,16 @@ fun TerminalScreen(
             sessions = tabs,
             activities = sessionActivities,
             activeId = activeTabId ?: "",
+            remoteSessions = remoteSessions,
             onPick = { id ->
                 onTabSwitch(id)
                 showSessionDrawer = false
+            },
+            onAttachRemote = onAttachRemote?.let { handler ->
+                { remote ->
+                    handler(remote)
+                    showSessionDrawer = false
+                }
             },
             onNew = {
                 onNewTab()
