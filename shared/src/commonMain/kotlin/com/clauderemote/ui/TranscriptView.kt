@@ -318,18 +318,23 @@ private fun UserPromptCard(entry: TranscriptEntry.UserPrompt) {
 private fun SlashCommandRow(entry: TranscriptEntry.SlashCommand) {
     val c = CRTheme.colors
     val m = CRTheme.metrics
-    Box(
-        modifier = Modifier
-            .fillMaxWidth()
-            .background(c.surface2, RoundedCornerShape(6.dp))
-            .border(1.dp, c.border, RoundedCornerShape(6.dp))
-            .padding(horizontal = m.cardPadH, vertical = 4.dp)
+    Row(
+        modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp),
+        horizontalArrangement = Arrangement.End,
     ) {
-        Text(
-            "/${entry.name}${if (entry.args.isNotBlank()) " ${entry.args}" else ""}",
-            style = CRType.mono,
-            color = c.accent
-        )
+        Box(
+            modifier = Modifier
+                .widthIn(max = 600.dp)
+                .background(c.surface2, RoundedCornerShape(6.dp))
+                .border(1.dp, c.border, RoundedCornerShape(6.dp))
+                .padding(horizontal = m.cardPadH, vertical = 4.dp)
+        ) {
+            Text(
+                "/${entry.name}${if (entry.args.isNotBlank()) " ${entry.args}" else ""}",
+                style = CRType.mono,
+                color = c.accent
+            )
+        }
     }
 }
 
