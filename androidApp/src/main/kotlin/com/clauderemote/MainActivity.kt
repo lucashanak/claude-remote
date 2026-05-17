@@ -161,16 +161,24 @@ class MainActivity : FragmentActivity() {
             val handle = terminalHandle ?: return@tabSwitch
             handle.replay(bufferedOutput.toByteArray(Charsets.UTF_8))
             // Force a full tmux redraw after the switch. Naive toggle
-            // resize(c, r-1) + resize(c, r) delivered back-to-back can
-            // be coalesced by the kernel — tmux reads *current* pty size
-            // == the value it already had, sees no change, skips redraw.
+            // resize(c, r) + resize(c, r) is coalesced — tmux reads
+            // *current* pty size, sees no change, skips redraw.
             // Use a delay between the two resizes and make the intermediate
-            // size strictly different so SIGWINCH always fires twice.
+            // size strictly different so SIGWINCH fires twice.
+            //
+            // IMPORTANT: shrink COLS, not ROWS. Shrinking rows by one
+            // pushes the tmux status line up by one cell during the kick;
+            // the bytes for the old status row leak into xterm.js
+            // scrollback before tmux finishes redrawing the new layout,
+            // leaving a stray status-line artifact mid-history. Column
+            // shrink still produces a SIGWINCH and a full repaint, but
+            // the status line stays anchored at the bottom row so no
+            // scrollback pollution.
             handle.view.post {
                 val (cols, rows) = handle.currentSize() ?: return@post
-                if (cols <= 0 || rows <= 1) return@post
+                if (cols <= 1 || rows <= 0) return@post
                 val conn = sessionOrchestrator.getConnection(sessionId) ?: return@post
-                conn.resize(cols, rows - 1)
+                conn.resize(cols - 1, rows)
                 handle.view.postDelayed({ conn.resize(cols, rows) }, 80)
             }
         }
@@ -270,9 +278,11 @@ class MainActivity : FragmentActivity() {
                     val handle = terminalHandle ?: return@App
                     handle.view.post {
                         val (cols, rows) = handle.currentSize() ?: return@post
-                        if (cols <= 0 || rows <= 1) return@post
+                        if (cols <= 1 || rows <= 0) return@post
                         val conn = sessionOrchestrator.getConnection(activeId) ?: return@post
-                        conn.resize(cols, rows - 1)
+                        // Shrink cols rather than rows — see tabSwitch
+                        // kick above for the status-line artifact reason.
+                        conn.resize(cols - 1, rows)
                         handle.view.postDelayed({ conn.resize(cols, rows) }, 80)
                     }
                 },
