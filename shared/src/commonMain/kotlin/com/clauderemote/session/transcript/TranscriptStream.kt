@@ -76,19 +76,32 @@ class TranscriptStream(
             append("case \"\$F\" in \"~\"*) F=\"\$HOME\${F#\"~\"}\";; esac; ")
             append("ENC=\$(cd \"\$F\" 2>/dev/null && pwd | sed 's|/|-|g'); ")
             append("[ -z \"\$ENC\" ] && exit 0; ")
-            // Try the UUID-targeted file first; if it doesn't exist (claude
-            // rotated session id via /clear or /resume and our drift
-            // reconcile hasn't caught up), fall back to the newest *.jsonl
-            // in the encoded-cwd dir so the chat view shows *something*
-            // useful instead of hanging on "Waiting for transcript…".
             append("DIR=\"\$HOME/.claude/projects/\$ENC\"; ")
-            append("T=\"\$DIR/").append(safeUuid).append(".jsonl\"; ")
-            append("[ ! -f \"\$T\" ] && T=\$(ls -t \"\$DIR\"/*.jsonl 2>/dev/null | head -1); ")
-            append("[ -z \"\$T\" ] && exit 0; ")
-            // tail -n N -F: emit the last N lines, then follow appends and
-            // rotations. Capped to bound startup time / RAM on long sessions.
-            append("tail -n ").append(INITIAL_LINES)
-            append(" -F \"\$T\" 2>/dev/null")
+            // Outer loop: re-pick the newest *.jsonl every time the
+            // inner tail dies. We start from the UUID-targeted file
+            // when it exists (so we keep showing the conversation
+            // matching tab.claudeSessionId) and on first iteration only;
+            // afterwards we always follow whatever the newest jsonl is,
+            // which catches `/clear` and `/resume` rotations that the
+            // 60 s server-as-truth reconcile would otherwise miss.
+            // A 5 s watcher kills the inner tail when a newer jsonl
+            // appears in \$DIR so we don't keep tailing a dead file.
+            append("UUID='").append(safeUuid).append("'; ")
+            append("FIRST=1; ")
+            append("while :; do ")
+            append("  if [ \$FIRST -eq 1 ] && [ -f \"\$DIR/\$UUID.jsonl\" ]; then T=\"\$DIR/\$UUID.jsonl\"; ")
+            append("  else T=\$(ls -t \"\$DIR\"/*.jsonl 2>/dev/null | head -1); fi; ")
+            append("  FIRST=0; ")
+            append("  if [ -z \"\$T\" ] || [ ! -f \"\$T\" ]; then sleep 5; continue; fi; ")
+            append("  tail -n ").append(INITIAL_LINES).append(" -F \"\$T\" 2>/dev/null & ")
+            append("  TPID=\$!; ")
+            append("  while kill -0 \$TPID 2>/dev/null; do ")
+            append("    sleep 5; ")
+            append("    NEW=\$(ls -t \"\$DIR\"/*.jsonl 2>/dev/null | head -1); ")
+            append("    if [ -n \"\$NEW\" ] && [ \"\$NEW\" != \"\$T\" ]; then kill \$TPID 2>/dev/null; break; fi; ")
+            append("  done; ")
+            append("  wait \$TPID 2>/dev/null; ")
+            append("done")
         }
         var attempt = 0
         while (scope.isActive) {
