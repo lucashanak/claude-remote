@@ -485,8 +485,20 @@ private fun SettingsSwitch(
         horizontalArrangement = Arrangement.SpaceBetween,
         verticalAlignment = Alignment.CenterVertically
     ) {
-        Text(label, style = CRType.bodyDim, color = CRTheme.colors.text, modifier = Modifier.weight(1f))
-        Switch(checked = checked, onCheckedChange = onCheckedChange)
+        val c = CRTheme.colors
+        Text(label, style = CRType.bodyDim, color = c.text, modifier = Modifier.weight(1f))
+        Switch(
+            checked = checked,
+            onCheckedChange = onCheckedChange,
+            colors = SwitchDefaults.colors(
+                checkedThumbColor = c.accentInk,
+                checkedTrackColor = c.accent,
+                checkedBorderColor = c.accent,
+                uncheckedThumbColor = c.textDim,
+                uncheckedTrackColor = c.surface2,
+                uncheckedBorderColor = c.border,
+            ),
+        )
     }
 }
 
@@ -513,7 +525,14 @@ private fun SettingsSlider(
             value = value.toFloat(),
             onValueChange = { onValueChange(it.toInt()) },
             valueRange = range.first.toFloat()..range.last.toFloat(),
-            steps = if (step > 1) ((range.last - range.first) / step - 1) else 0
+            steps = if (step > 1) ((range.last - range.first) / step - 1) else 0,
+            colors = SliderDefaults.colors(
+                thumbColor = c.accent,
+                activeTrackColor = c.accent,
+                activeTickColor = c.accentInk,
+                inactiveTrackColor = c.surface2,
+                inactiveTickColor = c.border,
+            ),
         )
     }
 }
