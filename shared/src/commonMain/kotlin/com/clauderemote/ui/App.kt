@@ -1,5 +1,6 @@
 package com.clauderemote.ui
 
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.WindowInsetsSides
@@ -15,6 +16,13 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.drawWithContent
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Rect
+import androidx.compose.ui.graphics.ColorFilter
+import androidx.compose.ui.graphics.ColorMatrix
+import androidx.compose.ui.graphics.Paint
+import androidx.compose.ui.graphics.drawscope.drawIntoCanvas
 import com.clauderemote.connection.TmuxManager
 import com.clauderemote.model.*
 import com.clauderemote.session.SessionOrchestrator
@@ -320,6 +328,26 @@ fun App(
         } else {
             WindowInsets.systemBars.union(WindowInsets.ime)
         }
+        val invertModifier = if (invertColors && !isMobile) {
+            Modifier.drawWithContent {
+                val paint = Paint().apply {
+                    colorFilter = ColorFilter.colorMatrix(
+                        ColorMatrix(floatArrayOf(
+                            -1f, 0f, 0f, 0f, 255f,
+                            0f, -1f, 0f, 0f, 255f,
+                            0f, 0f, -1f, 0f, 255f,
+                            0f, 0f, 0f, 1f, 0f,
+                        ))
+                    )
+                }
+                drawIntoCanvas { canvas ->
+                    canvas.saveLayer(Rect(Offset.Zero, size), paint)
+                    drawContent()
+                    canvas.restore()
+                }
+            }
+        } else Modifier
+        Box(modifier = Modifier.fillMaxSize().then(invertModifier)) {
         Column(
             modifier = Modifier
                 .fillMaxSize()
@@ -790,6 +818,7 @@ fun App(
                 }
             )
         }
+        } // end Box
     }
     }
 }
