@@ -309,7 +309,7 @@ private fun UserPromptCard(entry: TranscriptEntry.UserPrompt) {
                 }
             }
             Spacer(Modifier.height(4.dp))
-            RichBody(entry.text)
+            RichBody(entry.text, textAlign = androidx.compose.ui.text.style.TextAlign.End)
         }
     }
 }
@@ -806,11 +806,15 @@ private fun SystemNoteRow(entry: TranscriptEntry.SystemNote) {
  * Typography and colors use CRTheme tokens.
  */
 @Composable
-private fun RichBody(text: String) {
+private fun RichBody(
+    text: String,
+    textAlign: androidx.compose.ui.text.style.TextAlign? = null,
+) {
     val c = CRTheme.colors
     val mono = FontFamily.Monospace
     val body = CRType.bodyDim.copy(
-        lineHeight = CRType.bodyDim.fontSize * 1.15f
+        lineHeight = CRType.bodyDim.fontSize * 1.15f,
+        textAlign = textAlign ?: CRType.bodyDim.textAlign,
     )
     val codeStyle = CRType.monoTiny
     val typography = com.mikepenz.markdown.m3.markdownTypography(
