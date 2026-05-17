@@ -16,6 +16,7 @@ import androidx.compose.material.icons.filled.DateRange
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material.icons.filled.SystemUpdate
 import androidx.compose.material3.*
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.runtime.*
@@ -59,6 +60,7 @@ fun LauncherScreen(
     onSettings: () -> Unit,
     onViewLog: () -> Unit = {},
     onUsageDashboard: (() -> Unit)? = null,
+    onCheckUpdate: (() -> Unit)? = null,
 ) {
     val c = CRTheme.colors
     val m = CRTheme.metrics
@@ -78,6 +80,11 @@ fun LauncherScreen(
                     if (onUsageDashboard != null) {
                         IconButton(onClick = onUsageDashboard) {
                             Icon(Icons.Default.DateRange, contentDescription = "Usage", tint = c.textDim)
+                        }
+                    }
+                    if (onCheckUpdate != null) {
+                        IconButton(onClick = onCheckUpdate) {
+                            Icon(Icons.Default.SystemUpdate, contentDescription = "Check for update", tint = c.textDim)
                         }
                     }
                     IconButton(onClick = onSettings) {

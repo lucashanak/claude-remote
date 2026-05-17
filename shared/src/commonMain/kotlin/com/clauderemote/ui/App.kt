@@ -456,7 +456,8 @@ fun App(
                         },
                         onSettings = { currentScreen = Screen.SETTINGS },
                         onViewLog = { currentScreen = Screen.LOG_VIEWER },
-                        onUsageDashboard = { currentScreen = Screen.USAGE_DASHBOARD }
+                        onUsageDashboard = { currentScreen = Screen.USAGE_DASHBOARD },
+                        onCheckUpdate = { checkForUpdate() },
                     )
                 }
 
