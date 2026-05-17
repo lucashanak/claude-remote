@@ -11,7 +11,7 @@ from pathlib import Path
 from PIL import Image, ImageDraw, ImageFilter
 
 REPO = Path("/home/lucas/claude-remote")
-M = 1024  # master size
+M = 2048  # master size (high-res for clean downsampling)
 
 # CRTheme color tokens
 BG_TOP = (15, 23, 42, 255)        # slate-900 #0F172A
@@ -146,17 +146,18 @@ def main():
         print(f"  android mipmap-{name} ({sz}px) → {target.name} + ic_launcher_round.png")
 
     # Android adaptive (foreground/background separate)
+    # Adaptive icon canvas is 108dp — per-density px must be 108 × dpi/160
+    adaptive = {"mdpi": 108, "hdpi": 162, "xhdpi": 216, "xxhdpi": 324, "xxxhdpi": 432}
     bg = build_adaptive_bg(M)
     fg = build_adaptive_fg(M)
-    for name, sz in mipmaps.items():
-        # Adaptive uses 108dp canvas; we approximate using the same px sizes
+    for name, sz in adaptive.items():
         bg.resize((sz, sz), Image.LANCZOS).save(
             REPO / "androidApp" / "src" / "main" / "res" / f"mipmap-{name}" / "ic_launcher_background.png"
         )
         fg.resize((sz, sz), Image.LANCZOS).save(
             REPO / "androidApp" / "src" / "main" / "res" / f"mipmap-{name}" / "ic_launcher_foreground.png"
         )
-    print("  android adaptive bg+fg written across all densities")
+        print(f"  android adaptive bg+fg {name}: {sz}px")
 
     # Desktop PNG (512)
     master.resize((512, 512), Image.LANCZOS).save(
