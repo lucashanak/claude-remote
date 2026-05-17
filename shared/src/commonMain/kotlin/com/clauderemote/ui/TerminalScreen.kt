@@ -667,7 +667,7 @@ fun TerminalScreen(
                     }
 
                     // ── Special keys row (spec §6.3 CRITICAL) ──────────────
-                    if (activeSession != null) {
+                    if (isMobile && activeSession != null) {
                         SpecialKeysRow(
                             onKey = { key ->
                                 onSendCommand(String(key.bytes.map { it.toInt().toChar() }.toCharArray()))
@@ -851,8 +851,8 @@ private fun CRTopBar(
                 }
             }
 
-            // Invert colors (sunlight-readable)
-            if (onToggleInvertColors != null) {
+            // Invert colors (sunlight-readable) — Android only (no desktop implementation)
+            if (isMobile && onToggleInvertColors != null) {
                 IconButton(onClick = onToggleInvertColors, modifier = Modifier.size(36.dp)) {
                     Text(
                         if (invertColors) "☾" else "☀",
@@ -1001,8 +1001,6 @@ private fun SpecialKeysRow(
         SpecialKeyBtn("Tab",  Modifier.weight(1f)) { onKey(SpecialKey.Tab)   }
         SpecialKeyBtn("↑",    Modifier.weight(1f)) { onKey(SpecialKey.Up)    }
         SpecialKeyBtn("↓",    Modifier.weight(1f)) { onKey(SpecialKey.Down)  }
-        SpecialKeyBtn("←",    Modifier.weight(1f)) { onKey(SpecialKey.Left)  }
-        SpecialKeyBtn("→",    Modifier.weight(1f)) { onKey(SpecialKey.Right) }
         SpecialKeyBtn("/",    Modifier.weight(1f)) { onKey(SpecialKey.Slash) }
         SpecialKeyBtn("⌃C",   Modifier.weight(1f)) { onKey(SpecialKey.CtrlC) }
         SpecialKeyBtn("⌃D",   Modifier.weight(1f)) { onKey(SpecialKey.CtrlD) }
