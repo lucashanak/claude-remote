@@ -39,6 +39,7 @@ fun SettingsScreen(
     onCheckUpdate: (() -> Unit)? = null,
     onExportServers: (() -> Unit)? = null,
     onImportServers: (() -> Unit)? = null,
+    onViewLog: (() -> Unit)? = null,
     sshKeyManager: com.clauderemote.connection.SshKeyManager? = null,
     appearance: AppearanceState = settings.loadAppearance(),
     onAppearanceChange: (AppearanceState) -> Unit = { settings.saveAppearance(it) }
@@ -394,8 +395,15 @@ fun SettingsScreen(
                         }
                     }
 
-                    if (onCheckUpdate != null || onExportServers != null || onImportServers != null) {
+                    if (onCheckUpdate != null || onExportServers != null || onImportServers != null || onViewLog != null) {
                         HorizontalDivider(color = c.border)
+                    }
+
+                    if (onViewLog != null) {
+                        OutlinedButton(
+                            onClick = onViewLog,
+                            modifier = Modifier.fillMaxWidth(),
+                        ) { Text("View log", color = c.accent) }
                     }
 
                     if (onCheckUpdate != null) {

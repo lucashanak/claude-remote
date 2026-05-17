@@ -707,7 +707,8 @@ fun App(
                                 ), serverStorage.loadServers())
                             onShareLog?.invoke(json)
                         },
-                        onImportServers = onImportServers
+                        onImportServers = onImportServers,
+                        onViewLog = { currentScreen = Screen.LOG_VIEWER }
                     )
                 }
 
