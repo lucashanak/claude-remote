@@ -190,50 +190,87 @@ fun TranscriptView(
         // misses, exactly matching the user-reported "sometimes doesn't
         // follow" symptom. Driving stickiness only off user scroll end
         // makes it deterministic and immune to add-then-measure races.
+        // ─────────────────────────────────────────────────────────────
+        // Auto-scroll / stickiness — robust against composition races.
+        //
+        // Two effects:
+        //  • A snapshotFlow watcher that decides whether the user wants
+        //    to stay at the bottom, ONLY reading layoutInfo when we are
+        //    NOT inside a programmatic scroll window.
+        //  • A content-change effect that, whenever itemsCount grows,
+        //    raises the programmatic guard, scrolls to the very end,
+        //    waits one settle frame, then drops the guard.
+        //
+        // Why a guard *counter* rather than a boolean: if a new entry
+        // arrives mid-scroll, this content-change effect is cancelled
+        // and re-launched. With a boolean guard the cancelled coroutine
+        // would lower the flag in its finally just as the new effect
+        // raises it — leaving a one-tick window in which the watcher
+        // reads the new (not-yet-scrolled-to) totalItemsCount, sees
+        // lastVisible < lastIdx, and falsely flips stickToBottom off.
+        // The counter increments on entry / decrements on exit; the
+        // guard is "down" only when *every* outstanding scroll has
+        // finished, so there is no false-positive window.
         var stickToBottom by remember(sessionKey) { mutableStateOf(true) }
-        // Track whether the user has ever physically scrolled — initial
-        // layout would otherwise flip stickToBottom off before our first
-        // scroll-to-end runs (visibleItemsInfo is empty pre-layout, so
-        // `lastVisible = -1 < lastIdx` evaluates as "not at bottom" even
-        // though the user hasn't interacted at all). We only consult
-        // user-scroll signals once a real scroll gesture has happened.
-        // Both flags key on sessionKey so switching tabs resets them.
         var userHasScrolled by remember(sessionKey) { mutableStateOf(false) }
-        LaunchedEffect(listState) {
+        var programmaticDepth by remember(sessionKey) { mutableStateOf(0) }
+        val programmaticGuard = programmaticDepth > 0
+
+        LaunchedEffect(listState, sessionKey) {
             snapshotFlow { listState.isScrollInProgress }.collect { inProgress ->
                 if (inProgress) {
+                    // Any scroll motion — including our own — marks that
+                    // the list state has moved at least once. We use this
+                    // only to gate the "pre-layout" guard below; the
+                    // programmatic guard handles distinguishing user
+                    // vs. machine intent.
                     userHasScrolled = true
                     return@collect
                 }
                 if (!userHasScrolled) return@collect
+                if (programmaticGuard) return@collect
                 val info = listState.layoutInfo
                 val lastIdx = info.totalItemsCount - 1
                 if (lastIdx < 0) return@collect
-                // Ignore the "scroll ended" tick if the list has no
-                // measured items yet — that's a pre-layout snapshot, not
-                // a real position observation.
                 if (info.visibleItemsInfo.isEmpty()) return@collect
                 val lastVisible = info.visibleItemsInfo.lastOrNull()?.index ?: -1
-                stickToBottom = lastVisible >= lastIdx || !listState.canScrollForward
+                // lastIdx - 1 buffer: when the tail item is taller than
+                // viewport-bottom-content-padding, its last pixel may sit
+                // just below the visible region even at true end-of-list,
+                // so lastVisible reads as lastIdx-1. canScrollForward is
+                // the authoritative check for "scrolled to the actual
+                // end", so OR it in.
+                stickToBottom = lastVisible >= lastIdx - 1 || !listState.canScrollForward
             }
         }
 
-        LaunchedEffect(itemsCount, stickToBottom) {
-            if (itemsCount <= 0 || !stickToBottom) return@LaunchedEffect
+        LaunchedEffect(itemsCount, sessionKey) {
+            if (itemsCount <= 0) return@LaunchedEffect
+            if (!stickToBottom) return@LaunchedEffect
             val lastIdx = itemsCount - 1
-            // Wait two frames so the just-appended item is composed and
-            // measured before we anchor — without this, scrollToItem may
-            // race a not-yet-laid-out tail and leave a gap.
-            kotlinx.coroutines.yield()
-            kotlinx.coroutines.yield()
-            listState.scrollToItem(lastIdx)
-            // scrollToItem anchors lastIdx at the TOP of the viewport.
-            // Push by a saturating delta so the item bottom-aligns; the
-            // LazyColumn clamps forward scroll at the content end, so an
-            // oversized push is safe and lands at true bottom regardless
-            // of the tail item's height.
-            kotlinx.coroutines.yield()
-            listState.scrollBy(Float.MAX_VALUE)
+            programmaticDepth++
+            try {
+                // Two frame yields so the new item is composed AND
+                // measured before scrollToItem anchors — without these
+                // the anchor sometimes lands on the prior tail item
+                // and the new one sits below the viewport.
+                kotlinx.coroutines.yield()
+                kotlinx.coroutines.yield()
+                listState.scrollToItem(lastIdx)
+                kotlinx.coroutines.yield()
+                // scrollBy with a saturating delta drops us at the true
+                // content end (LazyColumn clamps forward scroll at the
+                // bottom), so the tail item bottom-aligns regardless of
+                // its height. Without this, scrollToItem(lastIdx) alone
+                // anchors the item at the TOP of the viewport.
+                listState.scrollBy(Float.MAX_VALUE)
+                // Hold the guard one settle frame longer so the watcher
+                // doesn't read a still-stale layoutInfo on the very next
+                // snapshot tick.
+                kotlinx.coroutines.delay(120)
+            } finally {
+                programmaticDepth--
+            }
         }
         CompositionLocalProvider(
             LocalDensity provides Density(
