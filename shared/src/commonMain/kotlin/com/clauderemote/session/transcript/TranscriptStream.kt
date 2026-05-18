@@ -77,31 +77,24 @@ class TranscriptStream(
             append("ENC=\$(cd \"\$F\" 2>/dev/null && pwd | sed 's|/|-|g'); ")
             append("[ -z \"\$ENC\" ] && exit 0; ")
             append("DIR=\"\$HOME/.claude/projects/\$ENC\"; ")
-            // Outer loop: re-pick the newest *.jsonl every time the
-            // inner tail dies. We start from the UUID-targeted file
-            // when it exists (so we keep showing the conversation
-            // matching tab.claudeSessionId) and on first iteration only;
-            // afterwards we always follow whatever the newest jsonl is,
-            // which catches `/clear` and `/resume` rotations that the
-            // 60 s server-as-truth reconcile would otherwise miss.
-            // A 5 s watcher kills the inner tail when a newer jsonl
-            // appears in \$DIR so we don't keep tailing a dead file.
-            append("UUID='").append(safeUuid).append("'; ")
-            append("FIRST=1; ")
-            append("while :; do ")
-            append("  if [ \$FIRST -eq 1 ] && [ -f \"\$DIR/\$UUID.jsonl\" ]; then T=\"\$DIR/\$UUID.jsonl\"; ")
-            append("  else T=\$(ls -t \"\$DIR\"/*.jsonl 2>/dev/null | head -1); fi; ")
-            append("  FIRST=0; ")
-            append("  if [ -z \"\$T\" ] || [ ! -f \"\$T\" ]; then sleep 5; continue; fi; ")
-            append("  tail -n ").append(INITIAL_LINES).append(" -F \"\$T\" 2>/dev/null & ")
-            append("  TPID=\$!; ")
-            append("  while kill -0 \$TPID 2>/dev/null; do ")
-            append("    sleep 5; ")
-            append("    NEW=\$(ls -t \"\$DIR\"/*.jsonl 2>/dev/null | head -1); ")
-            append("    if [ -n \"\$NEW\" ] && [ \"\$NEW\" != \"\$T\" ]; then kill \$TPID 2>/dev/null; break; fi; ")
-            append("  done; ")
-            append("  wait \$TPID 2>/dev/null; ")
-            append("done")
+            // Tail strictly the UUID-targeted jsonl. NEVER fall back to
+            // "newest *.jsonl in this folder" — two tabs that share a
+            // cwd (e.g. "second" and "third" aliases of the same
+            // server/folder) would both pick the same newest file and
+            // cross-pollute. Rotation across /clear and /resume is
+            // handled at the SessionOrchestrator layer: the 60 s
+            // reconcile loop polls the server's sessions.json AND, when
+            // that's empty, the per-pid ~/.claude/sessions/<pid>.json
+            // probe directly. Either path updates tab.claudeSessionId
+            // and triggers notifyClaudeSessionIdChanged, which restarts
+            // this stream against the correct uuid.
+            //
+            // tail -F waits patiently for the file to appear, so a
+            // freshly-launched session with no transcript yet hangs on
+            // "Waiting for transcript…" until claude writes the first
+            // line — that's the correct behaviour, not a bug.
+            append("tail -n ").append(INITIAL_LINES)
+            append(" -F \"\$DIR/").append(safeUuid).append(".jsonl\" 2>/dev/null")
         }
         var attempt = 0
         while (scope.isActive) {

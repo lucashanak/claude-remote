@@ -642,21 +642,46 @@ fun TerminalScreen(
                         PromptInputBar(
                             commands = commands,
                             onSend = { text ->
-                                // Body + Enter as TWO writes with a short gap.
-                                // Claude Code detects pastes by burst speed —
-                                // single text+\r writes land in the prompt as
-                                // multi-line paste, trailing \r is treated as
-                                // newline inside the paste, so user has to
-                                // press Send twice. Splitting closes the burst
-                                // window before the Enter, so it's a fresh
-                                // submit. Bracketed paste markers were the
-                                // wrong fix: claude in the tmux PTY never
-                                // negotiated \e[?2004h and rendered '[200~'
-                                // literally inside the message text.
+                                // Two send strategies depending on whether
+                                // the input is a slash command:
+                                //
+                                // 1) Slash commands ("/clear", "/resume",
+                                //    etc.) need claude TUI's keystroke
+                                //    handler to open the command palette
+                                //    on the first '/', then filter on
+                                //    subsequent characters, then ENTER to
+                                //    select. If we send the whole string
+                                //    as a burst, claude detects it as a
+                                //    paste and lands "/clear" in the
+                                //    prompt as plain text instead — the
+                                //    user then sees "//clear" rendered by
+                                //    claude (its own '/' indicator + the
+                                //    pasted '/clear') and the command is
+                                //    never executed. Send char-by-char
+                                //    with a small gap so each character
+                                //    arrives as its own keystroke.
+                                //
+                                // 2) Regular text: body + Enter as TWO
+                                //    writes with a short gap. Single
+                                //    text+\r is misdetected as paste,
+                                //    forcing the user to press Send
+                                //    twice. Bracketed-paste markers were
+                                //    the wrong fix: claude in the tmux
+                                //    PTY never negotiated \e[?2004h and
+                                //    rendered '[200~' literally.
                                 scope.launch {
-                                    onSendCommand(text)
-                                    kotlinx.coroutines.delay(40)
-                                    onSendCommand("\r")
+                                    if (text.startsWith("/") && !text.contains('\n') && text.length < 64) {
+                                        for (ch in text) {
+                                            onSendCommand(ch.toString())
+                                            kotlinx.coroutines.delay(15)
+                                        }
+                                        kotlinx.coroutines.delay(60)
+                                        onSendCommand("\r")
+                                    } else {
+                                        onSendCommand(text)
+                                        kotlinx.coroutines.delay(40)
+                                        onSendCommand("\r")
+                                    }
                                 }
                             },
                             onSendCommand = onSendCommand,
@@ -730,7 +755,27 @@ fun TerminalScreen(
         if (showExpanded) {
             ExpandedInput(
                 onSend = { text ->
-                    onSendCommand("[200~" + text + "[201~\r")
+                    // Match the PromptInputBar send strategy: char-by-char
+                    // for slash commands, body + delayed \r otherwise.
+                    // Bracketed-paste markers ([200~ … [201~) used to
+                    // wrap the payload here but claude in the tmux PTY
+                    // never negotiates \e[?2004h, so the markers ended
+                    // up in the prompt verbatim.
+                    scope.launch {
+                        if (text.startsWith("/") && !text.contains('\n') && text.length < 64) {
+                            for (ch in text) {
+                                onSendCommand(ch.toString())
+                                kotlinx.coroutines.delay(15)
+                            }
+                            kotlinx.coroutines.delay(60)
+                            onSendCommand("\r")
+                        } else {
+                            onSendCommand(text)
+                            kotlinx.coroutines.delay(40)
+                            onSendCommand("\r")
+                        }
+                    }
+                    showExpanded = false
                 },
                 onDismiss = { showExpanded = false },
             )
