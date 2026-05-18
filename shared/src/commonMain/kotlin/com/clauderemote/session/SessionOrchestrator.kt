@@ -242,11 +242,27 @@ class SessionOrchestrator(
                         ?: readRealSessionId(sshManager, tmuxName)
                     val tab = tabManager.getTab(sessionId)
                     if (tab != null && !realUuid.isNullOrBlank() && tab.claudeSessionId != realUuid) {
-                        val source = if (entry?.claudeSessionId == realUuid) "server" else "pid-probe"
-                        FileLogger.log(TAG, "Session $sessionId UUID synced from $source: ${tab.claudeSessionId} -> $realUuid")
-                        tabManager.updateClaudeSessionId(sessionId, realUuid)
-                        sessionStorage.upsert(SessionStorage.fromClaudeSession(tab.copy(claudeSessionId = realUuid)))
-                        notifyClaudeSessionIdChanged(sessionId, realUuid)
+                        // Refuse to adopt a UUID already owned by another
+                        // tab — two transcript streams pointing at the
+                        // same jsonl would mirror identical content
+                        // across both sessions, which is exactly the
+                        // "občas se chat historie zobrazuje stejně" bug.
+                        // Happens when the user picks the same /resume
+                        // conversation in two tabs, or when a tmux name
+                        // collision lets the drift daemon attribute one
+                        // claude pid to two tab rows.
+                        val claimedByOther = tabManager.tabs.value.any {
+                            it.id != sessionId && it.claudeSessionId == realUuid
+                        }
+                        if (claimedByOther) {
+                            FileLogger.log(TAG, "Skip UUID drift $realUuid for $sessionId — already owned by another tab")
+                        } else {
+                            val source = if (entry?.claudeSessionId == realUuid) "server" else "pid-probe"
+                            FileLogger.log(TAG, "Session $sessionId UUID synced from $source: ${tab.claudeSessionId} -> $realUuid")
+                            tabManager.updateClaudeSessionId(sessionId, realUuid)
+                            sessionStorage.upsert(SessionStorage.fromClaudeSession(tab.copy(claudeSessionId = realUuid)))
+                            notifyClaudeSessionIdChanged(sessionId, realUuid)
+                        }
                     }
                 } catch (_: Exception) {}
                 kotlinx.coroutines.delay(15_000)
@@ -644,10 +660,17 @@ else:
                     val real = readRealSessionId(sshMan, tab.tmuxSessionName)
                     val current = tabManager.getTab(sessionId)
                     if (real != null && current != null && current.claudeSessionId != real) {
-                        FileLogger.log(TAG, "Session $sessionId UUID kick-sync from pid-probe: ${current.claudeSessionId} -> $real")
-                        tabManager.updateClaudeSessionId(sessionId, real)
-                        sessionStorage?.upsert(SessionStorage.fromClaudeSession(current.copy(claudeSessionId = real)))
-                        notifyClaudeSessionIdChanged(sessionId, real)
+                        val claimedByOther = tabManager.tabs.value.any {
+                            it.id != sessionId && it.claudeSessionId == real
+                        }
+                        if (claimedByOther) {
+                            FileLogger.log(TAG, "Skip kick-sync UUID $real for $sessionId — already owned by another tab")
+                        } else {
+                            FileLogger.log(TAG, "Session $sessionId UUID kick-sync from pid-probe: ${current.claudeSessionId} -> $real")
+                            tabManager.updateClaudeSessionId(sessionId, real)
+                            sessionStorage?.upsert(SessionStorage.fromClaudeSession(current.copy(claudeSessionId = real)))
+                            notifyClaudeSessionIdChanged(sessionId, real)
+                        }
                     }
                 } catch (_: Exception) {}
             }
