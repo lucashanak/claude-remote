@@ -405,25 +405,51 @@ fun main() = application {
                 }
             },
             onPickFile = { callback ->
+                // Spinner-forever bug on macOS: if any step in this
+                // body threw an exception (FileDialog construction
+                // failure, a SecurityException reading bytes, anything)
+                // the outer callback never fired, the
+                // CompletableDeferred in App.kt's onAttachFile awaited
+                // forever, and PromptInputBar's `uploading` flag stayed
+                // true. Wrap the entire body so callback() is invoked
+                // exactly once, even on exception. Also dispose the
+                // dialog explicitly — FileDialog on macOS has been
+                // observed to wedge subsequent invocations when
+                // previous instances weren't released.
                 javax.swing.SwingUtilities.invokeLater {
-                    val parent = javax.swing.SwingUtilities.getWindowAncestor(termWidget) as? java.awt.Frame
-                    val dialog = java.awt.FileDialog(parent, "Attach File", java.awt.FileDialog.LOAD)
-                    dialog.isMultipleMode = true
-                    dialog.isVisible = true
-                    val files = dialog.files
-                    if (files != null && files.isNotEmpty()) {
-                        val pairs = files.mapNotNull { f ->
-                            try { f.readBytes() to f.name } catch (_: Exception) { null }
-                        }
+                    var fired = false
+                    fun fire(pairs: List<Pair<ByteArray, String>>) {
+                        if (fired) return
+                        fired = true
                         callback(pairs)
-                    } else {
-                        callback(emptyList())
                     }
-                    // Force repaint after native dialog — macOS can leave the
-                    // SwingPanel in a stale state after FileDialog steals focus
-                    termWidget?.let { w ->
-                        w.revalidate()
-                        w.repaint()
+                    var dialog: java.awt.FileDialog? = null
+                    try {
+                        val parent = javax.swing.SwingUtilities.getWindowAncestor(termWidget) as? java.awt.Frame
+                        dialog = java.awt.FileDialog(parent, "Attach File", java.awt.FileDialog.LOAD)
+                        dialog.isMultipleMode = true
+                        dialog.isVisible = true
+                        val files = dialog.files
+                        if (files != null && files.isNotEmpty()) {
+                            val pairs = files.mapNotNull { f ->
+                                try { f.readBytes() to f.name } catch (_: Exception) { null }
+                            }
+                            fire(pairs)
+                        } else {
+                            fire(emptyList())
+                        }
+                    } catch (e: Exception) {
+                        com.clauderemote.util.FileLogger.error(
+                            "Main", "FileDialog failed: ${e.message}", e
+                        )
+                        fire(emptyList())
+                    } finally {
+                        try { dialog?.dispose() } catch (_: Throwable) {}
+                        if (!fired) fire(emptyList())
+                        termWidget?.let { w ->
+                            w.revalidate()
+                            w.repaint()
+                        }
                     }
                 }
             },
