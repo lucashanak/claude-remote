@@ -587,7 +587,20 @@ fun App(
                                 val id = activeTabId ?: return@attachFile null
                                 val deferred = CompletableDeferred<List<Pair<ByteArray, String>>>()
                                 onPickFile { files -> deferred.complete(files) }
-                                val files = deferred.await()
+                                // Hard timeout: if the picker never fires
+                                // its callback (native dialog wedged, JBR
+                                // bug, etc.), unstick the spinner after
+                                // five minutes instead of hanging the UI
+                                // forever. Long enough for a real user to
+                                // pick a file with thought; short enough
+                                // that a stuck dialog doesn't lock the +
+                                // button permanently.
+                                val files = kotlinx.coroutines.withTimeoutOrNull(5 * 60 * 1000L) {
+                                    deferred.await()
+                                } ?: run {
+                                    FileLogger.log("App", "onAttachFile timed out waiting for picker")
+                                    emptyList()
+                                }
                                 if (files.isEmpty()) return@attachFile null
                                 val paths = files.mapNotNull { (bytes, name) ->
                                     if (bytes.isEmpty() || name.isEmpty()) return@mapNotNull null
