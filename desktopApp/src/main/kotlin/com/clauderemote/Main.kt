@@ -319,6 +319,12 @@ fun main() = application {
         icon = appIcon?.let { androidx.compose.ui.graphics.painter.BitmapPainter(it) },
         state = rememberWindowState(width = 1000.dp, height = 700.dp)
     ) {
+        // Force dark titlebar on macOS so it matches the app chrome.
+        if (System.getProperty("os.name").lowercase().contains("mac")) {
+            androidx.compose.runtime.SideEffect {
+                window.rootPane.putClientProperty("apple.awt.windowAppearance", "NSAppearanceNameDarkAqua")
+            }
+        }
         App(
             serverStorage = serverStorage,
             appSettings = appSettings,
