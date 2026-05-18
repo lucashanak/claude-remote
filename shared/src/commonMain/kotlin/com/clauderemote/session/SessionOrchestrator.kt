@@ -226,7 +226,7 @@ class SessionOrchestrator(
         if (sessionStorage == null) return
         sessionIdRefreshJobs[sessionId]?.cancel()
         sessionIdRefreshJobs[sessionId] = reconnectScope.launch {
-            kotlinx.coroutines.delay(3000)
+            kotlinx.coroutines.delay(1000)
             while (isActive) {
                 try {
                     val remote = fetchSessionsFromServer(sshManager)
@@ -249,7 +249,7 @@ class SessionOrchestrator(
                         notifyClaudeSessionIdChanged(sessionId, realUuid)
                     }
                 } catch (_: Exception) {}
-                kotlinx.coroutines.delay(60_000)
+                kotlinx.coroutines.delay(15_000)
             }
         }
     }
@@ -631,6 +631,27 @@ else:
         }
         val uuid = tab.claudeSessionId
         if (uuid != null) stream.start(uuid)
+        // The 60 s reconcile loop is too slow when the user opens the
+        // chat view for a fresh session — they sit on "Waiting for
+        // transcript…" because tab.claudeSessionId was generated
+        // client-side and doesn't match what claude is actually writing
+        // to. Fire a one-shot pid probe right now so the UUID is
+        // corrected within a few hundred ms.
+        val sshMan = connections[sessionId]
+        if (sshMan != null && sshMan.isConnected) {
+            reconnectScope.launch {
+                try {
+                    val real = readRealSessionId(sshMan, tab.tmuxSessionName)
+                    val current = tabManager.getTab(sessionId)
+                    if (real != null && current != null && current.claudeSessionId != real) {
+                        FileLogger.log(TAG, "Session $sessionId UUID kick-sync from pid-probe: ${current.claudeSessionId} -> $real")
+                        tabManager.updateClaudeSessionId(sessionId, real)
+                        sessionStorage?.upsert(SessionStorage.fromClaudeSession(current.copy(claudeSessionId = real)))
+                        notifyClaudeSessionIdChanged(sessionId, real)
+                    }
+                } catch (_: Exception) {}
+            }
+        }
         return stream.entries
     }
 
