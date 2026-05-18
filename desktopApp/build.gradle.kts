@@ -28,6 +28,11 @@ compose.desktop {
     application {
         mainClass = "com.clauderemote.MainKt"
 
+        // Force dark titlebar / system chrome on macOS to match the app theme.
+        // Must be a JVM arg (set before AWT initialises) — setting the system
+        // property from inside main() is too late.
+        jvmArgs += listOf("-Dapple.awt.application.appearance=NSAppearanceNameDarkAqua")
+
         nativeDistributions {
             targetFormats(TargetFormat.Dmg, TargetFormat.Deb, TargetFormat.Msi)
             packageName = "Claude Remote"
