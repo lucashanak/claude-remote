@@ -216,19 +216,22 @@ fun main() = application {
     sessionOrchestrator.onTabSwitched = tabSwitched@{ sessionId, bufferedOutput ->
         val widget = termWidget ?: return@tabSwitched
         javax.swing.SwingUtilities.invokeLater {
+            // clearBuffer() only empties the scrollback history on
+            // JediTerm — it does NOT clear the visible screen cells.
+            // Without an ANSI clear-screen prefix, the previous
+            // session's last frame stays on the visible viewport and
+            // tmux's diff-based SIGWINCH redraw only overwrites cells
+            // that *changed* between its model and ours. The leftover
+            // unchanged cells from session A then sit beneath the
+            // partial redraw of session B, producing the duplicated
+            // status lines visible in the user's screenshot. Prepend
+            // ESC[H (cursor home) + ESC[2J (clear visible screen) +
+            // ESC[3J (clear scrollback) so the JediTerm canvas is
+            // genuinely empty before the tail replay.
             widget.terminalPanel.clearBuffer()
-            if (bufferedOutput.isNotEmpty()) connector.feedOutput(bufferedOutput)
+            val clearSeq = "[H[2J[3J"
+            connector.feedOutput(clearSeq + bufferedOutput)
             widget.terminalPanel.requestFocusInWindow()
-            // Force a full tmux redraw after the switch, matching Android behavior.
-            // Toggle PTY size to fire SIGWINCH twice — naive back-to-back resize can
-            // be coalesced by the kernel, so use a delay between the two resizes.
-            //
-            // Source of truth: the local JediTerm display dims. `lastTermSize` is
-            // only a fallback for the brief window before JediTerm has fired its
-            // first resize callback into the connector — on a first tab-switch the
-            // cache may be null, in which case the previous code early-returned
-            // and the tmux session stayed at whatever dims the other client (e.g.
-            // Android) had set on the server.
             val buffer = widget.terminalTextBuffer
             val cols = buffer?.width?.takeIf { it > 0 }
                 ?: connector.lastTermSize?.columns
@@ -236,8 +239,15 @@ fun main() = application {
             val rows = buffer?.height?.takeIf { it > 0 }
                 ?: connector.lastTermSize?.rows
                 ?: return@invokeLater
-            if (cols <= 0 || rows <= 1) return@invokeLater
-            sessionOrchestrator.resize(sessionId, cols, rows - 1)
+            if (cols <= 1 || rows <= 0) return@invokeLater
+            // Force a full tmux redraw via SIGWINCH by toggling the PTY
+            // size. Shrink COLS rather than ROWS — row shrink moves
+            // tmux's status line up one cell during the kick and the
+            // bytes for the old status row leak into scrollback before
+            // tmux finishes redrawing, leaving stray status-line
+            // artifacts (this was the Android-side bug we already fixed
+            // in MainActivity; same fix applies on desktop).
+            sessionOrchestrator.resize(sessionId, cols - 1, rows)
             javax.swing.Timer(80) {
                 sessionOrchestrator.resize(sessionId, cols, rows)
                 widget.terminalPanel.requestFocusInWindow()
