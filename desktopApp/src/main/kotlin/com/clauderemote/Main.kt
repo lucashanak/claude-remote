@@ -405,17 +405,16 @@ fun main() = application {
                 }
             },
             onPickFile = { callback ->
-                // Spinner-forever bug on macOS: if any step in this
-                // body threw an exception (FileDialog construction
-                // failure, a SecurityException reading bytes, anything)
-                // the outer callback never fired, the
-                // CompletableDeferred in App.kt's onAttachFile awaited
-                // forever, and PromptInputBar's `uploading` flag stayed
-                // true. Wrap the entire body so callback() is invoked
-                // exactly once, even on exception. Also dispose the
-                // dialog explicitly — FileDialog on macOS has been
-                // observed to wedge subsequent invocations when
-                // previous instances weren't released.
+                // JFileChooser, not java.awt.FileDialog. The AWT
+                // FileDialog was throwing on certain macOS + JBR
+                // combinations (callback never fired -> spinner
+                // forever; after the previous hardening that caught
+                // the throw + fired emptyList, the symptom became "+
+                // does nothing at all" because the dialog itself never
+                // appeared). JFileChooser is pure Swing, works the
+                // same on every JBR/JDK, and supports multi-select.
+                // We accept the non-native look in exchange for
+                // actually working.
                 javax.swing.SwingUtilities.invokeLater {
                     var fired = false
                     fun fire(pairs: List<Pair<ByteArray, String>>) {
@@ -423,14 +422,16 @@ fun main() = application {
                         fired = true
                         callback(pairs)
                     }
-                    var dialog: java.awt.FileDialog? = null
                     try {
-                        val parent = javax.swing.SwingUtilities.getWindowAncestor(termWidget) as? java.awt.Frame
-                        dialog = java.awt.FileDialog(parent, "Attach File", java.awt.FileDialog.LOAD)
-                        dialog.isMultipleMode = true
-                        dialog.isVisible = true
-                        val files = dialog.files
-                        if (files != null && files.isNotEmpty()) {
+                        val chooser = javax.swing.JFileChooser().apply {
+                            dialogTitle = "Attach File"
+                            isMultiSelectionEnabled = true
+                            fileSelectionMode = javax.swing.JFileChooser.FILES_ONLY
+                        }
+                        val parent = javax.swing.SwingUtilities.getWindowAncestor(termWidget)
+                        val result = chooser.showOpenDialog(parent)
+                        if (result == javax.swing.JFileChooser.APPROVE_OPTION) {
+                            val files = chooser.selectedFiles ?: emptyArray()
                             val pairs = files.mapNotNull { f ->
                                 try { f.readBytes() to f.name } catch (_: Exception) { null }
                             }
@@ -440,11 +441,10 @@ fun main() = application {
                         }
                     } catch (e: Exception) {
                         com.clauderemote.util.FileLogger.error(
-                            "Main", "FileDialog failed: ${e.message}", e
+                            "Main", "JFileChooser failed: ${e.message}", e
                         )
                         fire(emptyList())
                     } finally {
-                        try { dialog?.dispose() } catch (_: Throwable) {}
                         if (!fired) fire(emptyList())
                         termWidget?.let { w ->
                             w.revalidate()
