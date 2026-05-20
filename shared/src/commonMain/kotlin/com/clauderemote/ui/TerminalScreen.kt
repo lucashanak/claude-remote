@@ -5,6 +5,9 @@ import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.Orientation
+import androidx.compose.foundation.gestures.draggable
+import androidx.compose.foundation.gestures.rememberDraggableState
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
@@ -35,7 +38,9 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.input.key.*
 import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import com.clauderemote.model.ClaudeModel
@@ -132,7 +137,9 @@ fun TerminalScreen(
     transcriptEntries: List<TranscriptEntry> = emptyList(),
     remoteStatus: RemoteSessionStatus? = null,
     onTerminalContentVisible: (() -> Unit)? = null,
-    activeClaudeSessionId: String? = null
+    activeClaudeSessionId: String? = null,
+    sidePanelWidthDp: Int = 220,
+    onSidePanelWidthChange: ((Int) -> Unit)? = null,
 ) {
     val c = CRTheme.colors
     val m = CRTheme.metrics
@@ -229,6 +236,9 @@ fun TerminalScreen(
         val hasMultiple = tabs.size > 1 || remoteSessions.any { r -> tabs.none { it.tmuxSessionName == r.tmuxSession.name } }
         val wideMode = maxWidth > 700.dp && hasMultiple
 
+        var sidePanelWidth by remember { mutableStateOf(sidePanelWidthDp.dp) }
+        val density = LocalDensity.current
+
         Row(modifier = Modifier.fillMaxSize()) {
             // Wide-screen side panel
             if (wideMode) {
@@ -243,8 +253,26 @@ fun TerminalScreen(
                     onAttachRemote = onAttachRemote,
                     onRenameSession = onRenameSession,
                     onNativeRenameDialog = onNativeRenameDialog,
-                    modifier = Modifier.width(200.dp).fillMaxHeight()
+                    modifier = Modifier.width(sidePanelWidth).fillMaxHeight()
                 )
+                if (!isMobile) {
+                    Box(
+                        Modifier
+                            .width(4.dp)
+                            .fillMaxHeight()
+                            .background(c.border.copy(alpha = 0.6f))
+                            .draggable(
+                                orientation = Orientation.Horizontal,
+                                state = rememberDraggableState { delta ->
+                                    val newWidth = with(density) {
+                                        (sidePanelWidth + delta.toDp()).coerceIn(160.dp, 480.dp)
+                                    }
+                                    sidePanelWidth = newWidth
+                                    onSidePanelWidthChange?.invoke(newWidth.value.toInt())
+                                },
+                            )
+                    )
+                }
             }
 
             Column(modifier = Modifier.weight(1f).fillMaxHeight().background(c.bg)) {
@@ -1374,7 +1402,7 @@ private fun SessionSidePanel(
             }
             Text(
                 "Sessions",
-                style = CRType.cardTitle,
+                style = if (isMobile) CRType.cardTitle else CRType.cardTitle.copy(fontSize = 16.sp),
                 color = c.text,
                 modifier = Modifier.weight(1f),
             )
@@ -1386,8 +1414,14 @@ private fun SessionSidePanel(
 
         // ── Session list grouped by server ──────────────────────────────────
         LazyColumn(modifier = Modifier.fillMaxSize()) {
-            byServer.forEach { (_, items) ->
+            val sortedServers = byServer.entries.sortedBy { (_, items) ->
+                (items.first().tab?.server?.name ?: items.first().remote?.server?.name ?: "").lowercase()
+            }
+            sortedServers.forEach { (_, items) ->
                 val server = items.first().tab?.server ?: items.first().remote?.server
+                val sortedItems = items.sortedBy { item ->
+                    item.label.lowercase()
+                }
                 if (server != null) {
                     item(key = "server_${server.id}") {
                         SidePanelGroupLabel(
@@ -1396,7 +1430,7 @@ private fun SessionSidePanel(
                         )
                     }
                 }
-                items(items, key = { it.id }) { item ->
+                items(sortedItems, key = { it.id }) { item ->
                     SidePanelSessionRow(
                         item = item,
                         isActive = item.tab?.id == activeTabId,
@@ -1455,7 +1489,7 @@ private fun SidePanelGroupLabel(serverName: String, count: Int) {
         ServerGlyph(name = serverName, modifier = Modifier.size(14.dp))
         Text(
             serverName,
-            style = CRType.sectionH,
+            style = if (isMobile) CRType.sectionH else CRType.sectionH.copy(fontSize = 13.sp),
             color = c.textDim,
             modifier = Modifier.weight(1f),
             maxLines = 1,
@@ -1529,7 +1563,7 @@ private fun SidePanelSessionRow(
                 )
                 Text(
                     rowLabel,
-                    style = CRType.bodyDim,
+                    style = if (isMobile) CRType.bodyDim else CRType.bodyDim.copy(fontSize = 14.sp),
                     color = if (isActive) c.text else c.textDim,
                     maxLines = 1,
                     overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
@@ -1558,7 +1592,7 @@ private fun SidePanelSessionRow(
                 Column(modifier = Modifier.weight(1f)) {
                     Text(
                         rowLabel,
-                        style = CRType.cardTitle,
+                        style = if (isMobile) CRType.cardTitle else CRType.cardTitle.copy(fontSize = 16.sp),
                         color = if (isActive) c.text else c.textDim,
                         maxLines = 1,
                         overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,

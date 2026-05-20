@@ -729,7 +729,9 @@ fun App(
                         onTerminalContentVisible = onTerminalScreenVisible,
                         activeClaudeSessionId = activeTabId?.let { id ->
                             tabs.firstOrNull { it.id == id }?.claudeSessionId
-                        }
+                        },
+                        sidePanelWidthDp = appSettings.sidePanelWidthDp,
+                        onSidePanelWidthChange = { appSettings.sidePanelWidthDp = it },
                     )
                 }
 
