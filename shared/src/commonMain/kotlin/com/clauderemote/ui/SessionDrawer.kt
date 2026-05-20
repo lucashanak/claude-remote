@@ -33,6 +33,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.coerceAtMost
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import com.clauderemote.model.ClaudeMode
 import com.clauderemote.model.ClaudeSession
 import com.clauderemote.model.RemoteSession
@@ -232,7 +233,7 @@ private fun DrawerHeader(count: Int, onClose: () -> Unit) {
         )
         Text(
             "Sessions",
-            style = CRType.cardTitle,
+            style = if (isMobile) CRType.cardTitle else CRType.cardTitle.copy(fontSize = 16.sp),
             color = c.text,
             modifier = Modifier.weight(1f),
         )
@@ -290,7 +291,7 @@ private fun DrawerGroupLabel(server: SshServer, count: Int) {
         ServerGlyph(name = server.name, modifier = Modifier.size(14.dp))
         Text(
             server.name,
-            style = CRType.sectionH,
+            style = if (isMobile) CRType.sectionH else CRType.sectionH.copy(fontSize = 13.sp),
             color = c.textDim,
             modifier = Modifier.weight(1f),
         )
@@ -344,7 +345,7 @@ private fun DrawerItem(
             Column(modifier = Modifier.weight(1f)) {
                 Text(
                     session.displayLabel,
-                    style = CRType.cardTitle,
+                    style = if (isMobile) CRType.cardTitle else CRType.cardTitle.copy(fontSize = 16.sp),
                     color = if (selected) c.accent else c.text,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,

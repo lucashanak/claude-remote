@@ -128,6 +128,11 @@ class AppSettings(private val prefs: PlatformPreferences) {
         get() = runCatching { CRTerminalScheme.valueOf(prefs.getString("cr_terminal_scheme", "Default")) }.getOrDefault(CRTerminalScheme.Default)
         set(value) = prefs.putString("cr_terminal_scheme", value.name)
 
+    // Side panel width (desktop only, dp)
+    var sidePanelWidthDp: Int
+        get() = prefs.getInt("side_panel_width_dp", 220).coerceIn(160, 480)
+        set(value) = prefs.putInt("side_panel_width_dp", value.coerceIn(160, 480))
+
     fun loadAppearance(): AppearanceState = AppearanceState(
         variant = crVariant,
         density = crDensity,
