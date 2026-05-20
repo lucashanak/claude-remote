@@ -162,41 +162,74 @@ fun SessionDrawer(
                         LazyColumn(Modifier.weight(1f)) {
                             sortedServerIds.forEach { sid ->
                                 val server = serverById[sid] ?: return@forEach
-                                val activeGroup = (activeByServer[sid] ?: emptyList())
-                                    .sortedWith(
-                                        compareBy(
-                                            { it.folder.trimEnd('/').substringAfterLast('/').lowercase() },
-                                            { it.alias.lowercase() },
-                                        )
-                                    )
-                                val remoteGroup = (remoteByServer[sid] ?: emptyList())
-                                    .sortedBy {
-                                        TmuxNameParser.parse(it.tmuxSession.name, server.name)
-                                            .folder.lowercase()
+                                // Merge active + remote into ONE list and
+                                // sort the combined list by (folder, alias)
+                                // — the previous code rendered actives
+                                // first (sorted) then remotes (sorted),
+                                // which split a tab and its server-side
+                                // tmux peer across the two halves. User
+                                // expectation: order is folder + alias,
+                                // period; connectedness is incidental and
+                                // shown by the per-row indicator only.
+                                val activeList = activeByServer[sid] ?: emptyList()
+                                val remoteList = remoteByServer[sid] ?: emptyList()
+                                data class Entry(
+                                    val folder: String,
+                                    val alias: String,
+                                    val active: ClaudeSession?,
+                                    val remote: RemoteSession?,
+                                )
+                                val entries = buildList {
+                                    activeList.forEach { s ->
+                                        add(Entry(
+                                            folder = s.folder.trimEnd('/').substringAfterLast('/').lowercase(),
+                                            alias = s.alias.lowercase(),
+                                            active = s,
+                                            remote = null,
+                                        ))
                                     }
-                                val groupCount = activeGroup.size + remoteGroup.size
+                                    remoteList.forEach { r ->
+                                        val parsed = TmuxNameParser.parse(r.tmuxSession.name, server.name)
+                                        add(Entry(
+                                            folder = parsed.folder.trimEnd('/').substringAfterLast('/').lowercase(),
+                                            alias = parsed.alias.lowercase(),
+                                            active = null,
+                                            remote = r,
+                                        ))
+                                    }
+                                }.sortedWith(compareBy({ it.folder }, { it.alias }))
+
                                 item(key = "group_${server.id}") {
-                                    DrawerGroupLabel(server = server, count = groupCount)
+                                    DrawerGroupLabel(server = server, count = entries.size)
                                 }
-                                items(activeGroup, key = { it.id }) { session ->
-                                    DrawerItem(
-                                        session = session,
-                                        activity = activities[session.id] ?: SessionActivity.IDLE,
-                                        selected = session.id == activeId,
-                                        onClick = {
-                                            onPick(session.id)
-                                            onClose()
-                                        },
-                                    )
-                                }
-                                items(remoteGroup, key = { "remote_${server.id}_${it.tmuxSession.name}" }) { remote ->
-                                    DrawerRemoteItem(
-                                        remote = remote,
-                                        onClick = {
-                                            onAttachRemote?.invoke(remote)
-                                            onClose()
-                                        },
-                                    )
+                                items(
+                                    items = entries,
+                                    key = { e ->
+                                        e.active?.id
+                                            ?: ("remote_${server.id}_" + (e.remote?.tmuxSession?.name ?: ""))
+                                    },
+                                ) { e ->
+                                    val s = e.active
+                                    val r = e.remote
+                                    if (s != null) {
+                                        DrawerItem(
+                                            session = s,
+                                            activity = activities[s.id] ?: SessionActivity.IDLE,
+                                            selected = s.id == activeId,
+                                            onClick = {
+                                                onPick(s.id)
+                                                onClose()
+                                            },
+                                        )
+                                    } else if (r != null) {
+                                        DrawerRemoteItem(
+                                            remote = r,
+                                            onClick = {
+                                                onAttachRemote?.invoke(r)
+                                                onClose()
+                                            },
+                                        )
+                                    }
                                 }
                             }
                         }
