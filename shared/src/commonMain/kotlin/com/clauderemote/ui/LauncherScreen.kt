@@ -119,15 +119,16 @@ fun LauncherScreen(
                 contentPadding = PaddingValues(start = m.sectionPad, end = m.sectionPad, top = 0.dp, bottom = 80.dp),
                 verticalArrangement = Arrangement.spacedBy(m.cardGap),
             ) {
-                // ── Active sessions section ──────────────────────────
-                val activeSectionTitle = if (activeSessions.isEmpty())
-                    "Active sessions"
-                else
-                    "Active sessions · ${activeSessions.size}"
+                // ── Sessions section (active + remote merged) ─────────
+                val totalSessionCount = activeSessions.size + remoteSessions.count {
+                    it.tmuxSession.name !in activeSessions.map { a -> a.tmuxSessionName }.toSet()
+                }
+                val sectionTitle = if (totalSessionCount == 0) "Sessions"
+                    else "Sessions · $totalSessionCount"
 
                 item(key = "header_active") {
                     LauncherSectionHeader(
-                        title = activeSectionTitle,
+                        title = sectionTitle,
                         modifier = Modifier.padding(top = m.sectionTopGap, bottom = 4.dp),
                         trailing = if (onUsageDashboard != null) {
                             {
@@ -139,11 +140,55 @@ fun LauncherScreen(
                     )
                 }
 
-                if (activeSessions.isEmpty()) {
+                // Unified list: actives + un-attached remotes merged
+                // and sorted by (server, folder, alias) regardless of
+                // connectedness. Section headers are kept separate
+                // only for visual grouping by server.
+                val connectedTmuxNames = activeSessions.map { it.tmuxSessionName }.toSet()
+                val filteredRemote = remoteSessions
+                    .filter { it.tmuxSession.name !in connectedTmuxNames }
+                    .distinctBy { "${it.server.id}:${it.tmuxSession.name}" }
+
+                data class LauncherEntry(
+                    val serverKey: String,
+                    val folderKey: String,
+                    val aliasKey: String,
+                    val active: ClaudeSession?,
+                    val remote: RemoteSession?,
+                )
+                val merged: List<LauncherEntry> = buildList {
+                    activeSessions.forEach { s ->
+                        add(LauncherEntry(
+                            serverKey = s.server.name.lowercase(),
+                            folderKey = s.folder.trimEnd('/').substringAfterLast('/').lowercase(),
+                            aliasKey = s.alias.lowercase(),
+                            active = s,
+                            remote = null,
+                        ))
+                    }
+                    filteredRemote.forEach { r ->
+                        val parsed = TmuxNameParser.parse(r.tmuxSession.name, r.server.name)
+                        add(LauncherEntry(
+                            serverKey = r.server.name.lowercase(),
+                            folderKey = parsed.folder.trimEnd('/').substringAfterLast('/').lowercase(),
+                            aliasKey = parsed.alias.lowercase(),
+                            active = null,
+                            remote = r,
+                        ))
+                    }
+                }.sortedWith(
+                    compareBy(
+                        { it.serverKey },
+                        { it.folderKey },
+                        { it.aliasKey },
+                    )
+                )
+
+                if (merged.isEmpty() && !remoteSessionsLoading) {
                     item(key = "empty_active") {
                         CRCard {
                             Text(
-                                "No active sessions. Connect to a server to start.",
+                                "No sessions. Connect to a server to start.",
                                 style = CRType.bodyDim,
                                 color = c.textDim,
                                 modifier = Modifier.padding(4.dp),
@@ -151,52 +196,23 @@ fun LauncherScreen(
                         }
                     }
                 } else {
-                    val sortedActive = activeSessions.sortedWith(
-                        compareBy(
-                            { it.server.name.lowercase() },
-                            { it.folder.trimEnd('/').substringAfterLast('/').lowercase() },
-                            { it.alias.lowercase() },
-                        )
-                    )
-                    items(sortedActive, key = { it.id }) { session ->
-                        SessionLauncherCard(
-                            session = session,
-                            onClick = { onResumeSession(session) },
-                        )
-                    }
-                }
-
-                // ── Remote sessions (undiscovered tmux) ───────────────
-                val connectedTmuxNames = activeSessions.map { it.tmuxSessionName }.toSet()
-                val filteredRemote = remoteSessions
-                    .filter { it.tmuxSession.name !in connectedTmuxNames }
-                    .distinctBy { "${it.server.id}:${it.tmuxSession.name}" }
-                    .sortedWith(
-                        compareBy(
-                            { it.server.name.lowercase() },
-                            { TmuxNameParser.parse(it.tmuxSession.name, it.server.name).folder.lowercase() },
-                            { it.tmuxSession.name.lowercase() },
-                        )
-                    )
-
-                if (filteredRemote.isNotEmpty() || remoteSessionsLoading) {
-                    item(key = "header_remote") {
-                        LauncherSectionHeader(
-                            title = "Remote sessions",
-                            modifier = Modifier.padding(top = m.sectionTopGap, bottom = 4.dp),
-                            trailing = if (remoteSessionsLoading) {
-                                {
-                                    CircularProgressIndicator(
-                                        modifier = Modifier.size(14.dp),
-                                        strokeWidth = 2.dp,
-                                        color = c.textDim,
-                                    )
-                                }
-                            } else null,
-                        )
-                    }
-                    items(filteredRemote, key = { "${it.server.id}:${it.tmuxSession.name}" }) { remote ->
-                        RemoteSessionCard(remote = remote, onClick = { onAttachRemote?.invoke(remote) })
+                    items(
+                        items = merged,
+                        key = { e ->
+                            e.active?.id
+                                ?: ("remote_" + (e.remote?.server?.id ?: "") + ":" + (e.remote?.tmuxSession?.name ?: ""))
+                        },
+                    ) { e ->
+                        val s = e.active
+                        val r = e.remote
+                        if (s != null) {
+                            SessionLauncherCard(
+                                session = s,
+                                onClick = { onResumeSession(s) },
+                            )
+                        } else if (r != null) {
+                            RemoteSessionCard(remote = r, onClick = { onAttachRemote?.invoke(r) })
+                        }
                     }
                 }
 
