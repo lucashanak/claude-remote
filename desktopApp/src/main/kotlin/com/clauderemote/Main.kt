@@ -416,7 +416,8 @@ fun main() = application {
                     connector.reapplySize(fallback)
                     if (widget != null && buffer.isNotEmpty()) {
                         widget.terminalPanel.clearBuffer()
-                        connector.feedOutput(buffer)
+                        val clearSeq = "[H[2J[3J"
+                        connector.feedOutput(clearSeq + buffer)
                     }
                 }
             },
