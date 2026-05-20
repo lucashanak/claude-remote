@@ -1419,9 +1419,39 @@ private fun SessionSidePanel(
             }
             sortedServers.forEach { (_, items) ->
                 val server = items.first().tab?.server ?: items.first().remote?.server
-                val sortedItems = items.sortedBy { item ->
-                    item.label.lowercase()
-                }
+                // Sort strictly by (folder leaf, alias) — NOT by
+                // item.label, because label collapses to the alias when
+                // one exists, which clusters every session named e.g.
+                // "second" together regardless of which folder they
+                // belong to. The user wants folder first, alias as
+                // tiebreaker, connectedness ignored.
+                val sortedItems = items.sortedWith(
+                    compareBy(
+                        { item ->
+                            val tab = item.tab
+                            val folder = if (tab != null) {
+                                tab.folder
+                            } else {
+                                val r = item.remote
+                                if (r != null) com.clauderemote.model.TmuxNameParser
+                                    .parse(r.tmuxSession.name, r.server.name).folder
+                                else item.folder
+                            }
+                            folder.trimEnd('/').substringAfterLast('/').lowercase()
+                        },
+                        { item ->
+                            val tab = item.tab
+                            if (tab != null) {
+                                tab.alias.lowercase()
+                            } else {
+                                val r = item.remote
+                                if (r != null) com.clauderemote.model.TmuxNameParser
+                                    .parse(r.tmuxSession.name, r.server.name).alias.lowercase()
+                                else ""
+                            }
+                        },
+                    )
+                )
                 if (server != null) {
                     item(key = "server_${server.id}") {
                         SidePanelGroupLabel(
