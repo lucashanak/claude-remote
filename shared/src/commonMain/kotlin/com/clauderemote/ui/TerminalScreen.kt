@@ -53,6 +53,7 @@ import com.clauderemote.session.SlashCommand
 import com.clauderemote.session.status.RemoteSessionStatus
 import com.clauderemote.session.transcript.TranscriptEntry
 import com.clauderemote.voice.MicButton
+import com.clauderemote.voice.VoiceModeScreen
 import com.clauderemote.ui.components.CRCard
 import com.clauderemote.ui.components.CRStatus
 import com.clauderemote.ui.components.Pill
@@ -170,6 +171,14 @@ fun TerminalScreen(
     var splitActive by remember { mutableStateOf(false) }
     var showSessionDrawer by remember { mutableStateOf(false) }
     var showExpanded by remember { mutableStateOf(false) }
+    var voiceModeActive by remember { mutableStateOf(false) }
+    val latestAssistant: TranscriptEntry.AssistantText? = remember(transcriptEntries) {
+        for (i in transcriptEntries.indices.reversed()) {
+            val e = transcriptEntries[i]
+            if (e is TranscriptEntry.AssistantText) return@remember e
+        }
+        null
+    }
 
     // Replay terminal buffer when switching back from transcript
     LaunchedEffect(terminalView, activeTabId) {
@@ -716,7 +725,8 @@ fun TerminalScreen(
                             onSendCommand = onSendCommand,
                             onAttachFile = onAttachFile,
                             inputFocusRequester = inputFocusRequester,
-                            onExpand = { showExpanded = true }
+                            onExpand = { showExpanded = true },
+                            onEnterVoiceMode = { voiceModeActive = true },
                         )
                     }
 
@@ -807,6 +817,24 @@ fun TerminalScreen(
                     showExpanded = false
                 },
                 onDismiss = { showExpanded = false },
+            )
+        }
+        // Voice-mode overlay sits on top of all the regular UI. Rendered as
+        // the last BoxWithConstraints child so it stacks above everything;
+        // VoiceModeScreen fills the screen with its own opaque surface.
+        if (voiceModeActive) {
+            VoiceModeScreen(
+                onSend = { text ->
+                    if (text.isBlank()) return@VoiceModeScreen
+                    scope.launch {
+                        onSendCommand(text)
+                        kotlinx.coroutines.delay(40)
+                        onSendCommand("\r")
+                    }
+                },
+                latestAssistantId = latestAssistant?.id,
+                latestAssistantText = latestAssistant?.text,
+                onClose = { voiceModeActive = false },
             )
         }
     } // end BoxWithConstraints
@@ -1715,7 +1743,8 @@ private fun PromptInputBar(
     onSendCommand: (String) -> Unit,
     onAttachFile: (suspend () -> String?)? = null,
     inputFocusRequester: FocusRequester? = null,
-    onExpand: (() -> Unit)? = null
+    onExpand: (() -> Unit)? = null,
+    onEnterVoiceMode: (() -> Unit)? = null,
 ) {
     val c = CRTheme.colors
     val m = CRTheme.metrics
@@ -2010,6 +2039,21 @@ private fun PromptInputBar(
                     modifier = Modifier.size(32.dp),
                     tint = c.textDim,
                 )
+
+                // Voice mode (hands-free dialog) — no-op when not provided.
+                if (onEnterVoiceMode != null) {
+                    IconButton(
+                        onClick = onEnterVoiceMode,
+                        modifier = Modifier.size(32.dp),
+                    ) {
+                        Icon(
+                            imageVector = androidx.compose.material.icons.Icons.Filled.RecordVoiceOver,
+                            contentDescription = "Voice mode",
+                            tint = c.textDim,
+                            modifier = Modifier.size(18.dp),
+                        )
+                    }
+                }
 
                 // Expand
                 IconButton(onClick = { if (onExpand != null) onExpand() else expanded = true }, modifier = Modifier.size(32.dp)) {

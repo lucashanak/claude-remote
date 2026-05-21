@@ -6,13 +6,9 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Bundle
-import android.os.Handler
-import android.os.Looper
 import android.speech.RecognitionListener
 import android.speech.RecognizerIntent
 import android.speech.SpeechRecognizer
-import android.speech.tts.TextToSpeech
-import android.speech.tts.UtteranceProgressListener
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.material.icons.Icons
@@ -33,93 +29,10 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.core.content.ContextCompat
-import java.util.Locale
 import java.util.concurrent.atomic.AtomicInteger
-import java.util.concurrent.atomic.AtomicReference
 
-private const val CZECH_LOCALE_TAG = "cs-CZ"
-
-private val mainHandler = Handler(Looper.getMainLooper())
-
-private fun postOnMain(action: () -> Unit) {
-    if (Looper.myLooper() == Looper.getMainLooper()) action() else mainHandler.post(action)
-}
-
-// ── TTS ────────────────────────────────────────────────────────────────────
-//
-// One process-wide TextToSpeech engine. Tapping a different SpeakerButton
-// interrupts whatever is currently being read. Completion callbacks are
-// dispatched on the main thread so callers can safely mutate Compose state.
-
-private object TtsHolder {
-    private var engine: TextToSpeech? = null
-    @Volatile private var ready = false
-    @Volatile private var languageOk = false
-    private val currentUtterance = AtomicReference<String?>(null)
-    private val currentCompletion = AtomicReference<(() -> Unit)?>(null)
-
-    fun speak(context: Context, text: String, onFinish: () -> Unit) {
-        // Replace any in-flight completion so the previous SpeakerButton's
-        // "speaking" state is reset before we start the new utterance.
-        currentCompletion.getAndSet(onFinish)?.let { postOnMain(it) }
-
-        val existing = engine
-        if (existing != null && ready) {
-            if (!languageOk) {
-                fireCurrentCompletion()
-                return
-            }
-            enqueue(existing, text)
-            return
-        }
-        engine = TextToSpeech(context.applicationContext) { status ->
-            if (status != TextToSpeech.SUCCESS) {
-                ready = false
-                fireCurrentCompletion()
-                return@TextToSpeech
-            }
-            val t = engine ?: return@TextToSpeech
-            val langResult = t.setLanguage(Locale.forLanguageTag(CZECH_LOCALE_TAG))
-            languageOk = langResult != TextToSpeech.LANG_MISSING_DATA &&
-                langResult != TextToSpeech.LANG_NOT_SUPPORTED
-            t.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
-                override fun onStart(utteranceId: String?) {}
-                override fun onDone(utteranceId: String?) = finish(utteranceId)
-                @Deprecated("Required override on older API levels.")
-                override fun onError(utteranceId: String?) = finish(utteranceId)
-                override fun onError(utteranceId: String?, errorCode: Int) = finish(utteranceId)
-
-                private fun finish(utteranceId: String?) {
-                    if (utteranceId != null && utteranceId == currentUtterance.get()) {
-                        currentUtterance.set(null)
-                        fireCurrentCompletion()
-                    }
-                }
-            })
-            ready = true
-            if (languageOk) enqueue(t, text) else fireCurrentCompletion()
-        }
-    }
-
-    private fun enqueue(t: TextToSpeech, text: String) {
-        val id = "cr-utt-${System.nanoTime()}"
-        currentUtterance.set(id)
-        t.stop()
-        t.speak(text, TextToSpeech.QUEUE_FLUSH, Bundle(), id)
-    }
-
-    fun stop() {
-        engine?.stop()
-        currentUtterance.set(null)
-        fireCurrentCompletion()
-    }
-
-    private fun fireCurrentCompletion() {
-        currentCompletion.getAndSet(null)?.let { postOnMain(it) }
-    }
-}
-
-// ── STT ────────────────────────────────────────────────────────────────────
+// TTS engine and main-thread helpers live in Tts.android.kt; recognizer helper
+// is shared with VoiceMode.android.kt via the same package.
 
 private fun createCzechRecognizer(context: Context): SpeechRecognizer {
     // Samsung devices ship their own recognizer backend which is unreliable
@@ -157,8 +70,6 @@ actual fun MicButton(
     var listening by remember { mutableStateOf(false) }
     var pendingStart by remember { mutableStateOf(false) }
     var recognizer by remember { mutableStateOf<SpeechRecognizer?>(null) }
-    // Monotonic session id — used by listener closures to ignore late
-    // callbacks delivered after the user has started a new dictation.
     val sessionId = remember { AtomicInteger(0) }
 
     DisposableEffect(Unit) {
