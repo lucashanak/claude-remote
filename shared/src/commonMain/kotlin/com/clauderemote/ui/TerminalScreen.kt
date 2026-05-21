@@ -52,6 +52,7 @@ import com.clauderemote.session.CommandFetcher
 import com.clauderemote.session.SlashCommand
 import com.clauderemote.session.status.RemoteSessionStatus
 import com.clauderemote.session.transcript.TranscriptEntry
+import com.clauderemote.voice.MicButton
 import com.clauderemote.ui.components.CRCard
 import com.clauderemote.ui.components.CRStatus
 import com.clauderemote.ui.components.Pill
@@ -2000,6 +2001,14 @@ private fun PromptInputBar(
                             }
                         )
                     }
+                )
+
+                // Dictation (cs-CZ STT) — no-op on platforms without speech support.
+                MicButton(
+                    currentText = text,
+                    onTextChange = { text = it },
+                    modifier = Modifier.size(32.dp),
+                    tint = c.textDim,
                 )
 
                 // Expand
