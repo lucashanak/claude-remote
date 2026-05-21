@@ -75,8 +75,10 @@ actual fun VoiceModeScreen(
     }
 
     val onSendState = rememberUpdatedState(onSend)
-    val initialAssistantId = remember(latestAssistantId) { latestAssistantId } // snapshot at first composition
-    val initialIdRef = remember { mutableStateOf(initialAssistantId) }
+    // Capture the assistant id present when voice mode opens; we only auto-
+    // speak messages newer than this. Plain `remember { latestAssistantId }`
+    // captures once on first composition and never changes thereafter.
+    val initialAssistantId = remember { latestAssistantId }
 
     var state by remember { mutableStateOf(VoiceState.Listening) }
     var partial by remember { mutableStateOf("") }
@@ -121,10 +123,9 @@ actual fun VoiceModeScreen(
 
     // Speak each fresh assistant message exactly once.
     LaunchedEffect(latestAssistantId) {
-        val initial = initialIdRef.value
         val id = latestAssistantId
         val body = latestAssistantText
-        if (id != null && id != initial && !body.isNullOrBlank()) {
+        if (id != null && id != initialAssistantId && !body.isNullOrBlank()) {
             controller.speak(body)
         }
     }
@@ -277,6 +278,7 @@ private class DialogueController(
     fun stop() {
         stopped = true
         sessionGen.incrementAndGet()
+        mainHandler.removeCallbacksAndMessages(null)
         TtsHolder.stop()
         recognizer?.let {
             runCatching { it.cancel() }
@@ -289,6 +291,10 @@ private class DialogueController(
         if (stopped) return
         paused = true
         sessionGen.incrementAndGet() // discard any in-flight recognition results
+        // Any restart we scheduled before the interruption is now stale; the
+        // session token bump would make its payload no-op anyway, but cancel
+        // it eagerly to keep the handler queue clean.
+        mainHandler.removeCallbacksAndMessages(null)
         recognizer?.let { runCatching { it.cancel() } }
         onStateChange(VoiceState.Speaking)
         TtsHolder.speak(context, text) {
@@ -367,8 +373,14 @@ private class DialogueController(
     }
 
     private fun scheduleRestart() {
+        // Capture the current session token; if anything else (a new result,
+        // an interrupt to speak()) has advanced sessionGen by the time this
+        // fires, the restart is stale and must be dropped — otherwise we
+        // can race the TTS-completion path and call startListening twice in
+        // a row on the same recognizer, which sticks it on ERROR_BUSY.
+        val tag = sessionGen.get()
         mainHandler.postDelayed({
-            if (!stopped && !paused) beginListening()
+            if (!stopped && !paused && sessionGen.get() == tag) beginListening()
         }, 250L)
     }
 }
