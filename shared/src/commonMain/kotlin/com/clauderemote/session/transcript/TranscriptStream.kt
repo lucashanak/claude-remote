@@ -43,6 +43,7 @@ class TranscriptStream(
     @Synchronized
     fun start(claudeSessionUuid: String) {
         if (currentUuid == claudeSessionUuid && streamJob?.isActive == true) return
+        val uuidChanged = currentUuid != claudeSessionUuid
         currentUuid = claudeSessionUuid
         // Cancel-and-join the previous tail in a new coroutine so the new one
         // never appends concurrently with the old one. Capture the old job
@@ -50,7 +51,14 @@ class TranscriptStream(
         val previous = streamJob
         streamJob = scope.launch {
             previous?.cancelAndJoin()
-            _entries.value = emptyList()
+            // Only wipe accumulated entries when the UUID actually changed
+            // (i.e. the user /resume'd or /clear'd into a different JSONL).
+            // Restarting the same UUID (e.g. SSH reconnect after a network
+            // blip) must NOT reset entries: the dedup guard in the update
+            // lambda already prevents duplicates, and blanking the list here
+            // would cause a visible "flash to empty" every time the SSH
+            // channel drops and reconnects.
+            if (uuidChanged) _entries.value = emptyList()
             runTail(claudeSessionUuid)
         }
     }

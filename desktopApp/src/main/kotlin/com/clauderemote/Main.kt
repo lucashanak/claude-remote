@@ -231,6 +231,12 @@ fun main() = application {
             widget.terminalPanel.clearBuffer()
             val clearSeq = "[H[2J[3J"
             connector.feedOutput(clearSeq + bufferedOutput)
+            // Explicit repaint: JediTerm schedules its own repaint when
+            // data arrives but the AWT component is not always invalidated
+            // on macOS Compose SwingPanel while it lacks focus. Calling
+            // repaint() here ensures the clear+buffer replay is always
+            // rendered without waiting for the next user-input event.
+            widget.terminalPanel.repaint()
             widget.terminalPanel.requestFocusInWindow()
             val buffer = widget.terminalTextBuffer
             val cols = buffer?.width?.takeIf { it > 0 }
@@ -249,8 +255,20 @@ fun main() = application {
             // in MainActivity; same fix applies on desktop).
             sessionOrchestrator.resize(sessionId, cols - 1, rows)
             javax.swing.Timer(80) {
-                sessionOrchestrator.resize(sessionId, cols, rows)
-                widget.terminalPanel.requestFocusInWindow()
+                // Re-read dimensions inside the timer: if Compose has
+                // re-laid-out the SwingPanel between the invokeLater
+                // dispatch and this firing (window resize, font change)
+                // the cols/rows captured above are stale. Reading the
+                // buffer here picks up the current geometry.
+                val w = termWidget ?: return@Timer
+                val b = w.terminalTextBuffer
+                val curCols = b?.width?.takeIf { it > 0 }
+                    ?: connector.lastTermSize?.columns ?: return@Timer
+                val curRows = b?.height?.takeIf { it > 0 }
+                    ?: connector.lastTermSize?.rows ?: return@Timer
+                sessionOrchestrator.resize(sessionId, curCols, curRows)
+                w.terminalPanel.repaint()
+                w.terminalPanel.requestFocusInWindow()
             }.also { it.isRepeats = false }.start()
         }
     }
@@ -418,6 +436,10 @@ fun main() = application {
                         widget.terminalPanel.clearBuffer()
                         val clearSeq = "[H[2J[3J"
                         connector.feedOutput(clearSeq + buffer)
+                        // Same rationale as onTabSwitched: explicit repaint
+                        // ensures the replayed content is rendered promptly
+                        // even when the panel regains focus asynchronously.
+                        widget.terminalPanel.repaint()
                     }
                 }
             },

@@ -171,6 +171,12 @@ class SessionOrchestrator(
     private val reconnectingSessionIds = mutableSetOf<String>()
     // Last known terminal dimensions per session — used to re-send SIGWINCH after reconnect
     private val terminalSizes = mutableMapOf<String, Pair<Int, Int>>()
+    // Sessions whose claudeSessionId has been confirmed by at least one server-side
+    // probe (pid-probe or sessions.json reconcile). Once confirmed, transcriptFlow()
+    // skips the one-shot kick-probe — firing it on every call caused repeated
+    // stream restarts (cancel → _entries = emptyList() → blank transcript) whenever
+    // the user toggled to the Transcript view while the server was slow to respond.
+    private val confirmedUuids = java.util.concurrent.ConcurrentHashMap<String, String>()
 
     /** Call from onPause/onResume to pause heavy background work and save battery. */
     fun setBackgroundMode(background: Boolean) {
@@ -262,6 +268,7 @@ class SessionOrchestrator(
                             tabManager.updateClaudeSessionId(sessionId, realUuid)
                             sessionStorage.upsert(SessionStorage.fromClaudeSession(tab.copy(claudeSessionId = realUuid)))
                             notifyClaudeSessionIdChanged(sessionId, realUuid)
+                            confirmedUuids[sessionId] = realUuid
                         }
                     }
                 } catch (_: Exception) {}
@@ -647,14 +654,16 @@ else:
         }
         val uuid = tab.claudeSessionId
         if (uuid != null) stream.start(uuid)
-        // The 60 s reconcile loop is too slow when the user opens the
-        // chat view for a fresh session — they sit on "Waiting for
-        // transcript…" because tab.claudeSessionId was generated
-        // client-side and doesn't match what claude is actually writing
-        // to. Fire a one-shot pid probe right now so the UUID is
-        // corrected within a few hundred ms.
+        // One-shot pid-probe to correct the client-generated UUID before the
+        // 15 s reconcile loop fires. Only runs until the UUID is confirmed by
+        // at least one server-side probe — after that, repeated calls to
+        // transcriptFlow() (e.g. every time the user toggles to the Transcript
+        // tab) skip this block entirely. Without this guard the probe was fired
+        // on every call, each one potentially restarting the stream and blanking
+        // the transcript for several seconds while the new SSH tail reconnected.
+        val alreadyConfirmed = uuid != null && confirmedUuids[sessionId] == uuid
         val sshMan = connections[sessionId]
-        if (sshMan != null && sshMan.isConnected) {
+        if (!alreadyConfirmed && sshMan != null && sshMan.isConnected) {
             reconnectScope.launch {
                 try {
                     val real = readRealSessionId(sshMan, tab.tmuxSessionName)
@@ -670,7 +679,11 @@ else:
                             tabManager.updateClaudeSessionId(sessionId, real)
                             sessionStorage?.upsert(SessionStorage.fromClaudeSession(current.copy(claudeSessionId = real)))
                             notifyClaudeSessionIdChanged(sessionId, real)
+                            confirmedUuids[sessionId] = real
                         }
+                    } else if (real != null && current != null) {
+                        // UUID already matches — mark confirmed so future calls skip the probe.
+                        confirmedUuids[sessionId] = real
                     }
                 } catch (_: Exception) {}
             }
@@ -1321,6 +1334,7 @@ else:
         promptDetector.removeSession(sessionId)
         pendingInputs.remove(sessionId)
         terminalSizes.remove(sessionId)
+        confirmedUuids.remove(sessionId)
         _sessionActivities.update { it - sessionId }
         _contextPercents.update { it - sessionId }
         _sessionUsagePercents.update { it - sessionId }
