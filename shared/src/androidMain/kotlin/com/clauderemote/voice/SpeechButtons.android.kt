@@ -5,8 +5,9 @@ import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
-import android.os.Build
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.speech.RecognitionListener
 import android.speech.RecognizerIntent
 import android.speech.SpeechRecognizer
@@ -33,39 +34,54 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.core.content.ContextCompat
 import java.util.Locale
+import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicReference
 
 private const val CZECH_LOCALE_TAG = "cs-CZ"
 
+private val mainHandler = Handler(Looper.getMainLooper())
+
+private fun postOnMain(action: () -> Unit) {
+    if (Looper.myLooper() == Looper.getMainLooper()) action() else mainHandler.post(action)
+}
+
 // ── TTS ────────────────────────────────────────────────────────────────────
 //
 // One process-wide TextToSpeech engine. Tapping a different SpeakerButton
-// interrupts whatever is currently being read.
+// interrupts whatever is currently being read. Completion callbacks are
+// dispatched on the main thread so callers can safely mutate Compose state.
 
 private object TtsHolder {
     private var engine: TextToSpeech? = null
     @Volatile private var ready = false
+    @Volatile private var languageOk = false
     private val currentUtterance = AtomicReference<String?>(null)
     private val currentCompletion = AtomicReference<(() -> Unit)?>(null)
 
     fun speak(context: Context, text: String, onFinish: () -> Unit) {
-        // Replace any in-flight completion before starting a new utterance so
-        // that the previous SpeakerButton's "speaking" state is reset.
-        currentCompletion.getAndSet(onFinish)?.invoke()
+        // Replace any in-flight completion so the previous SpeakerButton's
+        // "speaking" state is reset before we start the new utterance.
+        currentCompletion.getAndSet(onFinish)?.let { postOnMain(it) }
 
         val existing = engine
         if (existing != null && ready) {
+            if (!languageOk) {
+                fireCurrentCompletion()
+                return
+            }
             enqueue(existing, text)
             return
         }
         engine = TextToSpeech(context.applicationContext) { status ->
             if (status != TextToSpeech.SUCCESS) {
                 ready = false
-                currentCompletion.getAndSet(null)?.invoke()
+                fireCurrentCompletion()
                 return@TextToSpeech
             }
             val t = engine ?: return@TextToSpeech
-            t.language = Locale.forLanguageTag(CZECH_LOCALE_TAG)
+            val langResult = t.setLanguage(Locale.forLanguageTag(CZECH_LOCALE_TAG))
+            languageOk = langResult != TextToSpeech.LANG_MISSING_DATA &&
+                langResult != TextToSpeech.LANG_NOT_SUPPORTED
             t.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
                 override fun onStart(utteranceId: String?) {}
                 override fun onDone(utteranceId: String?) = finish(utteranceId)
@@ -76,12 +92,12 @@ private object TtsHolder {
                 private fun finish(utteranceId: String?) {
                     if (utteranceId != null && utteranceId == currentUtterance.get()) {
                         currentUtterance.set(null)
-                        currentCompletion.getAndSet(null)?.invoke()
+                        fireCurrentCompletion()
                     }
                 }
             })
             ready = true
-            enqueue(t, text)
+            if (languageOk) enqueue(t, text) else fireCurrentCompletion()
         }
     }
 
@@ -95,7 +111,11 @@ private object TtsHolder {
     fun stop() {
         engine?.stop()
         currentUtterance.set(null)
-        currentCompletion.getAndSet(null)?.invoke()
+        fireCurrentCompletion()
+    }
+
+    private fun fireCurrentCompletion() {
+        currentCompletion.getAndSet(null)?.let { postOnMain(it) }
     }
 }
 
@@ -137,18 +157,24 @@ actual fun MicButton(
     var listening by remember { mutableStateOf(false) }
     var pendingStart by remember { mutableStateOf(false) }
     var recognizer by remember { mutableStateOf<SpeechRecognizer?>(null) }
-    var baseText by remember { mutableStateOf("") }
+    // Monotonic session id — used by listener closures to ignore late
+    // callbacks delivered after the user has started a new dictation.
+    val sessionId = remember { AtomicInteger(0) }
 
     DisposableEffect(Unit) {
         onDispose {
-            recognizer?.destroy()
+            recognizer?.let {
+                runCatching { it.cancel() }
+                runCatching { it.destroy() }
+            }
             recognizer = null
         }
     }
 
     fun startListening() {
         val rec = recognizer ?: createCzechRecognizer(context).also { recognizer = it }
-        baseText = currentTextState.value
+        val mySession = sessionId.incrementAndGet()
+        val sessionBase = currentTextState.value
         val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
             putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
             putExtra(RecognizerIntent.EXTRA_LANGUAGE, CZECH_LOCALE_TAG)
@@ -157,31 +183,35 @@ actual fun MicButton(
             putExtra(RecognizerIntent.EXTRA_CALLING_PACKAGE, context.packageName)
         }
         rec.setRecognitionListener(object : RecognitionListener {
+            private fun stale() = sessionId.get() != mySession
             override fun onReadyForSpeech(params: Bundle?) {}
             override fun onBeginningOfSpeech() {}
             override fun onRmsChanged(rmsdB: Float) {}
             override fun onBufferReceived(buffer: ByteArray?) {}
             override fun onEndOfSpeech() {}
             override fun onError(error: Int) {
+                if (stale()) return
                 listening = false
             }
             override fun onResults(results: Bundle?) {
+                if (stale()) return
                 val phrase = results
                     ?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
                     ?.firstOrNull()
                     .orEmpty()
                 if (phrase.isNotBlank()) {
-                    onTextChangeState.value(appendDictated(baseText, phrase))
+                    onTextChangeState.value(appendDictated(sessionBase, phrase))
                 }
                 listening = false
             }
             override fun onPartialResults(partial: Bundle?) {
+                if (stale()) return
                 val phrase = partial
                     ?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
                     ?.firstOrNull()
                     .orEmpty()
                 if (phrase.isNotBlank()) {
-                    onTextChangeState.value(appendDictated(baseText, phrase))
+                    onTextChangeState.value(appendDictated(sessionBase, phrase))
                 }
             }
             override fun onEvent(eventType: Int, params: Bundle?) {}
@@ -199,6 +229,7 @@ actual fun MicButton(
 
     IconButton(
         onClick = {
+            if (pendingStart) return@IconButton
             if (listening) {
                 recognizer?.stopListening()
                 listening = false
@@ -257,6 +288,3 @@ actual fun SpeakerButton(
         )
     }
 }
-
-@Suppress("unused")
-private val supportsModernTts = Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP
