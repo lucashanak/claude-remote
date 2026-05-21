@@ -31,6 +31,7 @@ import androidx.compose.foundation.lazy.LazyListScope
 import com.clauderemote.model.SessionActivity
 import com.clauderemote.session.status.RemoteSessionStatus
 import com.clauderemote.session.transcript.TranscriptEntry
+import com.clauderemote.voice.SpeakerButton
 import com.clauderemote.ui.components.CRCard
 import com.clauderemote.ui.components.Pill
 import com.clauderemote.ui.theme.CRTheme
@@ -402,6 +403,11 @@ private fun AssistantTextCard(entry: TranscriptEntry.AssistantText) {
                 if (entry.timestamp != null) {
                     Text(formatTimestamp(entry.timestamp), style = CRType.monoTiny, color = c.textDim)
                 }
+                SpeakerButton(
+                    text = entry.text,
+                    modifier = Modifier.size(28.dp),
+                    tint = c.textDim,
+                )
             }
         }
         Spacer(Modifier.height(6.dp))
