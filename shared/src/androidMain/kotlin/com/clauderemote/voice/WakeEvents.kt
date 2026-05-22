@@ -16,7 +16,8 @@ import kotlinx.coroutines.flow.asStateFlow
  * consumer acknowledges by calling [acknowledge] to clear the flag,
  * preventing a stale wake from re-triggering on configuration changes.
  */
-internal object WakeEvents {
+// Public so the foreground WakeWordService (androidApp module) can fire it.
+object WakeEvents {
     private val _pendingOpen = MutableStateFlow(false)
     val pendingOpen: StateFlow<Boolean> = _pendingOpen.asStateFlow()
 

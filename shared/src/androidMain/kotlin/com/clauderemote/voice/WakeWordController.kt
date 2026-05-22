@@ -76,9 +76,11 @@ object WakeWordController {
     /**
      * Called by [com.clauderemote.voice.WakeWordService] when its audio
      * loop opens / releases the microphone, so the controller status
-     * reflects ground truth instead of the call-site's hope.
+     * reflects ground truth instead of the call-site's hope. Public
+     * because the service lives in the androidApp module across the
+     * Kotlin `internal` boundary.
      */
-    internal fun reportServiceRunning(running: Boolean, context: Context) {
+    fun reportServiceRunning(running: Boolean, context: Context) {
         _status.value = when {
             running -> Status.Listening
             isModelReady(context) -> Status.Ready

@@ -18,7 +18,8 @@ import org.vosk.Recognizer
  * those specific words plus `[unk]` for everything else. This is the
  * recommended Vosk pattern for low-power wake-word style usage.
  */
-internal class WakeWordEngine private constructor(
+// Public so the foreground WakeWordService (androidApp module) can use it.
+class WakeWordEngine private constructor(
     private val model: Model,
     private val recognizer: Recognizer,
 ) {

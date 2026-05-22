@@ -19,7 +19,10 @@ import java.util.zip.ZipInputStream
  * The download is intentionally simple: HTTPS GET + streaming unzip. No
  * resume, no checksum — the model is small and we re-download on failure.
  */
-internal object VoskModelManager {
+// Public so the foreground WakeWordService (which lives in the androidApp
+// gradle module) can call it across the module boundary; `internal` is
+// module-scoped in Kotlin and would not be visible there.
+object VoskModelManager {
 
     private const val MODEL_URL =
         "https://alphacephei.com/vosk/models/vosk-model-small-cs-0.4-rhasspy.zip"
