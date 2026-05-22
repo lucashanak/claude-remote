@@ -59,11 +59,20 @@ internal object VoskModelManager {
             if (conn.responseCode !in 200..299) return@withContext false
             val total = conn.contentLengthLong.coerceAtLeast(1L)
             var written = 0L
+            // Resolved-path prefix used to reject zip-slip entries that
+            // would escape `root` via "../" in the entry name.
+            val safeRootPrefix = root.canonicalPath + File.separator
             ZipInputStream(conn.inputStream).use { zis ->
                 var entry = zis.nextEntry
                 val buf = ByteArray(64 * 1024)
                 while (entry != null) {
                     val outFile = File(root, entry.name)
+                    val canonical = outFile.canonicalPath
+                    if (canonical != root.canonicalPath &&
+                        !canonical.startsWith(safeRootPrefix)) {
+                        // Malicious entry trying to escape the model dir.
+                        return@withContext false
+                    }
                     if (entry.isDirectory) {
                         outFile.mkdirs()
                     } else {
@@ -84,6 +93,8 @@ internal object VoskModelManager {
             }
             isModelReady(context)
         } catch (_: Throwable) {
+            // Leave partial state on disk; the next download attempt
+            // wipes modelDir before extracting.
             false
         } finally {
             runCatching { conn.disconnect() }

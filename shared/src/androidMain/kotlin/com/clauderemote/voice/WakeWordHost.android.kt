@@ -93,7 +93,16 @@ actual fun WakeWordSettingsCard(settings: AppSettings) {
 
     val permissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission()
-    ) { granted -> micGranted = granted }
+    ) { granted ->
+        micGranted = granted
+        if (!granted) {
+            // User refused the permission prompt — clear the toggle so the
+            // UI doesn't show an enabled-but-broken state on the next
+            // composition. Re-enabling triggers a fresh permission ask.
+            enabled = false
+            settings.wakeWordEnabled = false
+        }
+    }
 
     fun applyEnabled(newValue: Boolean) {
         enabled = newValue

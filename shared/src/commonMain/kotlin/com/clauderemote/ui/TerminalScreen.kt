@@ -183,6 +183,17 @@ fun TerminalScreen(
         null
     }
 
+    // Wake-word host (side-effect only, no render). Hoisted above the
+    // layout tree so its LaunchedEffect runs regardless of which branch
+    // of the conditional UI is composed — important when a wake event
+    // fires during a cold-start that lands on a non-terminal screen
+    // transiently before voice mode opens.
+    WakeWordHost(
+        enabled = wakeWordEnabled,
+        voiceModeActive = voiceModeActive,
+        onWake = { voiceModeActive = true },
+    )
+
     // Replay terminal buffer when switching back from transcript
     LaunchedEffect(terminalView, activeTabId) {
         if (terminalView == CRTerminalView.Raw) onTerminalContentVisible?.invoke()
@@ -822,15 +833,6 @@ fun TerminalScreen(
                 onDismiss = { showExpanded = false },
             )
         }
-        // Wake-word host: manages the foreground listener service and
-        // funnels wake events into voice-mode activation. No-op on desktop
-        // and when wake-word is disabled in settings.
-        WakeWordHost(
-            enabled = wakeWordEnabled,
-            voiceModeActive = voiceModeActive,
-            onWake = { voiceModeActive = true },
-        )
-
         // Voice-mode overlay sits on top of all the regular UI. Rendered as
         // the last BoxWithConstraints child so it stacks above everything;
         // VoiceModeScreen fills the screen with its own opaque surface.

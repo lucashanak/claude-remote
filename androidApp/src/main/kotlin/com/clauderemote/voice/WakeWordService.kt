@@ -128,18 +128,22 @@ class WakeWordService : Service() {
             return
         }
 
+        var wakeDetected = false
         val buf = ByteArray(FRAME_SAMPLES * 2) // 16-bit samples
         try {
             recorder.startRecording()
+            WakeWordController.reportServiceRunning(true, this)
             while (!stopped && scope.isActive) {
                 val n = recorder.read(buf, 0, buf.size)
                 if (n <= 0) continue
                 if (engine.process(buf, n)) {
-                    fireWake()
-                    engine.reset()
-                    // Pause briefly to avoid retriggering on the tail of the
-                    // same phrase before the foreground UI takes over.
-                    Thread.sleep(750)
+                    wakeDetected = true
+                    // Break out immediately — voice mode is about to take
+                    // the microphone over. The finally block releases
+                    // AudioRecord synchronously *before* we fire the wake,
+                    // so VoiceMode's SpeechRecognizer doesn't race the
+                    // service for the mic.
+                    break
                 }
             }
         } catch (_: Throwable) {
@@ -148,13 +152,22 @@ class WakeWordService : Service() {
             runCatching { recorder.stop() }
             runCatching { recorder.release() }
             engine.close()
+            WakeWordController.reportServiceRunning(false, this)
         }
+        if (wakeDetected && !stopped) {
+            fireWake()
+        }
+        // The service self-stops after a wake so the WakeWordHost lifecycle
+        // logic in TerminalScreen is the single source of truth for when
+        // to start listening again.
+        stopSelfSafely()
     }
 
     private fun fireWake() {
         WakeEvents.fire()
-        // Bring the app to the foreground so voice mode is visible. Single-
-        // task launch mode prevents a duplicate activity instance.
+        // Bring the app to the foreground so voice mode is visible.
+        // FLAG_ACTIVITY_SINGLE_TOP avoids a duplicate activity instance
+        // when MainActivity is already at the top of the back stack.
         val launch = Intent(this, MainActivity::class.java).apply {
             action = ACTION_OPEN_VOICE_MODE
             addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP)
@@ -189,7 +202,7 @@ class WakeWordService : Service() {
             .setPriority(NotificationCompat.PRIORITY_LOW)
             .addAction(0, "Vypnout", stopIntent)
             .build()
-        if (Build.VERSION.SDK_INT >= 29) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             ServiceCompat.startForeground(
                 this, NOTIFICATION_ID, notification,
                 ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE,

@@ -58,7 +58,10 @@ object WakeWordController {
         if (!isModelReady(context) || !hasMicPermission(context)) return
         val intent = Intent().setComponent(serviceComponent(context))
         ContextCompat.startForegroundService(context, intent)
-        _status.value = Status.Listening
+        // Don't flip to Listening yet — the service will call
+        // [reportServiceRunning] once AudioRecord is actually open. Until
+        // then, we stay at Ready so the UI doesn't lie if the service
+        // self-stops due to permission/model issues.
     }
 
     /** Stop the foreground listener if running. */
@@ -66,8 +69,20 @@ object WakeWordController {
         val intent = Intent().setComponent(serviceComponent(context))
             .setAction(STOP_ACTION)
         runCatching { context.startService(intent) }
-        if (_status.value == Status.Listening) {
-            _status.value = if (isModelReady(context)) Status.Ready else Status.Idle
+        // Same pattern: actual flip happens via [reportServiceRunning] when
+        // the service's audio loop exits. This is just a request to stop.
+    }
+
+    /**
+     * Called by [com.clauderemote.voice.WakeWordService] when its audio
+     * loop opens / releases the microphone, so the controller status
+     * reflects ground truth instead of the call-site's hope.
+     */
+    internal fun reportServiceRunning(running: Boolean, context: Context) {
+        _status.value = when {
+            running -> Status.Listening
+            isModelReady(context) -> Status.Ready
+            else -> Status.Idle
         }
     }
 
