@@ -29,6 +29,7 @@ import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.KeyboardArrowLeft
 import androidx.compose.material.icons.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.Menu
+import androidx.compose.material.icons.filled.RecordVoiceOver
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -2047,7 +2048,7 @@ private fun PromptInputBar(
                         modifier = Modifier.size(32.dp),
                     ) {
                         Icon(
-                            imageVector = androidx.compose.material.icons.Icons.Filled.RecordVoiceOver,
+                            imageVector = Icons.Filled.RecordVoiceOver,
                             contentDescription = "Voice mode",
                             tint = c.textDim,
                             modifier = Modifier.size(18.dp),
