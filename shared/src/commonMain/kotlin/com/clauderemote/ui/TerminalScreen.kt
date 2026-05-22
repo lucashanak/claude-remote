@@ -55,6 +55,7 @@ import com.clauderemote.session.status.RemoteSessionStatus
 import com.clauderemote.session.transcript.TranscriptEntry
 import com.clauderemote.voice.MicButton
 import com.clauderemote.voice.VoiceModeScreen
+import com.clauderemote.voice.WakeWordHost
 import com.clauderemote.ui.components.CRCard
 import com.clauderemote.ui.components.CRStatus
 import com.clauderemote.ui.components.Pill
@@ -143,6 +144,7 @@ fun TerminalScreen(
     activeClaudeSessionId: String? = null,
     sidePanelWidthDp: Int = 220,
     onSidePanelWidthChange: ((Int) -> Unit)? = null,
+    wakeWordEnabled: Boolean = false,
 ) {
     val c = CRTheme.colors
     val m = CRTheme.metrics
@@ -180,6 +182,17 @@ fun TerminalScreen(
         }
         null
     }
+
+    // Wake-word host (side-effect only, no render). Hoisted above the
+    // layout tree so its LaunchedEffect runs regardless of which branch
+    // of the conditional UI is composed — important when a wake event
+    // fires during a cold-start that lands on a non-terminal screen
+    // transiently before voice mode opens.
+    WakeWordHost(
+        enabled = wakeWordEnabled,
+        voiceModeActive = voiceModeActive,
+        onWake = { voiceModeActive = true },
+    )
 
     // Replay terminal buffer when switching back from transcript
     LaunchedEffect(terminalView, activeTabId) {

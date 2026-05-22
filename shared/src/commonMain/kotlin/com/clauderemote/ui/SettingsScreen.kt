@@ -17,6 +17,7 @@ import com.clauderemote.model.ClaudeMode
 import com.clauderemote.model.ClaudeModel
 import com.clauderemote.model.ConnectionType
 import com.clauderemote.storage.AppSettings
+import com.clauderemote.voice.WakeWordSettingsCard
 import com.clauderemote.ui.components.CRCard
 import com.clauderemote.ui.components.Pill
 import com.clauderemote.ui.components.Segmented
@@ -371,6 +372,10 @@ fun SettingsScreen(
                     onCheckedChange = { biometricLock = it; settings.biometricLockEnabled = it }
                 )
             }
+
+            // ── Voice (Android only) ───────────────────────────────────────
+            SectionHeader("Voice")
+            WakeWordSettingsCard(settings)
 
             // ── About ───────────────────────────────────────────────────────
             SectionHeader("About")

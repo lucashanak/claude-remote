@@ -133,6 +133,11 @@ class AppSettings(private val prefs: PlatformPreferences) {
         get() = prefs.getInt("side_panel_width_dp", 220).coerceIn(160, 480)
         set(value) = prefs.putInt("side_panel_width_dp", value.coerceIn(160, 480))
 
+    // Hands-free wake-word ("Hej Claude") via Czech offline Vosk model.
+    var wakeWordEnabled: Boolean
+        get() = prefs.getBoolean("wake_word_enabled", false)
+        set(value) = prefs.putBoolean("wake_word_enabled", value)
+
     fun loadAppearance(): AppearanceState = AppearanceState(
         variant = crVariant,
         density = crDensity,
