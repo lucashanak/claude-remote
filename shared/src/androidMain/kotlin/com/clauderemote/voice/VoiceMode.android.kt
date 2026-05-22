@@ -59,7 +59,14 @@ import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
 import java.util.concurrent.atomic.AtomicInteger
 
-private enum class VoiceState { Listening, Thinking, Speaking, NoPermission, Error }
+private sealed class VoiceState {
+    object Listening : VoiceState()
+    object Thinking : VoiceState()
+    object Speaking : VoiceState()
+    object NoPermission : VoiceState()
+    /** [reason] is shown to the user verbatim — already localised Czech. */
+    data class Error(val reason: String) : VoiceState()
+}
 
 @Composable
 actual fun VoiceModeScreen(
@@ -70,7 +77,15 @@ actual fun VoiceModeScreen(
 ) {
     val context = LocalContext.current
     if (!SpeechRecognizer.isRecognitionAvailable(context)) {
-        VoiceModeFrame(state = VoiceState.Error, partial = "", onClose = onClose)
+        VoiceModeFrame(
+            state = VoiceState.Error(
+                "Toto zařízení nemá službu rozpoznávání řeči. " +
+                    "Nainstalujte aplikaci Google z Play Store nebo " +
+                    "Mluva (Speech Services by Google) a zkuste znovu."
+            ),
+            partial = "",
+            onClose = onClose,
+        )
         return
     }
 
@@ -194,11 +209,11 @@ private fun Row(onClose: () -> Unit) {
 private fun Orb(state: VoiceState) {
     val infinite = rememberInfiniteTransition(label = "orb")
     val (color, durationMs, minScale, maxScale) = when (state) {
-        VoiceState.Listening -> OrbAnim(Color(0xFF4E9CFF), 1100, 0.92f, 1.08f)
-        VoiceState.Thinking  -> OrbAnim(Color(0xFFFFB44E), 1700, 0.96f, 1.04f)
-        VoiceState.Speaking  -> OrbAnim(Color(0xFF4EE0A0), 1300, 0.94f, 1.10f)
-        VoiceState.NoPermission, VoiceState.Error ->
-            OrbAnim(Color(0xFFFF5C5C), 2000, 1f, 1f)
+        is VoiceState.Listening    -> OrbAnim(Color(0xFF4E9CFF), 1100, 0.92f, 1.08f)
+        is VoiceState.Thinking     -> OrbAnim(Color(0xFFFFB44E), 1700, 0.96f, 1.04f)
+        is VoiceState.Speaking     -> OrbAnim(Color(0xFF4EE0A0), 1300, 0.94f, 1.10f)
+        is VoiceState.NoPermission,
+        is VoiceState.Error        -> OrbAnim(Color(0xFFFF5C5C), 2000, 1f, 1f)
     }
     val scale by infinite.animateFloat(
         initialValue = minScale,
@@ -237,19 +252,19 @@ private fun Orb(state: VoiceState) {
 private data class OrbAnim(val color: Color, val duration: Int, val min: Float, val max: Float)
 
 private fun stateLabel(state: VoiceState): String = when (state) {
-    VoiceState.Listening    -> "Poslouchám…"
-    VoiceState.Thinking     -> "Přemýšlím…"
-    VoiceState.Speaking     -> "Mluvím…"
-    VoiceState.NoPermission -> "Chybí oprávnění mikrofonu"
-    VoiceState.Error        -> "Rozpoznávání není dostupné"
+    is VoiceState.Listening    -> "Poslouchám…"
+    is VoiceState.Thinking     -> "Přemýšlím…"
+    is VoiceState.Speaking     -> "Mluvím…"
+    is VoiceState.NoPermission -> "Chybí oprávnění mikrofonu"
+    is VoiceState.Error        -> "Rozpoznávání selhalo"
 }
 
 private fun hintFor(state: VoiceState): String = when (state) {
-    VoiceState.Listening    -> "Mluvte teď — česky"
-    VoiceState.Thinking     -> ""
-    VoiceState.Speaking     -> ""
-    VoiceState.NoPermission -> "Otevřete nastavení a povolte mikrofon."
-    VoiceState.Error        -> "Toto zařízení nepodporuje rozpoznávání řeči."
+    is VoiceState.Listening    -> "Mluvte teď — česky"
+    is VoiceState.Thinking     -> ""
+    is VoiceState.Speaking     -> ""
+    is VoiceState.NoPermission -> "Otevřete nastavení a povolte mikrofon."
+    is VoiceState.Error        -> state.reason
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -309,7 +324,17 @@ private class DialogueController(
 
     private fun ensureRecognizer() {
         if (recognizer != null) return
-        recognizer = createCzechRecognizerForVoice(context)
+        recognizer = createCzechRecognizerSmart(context)
+        if (recognizer == null) {
+            // PackageManager probe failed and the default constructor
+            // returned nothing — bail out with a clear message.
+            onStateChange(
+                VoiceState.Error(
+                    "Nepodařilo se inicializovat rozpoznávač. " +
+                        "Nainstalujte aplikaci Google (Speech Services by Google)."
+                )
+            )
+        }
     }
 
     private fun beginListening() {
@@ -343,7 +368,7 @@ private class DialogueController(
                         scheduleRestart()
                     }
                     SpeechRecognizer.ERROR_CLIENT -> scheduleRestart()
-                    else -> onStateChange(VoiceState.Error)
+                    else -> onStateChange(VoiceState.Error(recognizerErrorLabel(error)))
                 }
             }
             override fun onResults(results: Bundle?) {
@@ -385,14 +410,5 @@ private class DialogueController(
     }
 }
 
-private fun createCzechRecognizerForVoice(context: Context): SpeechRecognizer {
-    val googleComponent = ComponentName(
-        "com.google.android.googlequicksearchbox",
-        "com.google.android.voicesearch.serviceapi.GoogleRecognitionService"
-    )
-    return try {
-        SpeechRecognizer.createSpeechRecognizer(context, googleComponent)
-    } catch (_: Throwable) {
-        SpeechRecognizer.createSpeechRecognizer(context)
-    }
-}
+// `createCzechRecognizerSmart` lives in Recognizer.android.kt and is the
+// single source of truth for recognizer construction.

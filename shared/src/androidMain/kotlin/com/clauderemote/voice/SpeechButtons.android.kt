@@ -6,6 +6,7 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Bundle
+import android.widget.Toast
 import android.speech.RecognitionListener
 import android.speech.RecognizerIntent
 import android.speech.SpeechRecognizer
@@ -34,19 +35,9 @@ import java.util.concurrent.atomic.AtomicInteger
 // TTS engine and main-thread helpers live in Tts.android.kt; recognizer helper
 // is shared with VoiceMode.android.kt via the same package.
 
-private fun createCzechRecognizer(context: Context): SpeechRecognizer {
-    // Samsung devices ship their own recognizer backend which is unreliable
-    // for cs-CZ. Force the Google recognition service when present.
-    val googleComponent = ComponentName(
-        "com.google.android.googlequicksearchbox",
-        "com.google.android.voicesearch.serviceapi.GoogleRecognitionService"
-    )
-    return try {
-        SpeechRecognizer.createSpeechRecognizer(context, googleComponent)
-    } catch (_: Throwable) {
-        SpeechRecognizer.createSpeechRecognizer(context)
-    }
-}
+// Recognizer construction lives in Recognizer.android.kt
+// (`createCzechRecognizerSmart`) — single source of truth across the
+// dictation button and voice mode.
 
 private fun appendDictated(base: String, addition: String): String {
     if (addition.isBlank()) return base
@@ -83,7 +74,16 @@ actual fun MicButton(
     }
 
     fun startListening() {
-        val rec = recognizer ?: createCzechRecognizer(context).also { recognizer = it }
+        val rec = recognizer ?: createCzechRecognizerSmart(context).also { recognizer = it }
+        if (rec == null) {
+            Toast.makeText(
+                context,
+                "Rozpoznávání řeči není dostupné. " +
+                    "Nainstalujte Google (Speech Services by Google).",
+                Toast.LENGTH_LONG,
+            ).show()
+            return
+        }
         val mySession = sessionId.incrementAndGet()
         val sessionBase = currentTextState.value
         val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
@@ -103,6 +103,19 @@ actual fun MicButton(
             override fun onError(error: Int) {
                 if (stale()) return
                 listening = false
+                // Silent failures are the #1 user complaint here — surface
+                // the actual reason so the user can act on it (install
+                // Google, grant a permission, retry on signal, etc.). Skip
+                // the toast for the routine ERROR_NO_MATCH / silence-
+                // timeout cases that fire on every quiet stretch.
+                if (error != SpeechRecognizer.ERROR_NO_MATCH &&
+                    error != SpeechRecognizer.ERROR_SPEECH_TIMEOUT) {
+                    Toast.makeText(
+                        context,
+                        recognizerErrorLabel(error),
+                        Toast.LENGTH_SHORT,
+                    ).show()
+                }
             }
             override fun onResults(results: Bundle?) {
                 if (stale()) return
