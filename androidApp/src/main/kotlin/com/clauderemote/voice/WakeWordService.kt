@@ -19,8 +19,8 @@ import androidx.core.app.NotificationCompat
 import androidx.core.app.ServiceCompat
 import androidx.core.content.ContextCompat
 import com.clauderemote.MainActivity
-import com.clauderemote.R
 import com.clauderemote.android.BuildConfig
+import com.clauderemote.android.R
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
