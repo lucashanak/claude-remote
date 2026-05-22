@@ -55,6 +55,7 @@ import com.clauderemote.session.status.RemoteSessionStatus
 import com.clauderemote.session.transcript.TranscriptEntry
 import com.clauderemote.voice.MicButton
 import com.clauderemote.voice.VoiceModeScreen
+import com.clauderemote.voice.WakeWordHost
 import com.clauderemote.ui.components.CRCard
 import com.clauderemote.ui.components.CRStatus
 import com.clauderemote.ui.components.Pill
@@ -143,6 +144,7 @@ fun TerminalScreen(
     activeClaudeSessionId: String? = null,
     sidePanelWidthDp: Int = 220,
     onSidePanelWidthChange: ((Int) -> Unit)? = null,
+    wakeWordEnabled: Boolean = false,
 ) {
     val c = CRTheme.colors
     val m = CRTheme.metrics
@@ -820,6 +822,15 @@ fun TerminalScreen(
                 onDismiss = { showExpanded = false },
             )
         }
+        // Wake-word host: manages the foreground listener service and
+        // funnels wake events into voice-mode activation. No-op on desktop
+        // and when wake-word is disabled in settings.
+        WakeWordHost(
+            enabled = wakeWordEnabled,
+            voiceModeActive = voiceModeActive,
+            onWake = { voiceModeActive = true },
+        )
+
         // Voice-mode overlay sits on top of all the regular UI. Rendered as
         // the last BoxWithConstraints child so it stacks above everything;
         // VoiceModeScreen fills the screen with its own opaque surface.

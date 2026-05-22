@@ -38,6 +38,7 @@ kotlin {
             dependencies {
                 implementation("androidx.activity:activity-compose:1.9.3")
                 implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")
+                implementation("com.alphacephei:vosk-android:0.3.47")
             }
         }
         val desktopMain by getting {
