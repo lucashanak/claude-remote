@@ -95,7 +95,10 @@ actual fun VoiceModeScreen(
     // captures once on first composition and never changes thereafter.
     val initialAssistantId = remember { latestAssistantId }
 
-    var state by remember { mutableStateOf(VoiceState.Listening) }
+    // Explicit type — without it, the release compiler narrows to
+    // `VoiceState.Listening` and later assignments of other subtypes
+    // (Thinking, Speaking, Error, …) fail with a type mismatch.
+    var state by remember { mutableStateOf<VoiceState>(VoiceState.Listening) }
     var partial by remember { mutableStateOf("") }
     var hasPermission by remember {
         mutableStateOf(
