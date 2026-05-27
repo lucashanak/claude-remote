@@ -54,13 +54,23 @@ actual fun MicButton(
     tint: Color,
 ) {
     val context = LocalContext.current
-    if (!SpeechRecognizer.isRecognitionAvailable(context)) return
+    val srAvailable = SpeechRecognizer.isRecognitionAvailable(context)
+    val voskReady = VoskModelManager.isModelReady(context)
+    // Render nothing only when neither path is usable — otherwise show the
+    // button so the user can tap and see a concrete error (model missing,
+    // permission denied, etc.) instead of being unable to interact at all.
+    if (!srAvailable && !voskReady) return
 
     val onTextChangeState = rememberUpdatedState(onTextChange)
     val currentTextState = rememberUpdatedState(currentText)
     var listening by remember { mutableStateOf(false) }
     var pendingStart by remember { mutableStateOf(false) }
     var recognizer by remember { mutableStateOf<SpeechRecognizer?>(null) }
+    var voskDictation by remember { mutableStateOf<VoskDictation?>(null) }
+    // Once the SR backend returns LANGUAGE_NOT_SUPPORTED we remember the
+    // verdict for the lifetime of this composable and route subsequent
+    // dictations straight through Vosk.
+    var useVosk by remember { mutableStateOf(!srAvailable && voskReady) }
     val sessionId = remember { AtomicInteger(0) }
 
     DisposableEffect(Unit) {
@@ -70,18 +80,58 @@ actual fun MicButton(
                 runCatching { it.destroy() }
             }
             recognizer = null
+            voskDictation?.stop()
+            voskDictation = null
         }
     }
 
-    fun startListening() {
-        val rec = recognizer ?: createCzechRecognizerSmart(context).also { recognizer = it }
-        if (rec == null) {
+    fun startVosk() {
+        if (!VoskModelManager.isModelReady(context)) {
             Toast.makeText(
                 context,
-                "Rozpoznávání řeči není dostupné. " +
-                    "Nainstalujte Google (Speech Services by Google).",
+                "Český Vosk model není stažený. Otevřete Nastavení → Voice a stáhněte model.",
                 Toast.LENGTH_LONG,
             ).show()
+            return
+        }
+        val sessionBase = currentTextState.value
+        val dictation = VoskDictation(
+            context = context.applicationContext,
+            onPartial = { phrase ->
+                onTextChangeState.value(appendDictated(sessionBase, phrase))
+            },
+            onFinal = { phrase ->
+                onTextChangeState.value(appendDictated(sessionBase, phrase))
+                voskDictation?.stop()
+                voskDictation = null
+                listening = false
+            },
+            onError = { msg ->
+                Toast.makeText(context, msg, Toast.LENGTH_LONG).show()
+                voskDictation?.stop()
+                voskDictation = null
+                listening = false
+            },
+        )
+        voskDictation = dictation
+        dictation.start()
+        listening = true
+    }
+
+    fun startSr() {
+        val rec = recognizer ?: createCzechRecognizerSmart(context).also { recognizer = it }
+        if (rec == null) {
+            if (voskReady) {
+                useVosk = true
+                startVosk()
+            } else {
+                Toast.makeText(
+                    context,
+                    "Rozpoznávání řeči není dostupné. " +
+                        "Nainstalujte Google (Speech Services by Google), nebo stáhněte český Vosk model v Nastavení → Voice.",
+                    Toast.LENGTH_LONG,
+                ).show()
+            }
             return
         }
         val mySession = sessionId.incrementAndGet()
@@ -102,12 +152,29 @@ actual fun MicButton(
             override fun onEndOfSpeech() {}
             override fun onError(error: Int) {
                 if (stale()) return
+                // Czech unsupported on this device — switch to Vosk for the
+                // rest of the composable's lifetime and try again in the
+                // same session so the user doesn't need to retap.
+                if (error == SpeechRecognizer.ERROR_LANGUAGE_NOT_SUPPORTED ||
+                    error == SpeechRecognizer.ERROR_LANGUAGE_UNAVAILABLE) {
+                    useVosk = true
+                    runCatching { rec.cancel() }
+                    runCatching { rec.destroy() }
+                    recognizer = null
+                    if (VoskModelManager.isModelReady(context)) {
+                        startVosk()
+                    } else {
+                        listening = false
+                        Toast.makeText(
+                            context,
+                            "Tento přístroj nepodporuje českou Google STT. " +
+                                "Stáhněte český Vosk model v Nastavení → Voice.",
+                            Toast.LENGTH_LONG,
+                        ).show()
+                    }
+                    return
+                }
                 listening = false
-                // Silent failures are the #1 user complaint here — surface
-                // the actual reason so the user can act on it (install
-                // Google, grant a permission, retry on signal, etc.). Skip
-                // the toast for the routine ERROR_NO_MATCH / silence-
-                // timeout cases that fire on every quiet stretch.
                 if (error != SpeechRecognizer.ERROR_NO_MATCH &&
                     error != SpeechRecognizer.ERROR_SPEECH_TIMEOUT) {
                     Toast.makeText(
@@ -144,6 +211,10 @@ actual fun MicButton(
         listening = true
     }
 
+    fun startListening() {
+        if (useVosk) startVosk() else startSr()
+    }
+
     val permissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission()
     ) { granted ->
@@ -155,7 +226,12 @@ actual fun MicButton(
         onClick = {
             if (pendingStart) return@IconButton
             if (listening) {
-                recognizer?.stopListening()
+                if (useVosk) {
+                    voskDictation?.stop()
+                    voskDictation = null
+                } else {
+                    recognizer?.stopListening()
+                }
                 listening = false
                 return@IconButton
             }
