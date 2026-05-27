@@ -63,7 +63,8 @@ actual fun MicButton(
     // Render nothing only when no backend is usable — otherwise show the
     // button so the user can tap and see a concrete error (model missing,
     // permission denied, etc.) instead of being unable to interact at all.
-    if (!srAvailable && !voskReady && !whisperReady) return
+    // The Server engine only needs a URL, so it always keeps the button.
+    if (engine != SttEngine.SERVER && !srAvailable && !voskReady && !whisperReady) return
 
     val onTextChangeState = rememberUpdatedState(onTextChange)
     val currentTextState = rememberUpdatedState(currentText)
@@ -72,6 +73,7 @@ actual fun MicButton(
     var recognizer by remember { mutableStateOf<SpeechRecognizer?>(null) }
     var voskDictation by remember { mutableStateOf<VoskDictation?>(null) }
     var whisperDictation by remember { mutableStateOf<WhisperDictation?>(null) }
+    var serverDictation by remember { mutableStateOf<ServerDictation?>(null) }
     // SYSTEM may auto-fall-back to Vosk if the device can't do Czech; we
     // remember that verdict for the rest of the composable's lifetime.
     var useVosk by remember { mutableStateOf(engine == SttEngine.SYSTEM && !srAvailable && voskReady) }
@@ -88,7 +90,44 @@ actual fun MicButton(
             voskDictation = null
             whisperDictation?.stop()
             whisperDictation = null
+            serverDictation?.stop()
+            serverDictation = null
         }
+    }
+
+    fun startServer() {
+        val cfg = sttServerConfig(context)
+        if (cfg.url.isBlank()) {
+            Toast.makeText(
+                context,
+                "Není nastavená adresa STT serveru. Otevřete Nastavení → Voice.",
+                Toast.LENGTH_LONG,
+            ).show()
+            return
+        }
+        val sessionBase = currentTextState.value
+        val dictation = ServerDictation(
+            context = context.applicationContext,
+            baseUrl = cfg.url,
+            model = cfg.model,
+            apiKey = cfg.apiKey,
+            continuous = false,
+            onFinal = { phrase ->
+                onTextChangeState.value(appendDictated(sessionBase, phrase))
+                serverDictation?.stop()
+                serverDictation = null
+                listening = false
+            },
+            onError = { msg ->
+                Toast.makeText(context, msg, Toast.LENGTH_LONG).show()
+                serverDictation?.stop()
+                serverDictation = null
+                listening = false
+            },
+        )
+        serverDictation = dictation
+        dictation.start()
+        listening = true
     }
 
     // The system voice dialog (RecognizerIntent activity). This is the
@@ -287,6 +326,7 @@ actual fun MicButton(
 
     fun startListening() {
         when (engine) {
+            SttEngine.SERVER -> startServer()
             SttEngine.WHISPER -> startWhisper()
             SttEngine.VOSK -> startVosk()
             SttEngine.SYSTEM -> if (useVosk) startVosk() else startSr()
@@ -304,6 +344,8 @@ actual fun MicButton(
         onClick = {
             if (pendingStart) return@IconButton
             if (listening) {
+                serverDictation?.stop()
+                serverDictation = null
                 whisperDictation?.stop()
                 whisperDictation = null
                 voskDictation?.stop()

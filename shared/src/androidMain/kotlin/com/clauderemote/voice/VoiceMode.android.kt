@@ -284,8 +284,10 @@ private class DialogueController(
     private var recognizer: SpeechRecognizer? = null
     private var voskDictation: VoskDictation? = null
     private var whisperDictation: WhisperDictation? = null
+    private var serverDictation: ServerDictation? = null
     private val engine = selectedSttEngine(context)
     private val useWhisper = engine == com.clauderemote.model.SttEngine.WHISPER
+    private val useServer = engine == com.clauderemote.model.SttEngine.SERVER
     // Once we know Czech isn't available via SpeechRecognizer we pin
     // listening to Vosk for the lifetime of this controller so the user
     // doesn't see a probe-and-fail dance on every turn.
@@ -297,7 +299,7 @@ private class DialogueController(
     fun start() {
         stopped = false
         paused = false
-        if (!useWhisper && !useVosk) {
+        if (!useWhisper && !useVosk && !useServer) {
             // SYSTEM engine: skip SR entirely when it's not available at all
             // but the Vosk model is — no point burning a no-op error round-trip.
             if (!SpeechRecognizer.isRecognitionAvailable(context) &&
@@ -323,6 +325,8 @@ private class DialogueController(
         voskDictation = null
         whisperDictation?.stop()
         whisperDictation = null
+        serverDictation?.stop()
+        serverDictation = null
     }
 
     fun speak(text: String) {
@@ -335,6 +339,8 @@ private class DialogueController(
         voskDictation = null
         whisperDictation?.stop()
         whisperDictation = null
+        serverDictation?.stop()
+        serverDictation = null
         onStateChange(VoiceState.Speaking)
         TtsHolder.speak(context, text) {
             paused = false
@@ -367,6 +373,10 @@ private class DialogueController(
 
     private fun beginListening() {
         if (stopped || paused) return
+        if (useServer) {
+            beginServerListening()
+            return
+        }
         if (useWhisper) {
             beginWhisperListening()
             return
@@ -451,6 +461,38 @@ private class DialogueController(
             override fun onEvent(eventType: Int, params: Bundle?) {}
         })
         runCatching { rec.startListening(intent) }
+    }
+
+    private fun beginServerListening() {
+        if (serverDictation != null) return
+        val cfg = sttServerConfig(context)
+        if (cfg.url.isBlank()) {
+            onStateChange(VoiceState.Error("Není nastavená adresa STT serveru. Otevřete Nastavení → Voice."))
+            return
+        }
+        val mySession = sessionGen.incrementAndGet()
+        val dictation = ServerDictation(
+            context = context,
+            baseUrl = cfg.url,
+            model = cfg.model,
+            apiKey = cfg.apiKey,
+            continuous = true,
+            onFinal = { phrase ->
+                if (stopped || paused || sessionGen.get() != mySession) return@ServerDictation
+                serverDictation?.stop()
+                serverDictation = null
+                if (phrase.isNotBlank()) onCommit(phrase) else beginListening()
+            },
+            onError = { msg ->
+                if (sessionGen.get() != mySession) return@ServerDictation
+                serverDictation?.stop()
+                serverDictation = null
+                onStateChange(VoiceState.Error(msg))
+            },
+        )
+        serverDictation = dictation
+        onStateChange(VoiceState.Listening)
+        dictation.start()
     }
 
     private fun beginWhisperListening() {

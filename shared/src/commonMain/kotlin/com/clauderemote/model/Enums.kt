@@ -43,7 +43,8 @@ enum class AuthMethod {
 enum class SttEngine(val displayName: String) {
     SYSTEM("Systémový (Google)"),
     VOSK("Vosk (offline)"),
-    WHISPER("Whisper (offline)");
+    WHISPER("Whisper (offline)"),
+    SERVER("Server (faster-whisper)");
 }
 
 enum class SessionStatus {
