@@ -30,6 +30,22 @@ enum class AuthMethod {
     KEY
 }
 
+/**
+ * Speech-to-text backend for Czech dictation + voice mode.
+ *
+ * - [SYSTEM]: the device's built-in recognizer (Google on most phones).
+ *   Best quality where the device supports Czech; needs network on many
+ *   devices. Auto-falls back to [VOSK] if the system can't do Czech.
+ * - [VOSK]: offline, small (~44 MB), fast, lower accuracy (~21% WER).
+ * - [WHISPER]: offline, larger download, slower, higher accuracy.
+ */
+@Serializable
+enum class SttEngine(val displayName: String) {
+    SYSTEM("Systémový (Google)"),
+    VOSK("Vosk (offline)"),
+    WHISPER("Whisper (offline)");
+}
+
 enum class SessionStatus {
     CONNECTING,
     ACTIVE,

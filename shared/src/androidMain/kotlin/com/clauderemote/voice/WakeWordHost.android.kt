@@ -35,6 +35,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
+import com.clauderemote.model.SttEngine
 import com.clauderemote.storage.AppSettings
 import com.clauderemote.ui.theme.CRTheme
 import com.clauderemote.ui.theme.CRType
@@ -79,6 +80,10 @@ actual fun WakeWordSettingsCard(settings: AppSettings) {
     val m = CRTheme.metrics
     val scope = rememberCoroutineScope()
 
+    var engine by remember { mutableStateOf(settings.sttEngine) }
+    var whisperReady by remember { mutableStateOf(WhisperModelManager.isModelReady(context)) }
+    var whisperProgress by remember { mutableStateOf(0f) }
+    var whisperDownloading by remember { mutableStateOf(false) }
     var enabled by remember { mutableStateOf(settings.wakeWordEnabled) }
     var modelReady by remember { mutableStateOf(WakeWordController.isModelReady(context)) }
     var micGranted by remember {
@@ -127,6 +132,77 @@ actual fun WakeWordSettingsCard(settings: AppSettings) {
             .padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
+        // ── Engine picker ───────────────────────────────────────────────
+        Text("Rozpoznávání řeči (STT)", style = CRType.cardTitle, color = c.text)
+        val engines = SttEngine.entries
+        com.clauderemote.ui.components.Segmented(
+            options = engines.indices.toList(),
+            selected = engines.indexOf(engine),
+            onSelect = { idx ->
+                engine = engines[idx]
+                settings.sttEngine = engine
+            },
+            label = { engines[it].displayName },
+        )
+        when (engine) {
+            SttEngine.SYSTEM -> Text(
+                "Systémové rozpoznávání (Google). Nejlepší kvalita; vyžaduje podporu " +
+                    "češtiny v zařízení. Když chybí, přepne se na Vosk.",
+                style = CRType.bodyDim, color = c.textDim,
+            )
+            SttEngine.VOSK -> {
+                Text(
+                    "Offline, rychlé, nižší kvalita (~50 MB model).",
+                    style = CRType.bodyDim, color = c.textDim,
+                )
+                if (!modelReady && status != WakeWordController.Status.Downloading) {
+                    Button(
+                        onClick = {
+                            scope.launch { modelReady = WakeWordController.downloadModel(context) }
+                        },
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = c.accent, contentColor = c.accentInk,
+                        ),
+                    ) { Text("Stáhnout český Vosk model") }
+                }
+            }
+            SttEngine.WHISPER -> {
+                Text(
+                    "Offline, výrazně lepší kvalita, ~375 MB. Pomalejší (text se " +
+                        "objeví po dořeknutí věty).",
+                    style = CRType.bodyDim, color = c.textDim,
+                )
+                when {
+                    whisperDownloading -> {
+                        Text("Stahuji Whisper: ${(whisperProgress * 100).toInt()} %",
+                            style = CRType.bodyDim, color = c.textDim)
+                        LinearProgressIndicator(
+                            progress = { whisperProgress.coerceIn(0f, 1f) },
+                            modifier = Modifier.fillMaxWidth(),
+                            color = c.accent, trackColor = c.surface2,
+                        )
+                    }
+                    !whisperReady -> Button(
+                        onClick = {
+                            whisperDownloading = true
+                            scope.launch {
+                                val ok = WhisperModelManager.download(context) { whisperProgress = it }
+                                whisperReady = ok
+                                whisperDownloading = false
+                            }
+                        },
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = c.accent, contentColor = c.accentInk,
+                        ),
+                    ) { Text("Stáhnout Whisper model (~375 MB)") }
+                    else -> Text("Whisper model připraven.", style = CRType.bodyDim, color = c.textDim)
+                }
+            }
+        }
+
+        androidx.compose.material3.HorizontalDivider(color = c.border)
+
+        // ── Wake-word ───────────────────────────────────────────────────
         Row(
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.SpaceBetween,
