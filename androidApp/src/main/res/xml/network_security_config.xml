@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Cleartext HTTP is permitted so the "Server" STT engine can reach a
+  self-hosted faster-whisper / Speaches box on a LAN / VPN / tailscale
+  address (typically http://192.168.x.x:port — no TLS). Android's
+  <domain> rules don't support CIDR, and the server URL is user-supplied,
+  so we can't scope this to private ranges only. Trade-off: the app no
+  longer hard-blocks plaintext sockets; the Bearer token (if set) travels
+  in cleartext on the local network. Acceptable for this self-hosting
+  power-user feature; use HTTPS where you can.
+-->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="true" />
+</network-security-config>

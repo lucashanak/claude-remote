@@ -81,6 +81,8 @@ actual fun WakeWordSettingsCard(settings: AppSettings) {
     val scope = rememberCoroutineScope()
 
     var engine by remember { mutableStateOf(settings.sttEngine) }
+    var serverUrl by remember { mutableStateOf(settings.sttServerUrl) }
+    var serverModel by remember { mutableStateOf(settings.sttServerModel) }
     var whisperReady by remember { mutableStateOf(WhisperModelManager.isModelReady(context)) }
     var whisperProgress by remember { mutableStateOf(0f) }
     var whisperDownloading by remember { mutableStateOf(false) }
@@ -197,6 +199,27 @@ actual fun WakeWordSettingsCard(settings: AppSettings) {
                     ) { Text("Stáhnout Whisper model (~375 MB)") }
                     else -> Text("Whisper model připraven.", style = CRType.bodyDim, color = c.textDim)
                 }
+            }
+            SttEngine.SERVER -> {
+                Text(
+                    "Vlastní faster-whisper / Speaches server (OpenAI API). Nejlepší " +
+                        "kvalita i rychlost; vyžaduje běžící server dostupný z telefonu.",
+                    style = CRType.bodyDim, color = c.textDim,
+                )
+                androidx.compose.material3.OutlinedTextField(
+                    value = serverUrl,
+                    onValueChange = { serverUrl = it; settings.sttServerUrl = it },
+                    label = { Text("URL serveru (http://…:8000)") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                androidx.compose.material3.OutlinedTextField(
+                    value = serverModel,
+                    onValueChange = { serverModel = it; settings.sttServerModel = it },
+                    label = { Text("Model") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                )
             }
         }
 

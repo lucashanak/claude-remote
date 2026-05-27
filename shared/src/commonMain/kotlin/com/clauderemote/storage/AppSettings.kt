@@ -147,6 +147,19 @@ class AppSettings(private val prefs: PlatformPreferences) {
         }.getOrDefault(com.clauderemote.model.SttEngine.SYSTEM)
         set(value) = prefs.putString("stt_engine", value.name)
 
+    // Self-hosted OpenAI-compatible STT server (faster-whisper / Speaches).
+    var sttServerUrl: String
+        get() = prefs.getString("stt_server_url", "")
+        set(value) = prefs.putString("stt_server_url", value.trim())
+
+    var sttServerModel: String
+        get() = prefs.getString("stt_server_model", "Systran/faster-whisper-large-v3")
+        set(value) = prefs.putString("stt_server_model", value.trim())
+
+    var sttServerApiKey: String
+        get() = prefs.getString("stt_server_api_key", "")
+        set(value) = prefs.putString("stt_server_api_key", value.trim())
+
     fun loadAppearance(): AppearanceState = AppearanceState(
         variant = crVariant,
         density = crDensity,

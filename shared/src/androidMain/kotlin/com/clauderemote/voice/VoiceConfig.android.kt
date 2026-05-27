@@ -17,3 +17,15 @@ internal fun selectedSttEngine(context: Context): SttEngine {
         ?: SttEngine.SYSTEM.name
     return runCatching { SttEngine.valueOf(name) }.getOrDefault(SttEngine.SYSTEM)
 }
+
+internal data class SttServerConfig(val url: String, val model: String, val apiKey: String)
+
+internal fun sttServerConfig(context: Context): SttServerConfig {
+    val p = context.getSharedPreferences("claude_remote", Context.MODE_PRIVATE)
+    return SttServerConfig(
+        url = p.getString("stt_server_url", "").orEmpty(),
+        model = p.getString("stt_server_model", "Systran/faster-whisper-large-v3")
+            .orEmpty().ifBlank { "Systran/faster-whisper-large-v3" },
+        apiKey = p.getString("stt_server_api_key", "").orEmpty(),
+    )
+}
