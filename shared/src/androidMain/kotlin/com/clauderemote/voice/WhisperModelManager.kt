@@ -117,19 +117,34 @@ internal object WhisperModelManager {
         }
         try {
             if (conn.responseCode !in 200..299) return false
+            val expected = conn.contentLengthLong // -1 if unknown
             dest.parentFile?.mkdirs()
+            // Stream to a .part file and only rename into place once the
+            // whole body arrived — otherwise an interrupted 375 MB download
+            // leaves a multi-MB-but-truncated .onnx that isModelReady would
+            // wrongly accept, and OfflineRecognizer then crashes on it.
+            val part = File(dest.parentFile, dest.name + ".part")
+            runCatching { part.delete() }
+            var total = 0L
             conn.inputStream.use { input ->
-                FileOutputStream(dest).use { out ->
+                FileOutputStream(part).use { out ->
                     val buf = ByteArray(64 * 1024)
                     while (true) {
                         val n = input.read(buf)
                         if (n <= 0) break
                         out.write(buf, 0, n)
+                        total += n
                         onChunk(n.toLong())
                     }
                 }
             }
-            true
+            if (expected > 0 && total < expected) {
+                // Short read vs declared length — treat as failed.
+                runCatching { part.delete() }
+                return false
+            }
+            runCatching { dest.delete() }
+            part.renameTo(dest)
         } finally {
             runCatching { conn.disconnect() }
         }
