@@ -2,6 +2,7 @@ package com.clauderemote.voice
 
 import android.content.Context
 import com.clauderemote.model.SttEngine
+import com.clauderemote.model.TtsEngine
 
 /**
  * Reads the user's chosen STT engine directly from the same
@@ -26,6 +27,30 @@ internal fun sttServerConfig(context: Context): SttServerConfig {
         url = p.getString("stt_server_url", "").orEmpty(),
         model = p.getString("stt_server_model", "Systran/faster-whisper-large-v3")
             .orEmpty().ifBlank { "Systran/faster-whisper-large-v3" },
+        apiKey = p.getString("stt_server_api_key", "").orEmpty(),
+    )
+}
+
+internal fun selectedTtsEngine(context: Context): TtsEngine {
+    val name = context
+        .getSharedPreferences("claude_remote", Context.MODE_PRIVATE)
+        .getString("tts_engine", TtsEngine.SYSTEM.name)
+        ?: TtsEngine.SYSTEM.name
+    return runCatching { TtsEngine.valueOf(name) }.getOrDefault(TtsEngine.SYSTEM)
+}
+
+internal data class TtsServerConfig(
+    val url: String, val model: String, val voice: String, val apiKey: String,
+)
+
+internal fun ttsServerConfig(context: Context): TtsServerConfig {
+    val p = context.getSharedPreferences("claude_remote", Context.MODE_PRIVATE)
+    // Reuse the STT server URL + key — same Speaches instance serves both.
+    return TtsServerConfig(
+        url = p.getString("stt_server_url", "").orEmpty(),
+        model = p.getString("tts_server_model", "speaches-ai/piper-cs_CZ-jirka-medium")
+            .orEmpty().ifBlank { "speaches-ai/piper-cs_CZ-jirka-medium" },
+        voice = p.getString("tts_server_voice", "jirka").orEmpty().ifBlank { "jirka" },
         apiKey = p.getString("stt_server_api_key", "").orEmpty(),
     )
 }

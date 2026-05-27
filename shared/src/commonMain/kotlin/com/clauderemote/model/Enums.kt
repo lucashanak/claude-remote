@@ -47,6 +47,13 @@ enum class SttEngine(val displayName: String) {
     SERVER("Server (faster-whisper)");
 }
 
+/** Text-to-speech backend for reading assistant replies aloud. */
+@Serializable
+enum class TtsEngine(val displayName: String) {
+    SYSTEM("Systémový (Android)"),
+    SERVER("Server (Piper/Speaches)");
+}
+
 enum class SessionStatus {
     CONNECTING,
     ACTIVE,

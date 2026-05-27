@@ -160,6 +160,24 @@ class AppSettings(private val prefs: PlatformPreferences) {
         get() = prefs.getString("stt_server_api_key", "")
         set(value) = prefs.putString("stt_server_api_key", value.trim())
 
+    // Text-to-speech backend + server voice config (reuses the STT server
+    // URL + API key — same Speaches instance serves both).
+    var ttsEngine: com.clauderemote.model.TtsEngine
+        get() = runCatching {
+            com.clauderemote.model.TtsEngine.valueOf(
+                prefs.getString("tts_engine", com.clauderemote.model.TtsEngine.SYSTEM.name)
+            )
+        }.getOrDefault(com.clauderemote.model.TtsEngine.SYSTEM)
+        set(value) = prefs.putString("tts_engine", value.name)
+
+    var ttsServerModel: String
+        get() = prefs.getString("tts_server_model", "speaches-ai/piper-cs_CZ-jirka-medium")
+        set(value) = prefs.putString("tts_server_model", value.trim())
+
+    var ttsServerVoice: String
+        get() = prefs.getString("tts_server_voice", "jirka")
+        set(value) = prefs.putString("tts_server_voice", value.trim())
+
     fun loadAppearance(): AppearanceState = AppearanceState(
         variant = crVariant,
         density = crDensity,

@@ -7,6 +7,7 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -83,6 +84,11 @@ actual fun WakeWordSettingsCard(settings: AppSettings) {
     var engine by remember { mutableStateOf(settings.sttEngine) }
     var serverUrl by remember { mutableStateOf(settings.sttServerUrl) }
     var serverModel by remember { mutableStateOf(settings.sttServerModel) }
+    var ttsEngine by remember { mutableStateOf(settings.ttsEngine) }
+    var ttsModel by remember { mutableStateOf(settings.ttsServerModel) }
+    var ttsVoice by remember { mutableStateOf(settings.ttsServerVoice) }
+    var catalog by remember { mutableStateOf<List<ServerCatalog.ModelInfo>>(emptyList()) }
+    var loadingCatalog by remember { mutableStateOf(false) }
     var whisperReady by remember { mutableStateOf(WhisperModelManager.isModelReady(context)) }
     var whisperProgress by remember { mutableStateOf(0f) }
     var whisperDownloading by remember { mutableStateOf(false) }
@@ -223,6 +229,81 @@ actual fun WakeWordSettingsCard(settings: AppSettings) {
             }
         }
 
+        // Load model list from the server API (shown when any server engine
+        // is in play and a URL is set).
+        if ((engine == SttEngine.SERVER || ttsEngine == com.clauderemote.model.TtsEngine.SERVER) &&
+            serverUrl.isNotBlank()
+        ) {
+            Button(
+                onClick = {
+                    loadingCatalog = true
+                    scope.launch {
+                        catalog = ServerCatalog.fetchModels(serverUrl, settings.sttServerApiKey)
+                        loadingCatalog = false
+                    }
+                },
+                enabled = !loadingCatalog,
+                colors = ButtonDefaults.buttonColors(containerColor = c.accent, contentColor = c.accentInk),
+            ) { Text(if (loadingCatalog) "Načítám…" else "Načíst modely ze serveru") }
+
+            if (engine == SttEngine.SERVER && catalog.isNotEmpty()) {
+                ModelDropdown(
+                    label = "STT model",
+                    options = catalog.filter { ServerCatalog.isStt(it) }.map { it.id },
+                    selected = serverModel,
+                    onSelect = { serverModel = it; settings.sttServerModel = it },
+                )
+            }
+        }
+
+        androidx.compose.material3.HorizontalDivider(color = c.border)
+
+        // ── Předčítání (TTS) ─────────────────────────────────────────────
+        Text("Předčítání (TTS)", style = CRType.cardTitle, color = c.text)
+        val ttsEngines = com.clauderemote.model.TtsEngine.entries
+        com.clauderemote.ui.components.Segmented(
+            options = ttsEngines.indices.toList(),
+            selected = ttsEngines.indexOf(ttsEngine),
+            onSelect = { idx -> ttsEngine = ttsEngines[idx]; settings.ttsEngine = ttsEngine },
+            label = { ttsEngines[it].displayName },
+        )
+        when (ttsEngine) {
+            com.clauderemote.model.TtsEngine.SYSTEM -> Text(
+                "Předčítání systémovým hlasem zařízení.",
+                style = CRType.bodyDim, color = c.textDim,
+            )
+            com.clauderemote.model.TtsEngine.SERVER -> {
+                Text(
+                    "Předčítání přes server (Piper/Speaches). Používá stejnou adresu " +
+                        "jako STT server výše.",
+                    style = CRType.bodyDim, color = c.textDim,
+                )
+                if (catalog.isNotEmpty()) {
+                    ModelDropdown(
+                        label = "TTS model",
+                        options = catalog.filter { ServerCatalog.isTts(it) }.map { it.id },
+                        selected = ttsModel,
+                        onSelect = { ttsModel = it; settings.ttsServerModel = it },
+                    )
+                } else {
+                    androidx.compose.material3.OutlinedTextField(
+                        value = ttsModel,
+                        onValueChange = { ttsModel = it; settings.ttsServerModel = it },
+                        label = { Text("TTS model") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                }
+                androidx.compose.material3.OutlinedTextField(
+                    value = ttsVoice,
+                    onValueChange = { ttsVoice = it; settings.ttsServerVoice = it },
+                    label = { Text("Hlas (voice)") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+            }
+        }
+
         androidx.compose.material3.HorizontalDivider(color = c.border)
 
         // ── Wake-word ───────────────────────────────────────────────────
@@ -290,6 +371,49 @@ actual fun WakeWordSettingsCard(settings: AppSettings) {
             }
             WakeWordController.Status.Listening -> {
                 Text("Poslouchám \"Hej Claude\".", style = CRType.bodyDim, color = c.textDim)
+            }
+        }
+    }
+}
+
+@Composable
+private fun ModelDropdown(
+    label: String,
+    options: List<String>,
+    selected: String,
+    onSelect: (String) -> Unit,
+) {
+    val c = CRTheme.colors
+    var expanded by remember { mutableStateOf(false) }
+    Column(modifier = Modifier.fillMaxWidth()) {
+        Text(label, style = CRType.bodyDim, color = c.textDim)
+        Box {
+            androidx.compose.material3.OutlinedButton(
+                onClick = { expanded = true },
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Text(
+                    selected.ifBlank { "— vyber model —" },
+                    maxLines = 1,
+                    color = c.text,
+                )
+            }
+            androidx.compose.material3.DropdownMenu(
+                expanded = expanded,
+                onDismissRequest = { expanded = false },
+            ) {
+                if (options.isEmpty()) {
+                    androidx.compose.material3.DropdownMenuItem(
+                        text = { Text("Žádné modely") },
+                        onClick = { expanded = false },
+                    )
+                }
+                options.forEach { opt ->
+                    androidx.compose.material3.DropdownMenuItem(
+                        text = { Text(opt) },
+                        onClick = { onSelect(opt); expanded = false },
+                    )
+                }
             }
         }
     }

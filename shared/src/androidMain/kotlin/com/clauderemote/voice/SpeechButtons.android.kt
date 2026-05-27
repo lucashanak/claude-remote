@@ -387,14 +387,27 @@ actual fun SpeakerButton(
     IconButton(
         onClick = {
             if (speaking) {
+                ServerTts.stop()
                 TtsHolder.stop()
                 speaking = false
             } else {
                 val payload = textState.value
                 if (payload.isBlank()) return@IconButton
                 speaking = true
-                TtsHolder.speak(context, payload) {
-                    speaking = false
+                if (selectedTtsEngine(context) == com.clauderemote.model.TtsEngine.SERVER) {
+                    val cfg = ttsServerConfig(context)
+                    if (cfg.url.isBlank()) {
+                        Toast.makeText(context, "Není nastavená adresa serveru (Nastavení → Voice).", Toast.LENGTH_LONG).show()
+                        speaking = false
+                    } else {
+                        ServerTts.speak(context, cfg.url, cfg.model, cfg.voice, cfg.apiKey, payload) {
+                            speaking = false
+                        }
+                    }
+                } else {
+                    TtsHolder.speak(context, payload) {
+                        speaking = false
+                    }
                 }
             }
         },

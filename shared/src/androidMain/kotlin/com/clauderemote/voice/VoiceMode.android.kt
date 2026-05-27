@@ -316,6 +316,7 @@ private class DialogueController(
         sessionGen.incrementAndGet()
         mainHandler.removeCallbacksAndMessages(null)
         TtsHolder.stop()
+        ServerTts.stop()
         recognizer?.let {
             runCatching { it.cancel() }
             runCatching { it.destroy() }
@@ -342,12 +343,22 @@ private class DialogueController(
         serverDictation?.stop()
         serverDictation = null
         onStateChange(VoiceState.Speaking)
-        TtsHolder.speak(context, text) {
+        val onSpoken = {
             paused = false
             if (!stopped) {
                 onStateChange(VoiceState.Listening)
                 beginListening()
+            } else Unit
+        }
+        if (selectedTtsEngine(context) == com.clauderemote.model.TtsEngine.SERVER) {
+            val cfg = ttsServerConfig(context)
+            if (cfg.url.isNotBlank()) {
+                ServerTts.speak(context, cfg.url, cfg.model, cfg.voice, cfg.apiKey, text, onSpoken)
+            } else {
+                TtsHolder.speak(context, text, onSpoken)
             }
+        } else {
+            TtsHolder.speak(context, text, onSpoken)
         }
     }
 
