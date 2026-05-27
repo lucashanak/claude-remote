@@ -71,6 +71,14 @@ internal class WhisperDictation(
 
     @SuppressLint("MissingPermission")
     private fun runLoop() {
+        // sherpa-onnx's Kotlin classes do NOT auto-load their native library
+        // (no System.loadLibrary in any class), so we must load it ourselves
+        // before touching OfflineRecognizer/Vad — otherwise the first native
+        // call throws UnsatisfiedLinkError and dictation silently does nothing.
+        runCatching { SherpaNative.ensureLoaded() }.getOrElse {
+            postOnMain { onError("Nepodařilo se načíst Whisper knihovnu: ${it.message ?: "neznámá chyba"}") }
+            return
+        }
         val recognizer = runCatching { buildRecognizer() }.getOrElse {
             postOnMain { onError("Whisper init selhal: ${it.message ?: "neznámá chyba"}") }
             return
@@ -193,5 +201,26 @@ internal class WhisperDictation(
         private const val SAMPLE_RATE = 16000
         // Silero VAD operates on 512-sample windows at 16 kHz (32 ms).
         private const val WINDOW_SIZE = 512
+    }
+}
+
+/**
+ * Loads the sherpa-onnx native libraries exactly once. The AAR bundles the
+ * .so files but no Kotlin class calls System.loadLibrary, so the host app
+ * is responsible for loading before any sherpa-onnx API use.
+ */
+internal object SherpaNative {
+    @Volatile private var loaded = false
+
+    fun ensureLoaded() {
+        if (loaded) return
+        synchronized(this) {
+            if (loaded) return
+            // onnxruntime is a DT_NEEDED dep of the jni lib; load it first to
+            // be safe across loaders, ignoring failure if it's auto-resolved.
+            runCatching { System.loadLibrary("onnxruntime") }
+            System.loadLibrary("sherpa-onnx-jni")
+            loaded = true
+        }
     }
 }
