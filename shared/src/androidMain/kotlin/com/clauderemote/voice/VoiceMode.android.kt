@@ -283,10 +283,13 @@ private class DialogueController(
     private val mainHandler = Handler(Looper.getMainLooper())
     private var recognizer: SpeechRecognizer? = null
     private var voskDictation: VoskDictation? = null
+    private var whisperDictation: WhisperDictation? = null
+    private val engine = selectedSttEngine(context)
+    private val useWhisper = engine == com.clauderemote.model.SttEngine.WHISPER
     // Once we know Czech isn't available via SpeechRecognizer we pin
     // listening to Vosk for the lifetime of this controller so the user
     // doesn't see a probe-and-fail dance on every turn.
-    @Volatile private var useVosk = false
+    @Volatile private var useVosk = engine == com.clauderemote.model.SttEngine.VOSK
     private val sessionGen = AtomicInteger(0)
     @Volatile private var stopped = false
     @Volatile private var paused = false  // true while TTS is speaking
@@ -294,13 +297,15 @@ private class DialogueController(
     fun start() {
         stopped = false
         paused = false
-        // Skip SR entirely when it's not available at all but the Vosk
-        // model is — no point burning a no-op error round-trip.
-        if (!SpeechRecognizer.isRecognitionAvailable(context) &&
-            VoskModelManager.isModelReady(context)) {
-            useVosk = true
+        if (!useWhisper && !useVosk) {
+            // SYSTEM engine: skip SR entirely when it's not available at all
+            // but the Vosk model is — no point burning a no-op error round-trip.
+            if (!SpeechRecognizer.isRecognitionAvailable(context) &&
+                VoskModelManager.isModelReady(context)) {
+                useVosk = true
+            }
+            if (!useVosk) ensureRecognizer()
         }
-        if (!useVosk) ensureRecognizer()
         beginListening()
     }
 
@@ -316,6 +321,8 @@ private class DialogueController(
         recognizer = null
         voskDictation?.stop()
         voskDictation = null
+        whisperDictation?.stop()
+        whisperDictation = null
     }
 
     fun speak(text: String) {
@@ -326,6 +333,8 @@ private class DialogueController(
         recognizer?.let { runCatching { it.cancel() } }
         voskDictation?.stop()
         voskDictation = null
+        whisperDictation?.stop()
+        whisperDictation = null
         onStateChange(VoiceState.Speaking)
         TtsHolder.speak(context, text) {
             paused = false
@@ -358,6 +367,10 @@ private class DialogueController(
 
     private fun beginListening() {
         if (stopped || paused) return
+        if (useWhisper) {
+            beginWhisperListening()
+            return
+        }
         if (useVosk) {
             beginVoskListening()
             return
@@ -438,6 +451,36 @@ private class DialogueController(
             override fun onEvent(eventType: Int, params: Bundle?) {}
         })
         runCatching { rec.startListening(intent) }
+    }
+
+    private fun beginWhisperListening() {
+        if (whisperDictation != null) return
+        if (!WhisperModelManager.isModelReady(context)) {
+            onStateChange(
+                VoiceState.Error("Whisper model není stažený. Otevřete Nastavení → Voice.")
+            )
+            return
+        }
+        val mySession = sessionGen.incrementAndGet()
+        val dictation = WhisperDictation(
+            context = context,
+            continuous = true,
+            onFinal = { phrase ->
+                if (stopped || paused || sessionGen.get() != mySession) return@WhisperDictation
+                whisperDictation?.stop()
+                whisperDictation = null
+                if (phrase.isNotBlank()) onCommit(phrase) else beginListening()
+            },
+            onError = { msg ->
+                if (sessionGen.get() != mySession) return@WhisperDictation
+                whisperDictation?.stop()
+                whisperDictation = null
+                onStateChange(VoiceState.Error(msg))
+            },
+        )
+        whisperDictation = dictation
+        onStateChange(VoiceState.Listening)
+        dictation.start()
     }
 
     private fun beginVoskListening() {

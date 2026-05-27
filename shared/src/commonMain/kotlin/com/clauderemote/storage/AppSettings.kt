@@ -138,6 +138,15 @@ class AppSettings(private val prefs: PlatformPreferences) {
         get() = prefs.getBoolean("wake_word_enabled", false)
         set(value) = prefs.putBoolean("wake_word_enabled", value)
 
+    // Speech-to-text backend for dictation + voice mode.
+    var sttEngine: com.clauderemote.model.SttEngine
+        get() = runCatching {
+            com.clauderemote.model.SttEngine.valueOf(
+                prefs.getString("stt_engine", com.clauderemote.model.SttEngine.SYSTEM.name)
+            )
+        }.getOrDefault(com.clauderemote.model.SttEngine.SYSTEM)
+        set(value) = prefs.putString("stt_engine", value.name)
+
     fun loadAppearance(): AppearanceState = AppearanceState(
         variant = crVariant,
         density = crDensity,

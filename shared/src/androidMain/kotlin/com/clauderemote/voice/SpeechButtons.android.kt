@@ -8,6 +8,7 @@ import android.content.pm.PackageManager
 import android.os.Bundle
 import android.widget.Toast
 import android.speech.RecognitionListener
+import com.clauderemote.model.SttEngine
 import android.speech.RecognizerIntent
 import android.speech.SpeechRecognizer
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -56,10 +57,12 @@ actual fun MicButton(
     val context = LocalContext.current
     val srAvailable = SpeechRecognizer.isRecognitionAvailable(context)
     val voskReady = VoskModelManager.isModelReady(context)
-    // Render nothing only when neither path is usable — otherwise show the
+    val whisperReady = WhisperModelManager.isModelReady(context)
+    val engine = remember { selectedSttEngine(context) }
+    // Render nothing only when no backend is usable — otherwise show the
     // button so the user can tap and see a concrete error (model missing,
     // permission denied, etc.) instead of being unable to interact at all.
-    if (!srAvailable && !voskReady) return
+    if (!srAvailable && !voskReady && !whisperReady) return
 
     val onTextChangeState = rememberUpdatedState(onTextChange)
     val currentTextState = rememberUpdatedState(currentText)
@@ -67,10 +70,10 @@ actual fun MicButton(
     var pendingStart by remember { mutableStateOf(false) }
     var recognizer by remember { mutableStateOf<SpeechRecognizer?>(null) }
     var voskDictation by remember { mutableStateOf<VoskDictation?>(null) }
-    // Once the SR backend returns LANGUAGE_NOT_SUPPORTED we remember the
-    // verdict for the lifetime of this composable and route subsequent
-    // dictations straight through Vosk.
-    var useVosk by remember { mutableStateOf(!srAvailable && voskReady) }
+    var whisperDictation by remember { mutableStateOf<WhisperDictation?>(null) }
+    // SYSTEM may auto-fall-back to Vosk if the device can't do Czech; we
+    // remember that verdict for the rest of the composable's lifetime.
+    var useVosk by remember { mutableStateOf(engine == SttEngine.SYSTEM && !srAvailable && voskReady) }
     val sessionId = remember { AtomicInteger(0) }
 
     DisposableEffect(Unit) {
@@ -82,7 +85,40 @@ actual fun MicButton(
             recognizer = null
             voskDictation?.stop()
             voskDictation = null
+            whisperDictation?.stop()
+            whisperDictation = null
         }
+    }
+
+    fun startWhisper() {
+        if (!WhisperModelManager.isModelReady(context)) {
+            Toast.makeText(
+                context,
+                "Whisper model není stažený. Otevřete Nastavení → Voice a stáhněte ho.",
+                Toast.LENGTH_LONG,
+            ).show()
+            return
+        }
+        val sessionBase = currentTextState.value
+        val dictation = WhisperDictation(
+            context = context.applicationContext,
+            continuous = false,
+            onFinal = { phrase ->
+                onTextChangeState.value(appendDictated(sessionBase, phrase))
+                whisperDictation?.stop()
+                whisperDictation = null
+                listening = false
+            },
+            onError = { msg ->
+                Toast.makeText(context, msg, Toast.LENGTH_LONG).show()
+                whisperDictation?.stop()
+                whisperDictation = null
+                listening = false
+            },
+        )
+        whisperDictation = dictation
+        dictation.start()
+        listening = true
     }
 
     fun startVosk() {
@@ -212,7 +248,11 @@ actual fun MicButton(
     }
 
     fun startListening() {
-        if (useVosk) startVosk() else startSr()
+        when (engine) {
+            SttEngine.WHISPER -> startWhisper()
+            SttEngine.VOSK -> startVosk()
+            SttEngine.SYSTEM -> if (useVosk) startVosk() else startSr()
+        }
     }
 
     val permissionLauncher = rememberLauncherForActivityResult(
@@ -226,12 +266,11 @@ actual fun MicButton(
         onClick = {
             if (pendingStart) return@IconButton
             if (listening) {
-                if (useVosk) {
-                    voskDictation?.stop()
-                    voskDictation = null
-                } else {
-                    recognizer?.stopListening()
-                }
+                whisperDictation?.stop()
+                whisperDictation = null
+                voskDictation?.stop()
+                voskDictation = null
+                recognizer?.stopListening()
                 listening = false
                 return@IconButton
             }
