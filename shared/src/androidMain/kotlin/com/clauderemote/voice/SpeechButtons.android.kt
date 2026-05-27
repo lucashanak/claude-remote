@@ -8,6 +8,7 @@ import android.content.pm.PackageManager
 import android.os.Bundle
 import android.widget.Toast
 import android.speech.RecognitionListener
+import androidx.activity.result.contract.ActivityResultContracts.StartActivityForResult
 import com.clauderemote.model.SttEngine
 import android.speech.RecognizerIntent
 import android.speech.SpeechRecognizer
@@ -90,6 +91,34 @@ actual fun MicButton(
         }
     }
 
+    // The system voice dialog (RecognizerIntent activity). This is the
+    // reliable way to reach Google's Czech recognition on devices where the
+    // bound SpeechRecognizer service reports the language unsupported but
+    // Gboard voice typing works — it routes through the same Google voice
+    // backend. One-shot, shows a system overlay, returns recognised text.
+    val googleDialogLauncher = rememberLauncherForActivityResult(
+        StartActivityForResult()
+    ) { result ->
+        listening = false
+        val text = result.data
+            ?.getStringArrayListExtra(RecognizerIntent.EXTRA_RESULTS)
+            ?.firstOrNull()
+            .orEmpty()
+        if (text.isNotBlank()) {
+            onTextChangeState.value(appendDictated(currentTextState.value, text))
+        }
+    }
+
+    fun launchGoogleDialog(): Boolean {
+        val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
+            putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+            putExtra(RecognizerIntent.EXTRA_LANGUAGE, CZECH_LOCALE_TAG)
+            putExtra(RecognizerIntent.EXTRA_LANGUAGE_PREFERENCE, CZECH_LOCALE_TAG)
+            putExtra(RecognizerIntent.EXTRA_PROMPT, "Mluvte česky…")
+        }
+        return runCatching { googleDialogLauncher.launch(intent); true }.getOrDefault(false)
+    }
+
     fun startWhisper() {
         if (!WhisperModelManager.isModelReady(context)) {
             Toast.makeText(
@@ -157,6 +186,11 @@ actual fun MicButton(
     fun startSr() {
         val rec = recognizer ?: createCzechRecognizerSmart(context).also { recognizer = it }
         if (rec == null) {
+            // No bound recognizer — try the Google voice dialog, then Vosk.
+            if (launchGoogleDialog()) {
+                listening = true
+                return
+            }
             if (voskReady) {
                 useVosk = true
                 startVosk()
@@ -193,11 +227,15 @@ actual fun MicButton(
                 // same session so the user doesn't need to retap.
                 if (error == SpeechRecognizer.ERROR_LANGUAGE_NOT_SUPPORTED ||
                     error == SpeechRecognizer.ERROR_LANGUAGE_UNAVAILABLE) {
-                    useVosk = true
                     runCatching { rec.cancel() }
                     runCatching { rec.destroy() }
                     recognizer = null
+                    // Bound service has no Czech — try the Google voice
+                    // dialog (works wherever Gboard voice does). Only if no
+                    // voice activity exists do we fall back to offline Vosk.
+                    if (launchGoogleDialog()) return
                     if (VoskModelManager.isModelReady(context)) {
+                        useVosk = true
                         startVosk()
                     } else {
                         listening = false
