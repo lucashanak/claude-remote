@@ -32,6 +32,10 @@ internal object ServerTts {
 
     @Volatile private var player: MediaPlayer? = null
     private val currentCompletion = AtomicReference<(() -> Unit)?>(null)
+    // Monotonic token: each speak() bumps it. An async fetch that resolves
+    // after a newer speak()/stop() has advanced the token must NOT spin up
+    // a MediaPlayer — otherwise two players overlap and the first leaks.
+    private val generation = java.util.concurrent.atomic.AtomicInteger(0)
 
     fun speak(
         context: Context,
@@ -44,10 +48,12 @@ internal object ServerTts {
     ) {
         // Replace any in-flight playback + its completion.
         stop()
+        val gen = generation.incrementAndGet()
         currentCompletion.set(onFinish)
         val appContext = context.applicationContext
         scope.launch {
             val bytes = runCatching { fetch(baseUrl, model, voice, apiKey, text) }.getOrNull()
+            if (gen != generation.get()) return@launch  // superseded
             if (bytes == null || bytes.isEmpty()) {
                 fireCompletion()
                 return@launch
@@ -60,7 +66,13 @@ internal object ServerTts {
                 return@launch
             }
             postOnMain {
+                if (gen != generation.get()) {
+                    runCatching { file.delete() }
+                    return@postOnMain
+                }
                 runCatching {
+                    // Release any lingering player before swapping in the new one.
+                    player?.let { runCatching { it.release() } }
                     val mp = MediaPlayer()
                     player = mp
                     mp.setDataSource(file.absolutePath)
@@ -84,6 +96,7 @@ internal object ServerTts {
     }
 
     fun stop() {
+        generation.incrementAndGet() // supersede any in-flight fetch
         player?.let {
             runCatching { it.stop() }
             runCatching { it.release() }
@@ -167,7 +180,8 @@ internal object ServerCatalog {
 
     fun isTts(m: ModelInfo): Boolean {
         val t = m.task.lowercase(); val id = m.id.lowercase()
-        return t.contains("text-to-speech") || t.contains("speech") && !isStt(m) ||
+        return t.contains("text-to-speech") ||
+            (t.contains("speech") && !t.contains("recognition") && !isStt(m)) ||
             id.contains("piper") || id.contains("kokoro") || id.contains("tts")
     }
 }

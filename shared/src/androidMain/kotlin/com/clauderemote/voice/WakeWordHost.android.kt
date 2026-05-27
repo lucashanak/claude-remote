@@ -214,7 +214,10 @@ actual fun WakeWordSettingsCard(settings: AppSettings) {
                 )
                 androidx.compose.material3.OutlinedTextField(
                     value = serverUrl,
-                    onValueChange = { serverUrl = it; settings.sttServerUrl = it },
+                    onValueChange = {
+                        serverUrl = it; settings.sttServerUrl = it
+                        catalog = emptyList() // invalidate model list for the old URL
+                    },
                     label = { Text("URL serveru (http://…:8000)") },
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth(),
