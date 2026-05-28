@@ -142,9 +142,9 @@ class AppSettings(private val prefs: PlatformPreferences) {
     var sttEngine: com.clauderemote.model.SttEngine
         get() = runCatching {
             com.clauderemote.model.SttEngine.valueOf(
-                prefs.getString("stt_engine", com.clauderemote.model.SttEngine.SYSTEM.name)
+                prefs.getString("stt_engine", com.clauderemote.model.SttEngine.SERVER.name)
             )
-        }.getOrDefault(com.clauderemote.model.SttEngine.SYSTEM)
+        }.getOrDefault(com.clauderemote.model.SttEngine.SERVER)
         set(value) = prefs.putString("stt_engine", value.name)
 
     // Self-hosted OpenAI-compatible STT server (faster-whisper / Speaches).
@@ -165,9 +165,9 @@ class AppSettings(private val prefs: PlatformPreferences) {
     var ttsEngine: com.clauderemote.model.TtsEngine
         get() = runCatching {
             com.clauderemote.model.TtsEngine.valueOf(
-                prefs.getString("tts_engine", com.clauderemote.model.TtsEngine.SYSTEM.name)
+                prefs.getString("tts_engine", com.clauderemote.model.TtsEngine.SERVER.name)
             )
-        }.getOrDefault(com.clauderemote.model.TtsEngine.SYSTEM)
+        }.getOrDefault(com.clauderemote.model.TtsEngine.SERVER)
         set(value) = prefs.putString("tts_engine", value.name)
 
     var ttsServerModel: String
