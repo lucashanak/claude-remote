@@ -11,6 +11,17 @@ import com.clauderemote.model.TtsEngine
  * AppSettings handle) can route to the right backend without extra
  * Compose plumbing.
  */
+/**
+ * Strip a trailing `/v1` (and any trailing slashes) from a server base URL.
+ * The app always appends `/v1/audio/...` itself, so a user-pasted URL that
+ * already includes `/v1` (a common OpenAI-style copy-paste) would otherwise
+ * produce a doubled segment and 404.
+ */
+internal fun normalizeApiBase(url: String): String {
+    val trimmed = url.trim().trimEnd('/')
+    return if (trimmed.endsWith("/v1")) trimmed.removeSuffix("/v1") else trimmed
+}
+
 internal fun selectedSttEngine(context: Context): SttEngine {
     val name = context
         .getSharedPreferences("claude_remote", Context.MODE_PRIVATE)

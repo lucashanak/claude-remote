@@ -123,7 +123,7 @@ internal object ServerTts {
             .put("response_format", "mp3")
             .toString()
         val req = Request.Builder()
-            .url(baseUrl.trimEnd('/') + "/v1/audio/speech")
+            .url(normalizeApiBase(baseUrl) + "/v1/audio/speech")
             .post(json.toRequestBody("application/json".toMediaType()))
             .apply { if (apiKey.isNotBlank()) header("Authorization", "Bearer $apiKey") }
             .build()
@@ -152,7 +152,7 @@ internal object ServerCatalog {
             if (baseUrl.isBlank()) return@withContext emptyList()
             runCatching {
                 val req = Request.Builder()
-                    .url(baseUrl.trimEnd('/') + "/v1/models")
+                    .url(normalizeApiBase(baseUrl) + "/v1/models")
                     .get()
                     .apply { if (apiKey.isNotBlank()) header("Authorization", "Bearer $apiKey") }
                     .build()
