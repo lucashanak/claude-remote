@@ -171,6 +171,68 @@ internal object ServerCatalog {
             }.getOrDefault(emptyList())
         }
 
+    /**
+     * Fetch the list of TTS voices from the server. Open WebUI exposes
+     * `/v1/audio/voices`; some servers use `/v1/audio/speech/voices`. We
+     * try both. The response shape varies — JSON array of strings,
+     * array of {name|id|voice} objects, or {voices:[...]}/{data:[...]}.
+     */
+    suspend fun fetchVoices(baseUrl: String, apiKey: String): List<String> =
+        withContext(Dispatchers.IO) {
+            if (baseUrl.isBlank()) return@withContext emptyList()
+            val base = normalizeApiBase(baseUrl)
+            for (path in listOf("/v1/audio/voices", "/v1/audio/speech/voices")) {
+                val result = runCatching { fetchVoicesAt(base + path, apiKey) }.getOrDefault(emptyList())
+                if (result.isNotEmpty()) return@withContext result
+            }
+            emptyList()
+        }
+
+    private fun fetchVoicesAt(url: String, apiKey: String): List<String> {
+        val req = Request.Builder().url(url).get().apply {
+            if (apiKey.isNotBlank()) header("Authorization", "Bearer $apiKey")
+        }.build()
+        http.newCall(req).execute().use { resp ->
+            if (!resp.isSuccessful) return emptyList()
+            val payload = resp.body?.string().orEmpty()
+            // Try array-of-string / array-of-object first.
+            return runCatching {
+                val arr = org.json.JSONArray(payload)
+                buildList {
+                    for (i in 0 until arr.length()) {
+                        val v = arr.opt(i)
+                        when (v) {
+                            is String -> if (v.isNotBlank()) add(v)
+                            is JSONObject -> {
+                                val name = listOf("name", "id", "voice", "voice_id")
+                                    .firstNotNullOfOrNull { k -> v.optString(k).takeIf { it.isNotBlank() } }
+                                if (name != null) add(name)
+                            }
+                        }
+                    }
+                }
+            }.getOrElse {
+                runCatching {
+                    val obj = JSONObject(payload)
+                    val arr = obj.optJSONArray("voices") ?: obj.optJSONArray("data") ?: return@getOrElse emptyList()
+                    buildList {
+                        for (i in 0 until arr.length()) {
+                            val v = arr.opt(i)
+                            when (v) {
+                                is String -> if (v.isNotBlank()) add(v)
+                                is JSONObject -> {
+                                    val name = listOf("name", "id", "voice", "voice_id")
+                                        .firstNotNullOfOrNull { k -> v.optString(k).takeIf { it.isNotBlank() } }
+                                    if (name != null) add(name)
+                                }
+                            }
+                        }
+                    }
+                }.getOrDefault(emptyList())
+            }
+        }
+    }
+
     /** Heuristic split when the API doesn't tag tasks. */
     fun isStt(m: ModelInfo): Boolean {
         val t = m.task.lowercase(); val id = m.id.lowercase()
