@@ -233,7 +233,33 @@ class SshManager(
         } finally { ch.disconnect() }
     }
 
-fun getSession(): Session? = session
+    fun getSession(): Session? = session
+
+    /**
+     * Open a minimal SSH session for exec-only use (no shell channel, no
+     * read loop). Used by [SessionOrchestrator.forgetSession] to kill tmux
+     * and push sessions.json even when the normal shell connection is absent.
+     * Caller must call [disconnect] when done.
+     */
+    suspend fun connectForCleanup(server: SshServer) = withContext(Dispatchers.IO) {
+        disconnected = false
+        val jsch = JSch()
+        if (server.authMethod == AuthMethod.KEY && server.privateKey != null) {
+            jsch.addIdentity("key", server.privateKey.toByteArray(), null, null)
+        }
+        val sess = jsch.getSession(server.username, server.host, server.port)
+        if (server.authMethod == AuthMethod.PASSWORD && server.password != null) {
+            sess.setPassword(server.password)
+        }
+        sess.setConfig("StrictHostKeyChecking", "no")
+        sess.userInfo = TofuUserInfo(server.host, serverStorage)
+        sess.timeout = 10_000
+        if (server.useCloudflareProxy) {
+            sess.setProxy(CloudflareProxy(server.host, server.cloudflareToken))
+        }
+        sess.connect(10_000)
+        session = sess
+    }
 
     companion object {
         private const val TAG = "SshManager"
