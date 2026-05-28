@@ -950,6 +950,12 @@ else:
             if (!reconnectingSessionIds.add(session.id)) return // already reconnecting
         }
         try {
+            // Invalidate the confirmed UUID before the first reconnect attempt so
+            // the transcript kick-probe fires after we come back up. If claude
+            // restarted (new pid, new session UUID) during the outage, the probe
+            // will adopt the new UUID; without this the stale UUID stays "confirmed"
+            // and the transcript stream tails a file that no longer exists.
+            confirmedUuids.remove(session.id)
             for (attempt in 1..maxAttempts) {
                 emit("\r\n\u001B[33mConnection lost. Reconnecting ($attempt/$maxAttempts)...\u001B[0m\r\n")
                 FileLogger.log(TAG, "Auto-reconnect attempt $attempt/$maxAttempts for ${session.id}")
@@ -1257,6 +1263,13 @@ else:
         val session = tabManager.getTab(sessionId) ?: return
         FileLogger.log(TAG, "Reconnecting session $sessionId to ${session.server.name}")
 
+        // Invalidate the confirmed UUID so the next transcriptFlow() call fires
+        // a fresh kick-probe. If claude restarted with a new session UUID during
+        // the outage (e.g. user ran /clear or /resume), the probe will adopt the
+        // new UUID. Without this, confirmedUuids retains the stale UUID forever
+        // and the transcript stream keeps tailing a non-existent .jsonl file.
+        confirmedUuids.remove(sessionId)
+
         // Clean up old connection
         connections[sessionId]?.disconnect()
         connections.remove(sessionId)
@@ -1288,19 +1301,45 @@ else:
             sessionStorage?.remove(sessionId)
             if (session != null) {
                 val conn = connections[sessionId]
-                if (conn != null && conn.isConnected) {
+                val liveConn: SshManager? = if (conn != null && conn.isConnected) conn else null
+
+                // If there is no live connection, open a short-lived one just
+                // for cleanup — so tmux panes are always killed and sessions.json
+                // is always re-synced even when the user closes a tab while SSH
+                // is disconnected. Without this the tmux pane stays alive on the
+                // server and the systemd restore service would re-materialise the
+                // "closed" session on next reboot.
+                val cleanupConn: SshManager? = liveConn ?: run {
                     try {
-                        com.clauderemote.connection.TmuxManager.killSession(
-                            conn.getSession() ?: error("no ssh"),
-                            session.tmuxSessionName
-                        )
+                        val tmp = SshManager(serverStorage)
+                        tmp.connectForCleanup(session.server)
+                        tmp
                     } catch (e: Exception) {
-                        FileLogger.error(TAG, "Tmux kill failed for $sessionId: ${e.message}", e)
+                        FileLogger.log(TAG, "Cleanup SSH connect failed for $sessionId (${e.message}) — server-side cleanup skipped")
+                        null
                     }
-                    try {
-                        pushSessionsToServer(conn, session.server.id)
-                    } catch (e: Exception) {
-                        FileLogger.error(TAG, "sessions.json push failed for ${session.server.id}: ${e.message}", e)
+                }
+                val ownedCleanup = cleanupConn != null && cleanupConn !== liveConn
+
+                try {
+                    if (cleanupConn != null) {
+                        try {
+                            com.clauderemote.connection.TmuxManager.killSession(
+                                cleanupConn.getSession() ?: error("no ssh"),
+                                session.tmuxSessionName
+                            )
+                        } catch (e: Exception) {
+                            FileLogger.error(TAG, "Tmux kill failed for $sessionId: ${e.message}", e)
+                        }
+                        try {
+                            pushSessionsToServer(cleanupConn, session.server.id)
+                        } catch (e: Exception) {
+                            FileLogger.error(TAG, "sessions.json push failed for ${session.server.id}: ${e.message}", e)
+                        }
+                    }
+                } finally {
+                    if (ownedCleanup) {
+                        try { cleanupConn!!.disconnect() } catch (_: Exception) {}
                     }
                 }
             }
