@@ -166,7 +166,7 @@ internal class ServerDictation(
             .addFormDataPart("language", "cs")
             .addFormDataPart("response_format", "json")
             .build()
-        val url = baseUrl.trimEnd('/') + "/v1/audio/transcriptions"
+        val url = normalizeApiBase(baseUrl) + "/v1/audio/transcriptions"
         val req = Request.Builder().url(url).post(body).apply {
             if (apiKey.isNotBlank()) header("Authorization", "Bearer $apiKey")
         }.build()
