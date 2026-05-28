@@ -149,26 +149,25 @@ internal object ServerCatalog {
 
     suspend fun fetchModels(baseUrl: String, apiKey: String): List<ModelInfo> =
         withContext(Dispatchers.IO) {
-            if (baseUrl.isBlank()) return@withContext emptyList()
-            runCatching {
-                val req = Request.Builder()
-                    .url(normalizeApiBase(baseUrl) + "/v1/models")
-                    .get()
-                    .apply { if (apiKey.isNotBlank()) header("Authorization", "Bearer $apiKey") }
-                    .build()
-                http.newCall(req).execute().use { resp ->
-                    if (!resp.isSuccessful) return@withContext emptyList()
-                    val payload = resp.body?.string().orEmpty()
-                    val arr = JSONObject(payload).optJSONArray("data") ?: return@withContext emptyList()
-                    buildList {
-                        for (i in 0 until arr.length()) {
-                            val o = arr.optJSONObject(i) ?: continue
-                            val id = o.optString("id")
-                            if (id.isNotBlank()) add(ModelInfo(id, o.optString("task")))
-                        }
+            if (baseUrl.isBlank()) throw IllegalArgumentException("URL serveru je prázdné")
+            val req = Request.Builder()
+                .url(normalizeApiBase(baseUrl) + "/v1/models")
+                .get()
+                .apply { if (apiKey.isNotBlank()) header("Authorization", "Bearer $apiKey") }
+                .build()
+            http.newCall(req).execute().use { resp ->
+                if (!resp.isSuccessful) throw RuntimeException("HTTP ${resp.code} z /v1/models")
+                val payload = resp.body?.string().orEmpty()
+                val arr = JSONObject(payload).optJSONArray("data")
+                    ?: throw RuntimeException("Neočekávaný tvar JSONu (chybí pole 'data')")
+                buildList {
+                    for (i in 0 until arr.length()) {
+                        val o = arr.optJSONObject(i) ?: continue
+                        val id = o.optString("id")
+                        if (id.isNotBlank()) add(ModelInfo(id, o.optString("task")))
                     }
                 }
-            }.getOrDefault(emptyList())
+            }
         }
 
     /**
@@ -179,12 +178,18 @@ internal object ServerCatalog {
      */
     suspend fun fetchVoices(baseUrl: String, apiKey: String): List<String> =
         withContext(Dispatchers.IO) {
-            if (baseUrl.isBlank()) return@withContext emptyList()
+            if (baseUrl.isBlank()) throw IllegalArgumentException("URL serveru je prázdné")
             val base = normalizeApiBase(baseUrl)
+            var lastError: Throwable? = null
             for (path in listOf("/v1/audio/voices", "/v1/audio/speech/voices")) {
-                val result = runCatching { fetchVoicesAt(base + path, apiKey) }.getOrDefault(emptyList())
-                if (result.isNotEmpty()) return@withContext result
+                try {
+                    val result = fetchVoicesAt(base + path, apiKey)
+                    if (result.isNotEmpty()) return@withContext result
+                } catch (e: Throwable) {
+                    lastError = e
+                }
             }
+            if (lastError != null) throw lastError!!
             emptyList()
         }
 
@@ -193,7 +198,7 @@ internal object ServerCatalog {
             if (apiKey.isNotBlank()) header("Authorization", "Bearer $apiKey")
         }.build()
         http.newCall(req).execute().use { resp ->
-            if (!resp.isSuccessful) return emptyList()
+            if (!resp.isSuccessful) throw RuntimeException("HTTP ${resp.code} z $url")
             val payload = resp.body?.string().orEmpty()
             // Try array-of-string / array-of-object first.
             return runCatching {

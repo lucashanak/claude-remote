@@ -31,6 +31,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
+import android.widget.Toast
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
@@ -142,117 +143,68 @@ actual fun WakeWordSettingsCard(settings: AppSettings) {
             .padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
-        // ── Engine picker ───────────────────────────────────────────────
-        Text("Rozpoznávání řeči (STT)", style = CRType.cardTitle, color = c.text)
-        val engines = SttEngine.entries
-        com.clauderemote.ui.components.Segmented(
-            options = engines.indices.toList(),
-            selected = engines.indexOf(engine),
-            onSelect = { idx ->
-                engine = engines[idx]
-                settings.sttEngine = engine
-            },
-            label = { engines[it].displayName },
-        )
-        when (engine) {
-            SttEngine.SYSTEM -> Text(
-                "Systémové rozpoznávání (Google). Nejlepší kvalita; vyžaduje podporu " +
-                    "češtiny v zařízení. Když chybí, přepne se na Vosk.",
-                style = CRType.bodyDim, color = c.textDim,
-            )
-            SttEngine.VOSK -> {
-                Text(
-                    "Offline, rychlé, nižší kvalita (~50 MB model).",
-                    style = CRType.bodyDim, color = c.textDim,
-                )
-                if (!modelReady && status != WakeWordController.Status.Downloading) {
-                    Button(
-                        onClick = {
-                            scope.launch { modelReady = WakeWordController.downloadModel(context) }
-                        },
-                        colors = ButtonDefaults.buttonColors(
-                            containerColor = c.accent, contentColor = c.accentInk,
-                        ),
-                    ) { Text("Stáhnout český Vosk model") }
-                }
-            }
-            SttEngine.WHISPER -> {
-                Text(
-                    "Offline, výrazně lepší kvalita, ~375 MB. Pomalejší (text se " +
-                        "objeví po dořeknutí věty).",
-                    style = CRType.bodyDim, color = c.textDim,
-                )
-                when {
-                    whisperDownloading -> {
-                        Text("Stahuji Whisper: ${(whisperProgress * 100).toInt()} %",
-                            style = CRType.bodyDim, color = c.textDim)
-                        LinearProgressIndicator(
-                            progress = { whisperProgress.coerceIn(0f, 1f) },
-                            modifier = Modifier.fillMaxWidth(),
-                            color = c.accent, trackColor = c.surface2,
-                        )
-                    }
-                    !whisperReady -> Button(
-                        onClick = {
-                            whisperDownloading = true
-                            scope.launch {
-                                val ok = WhisperModelManager.download(context) { whisperProgress = it }
-                                whisperReady = ok
-                                whisperDownloading = false
-                            }
-                        },
-                        colors = ButtonDefaults.buttonColors(
-                            containerColor = c.accent, contentColor = c.accentInk,
-                        ),
-                    ) { Text("Stáhnout Whisper model (~375 MB)") }
-                    else -> Text("Whisper model připraven.", style = CRType.bodyDim, color = c.textDim)
-                }
-            }
-            SttEngine.SERVER -> {
-                Text(
-                    "Vlastní faster-whisper / Speaches server (OpenAI API). Nejlepší " +
-                        "kvalita i rychlost; vyžaduje běžící server dostupný z telefonu.",
-                    style = CRType.bodyDim, color = c.textDim,
-                )
-                androidx.compose.material3.OutlinedTextField(
-                    value = serverUrl,
-                    onValueChange = {
-                        serverUrl = it; settings.sttServerUrl = it
-                        catalog = emptyList() // invalidate cached lists from old URL
-                        voicesCatalog = emptyList()
-                    },
-                    label = { Text("URL serveru (http://…:8000)") },
-                    singleLine = true,
-                    modifier = Modifier.fillMaxWidth(),
-                )
-                androidx.compose.material3.OutlinedTextField(
-                    value = serverModel,
-                    onValueChange = { serverModel = it; settings.sttServerModel = it },
-                    label = { Text("Model") },
-                    singleLine = true,
-                    modifier = Modifier.fillMaxWidth(),
-                )
+        // Pin the engine to Server — System/Vosk/Whisper paths exist in code
+        // but the user opted to use the self-hosted server exclusively.
+        LaunchedEffect(Unit) {
+            if (engine != SttEngine.SERVER) {
+                engine = SttEngine.SERVER
+                settings.sttEngine = SttEngine.SERVER
             }
         }
 
-        // Load model list from the server API (shown when any server engine
-        // is in play and a URL is set).
-        if ((engine == SttEngine.SERVER || ttsEngine == com.clauderemote.model.TtsEngine.SERVER) &&
-            serverUrl.isNotBlank()
-        ) {
+        Text("Rozpoznávání řeči — Server", style = CRType.cardTitle, color = c.text)
+        Text(
+            "OpenAI-kompatibilní endpoint (např. Open WebUI / Speaches / " +
+                "faster-whisper-server). Vyžaduje URL serveru.",
+            style = CRType.bodyDim, color = c.textDim,
+        )
+        androidx.compose.material3.OutlinedTextField(
+            value = serverUrl,
+            onValueChange = {
+                serverUrl = it; settings.sttServerUrl = it
+                catalog = emptyList()
+                voicesCatalog = emptyList()
+            },
+            label = { Text("URL serveru (https://…/api/v1)") },
+            singleLine = true,
+            modifier = Modifier.fillMaxWidth(),
+        )
+        androidx.compose.material3.OutlinedTextField(
+            value = serverModel,
+            onValueChange = { serverModel = it; settings.sttServerModel = it },
+            label = { Text("STT model") },
+            singleLine = true,
+            modifier = Modifier.fillMaxWidth(),
+        )
+
+        if (serverUrl.isNotBlank()) {
             Button(
                 onClick = {
                     loadingCatalog = true
                     scope.launch {
-                        catalog = ServerCatalog.fetchModels(serverUrl, settings.sttServerApiKey)
-                        loadingCatalog = false
+                        try {
+                            val result = ServerCatalog.fetchModels(serverUrl, settings.sttServerApiKey)
+                            catalog = result
+                            if (result.isEmpty()) {
+                                Toast.makeText(context, "Server vrátil prázdný seznam modelů.", Toast.LENGTH_LONG).show()
+                            }
+                        } catch (e: Throwable) {
+                            Toast.makeText(context, "Modely: ${e.message ?: "neznámá chyba"}", Toast.LENGTH_LONG).show()
+                        } finally {
+                            loadingCatalog = false
+                        }
                     }
                 },
                 enabled = !loadingCatalog,
                 colors = ButtonDefaults.buttonColors(containerColor = c.accent, contentColor = c.accentInk),
-            ) { Text(if (loadingCatalog) "Načítám…" else "Načíst modely ze serveru") }
-
-            if (engine == SttEngine.SERVER && catalog.isNotEmpty()) {
+            ) {
+                Text(
+                    if (loadingCatalog) "Načítám…"
+                    else if (catalog.isEmpty()) "Načíst modely ze serveru"
+                    else "Obnovit modely (${catalog.size})"
+                )
+            }
+            if (catalog.isNotEmpty()) {
                 ModelDropdown(
                     label = "STT model",
                     options = catalog.filter { ServerCatalog.isStt(it) }.map { it.id },
@@ -264,77 +216,76 @@ actual fun WakeWordSettingsCard(settings: AppSettings) {
 
         androidx.compose.material3.HorizontalDivider(color = c.border)
 
-        // ── Předčítání (TTS) ─────────────────────────────────────────────
-        Text("Předčítání (TTS)", style = CRType.cardTitle, color = c.text)
-        val ttsEngines = com.clauderemote.model.TtsEngine.entries
-        com.clauderemote.ui.components.Segmented(
-            options = ttsEngines.indices.toList(),
-            selected = ttsEngines.indexOf(ttsEngine),
-            onSelect = { idx -> ttsEngine = ttsEngines[idx]; settings.ttsEngine = ttsEngine },
-            label = { ttsEngines[it].displayName },
+        // ── Předčítání — Server ─────────────────────────────────────────
+        LaunchedEffect(Unit) {
+            if (ttsEngine != com.clauderemote.model.TtsEngine.SERVER) {
+                ttsEngine = com.clauderemote.model.TtsEngine.SERVER
+                settings.ttsEngine = com.clauderemote.model.TtsEngine.SERVER
+            }
+        }
+        Text("Předčítání — Server", style = CRType.cardTitle, color = c.text)
+        Text(
+            "Předčítání přes stejný server (např. Piper voice via /v1/audio/speech).",
+            style = CRType.bodyDim, color = c.textDim,
         )
-        when (ttsEngine) {
-            com.clauderemote.model.TtsEngine.SYSTEM -> Text(
-                "Předčítání systémovým hlasem zařízení.",
-                style = CRType.bodyDim, color = c.textDim,
+        if (catalog.isNotEmpty()) {
+            ModelDropdown(
+                label = "TTS model",
+                options = catalog.filter { ServerCatalog.isTts(it) }.map { it.id },
+                selected = ttsModel,
+                onSelect = { ttsModel = it; settings.ttsServerModel = it },
             )
-            com.clauderemote.model.TtsEngine.SERVER -> {
-                Text(
-                    "Předčítání přes server (Piper/Speaches). Používá stejnou adresu " +
-                        "jako STT server výše.",
-                    style = CRType.bodyDim, color = c.textDim,
-                )
-                if (catalog.isNotEmpty()) {
-                    ModelDropdown(
-                        label = "TTS model",
-                        options = catalog.filter { ServerCatalog.isTts(it) }.map { it.id },
-                        selected = ttsModel,
-                        onSelect = { ttsModel = it; settings.ttsServerModel = it },
-                    )
-                } else {
-                    androidx.compose.material3.OutlinedTextField(
-                        value = ttsModel,
-                        onValueChange = { ttsModel = it; settings.ttsServerModel = it },
-                        label = { Text("TTS model") },
-                        singleLine = true,
-                        modifier = Modifier.fillMaxWidth(),
-                    )
-                }
-                if (voicesCatalog.isNotEmpty()) {
-                    ModelDropdown(
-                        label = "Hlas (voice)",
-                        options = voicesCatalog,
-                        selected = ttsVoice,
-                        onSelect = { ttsVoice = it; settings.ttsServerVoice = it },
-                    )
-                } else {
-                    androidx.compose.material3.OutlinedTextField(
-                        value = ttsVoice,
-                        onValueChange = { ttsVoice = it; settings.ttsServerVoice = it },
-                        label = { Text("Hlas (voice)") },
-                        singleLine = true,
-                        modifier = Modifier.fillMaxWidth(),
-                    )
-                }
-                if (serverUrl.isNotBlank()) {
-                    Button(
-                        onClick = {
-                            loadingVoices = true
-                            scope.launch {
-                                voicesCatalog = ServerCatalog.fetchVoices(serverUrl, settings.sttServerApiKey)
-                                loadingVoices = false
+        } else {
+            androidx.compose.material3.OutlinedTextField(
+                value = ttsModel,
+                onValueChange = { ttsModel = it; settings.ttsServerModel = it },
+                label = { Text("TTS model (např. tts-1)") },
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth(),
+            )
+        }
+        if (voicesCatalog.isNotEmpty()) {
+            ModelDropdown(
+                label = "Hlas (voice)",
+                options = voicesCatalog,
+                selected = ttsVoice,
+                onSelect = { ttsVoice = it; settings.ttsServerVoice = it },
+            )
+        } else {
+            androidx.compose.material3.OutlinedTextField(
+                value = ttsVoice,
+                onValueChange = { ttsVoice = it; settings.ttsServerVoice = it },
+                label = { Text("Hlas (voice)") },
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth(),
+            )
+        }
+        if (serverUrl.isNotBlank()) {
+            Button(
+                onClick = {
+                    loadingVoices = true
+                    scope.launch {
+                        try {
+                            val result = ServerCatalog.fetchVoices(serverUrl, settings.sttServerApiKey)
+                            voicesCatalog = result
+                            if (result.isEmpty()) {
+                                Toast.makeText(context, "Server vrátil prázdný seznam hlasů.", Toast.LENGTH_LONG).show()
                             }
-                        },
-                        enabled = !loadingVoices,
-                        colors = ButtonDefaults.buttonColors(containerColor = c.accent, contentColor = c.accentInk),
-                    ) {
-                        Text(
-                            if (loadingVoices) "Načítám hlasy…"
-                            else if (voicesCatalog.isEmpty()) "Načíst hlasy ze serveru"
-                            else "Obnovit seznam hlasů (${voicesCatalog.size})"
-                        )
+                        } catch (e: Throwable) {
+                            Toast.makeText(context, "Hlasy: ${e.message ?: "neznámá chyba"}", Toast.LENGTH_LONG).show()
+                        } finally {
+                            loadingVoices = false
+                        }
                     }
-                }
+                },
+                enabled = !loadingVoices,
+                colors = ButtonDefaults.buttonColors(containerColor = c.accent, contentColor = c.accentInk),
+            ) {
+                Text(
+                    if (loadingVoices) "Načítám hlasy…"
+                    else if (voicesCatalog.isEmpty()) "Načíst hlasy ze serveru"
+                    else "Obnovit seznam hlasů (${voicesCatalog.size})"
+                )
             }
         }
 
