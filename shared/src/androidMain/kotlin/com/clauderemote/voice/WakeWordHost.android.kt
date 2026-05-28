@@ -89,6 +89,8 @@ actual fun WakeWordSettingsCard(settings: AppSettings) {
     var ttsVoice by remember { mutableStateOf(settings.ttsServerVoice) }
     var catalog by remember { mutableStateOf<List<ServerCatalog.ModelInfo>>(emptyList()) }
     var loadingCatalog by remember { mutableStateOf(false) }
+    var voicesCatalog by remember { mutableStateOf<List<String>>(emptyList()) }
+    var loadingVoices by remember { mutableStateOf(false) }
     var whisperReady by remember { mutableStateOf(WhisperModelManager.isModelReady(context)) }
     var whisperProgress by remember { mutableStateOf(0f) }
     var whisperDownloading by remember { mutableStateOf(false) }
@@ -216,7 +218,8 @@ actual fun WakeWordSettingsCard(settings: AppSettings) {
                     value = serverUrl,
                     onValueChange = {
                         serverUrl = it; settings.sttServerUrl = it
-                        catalog = emptyList() // invalidate model list for the old URL
+                        catalog = emptyList() // invalidate cached lists from old URL
+                        voicesCatalog = emptyList()
                     },
                     label = { Text("URL serveru (http://…:8000)") },
                     singleLine = true,
@@ -297,13 +300,41 @@ actual fun WakeWordSettingsCard(settings: AppSettings) {
                         modifier = Modifier.fillMaxWidth(),
                     )
                 }
-                androidx.compose.material3.OutlinedTextField(
-                    value = ttsVoice,
-                    onValueChange = { ttsVoice = it; settings.ttsServerVoice = it },
-                    label = { Text("Hlas (voice)") },
-                    singleLine = true,
-                    modifier = Modifier.fillMaxWidth(),
-                )
+                if (voicesCatalog.isNotEmpty()) {
+                    ModelDropdown(
+                        label = "Hlas (voice)",
+                        options = voicesCatalog,
+                        selected = ttsVoice,
+                        onSelect = { ttsVoice = it; settings.ttsServerVoice = it },
+                    )
+                } else {
+                    androidx.compose.material3.OutlinedTextField(
+                        value = ttsVoice,
+                        onValueChange = { ttsVoice = it; settings.ttsServerVoice = it },
+                        label = { Text("Hlas (voice)") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                }
+                if (serverUrl.isNotBlank()) {
+                    Button(
+                        onClick = {
+                            loadingVoices = true
+                            scope.launch {
+                                voicesCatalog = ServerCatalog.fetchVoices(serverUrl, settings.sttServerApiKey)
+                                loadingVoices = false
+                            }
+                        },
+                        enabled = !loadingVoices,
+                        colors = ButtonDefaults.buttonColors(containerColor = c.accent, contentColor = c.accentInk),
+                    ) {
+                        Text(
+                            if (loadingVoices) "Načítám hlasy…"
+                            else if (voicesCatalog.isEmpty()) "Načíst hlasy ze serveru"
+                            else "Obnovit seznam hlasů (${voicesCatalog.size})"
+                        )
+                    }
+                }
             }
         }
 
