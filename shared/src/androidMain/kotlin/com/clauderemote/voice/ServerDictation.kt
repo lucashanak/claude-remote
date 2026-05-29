@@ -226,14 +226,11 @@ internal class ServerDictation(
         private const val FRAME = 1600          // 100 ms @ 16 kHz
         private const val FRAME_MS = 100
         private const val SILENCE_MS = 700      // end-of-utterance silence
-        private const val MIN_SPEECH_MS = 500   // ignore blips (was 300 —
-                                                // sub-300 ms blobs almost
-                                                // always produce Whisper
-                                                // hallucinations)
-        private const val RMS_THRESHOLD = 1200.0 // bumped from 500 — quieter
-                                                 // env noise was passing the
-                                                 // VAD and feeding silence
-                                                 // to Whisper
+        // Tuned permissively — RMS 1200 / min 500 ms dropped the user's
+        // own voice; rely on the Whisper `prompt` + hallucination filter
+        // to handle quiet-audio attractors instead of the VAD gating.
+        private const val MIN_SPEECH_MS = 300
+        private const val RMS_THRESHOLD = 600.0
 
         private val HALLUCINATIONS = listOf(
             "titulky vytvořil johnyx",
