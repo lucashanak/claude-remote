@@ -613,6 +613,15 @@ else:
     fun switchTab(id: String) {
         tabManager.switchTab(id)
         promptDetector.onUserInput(id)
+        // Re-verify the Claude session UUID whenever we (re)enter a session.
+        // While this tab was in the background Claude may have rotated its
+        // session id (/clear, /compact, /resume) — leaving confirmedUuids
+        // pointing at a dead .jsonl. Clearing it here lets the next
+        // transcriptFlow() call (UI re-subscribes on active-tab change) fire a
+        // fresh kick-probe and re-point the transcript stream at the live file.
+        // a08359c cleared this on reconnect but missed plain tab switches,
+        // which is why the chat only refreshed after an app restart.
+        confirmedUuids.remove(id)
         val tail = synchronized(bufferLock) {
             val buf = outputBuffers[id] ?: return@synchronized ""
             val len = buf.length
