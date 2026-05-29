@@ -732,7 +732,6 @@ fun App(
                         },
                         sidePanelWidthDp = appSettings.sidePanelWidthDp,
                         onSidePanelWidthChange = { appSettings.sidePanelWidthDp = it },
-                        wakeWordEnabled = appSettings.wakeWordEnabled,
                     )
                 }
 
