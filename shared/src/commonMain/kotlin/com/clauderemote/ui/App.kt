@@ -141,6 +141,18 @@ fun App(
         }
     }
 
+    // When a tab is permanently closed, drop the matching entry from the
+    // remote-tmux snapshot immediately — otherwise the killed pane (no longer
+    // an attached tab) resurfaces as a "detached remote" row until the next
+    // 30s scan, and tapping it would launch a brand-new empty session.
+    LaunchedEffect(Unit) {
+        sessionOrchestrator.onSessionForgotten = { serverId, tmuxName ->
+            remoteSessions = remoteSessions.filterNot {
+                it.server.id == serverId && it.tmuxSession.name == tmuxName
+            }
+        }
+    }
+
     // Scan remote sessions on startup and whenever launcher is shown
     LaunchedEffect(Unit) { scanRemoteSessions() }
     LaunchedEffect(currentScreen) {

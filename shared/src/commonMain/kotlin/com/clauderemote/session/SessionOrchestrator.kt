@@ -132,6 +132,12 @@ class SessionOrchestrator(
     // Usage stats callback (session%, week%)
     var onUsageUpdate: ((sessionPercent: Int?, weekPercent: Int?) -> Unit)? = null
 
+    // Fired when a session is permanently forgotten (tab closed). Lets the UI
+    // prune the matching entry from its (stale) remote-tmux snapshot so the
+    // killed pane doesn't reappear as a "detached remote" row and resurrect
+    // into a new empty session when tapped.
+    var onSessionForgotten: ((serverId: String, tmuxSessionName: String) -> Unit)? = null
+
     // Per-session usage percentages parsed from the OMC statusline. 5h and
     // weekly are technically account-wide values but we still key by session
     // because each session prints its own (potentially stale) snapshot — a
@@ -1297,6 +1303,10 @@ else:
      */
     suspend fun forgetSession(sessionId: String) {
         val session = tabManager.getTab(sessionId)
+        // Capture identity up front so we can prune the UI's stale remote-tmux
+        // snapshot even after the tab is torn down below.
+        val forgottenServerId = session?.server?.id
+        val forgottenTmuxName = session?.tmuxSessionName
         try {
             sessionStorage?.remove(sessionId)
             if (session != null) {
@@ -1348,6 +1358,11 @@ else:
             // server-side cleanup above threw — otherwise the tab list and
             // connection map drift out of sync with what the user expects.
             disconnectSession(sessionId)
+            // Prune the UI's stale remote-tmux snapshot so the killed pane
+            // doesn't reappear as a "detached remote" row.
+            if (forgottenServerId != null && !forgottenTmuxName.isNullOrBlank()) {
+                onSessionForgotten?.invoke(forgottenServerId, forgottenTmuxName)
+            }
         }
     }
 
