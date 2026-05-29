@@ -127,6 +127,7 @@ fun TerminalScreen(
     sessionResetMin: Int? = null,
     weekResetMin: Int? = null,
     sessionActivities: Map<String, com.clauderemote.model.SessionActivity> = emptyMap(),
+    hookActiveSessions: Set<String> = emptySet(),
     latencyMs: Long? = null,
     pendingInputCount: Int = 0,
     onClearPending: (() -> Unit)? = null,
@@ -599,6 +600,7 @@ fun TerminalScreen(
                             latencyMs = latencyMs,
                             remoteStatus = remoteStatus,
                             activity = activeTabId?.let { sessionActivities[it] },
+                            hookActive = activeTabId?.let { it in hookActiveSessions } ?: false,
                             claudeSessionId = activeClaudeSessionId
                         )
                     }

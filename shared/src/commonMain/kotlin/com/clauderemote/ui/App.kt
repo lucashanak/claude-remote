@@ -83,6 +83,7 @@ fun App(
 
     // Collect new StateFlows from orchestrator
     val sessionActivities by sessionOrchestrator.sessionActivities.collectAsState()
+    val hookActiveSessions by sessionOrchestrator.hookActiveSessions.collectAsState()
     val contextPercents by sessionOrchestrator.contextPercents.collectAsState()
     val sessionUsagePercents by sessionOrchestrator.sessionUsagePercents.collectAsState()
     val weekUsagePercents by sessionOrchestrator.weekUsagePercents.collectAsState()
@@ -713,6 +714,7 @@ fun App(
                         sessionResetMin = activeTabId?.let { sessionResetMin[it] },
                         weekResetMin = activeTabId?.let { weekResetMin[it] },
                         sessionActivities = sessionActivities,
+                        hookActiveSessions = hookActiveSessions,
                         contextPercent = activeTabId?.let { contextPercents[it] },
                         latencyMs = activeTabId?.let { latencies[it] },
                         pendingInputCount = activeTabId?.let { pendingCounts[it] } ?: 0,

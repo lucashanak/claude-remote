@@ -49,6 +49,11 @@ import kotlinx.coroutines.launch
  * with collapsible results, and slash commands. Entire view is wrapped
  * in a SelectionContainer so any text can be copied.
  */
+// Fallback only, for sessions without the Stop hook: how long a WORKING state
+// may persist with no new transcript content before we assume Claude is idle.
+// Generous so a slow tool (build, test run) doesn't flip the indicator off.
+private const val STALE_WORKING_MS = 45_000L
+
 @Composable
 fun TranscriptView(
     entries: List<TranscriptEntry>,
@@ -61,6 +66,7 @@ fun TranscriptView(
     latencyMs: Long? = null,
     remoteStatus: RemoteSessionStatus? = null,
     activity: SessionActivity? = null,
+    hookActive: Boolean = false,
     claudeSessionId: String? = null
 ) {
     // Key list+scroll state on the session uuid so switching tabs resets
@@ -125,15 +131,28 @@ fun TranscriptView(
     }
     LaunchedEffect(contentTick) { lastChangeAt = System.currentTimeMillis() }
     var now by remember { mutableStateOf(System.currentTimeMillis()) }
-    LaunchedEffect(activity == SessionActivity.WORKING) {
-        while (activity == SessionActivity.WORKING) {
+    // Only tick the stale-WORKING clock for sessions WITHOUT the Stop hook —
+    // hook sessions get an authoritative WAITING the instant Claude finishes,
+    // so they never need the timer.
+    LaunchedEffect(activity == SessionActivity.WORKING, hookActive) {
+        while (activity == SessionActivity.WORKING && !hookActive) {
             now = System.currentTimeMillis()
             kotlinx.coroutines.delay(1000)
         }
     }
     val effectiveActivity = when {
         activity != SessionActivity.WORKING -> activity
-        now - lastChangeAt > 6_000 -> SessionActivity.WAITING_FOR_INPUT
+        // The Stop hook flips activity → WAITING the moment Claude finishes,
+        // even while the user is in chat view, so trust it outright. The old
+        // 6s decay second-guessed it and hid "Claude is working…" during any
+        // tool gap longer than 6s (a build, a test run) while Claude was still
+        // working — the flicker the user reported.
+        hookActive -> activity
+        // Non-hook fallback: the screen-scrape detector can't read the disposed
+        // terminal in chat view, so a stale WORKING would otherwise freeze here.
+        // Decay after a window generous enough to span a slow tool so we don't
+        // flicker on normal gaps.
+        now - lastChangeAt > STALE_WORKING_MS -> SessionActivity.WAITING_FOR_INPUT
         else -> activity
     }
 

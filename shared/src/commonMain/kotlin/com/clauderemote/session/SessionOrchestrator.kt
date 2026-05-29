@@ -72,6 +72,19 @@ class SessionOrchestrator(
     private val _sessionActivities = kotlinx.coroutines.flow.MutableStateFlow<Map<String, SessionActivity>>(emptyMap())
     val sessionActivities: kotlinx.coroutines.flow.StateFlow<Map<String, SessionActivity>> = _sessionActivities
 
+    // Sessions whose idle/working state is driven by the Claude Code Stop hook
+    // (authoritative: flips to WAITING the instant Claude finishes, regardless
+    // of which screen the user is on). The UI uses this to know it can trust
+    // `activity` outright instead of falling back to a stale-WORKING timer.
+    private val _hookActiveSessions = kotlinx.coroutines.flow.MutableStateFlow<Set<String>>(emptySet())
+    val hookActiveSessions: kotlinx.coroutines.flow.StateFlow<Set<String>> = _hookActiveSessions
+
+    private fun setHookActive(sessionId: String, active: Boolean) {
+        if (active) promptDetector.markHookActive(sessionId)
+        else promptDetector.markHookInactive(sessionId)
+        _hookActiveSessions.update { if (active) it + sessionId else it - sessionId }
+    }
+
     // Per-session context window usage (0-100)
     private val _contextPercents = kotlinx.coroutines.flow.MutableStateFlow<Map<String, Int>>(emptyMap())
     val contextPercents: kotlinx.coroutines.flow.StateFlow<Map<String, Int>> = _contextPercents
@@ -547,7 +560,7 @@ else:
                 val reader = ch.inputStream.bufferedReader()
                 ch.connect(5000)
 
-                promptDetector.markHookActive(sessionId)
+                setHookActive(sessionId, true)
                 FileLogger.log(TAG, "Notify watcher started for $sessionId (tmux=$tmuxName)")
 
                 while (isActive && ch.isConnected) {
@@ -565,7 +578,7 @@ else:
             } catch (e: Exception) {
                 FileLogger.error(TAG, "Notify watcher failed for $sessionId: ${e.message}", e)
             } finally {
-                promptDetector.markHookInactive(sessionId)
+                setHookActive(sessionId, false)
                 FileLogger.log(TAG, "Notify watcher stopped for $sessionId")
             }
         }
@@ -1413,7 +1426,7 @@ else:
         latencyPollingJobs.remove(sessionId)?.cancel()
         notifyWatchers.remove(sessionId)?.cancel()
         sessionIdRefreshJobs.remove(sessionId)?.cancel()
-        promptDetector.markHookInactive(sessionId)
+        setHookActive(sessionId, false)
         connections[sessionId]?.disconnect()
         connections.remove(sessionId)
         moshConnections[sessionId]?.disconnect()
