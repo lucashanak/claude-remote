@@ -165,6 +165,11 @@ internal class ServerDictation(
             .addFormDataPart("model", model)
             .addFormDataPart("language", "cs")
             .addFormDataPart("response_format", "json")
+            // Context biasing — pulls Whisper away from its movie-subtitle
+            // training-data attractors ("Titulky vytvořil JohnyX.",
+            // "Děkuji za sledování.", "amara.org", …) when audio is short
+            // or noisy.
+            .addFormDataPart("prompt", "Krátká česká hlasová zpráva uživatele asistentovi.")
             .build()
         val url = normalizeApiBase(baseUrl) + "/v1/audio/transcriptions"
         val req = Request.Builder().url(url).post(body).apply {
@@ -173,10 +178,17 @@ internal class ServerDictation(
         http.newCall(req).execute().use { resp ->
             val payload = resp.body?.string().orEmpty()
             if (!resp.isSuccessful) throw RuntimeException("HTTP ${resp.code}")
-            return runCatching { JSONObject(payload).optString("text") }
+            val text = runCatching { JSONObject(payload).optString("text") }
                 .getOrDefault("")
                 .trim()
+            return if (isHallucination(text)) "" else text
         }
+    }
+
+    /** Drop the canonical Whisper hallucinations that survive prompt biasing. */
+    private fun isHallucination(text: String): Boolean {
+        val t = text.lowercase().trim().trim('.', ',', '!', '?', ' ')
+        return t.isEmpty() || HALLUCINATIONS.any { t == it || t.contains(it) }
     }
 
     private fun rms(buf: ShortArray, n: Int): Double {
@@ -214,7 +226,28 @@ internal class ServerDictation(
         private const val FRAME = 1600          // 100 ms @ 16 kHz
         private const val FRAME_MS = 100
         private const val SILENCE_MS = 700      // end-of-utterance silence
-        private const val MIN_SPEECH_MS = 300   // ignore blips
-        private const val RMS_THRESHOLD = 500.0 // 16-bit amplitude; tuned for voice
+        private const val MIN_SPEECH_MS = 500   // ignore blips (was 300 —
+                                                // sub-300 ms blobs almost
+                                                // always produce Whisper
+                                                // hallucinations)
+        private const val RMS_THRESHOLD = 1200.0 // bumped from 500 — quieter
+                                                 // env noise was passing the
+                                                 // VAD and feeding silence
+                                                 // to Whisper
+
+        private val HALLUCINATIONS = listOf(
+            "titulky vytvořil johnyx",
+            "titulky: amara.org",
+            "titulky: amara org",
+            "amara.org",
+            "amara org",
+            "děkuji za sledování",
+            "děkujeme za sledování",
+            "titulky vytvořila",
+            "překlad titulky",
+            "titulky a překlad",
+            "thanks for watching",
+            "subtitles by",
+        )
     }
 }
