@@ -108,8 +108,22 @@ fun TranscriptView(
     // anything, and a WORKING reading from before the toggle freezes here.
     // If no new entry has arrived for ~6 s, treat the state as ready so the
     // pulsing dot + skeleton card stop misleading the user.
-    var lastChangeAt by remember { mutableStateOf(0L) }
-    LaunchedEffect(entries.size) { lastChangeAt = System.currentTimeMillis() }
+    var lastChangeAt by remember { mutableStateOf(System.currentTimeMillis()) }
+    // Track content freshness on more than list size: a long single streaming
+    // assistant/thinking message grows in place without changing entries.size,
+    // and keying decay on size alone made Claude look "stuck → waiting" while it
+    // was actively streaming. Fold in the last entry's id + text length.
+    val contentTick = remember(entries) {
+        val last = entries.lastOrNull()
+        val len = when (last) {
+            is TranscriptEntry.AssistantText -> last.text.length
+            is TranscriptEntry.AssistantThinking -> last.text.length
+            is TranscriptEntry.ToolResult -> last.text.length
+            else -> 0
+        }
+        Triple(entries.size, last?.id, len)
+    }
+    LaunchedEffect(contentTick) { lastChangeAt = System.currentTimeMillis() }
     var now by remember { mutableStateOf(System.currentTimeMillis()) }
     LaunchedEffect(activity == SessionActivity.WORKING) {
         while (activity == SessionActivity.WORKING) {
@@ -119,7 +133,7 @@ fun TranscriptView(
     }
     val effectiveActivity = when {
         activity != SessionActivity.WORKING -> activity
-        lastChangeAt > 0 && now - lastChangeAt > 6_000 -> SessionActivity.WAITING_FOR_INPUT
+        now - lastChangeAt > 6_000 -> SessionActivity.WAITING_FOR_INPUT
         else -> activity
     }
 
@@ -289,8 +303,11 @@ fun TranscriptView(
                     items(
                         items = rendered,
                         key = { item ->
+                            // Namespace per render type so a Single entry id can
+                            // never collide with a ToolGroup key — a duplicate
+                            // LazyColumn key is a hard crash, not a glitch.
                             when (item) {
-                                is RenderItem.Single -> item.entry.id
+                                is RenderItem.Single -> "s:" + item.entry.id
                                 is RenderItem.ToolGroup -> "tg:" + item.calls.first().id
                             }
                         }

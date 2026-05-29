@@ -39,9 +39,15 @@ class TranscriptStream(
     private val scope = CoroutineScope(parentScope.coroutineContext + supervisor)
     private var streamJob: Job? = null
     private var currentUuid: String? = null
+    // Set once stop() has been called. start() is invoked outside transcriptLock
+    // by the orchestrator, so it can race a concurrent disconnectSession() that
+    // stops + removes this stream. Without this flag a late start() would
+    // resurrect a tail -F on a torn-down session and leak the SSH channel.
+    private var closed = false
 
     @Synchronized
     fun start(claudeSessionUuid: String) {
+        if (closed) return
         if (currentUuid == claudeSessionUuid && streamJob?.isActive == true) return
         val uuidChanged = currentUuid != claudeSessionUuid
         currentUuid = claudeSessionUuid
@@ -64,6 +70,7 @@ class TranscriptStream(
     }
 
     suspend fun stop() {
+        synchronized(this) { closed = true }
         streamJob?.cancelAndJoin()
         streamJob = null
         currentUuid = null
@@ -107,6 +114,7 @@ class TranscriptStream(
         var attempt = 0
         while (scope.isActive) {
             attempt++
+            var sawData = false
             try {
                 SshSessionHelper.withSession(server, timeout = 15_000) { sess ->
                     val ch = sess.openChannel("exec") as com.jcraft.jsch.ChannelExec
@@ -117,14 +125,18 @@ class TranscriptStream(
                     try {
                         val reader = BufferedReader(InputStreamReader(inStream, Charsets.UTF_8))
                         while (scope.isActive && !ch.isClosed) {
-                            val line = withContext(Dispatchers.IO) {
-                                try { reader.readLine() } catch (_: Throwable) { null }
-                            } ?: break
+                            // Let read errors (broken pipe, channel reset) propagate
+                            // to the outer catch so they go through the backoff +
+                            // logging path. The old `catch { null }` collapsed errors
+                            // into clean-EOF, which reset attempt=0 → delay(0) →
+                            // tight reconnect loop hammering SSH on a dead channel.
+                            val line = withContext(Dispatchers.IO) { reader.readLine() } ?: break
                             // Parse opportunistically. Each JSONL line is independent;
                             // partial lines (rare, when tail catches mid-write) will fail
                             // parse cleanly and get dropped by the parser.
                             val newEntries = TranscriptParser.parseLines(sequenceOf(line))
                             if (newEntries.isNotEmpty()) {
+                                sawData = true
                                 _entries.update { prev ->
                                     // Dedup by id. On SSH reconnect the
                                     // outer retry loop reopens tail -F, which
@@ -146,7 +158,12 @@ class TranscriptStream(
                         try { ch.disconnect() } catch (_: Throwable) {}
                     }
                 }
-                attempt = 0
+                // Only treat the connection as healthy (reset backoff) if it
+                // actually delivered transcript data. A folder that doesn't
+                // resolve (ENC empty → `exit 0`) or a missing file returns
+                // cleanly with zero lines — without this guard that would
+                // reset attempt=0 and busy-reconnect with no backoff.
+                if (sawData) attempt = 0
             } catch (t: Throwable) {
                 FileLogger.log(TAG, "tail stream error (attempt $attempt): ${t.message}")
             }

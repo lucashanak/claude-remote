@@ -5,7 +5,7 @@ import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
-import kotlinx.serialization.json.boolean
+import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
@@ -48,15 +48,26 @@ object TranscriptParser {
                 continue
             }
             val type = obj["type"]?.jsonPrimitive?.contentOrNull ?: continue
-            when (type) {
-                "user" -> parseUser(obj, out)
-                "assistant" -> parseAssistant(obj, out)
-                "system" -> parseSystem(obj, out)
-                // Drop: attachment, file-history-snapshot, ai-title, last-prompt,
-                // queue-operation, permission-mode. `last-prompt` is a duplicate
-                // checkpoint that Claude Code re-emits with the same text every
-                // turn — using it as a fallback produced ghost user bubbles.
-                else -> {}
+            // Per-line isolation: a record that parses as JSON but trips a
+            // downstream coercion (e.g. an unexpected field shape) must not
+            // abort the whole batch — that would blank every entry after the
+            // first malformed line.
+            try {
+                when (type) {
+                    "user" -> parseUser(obj, out)
+                    "assistant" -> parseAssistant(obj, out)
+                    "system" -> parseSystem(obj, out)
+                    // Post-compaction conversation summary. Has no uuid/timestamp;
+                    // keyed off leafUuid.
+                    "summary" -> parseSummary(obj, out)
+                    // Drop: attachment, file-history-snapshot, ai-title, last-prompt,
+                    // queue-operation, permission-mode. `last-prompt` is a duplicate
+                    // checkpoint that Claude Code re-emits with the same text every
+                    // turn — using it as a fallback produced ghost user bubbles.
+                    else -> {}
+                }
+            } catch (_: Throwable) {
+                // Skip this line, keep the batch alive.
             }
         }
         return out
@@ -64,6 +75,10 @@ object TranscriptParser {
 
     private fun parseUser(obj: JsonObject, out: MutableList<TranscriptEntry>) {
         val uuid = obj["uuid"]?.jsonPrimitive?.contentOrNull ?: return
+        // Meta records are Claude Code's own synthetic injections (caveats,
+        // reminders) — not something the human typed. Rendering them as user
+        // bubbles is misleading.
+        if (obj["isMeta"]?.jsonPrimitive?.booleanOrNull == true) return
         val ts = obj["timestamp"]?.jsonPrimitive?.contentOrNull
         val message = obj["message"]?.jsonObject ?: return
         val content = message["content"] ?: return
@@ -92,22 +107,40 @@ object TranscriptParser {
                 }
             }
             is JsonArray -> {
+                val textParts = mutableListOf<String>()
                 content.jsonArray.forEachIndexed { idx, block ->
                     val b = block as? JsonObject ?: return@forEachIndexed
-                    val btype = b["type"]?.jsonPrimitive?.contentOrNull ?: return@forEachIndexed
-                    if (btype == "tool_result") {
-                        val toolUseId = b["tool_use_id"]?.jsonPrimitive?.contentOrNull
-                            ?: obj["sourceToolAssistantUUID"]?.jsonPrimitive?.contentOrNull
-                        val isError = b["is_error"]?.jsonPrimitive?.boolean ?: false
-                        val text = extractToolResultText(b["content"])
-                        out += TranscriptEntry.ToolResult(
-                            id = "$uuid#$idx",
-                            timestamp = ts,
-                            toolUseId = toolUseId,
-                            text = text,
-                            isError = isError
-                        )
+                    when (b["type"]?.jsonPrimitive?.contentOrNull) {
+                        "tool_result" -> {
+                            // Pair strictly on the tool_use block id. The old
+                            // fallback to sourceToolAssistantUUID mixed a
+                            // message-uuid into the toolUseId namespace, so it
+                            // could never match a ToolCall and the result
+                            // rendered as a permanent orphan.
+                            val toolUseId = b["tool_use_id"]?.jsonPrimitive?.contentOrNull
+                            val isError = b["is_error"]?.jsonPrimitive?.booleanOrNull ?: false
+                            val text = extractToolResultText(b["content"])
+                            out += TranscriptEntry.ToolResult(
+                                id = "$uuid#$idx",
+                                timestamp = ts,
+                                toolUseId = toolUseId,
+                                text = text,
+                                isError = isError
+                            )
+                        }
+                        // User input can arrive as a content-block array (pasted
+                        // images, multi-part input) rather than a plain string —
+                        // collect the text blocks so the prompt isn't dropped.
+                        "text" -> b["text"]?.jsonPrimitive?.contentOrNull?.let { textParts += it }
+                        else -> {}
                     }
+                }
+                if (textParts.any { it.isNotBlank() }) {
+                    out += TranscriptEntry.UserPrompt(
+                        id = uuid,
+                        timestamp = ts,
+                        text = textParts.joinToString("\n")
+                    )
                 }
             }
             else -> {}
@@ -118,13 +151,19 @@ object TranscriptParser {
         if (content == null) return ""
         return when (content) {
             is JsonPrimitive -> content.contentOrNull ?: ""
-            is JsonArray -> content.jsonArray.joinToString("\n") { item ->
-                val o = item as? JsonObject ?: return@joinToString ""
+            // mapNotNull (not joinToString-with-"") so non-text blocks don't
+            // emit blank lines, and an image-only result isn't rendered as an
+            // empty body the user reads as "nothing happened".
+            is JsonArray -> content.jsonArray.mapNotNull { item ->
+                val o = item as? JsonObject ?: return@mapNotNull null
                 when (o["type"]?.jsonPrimitive?.contentOrNull) {
-                    "text" -> o["text"]?.jsonPrimitive?.contentOrNull ?: ""
-                    else -> ""
+                    "text" -> o["text"]?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotEmpty() }
+                    "image" -> "[image]"
+                    "tool_reference" ->
+                        o["tool_name"]?.jsonPrimitive?.contentOrNull?.let { "[tool: $it]" } ?: "[tool_reference]"
+                    else -> null
                 }
-            }
+            }.joinToString("\n")
             else -> ""
         }
     }
@@ -169,7 +208,11 @@ object TranscriptParser {
                     val input = b["input"] as? JsonObject
                     val (summary, full) = summarizeToolInput(name, input)
                     out += TranscriptEntry.ToolCall(
-                        id = "$uuid#$idx",
+                        // Key off the stable tool_use block id (toolu_…) rather
+                        // than the array index — index keys collide / shift when
+                        // Claude re-emits a line on re-tail, dropping or
+                        // duplicating tool cards.
+                        id = toolUseId,
                         timestamp = ts,
                         toolUseId = toolUseId,
                         name = name,
@@ -186,7 +229,7 @@ object TranscriptParser {
         if (input == null) return "" to ""
         val pretty = prettyJson.encodeToString(JsonObject.serializer(), input)
         val summary = when (name) {
-            "Bash" -> input["command"]?.jsonPrimitive?.contentOrNull?.lines()?.first().orEmpty()
+            "Bash" -> input["command"]?.jsonPrimitive?.contentOrNull?.lines()?.firstOrNull().orEmpty()
             "Read" -> {
                 val path = input["file_path"]?.jsonPrimitive?.contentOrNull.orEmpty()
                 val offset = input["offset"]?.jsonPrimitive?.contentOrNull
@@ -208,15 +251,43 @@ object TranscriptParser {
         val uuid = obj["uuid"]?.jsonPrimitive?.contentOrNull ?: return
         val ts = obj["timestamp"]?.jsonPrimitive?.contentOrNull
         val subtype = obj["subtype"]?.jsonPrimitive?.contentOrNull ?: return
-        // Only surface user-meaningful system events. Hooks and local-command
-        // stdout are noisy bookkeeping — keep but collapsed by default in UI.
-        val text = obj["content"]?.jsonPrimitive?.contentOrNull
+        // Different system subtypes carry their body in different fields.
+        // turn_duration has neither content nor stopReason (only durationMs);
+        // emitting a SystemNote with an empty body produced hundreds of blank
+        // rows when the user toggled system notes on.
+        val raw = obj["content"]?.jsonPrimitive?.contentOrNull
             ?: obj["stopReason"]?.jsonPrimitive?.contentOrNull
+            ?: obj["durationMs"]?.jsonPrimitive?.contentOrNull?.let { "turn took $it ms" }
             ?: ""
+        val text = raw.trim()
+        // Drop empty bodies and internal local-command bookkeeping (same filter
+        // as the user path) — neither is meaningful to show.
+        if (text.isEmpty() ||
+            text.startsWith("<command-") ||
+            text.startsWith("<local-command-")
+        ) return
         out += TranscriptEntry.SystemNote(
             id = uuid,
             timestamp = ts,
             subtype = subtype,
+            text = text
+        )
+    }
+
+    private fun parseSummary(obj: JsonObject, out: MutableList<TranscriptEntry>) {
+        val text = obj["summary"]?.jsonPrimitive?.contentOrNull?.trim()?.takeIf { it.isNotEmpty() }
+            ?: return
+        // Summary lines reference the conversation leaf they summarise; that
+        // leafUuid is the stable id. Fall back to a content+time hash only when
+        // it's absent (rare) — folding the timestamp in lowers the chance two
+        // distinct summaries collide and get dropped by the stream's id dedup.
+        val ts = obj["timestamp"]?.jsonPrimitive?.contentOrNull
+        val id = obj["leafUuid"]?.jsonPrimitive?.contentOrNull
+            ?: ("summary#" + (text + (ts ?: "")).hashCode())
+        out += TranscriptEntry.SystemNote(
+            id = id,
+            timestamp = ts,
+            subtype = "summary",
             text = text
         )
     }

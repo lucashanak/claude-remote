@@ -731,7 +731,17 @@ fun App(
                         onTerminalViewChange = { tv -> updateAppearance(appearance.copy(terminalView = tv)) },
                         terminalContent = terminalContent,
                         transcriptEntries = activeTabId?.let { id ->
-                            val flow = remember(id) { sessionOrchestrator.transcriptFlow(id) }
+                            // Key on the Claude session UUID too, not just the tab
+                            // id. transcriptFlow() only (re)starts the tail and
+                            // fires the UUID kick-probe WHEN IT IS CALLED, and the
+                            // remember block is the only caller. Keying on id alone
+                            // meant a UUID rotation (/clear, /compact, /resume, or
+                            // the first null→real reconcile) never re-invoked it, so
+                            // the stream stayed pinned to the old/dead .jsonl and the
+                            // chat only refreshed after an app restart. Re-keying on
+                            // the UUID re-subscribes against the live file.
+                            val claudeUuid = tabs.firstOrNull { it.id == id }?.claudeSessionId
+                            val flow = remember(id, claudeUuid) { sessionOrchestrator.transcriptFlow(id) }
                             flow.collectAsState().value
                         } ?: emptyList(),
                         remoteStatus = activeTabId?.let { id ->
