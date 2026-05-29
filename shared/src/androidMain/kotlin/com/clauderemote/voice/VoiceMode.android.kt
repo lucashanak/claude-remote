@@ -148,6 +148,20 @@ actual fun VoiceModeScreen(
         }
     }
 
+    // Watchdog: if the assistant never replies (terminal didn't echo, claude
+    // is busy, transcript flow stalled, …) we'd otherwise sit in "Přemýšlím"
+    // forever. After 30 s of no reply, fall back to Listening so the user
+    // can try again without having to exit and re-enter voice mode.
+    LaunchedEffect(state) {
+        if (state is VoiceState.Thinking) {
+            kotlinx.coroutines.delay(30_000)
+            if (state is VoiceState.Thinking) {
+                state = VoiceState.Listening
+                controller.resume()
+            }
+        }
+    }
+
     VoiceModeFrame(state = state, partial = partial, onClose = onClose)
 }
 
@@ -328,6 +342,13 @@ private class DialogueController(
         whisperDictation = null
         serverDictation?.stop()
         serverDictation = null
+    }
+
+    /** Restart listening on the configured engine without re-initialising. */
+    fun resume() {
+        if (stopped) return
+        paused = false
+        beginListening()
     }
 
     fun speak(text: String) {
