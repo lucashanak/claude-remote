@@ -243,15 +243,18 @@ class SessionOrchestrator(
                 try {
                     val remote = fetchSessionsFromServer(sshManager)
                     val entry = remote?.firstOrNull { it.tmuxSessionName == tmuxName }
-                    // Server-as-truth via drift daemon when available, but
-                    // fall back to a direct per-pid probe of
-                    // ~/.claude/sessions/<pid>.json when the daemon is not
-                    // installed / hasn't recorded this tmux session yet —
-                    // otherwise tab.claudeSessionId stays frozen at the
-                    // value generated client-side at launch and the
-                    // transcript view tails a non-existent JSONL.
-                    val realUuid = entry?.claudeSessionId.takeUnless { it.isNullOrBlank() }
-                        ?: readRealSessionId(sshManager, tmuxName)
+                    // Prefer the LIVE pane's running Claude pid over the server's
+                    // sessions.json record. The server entry is seeded with the
+                    // client-generated launch UUID and the drift daemon may not
+                    // have caught a rotation (or recorded the wrong pid) — a
+                    // stale-but-present server value would mask the real UUID and
+                    // actively fight the transcript kick-probe, reverting the
+                    // corrected UUID every 15 s. The pid-probe reads what Claude
+                    // is writing right now, so it's ground truth for a connected
+                    // tab; the server entry is only a fallback when the pane
+                    // can't be resolved.
+                    val realUuid = readRealSessionId(sshManager, tmuxName)
+                        ?: entry?.claudeSessionId.takeUnless { it.isNullOrBlank() }
                     val tab = tabManager.getTab(sessionId)
                     if (tab != null && !realUuid.isNullOrBlank() && tab.claudeSessionId != realUuid) {
                         // Refuse to adopt a UUID already owned by another
@@ -334,15 +337,33 @@ class SessionOrchestrator(
             try {
                 val sshSession = sshManager.getSession() ?: return@withContext null
                 val escaped = tmuxName.replace("'", "'\\''")
+                // The tmux pane_pid is the `claude` LAUNCHER process; the actual
+                // Claude session that writes ~/.claude/sessions/<pid>.json is a
+                // CHILD of it (verified: pane_pid 2890285 has no json, its child
+                // 2890289 does). Reading sessions/<pane_pid>.json therefore
+                // returned nothing, the UUID was never corrected, and the tab
+                // stayed pinned to the dead client-generated launch UUID with
+                // "Waiting for transcript… 0 entries" forever.
+                //
+                // Walk the pane's whole process subtree (BFS via a ps ppid
+                // table) and take the FIRST (shallowest) pid that has a sessions
+                // json. Shallowest = the top-level Claude, not a Task-tool
+                // subagent (those are deeper children with their own session
+                // files and would point the transcript at the wrong jsonl).
                 val cmd = "PID=\$(tmux list-panes -t '$escaped' -F '#{pane_pid}' 2>/dev/null | head -1); " +
                     "[ -n \"\$PID\" ] || exit 1; " +
-                    "F=\"\$HOME/.claude/sessions/\$PID.json\"; " +
-                    "[ -f \"\$F\" ] && jq -r .sessionId \"\$F\" 2>/dev/null"
+                    "PIDS=\$(ps -eo pid=,ppid= 2>/dev/null | awk -v root=\"\$PID\" '" +
+                    "{ kids[\$2]=kids[\$2]\" \"\$1 } " +
+                    "END { head=0;tail=0;q[tail++]=root; " +
+                    "while(head<tail){p=q[head++];print p;m=split(kids[p],a,\" \");" +
+                    "for(i=1;i<=m;i++)if(a[i]!=\"\")q[tail++]=a[i]} }'); " +
+                    "for p in \$PIDS; do f=\"\$HOME/.claude/sessions/\$p.json\"; " +
+                    "[ -f \"\$f\" ] && { jq -r '.sessionId // empty' \"\$f\" 2>/dev/null; break; }; done"
                 val ch = sshSession.openChannel("exec") as com.jcraft.jsch.ChannelExec
                 ch.setCommand(cmd)
                 ch.inputStream = null
                 val input = ch.inputStream
-                ch.connect(2000)
+                ch.connect(3000)
                 val out = input.bufferedReader().readText().trim()
                 ch.disconnect()
                 if (out.isEmpty() || out == "null" || !out.matches(Regex("^[0-9a-f-]{36}$"))) null else out
