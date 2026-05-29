@@ -139,13 +139,20 @@ actual fun VoiceModeScreen(
         onDispose { controller.stop() }
     }
 
-    // Speak each fresh assistant message exactly once.
+    // Speak each fresh assistant message exactly once. Also toast a tiny
+    // diagnostic so the user can confirm whether the reply ever reaches the
+    // app — if Toast fires but Thinking persists, the trigger is wrong; if
+    // no Toast, the transcript stream / claude session is the culprit.
     LaunchedEffect(latestAssistantId) {
-        val id = latestAssistantId
+        val id = latestAssistantId ?: return@LaunchedEffect
+        if (id == initialAssistantId) return@LaunchedEffect
         val body = latestAssistantText
-        if (id != null && id != initialAssistantId && !body.isNullOrBlank()) {
-            controller.speak(body)
-        }
+        android.widget.Toast.makeText(
+            context,
+            "Nová odpověď (id …${id.takeLast(6)}, ${body?.length ?: 0} znaků)",
+            android.widget.Toast.LENGTH_SHORT,
+        ).show()
+        if (!body.isNullOrBlank()) controller.speak(body)
     }
 
     // Watchdog: if the assistant never replies (terminal didn't echo, claude
