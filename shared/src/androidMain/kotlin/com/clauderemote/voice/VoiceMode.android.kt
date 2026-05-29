@@ -303,16 +303,11 @@ private class DialogueController(
 ) {
     private val mainHandler = Handler(Looper.getMainLooper())
     private var recognizer: SpeechRecognizer? = null
-    private var voskDictation: VoskDictation? = null
     private var whisperDictation: WhisperDictation? = null
     private var serverDictation: ServerDictation? = null
     private val engine = selectedSttEngine(context)
     private val useWhisper = engine == com.clauderemote.model.SttEngine.WHISPER
     private val useServer = engine == com.clauderemote.model.SttEngine.SERVER
-    // Once we know Czech isn't available via SpeechRecognizer we pin
-    // listening to Vosk for the lifetime of this controller so the user
-    // doesn't see a probe-and-fail dance on every turn.
-    @Volatile private var useVosk = engine == com.clauderemote.model.SttEngine.VOSK
     private val sessionGen = AtomicInteger(0)
     @Volatile private var stopped = false
     @Volatile private var paused = false  // true while TTS is speaking
@@ -320,14 +315,9 @@ private class DialogueController(
     fun start() {
         stopped = false
         paused = false
-        if (!useWhisper && !useVosk && !useServer) {
-            // SYSTEM engine: skip SR entirely when it's not available at all
-            // but the Vosk model is — no point burning a no-op error round-trip.
-            if (!SpeechRecognizer.isRecognitionAvailable(context) &&
-                VoskModelManager.isModelReady(context)) {
-                useVosk = true
-            }
-            if (!useVosk) ensureRecognizer()
+        if (!useWhisper && !useServer) {
+            // SYSTEM engine: lazily build the bound SpeechRecognizer.
+            ensureRecognizer()
         }
         beginListening()
     }
@@ -343,8 +333,6 @@ private class DialogueController(
             runCatching { it.destroy() }
         }
         recognizer = null
-        voskDictation?.stop()
-        voskDictation = null
         whisperDictation?.stop()
         whisperDictation = null
         serverDictation?.stop()
@@ -364,8 +352,6 @@ private class DialogueController(
         sessionGen.incrementAndGet() // discard any in-flight recognition results
         mainHandler.removeCallbacksAndMessages(null)
         recognizer?.let { runCatching { it.cancel() } }
-        voskDictation?.stop()
-        voskDictation = null
         whisperDictation?.stop()
         whisperDictation = null
         serverDictation?.stop()
@@ -394,19 +380,12 @@ private class DialogueController(
         if (recognizer != null) return
         recognizer = createCzechRecognizerSmart(context)
         if (recognizer == null) {
-            // No SR on the device at all — fall through to Vosk if we have
-            // the model, otherwise surface a clear error.
-            if (VoskModelManager.isModelReady(context)) {
-                useVosk = true
-            } else {
-                onStateChange(
-                    VoiceState.Error(
-                        "Nepodařilo se inicializovat rozpoznávač. Nainstalujte " +
-                            "Google (Speech Services by Google) nebo stáhněte český " +
-                            "Vosk model v Nastavení → Voice."
-                    )
+            onStateChange(
+                VoiceState.Error(
+                    "Nepodařilo se inicializovat rozpoznávač. Přepněte na engine " +
+                        "Server v Nastavení → Voice."
                 )
-            }
+            )
         }
     }
 
@@ -418,10 +397,6 @@ private class DialogueController(
         }
         if (useWhisper) {
             beginWhisperListening()
-            return
-        }
-        if (useVosk) {
-            beginVoskListening()
             return
         }
         val rec = recognizer ?: return
@@ -457,21 +432,16 @@ private class DialogueController(
                     SpeechRecognizer.ERROR_LANGUAGE_UNAVAILABLE -> {
                         // System recognizer doesn't know Czech. Switch the
                         // whole controller to the offline Vosk fallback for
-                        // the rest of the session and continue listening.
-                        if (VoskModelManager.isModelReady(context)) {
-                            useVosk = true
-                            runCatching { rec.cancel() }
-                            runCatching { rec.destroy() }
-                            recognizer = null
-                            beginListening() // now routes through Vosk
-                        } else {
-                            onStateChange(
-                                VoiceState.Error(
-                                    "Tento přístroj nepodporuje českou Google STT. " +
-                                        "Stáhněte český Vosk model v Nastavení → Voice."
-                                )
+                        // the rest of the session and surface an error.
+                        runCatching { rec.cancel() }
+                        runCatching { rec.destroy() }
+                        recognizer = null
+                        onStateChange(
+                            VoiceState.Error(
+                                "Tento přístroj nepodporuje českou Google STT. " +
+                                    "Přepněte na engine Server v Nastavení → Voice."
                             )
-                        }
+                        )
                     }
                     else -> onStateChange(VoiceState.Error(recognizerErrorLabel(error)))
                 }
@@ -560,44 +530,6 @@ private class DialogueController(
             },
         )
         whisperDictation = dictation
-        onStateChange(VoiceState.Listening)
-        dictation.start()
-    }
-
-    private fun beginVoskListening() {
-        if (voskDictation != null) return
-        if (!VoskModelManager.isModelReady(context)) {
-            onStateChange(
-                VoiceState.Error(
-                    "Český Vosk model není stažený. Otevřete Nastavení → Voice."
-                )
-            )
-            return
-        }
-        val mySession = sessionGen.incrementAndGet()
-        val dictation = VoskDictation(
-            context = context,
-            onPartial = { phrase ->
-                if (!stopped && !paused && sessionGen.get() == mySession) onPartial(phrase)
-            },
-            onFinal = { phrase ->
-                if (stopped || paused || sessionGen.get() != mySession) return@VoskDictation
-                voskDictation?.stop()
-                voskDictation = null
-                if (phrase.isNotBlank()) {
-                    onCommit(phrase) // parent flips to Thinking; later speak() resumes us
-                } else {
-                    beginListening()
-                }
-            },
-            onError = { msg ->
-                if (sessionGen.get() != mySession) return@VoskDictation
-                voskDictation?.stop()
-                voskDictation = null
-                onStateChange(VoiceState.Error(msg))
-            },
-        )
-        voskDictation = dictation
         onStateChange(VoiceState.Listening)
         dictation.start()
     }

@@ -57,26 +57,21 @@ actual fun MicButton(
 ) {
     val context = LocalContext.current
     val srAvailable = SpeechRecognizer.isRecognitionAvailable(context)
-    val voskReady = VoskModelManager.isModelReady(context)
     val whisperReady = WhisperModelManager.isModelReady(context)
     val engine = remember { selectedSttEngine(context) }
     // Render nothing only when no backend is usable — otherwise show the
     // button so the user can tap and see a concrete error (model missing,
     // permission denied, etc.) instead of being unable to interact at all.
     // The Server engine only needs a URL, so it always keeps the button.
-    if (engine != SttEngine.SERVER && !srAvailable && !voskReady && !whisperReady) return
+    if (engine != SttEngine.SERVER && !srAvailable && !whisperReady) return
 
     val onTextChangeState = rememberUpdatedState(onTextChange)
     val currentTextState = rememberUpdatedState(currentText)
     var listening by remember { mutableStateOf(false) }
     var pendingStart by remember { mutableStateOf(false) }
     var recognizer by remember { mutableStateOf<SpeechRecognizer?>(null) }
-    var voskDictation by remember { mutableStateOf<VoskDictation?>(null) }
     var whisperDictation by remember { mutableStateOf<WhisperDictation?>(null) }
     var serverDictation by remember { mutableStateOf<ServerDictation?>(null) }
-    // SYSTEM may auto-fall-back to Vosk if the device can't do Czech; we
-    // remember that verdict for the rest of the composable's lifetime.
-    var useVosk by remember { mutableStateOf(engine == SttEngine.SYSTEM && !srAvailable && voskReady) }
     val sessionId = remember { AtomicInteger(0) }
 
     DisposableEffect(Unit) {
@@ -86,8 +81,6 @@ actual fun MicButton(
                 runCatching { it.destroy() }
             }
             recognizer = null
-            voskDictation?.stop()
-            voskDictation = null
             whisperDictation?.stop()
             whisperDictation = null
             serverDictation?.stop()
@@ -189,58 +182,21 @@ actual fun MicButton(
         listening = true
     }
 
-    fun startVosk() {
-        if (!VoskModelManager.isModelReady(context)) {
-            Toast.makeText(
-                context,
-                "Český Vosk model není stažený. Otevřete Nastavení → Voice a stáhněte model.",
-                Toast.LENGTH_LONG,
-            ).show()
-            return
-        }
-        val sessionBase = currentTextState.value
-        val dictation = VoskDictation(
-            context = context.applicationContext,
-            onPartial = { phrase ->
-                onTextChangeState.value(appendDictated(sessionBase, phrase))
-            },
-            onFinal = { phrase ->
-                onTextChangeState.value(appendDictated(sessionBase, phrase))
-                voskDictation?.stop()
-                voskDictation = null
-                listening = false
-            },
-            onError = { msg ->
-                Toast.makeText(context, msg, Toast.LENGTH_LONG).show()
-                voskDictation?.stop()
-                voskDictation = null
-                listening = false
-            },
-        )
-        voskDictation = dictation
-        dictation.start()
-        listening = true
-    }
-
     fun startSr() {
         val rec = recognizer ?: createCzechRecognizerSmart(context).also { recognizer = it }
         if (rec == null) {
-            // No bound recognizer — try the Google voice dialog, then Vosk.
+            // No bound recognizer — try the Google voice dialog.
             if (launchGoogleDialog()) {
                 listening = true
                 return
             }
-            if (voskReady) {
-                useVosk = true
-                startVosk()
-            } else {
-                Toast.makeText(
-                    context,
-                    "Rozpoznávání řeči není dostupné. " +
-                        "Nainstalujte Google (Speech Services by Google), nebo stáhněte český Vosk model v Nastavení → Voice.",
-                    Toast.LENGTH_LONG,
-                ).show()
-            }
+            Toast.makeText(
+                context,
+                "Rozpoznávání řeči není dostupné. " +
+                    "Nainstalujte Google (Speech Services by Google) " +
+                    "nebo přepněte na engine Server v Nastavení → Voice.",
+                Toast.LENGTH_LONG,
+            ).show()
             return
         }
         val mySession = sessionId.incrementAndGet()
@@ -270,21 +226,15 @@ actual fun MicButton(
                     runCatching { rec.destroy() }
                     recognizer = null
                     // Bound service has no Czech — try the Google voice
-                    // dialog (works wherever Gboard voice does). Only if no
-                    // voice activity exists do we fall back to offline Vosk.
+                    // dialog (works wherever Gboard voice does).
                     if (launchGoogleDialog()) return
-                    if (VoskModelManager.isModelReady(context)) {
-                        useVosk = true
-                        startVosk()
-                    } else {
-                        listening = false
-                        Toast.makeText(
-                            context,
-                            "Tento přístroj nepodporuje českou Google STT. " +
-                                "Stáhněte český Vosk model v Nastavení → Voice.",
-                            Toast.LENGTH_LONG,
-                        ).show()
-                    }
+                    listening = false
+                    Toast.makeText(
+                        context,
+                        "Tento přístroj nepodporuje českou Google STT. " +
+                            "Přepněte na engine Server v Nastavení → Voice.",
+                        Toast.LENGTH_LONG,
+                    ).show()
                     return
                 }
                 listening = false
@@ -328,8 +278,7 @@ actual fun MicButton(
         when (engine) {
             SttEngine.SERVER -> startServer()
             SttEngine.WHISPER -> startWhisper()
-            SttEngine.VOSK -> startVosk()
-            SttEngine.SYSTEM -> if (useVosk) startVosk() else startSr()
+            SttEngine.SYSTEM -> startSr()
         }
     }
 
@@ -348,8 +297,6 @@ actual fun MicButton(
                 serverDictation = null
                 whisperDictation?.stop()
                 whisperDictation = null
-                voskDictation?.stop()
-                voskDictation = null
                 recognizer?.stopListening()
                 listening = false
                 return@IconButton

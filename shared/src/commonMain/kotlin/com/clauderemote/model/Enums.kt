@@ -42,7 +42,6 @@ enum class AuthMethod {
 @Serializable
 enum class SttEngine(val displayName: String) {
     SYSTEM("Systémový (Google)"),
-    VOSK("Vosk (offline)"),
     WHISPER("Whisper (offline)"),
     SERVER("Server (faster-whisper)");
 }
