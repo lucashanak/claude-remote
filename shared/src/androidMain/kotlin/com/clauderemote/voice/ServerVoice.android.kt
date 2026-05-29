@@ -158,6 +158,12 @@ internal object ServerCatalog {
             http.newCall(req).execute().use { resp ->
                 if (!resp.isSuccessful) throw RuntimeException("HTTP ${resp.code} z /v1/models")
                 val payload = resp.body?.string().orEmpty()
+                if (payload.trimStart().startsWith("<")) {
+                    throw RuntimeException(
+                        "Server vrátil HTML místo JSON — zkontrolujte URL " +
+                            "(typicky špatná casing nebo chybí /api segment)."
+                    )
+                }
                 val arr = JSONObject(payload).optJSONArray("data")
                     ?: throw RuntimeException("Neočekávaný tvar JSONu (chybí pole 'data')")
                 buildList {
@@ -200,6 +206,12 @@ internal object ServerCatalog {
         http.newCall(req).execute().use { resp ->
             if (!resp.isSuccessful) throw RuntimeException("HTTP ${resp.code} z $url")
             val payload = resp.body?.string().orEmpty()
+            if (payload.trimStart().startsWith("<")) {
+                throw RuntimeException(
+                    "Server vrátil HTML místo JSON — zkontrolujte URL " +
+                        "(typicky špatná casing nebo chybí /api segment)."
+                )
+            }
             // Try array-of-string / array-of-object first.
             return runCatching {
                 val arr = org.json.JSONArray(payload)
