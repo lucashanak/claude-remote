@@ -1166,13 +1166,13 @@ private fun formatReset(minutes: Int): String {
     return if (h > 0) "${h}h${m}m" else "${m}m"
 }
 
+private val openTodoRegex = Regex("\"status\"\\s*:\\s*\"(pending|in_progress)\"")
+
 private fun countOpenTodos(entries: List<TranscriptEntry>): Int {
     val last = entries.asReversed().firstOrNull {
         it is TranscriptEntry.ToolCall && it.name == "TodoWrite"
     } as? TranscriptEntry.ToolCall ?: return 0
     val json = last.fullInput
     if (json.isBlank()) return 0
-    val pending = Regex("\"status\"\\s*:\\s*\"(pending|in_progress)\"")
-        .findAll(json).count()
-    return pending
+    return openTodoRegex.findAll(json).count()
 }

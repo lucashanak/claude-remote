@@ -304,9 +304,12 @@ class SessionOrchestrator(
                 )
                 ch.inputStream = null
                 val input = ch.inputStream
-                ch.connect(3000)
-                val out = input.bufferedReader().readText().trim()
-                ch.disconnect()
+                val out = try {
+                    ch.connect(3000)
+                    input.bufferedReader().readText().trim()
+                } finally {
+                    try { ch.disconnect() } catch (_: Exception) {}
+                }
                 if (out.isEmpty()) emptyList()
                 else fetchJson.decodeFromString<List<PersistedSession>>(out)
             } catch (e: Exception) {
@@ -363,9 +366,15 @@ class SessionOrchestrator(
                 ch.setCommand(cmd)
                 ch.inputStream = null
                 val input = ch.inputStream
-                ch.connect(3000)
-                val out = input.bufferedReader().readText().trim()
-                ch.disconnect()
+                val out = try {
+                    ch.connect(3000)
+                    input.bufferedReader().readText().trim()
+                } finally {
+                    // Disconnect even if connect()/readText() throws — otherwise
+                    // the channel leaks on the shared long-lived SSH session
+                    // every time this 15 s probe hits an error.
+                    try { ch.disconnect() } catch (_: Exception) {}
+                }
                 if (out.isEmpty() || out == "null" || !out.matches(Regex("^[0-9a-f-]{36}$"))) null else out
             } catch (e: Exception) {
                 null
@@ -389,9 +398,12 @@ class SessionOrchestrator(
                             ch.setCommand("echo pong")
                             ch.inputStream = null
                             val input = ch.inputStream
-                            ch.connect(5000)
-                            input.bufferedReader().readText()
-                            ch.disconnect()
+                            try {
+                                ch.connect(5000)
+                                input.bufferedReader().readText()
+                            } finally {
+                                try { ch.disconnect() } catch (_: Exception) {}
+                            }
                             System.currentTimeMillis() - start
                         }
                         recentLatencies.add(latency)

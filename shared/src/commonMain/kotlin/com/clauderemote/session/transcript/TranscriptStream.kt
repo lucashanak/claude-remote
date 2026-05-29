@@ -39,6 +39,11 @@ class TranscriptStream(
     private val scope = CoroutineScope(parentScope.coroutineContext + supervisor)
     private var streamJob: Job? = null
     private var currentUuid: String? = null
+    // Persistent dedup set so appending a line is O(1) instead of rebuilding a
+    // HashSet of every retained entry on each line. Single-writer: only the
+    // active tail coroutine touches it, and start() cancel-and-joins the
+    // previous tail before the next one runs, so no locking is needed.
+    private val seenIds = HashSet<String>()
     // Set once stop() has been called. start() is invoked outside transcriptLock
     // by the orchestrator, so it can race a concurrent disconnectSession() that
     // stops + removes this stream. Without this flag a late start() would
@@ -64,7 +69,10 @@ class TranscriptStream(
             // lambda already prevents duplicates, and blanking the list here
             // would cause a visible "flash to empty" every time the SSH
             // channel drops and reconnects.
-            if (uuidChanged) _entries.value = emptyList()
+            if (uuidChanged) {
+                _entries.value = emptyList()
+                seenIds.clear()
+            }
             runTail(claudeSessionUuid)
         }
     }
@@ -130,28 +138,28 @@ class TranscriptStream(
                             // logging path. The old `catch { null }` collapsed errors
                             // into clean-EOF, which reset attempt=0 → delay(0) →
                             // tight reconnect loop hammering SSH on a dead channel.
-                            val line = withContext(Dispatchers.IO) { reader.readLine() } ?: break
-                            // Parse opportunistically. Each JSONL line is independent;
-                            // partial lines (rare, when tail catches mid-write) will fail
-                            // parse cleanly and get dropped by the parser.
-                            val newEntries = TranscriptParser.parseLines(sequenceOf(line))
+                            val first = withContext(Dispatchers.IO) { reader.readLine() } ?: break
+                            // Coalesce a burst — the 2 000-line replay on (re)connect
+                            // and rapid streaming — into ONE flow emission instead of
+                            // one per line. Each emission triggers a full list copy
+                            // here plus ~4 O(n) recomputes in the Compose transcript
+                            // view, so per-line emission janks badly on long sessions.
+                            // reader.ready() drains only what's already buffered, so a
+                            // genuinely idle stream still emits promptly per line.
+                            val batch = ArrayList<String>()
+                            batch.add(first)
+                            while (batch.size < MAX_BATCH &&
+                                withContext(Dispatchers.IO) { reader.ready() }
+                            ) {
+                                val more = withContext(Dispatchers.IO) { reader.readLine() } ?: break
+                                batch.add(more)
+                            }
+                            // Partial lines (tail caught mid-write) fail parse cleanly
+                            // and are dropped by the parser.
+                            val newEntries = TranscriptParser.parseLines(batch.asSequence())
                             if (newEntries.isNotEmpty()) {
                                 sawData = true
-                                _entries.update { prev ->
-                                    // Dedup by id. On SSH reconnect the
-                                    // outer retry loop reopens tail -F, which
-                                    // re-emits the last 2 000 lines from the
-                                    // start of the file. Without this guard
-                                    // every reconnect would clone the whole
-                                    // backlog into the entries flow.
-                                    val seen = prev.mapTo(HashSet(prev.size)) { it.id }
-                                    val unique = newEntries.filter { seen.add(it.id) }
-                                    if (unique.isEmpty()) return@update prev
-                                    val combined = prev + unique
-                                    if (combined.size > MAX_ENTRIES) {
-                                        combined.subList(combined.size - MAX_ENTRIES, combined.size).toList()
-                                    } else combined
-                                }
+                                appendEntries(newEntries)
                             }
                         }
                     } finally {
@@ -173,11 +181,43 @@ class TranscriptStream(
         }
     }
 
+    /**
+     * Append a parsed batch, deduped by id. Dedup matters because the outer
+     * retry loop reopens `tail -F` on reconnect, which re-emits the last
+     * [INITIAL_LINES] lines — without this every reconnect would clone the
+     * backlog. The `seenIds.add` side effect runs exactly once here (outside
+     * the StateFlow.update lambda, which can be retried), and seenIds is
+     * bounded so a long-lived stream doesn't grow it without limit.
+     */
+    private fun appendEntries(newEntries: List<TranscriptEntry>) {
+        val unique = newEntries.filter { seenIds.add(it.id) }
+        if (unique.isEmpty()) return
+        _entries.update { prev ->
+            val combined = prev + unique
+            if (combined.size > MAX_ENTRIES) {
+                combined.subList(combined.size - MAX_ENTRIES, combined.size).toList()
+            } else combined
+        }
+        // Keep seenIds from growing unbounded across a very long session by
+        // pruning back to the currently-visible ids. This is safe against the
+        // reconnect replay: `tail -n INITIAL_LINES -F` re-emits only the NEWEST
+        // <= INITIAL_LINES (2000) lines, and INITIAL_LINES < MAX_ENTRIES (5000),
+        // so every replayable entry is always within the retained visible
+        // window and stays deduped. Prune lazily (at 2x) to avoid rebuilding
+        // the set on every batch.
+        if (seenIds.size > MAX_ENTRIES * 2) {
+            val retained = _entries.value.mapTo(HashSet(_entries.value.size)) { it.id }
+            seenIds.retainAll(retained)
+        }
+    }
+
     companion object {
         private const val TAG = "TranscriptStream"
         // Cap initial backlog from tail to bound startup time + RAM.
         private const val INITIAL_LINES = 2000
         // Hard cap on entries held in memory; oldest get dropped when exceeded.
         private const val MAX_ENTRIES = 5000
+        // Max lines coalesced into a single flow emission during a burst.
+        private const val MAX_BATCH = 500
     }
 }
