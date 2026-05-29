@@ -212,40 +212,56 @@ internal object ServerCatalog {
                         "(typicky špatná casing nebo chybí /api segment)."
                 )
             }
-            // Try array-of-string / array-of-object first.
-            return runCatching {
-                val arr = org.json.JSONArray(payload)
-                buildList {
-                    for (i in 0 until arr.length()) {
-                        val v = arr.opt(i)
-                        when (v) {
-                            is String -> if (v.isNotBlank()) add(v)
-                            is JSONObject -> {
-                                val name = listOf("name", "id", "voice", "voice_id")
-                                    .firstNotNullOfOrNull { k -> v.optString(k).takeIf { it.isNotBlank() } }
-                                if (name != null) add(name)
-                            }
-                        }
+            val list = parseVoicesPayload(payload)
+            if (list.isEmpty()) {
+                // Include a snippet so the user can paste it and we'll know
+                // the exact JSON shape the server uses.
+                val snippet = payload.take(220).replace(Regex("\\s+"), " ")
+                throw RuntimeException("Nerozpoznaný tvar JSONu od $url: $snippet")
+            }
+            return list
+        }
+    }
+
+    private fun parseVoicesPayload(payload: String): List<String> {
+        // 1) Top-level JSON array of strings or objects.
+        runCatching {
+            val arr = org.json.JSONArray(payload)
+            val r = jsonArrayToVoiceList(arr)
+            if (r.isNotEmpty()) return r
+        }
+        // 2) Top-level JSON object with a nested array under common keys…
+        runCatching {
+            val obj = JSONObject(payload)
+            for (key in listOf("voices", "data", "items", "results")) {
+                val arr = obj.optJSONArray(key) ?: continue
+                val r = jsonArrayToVoiceList(arr)
+                if (r.isNotEmpty()) return r
+            }
+            // …or the voices are the object's own keys (map shape).
+            val keys = obj.keys().asSequence().toList()
+            val voiceLike = keys.filter { k ->
+                k.isNotBlank() && (k.contains('_') || k.contains('-') || k.matches(Regex("^[A-Za-z][A-Za-z0-9_-]+$")))
+            }
+            if (voiceLike.isNotEmpty()) return voiceLike
+        }
+        return emptyList()
+    }
+
+    private fun jsonArrayToVoiceList(arr: org.json.JSONArray): List<String> = buildList {
+        val keys = listOf(
+            "name", "id", "voice", "voice_id", "voice_name",
+            "key", "value", "model", "label", "slug",
+        )
+        for (i in 0 until arr.length()) {
+            when (val v = arr.opt(i)) {
+                is String -> if (v.isNotBlank()) add(v)
+                is JSONObject -> {
+                    val candidate = keys.firstNotNullOfOrNull { k ->
+                        v.optString(k).takeIf { it.isNotBlank() }
                     }
+                    if (candidate != null) add(candidate)
                 }
-            }.getOrElse {
-                runCatching {
-                    val obj = JSONObject(payload)
-                    val arr = obj.optJSONArray("voices") ?: obj.optJSONArray("data") ?: return@getOrElse emptyList()
-                    buildList {
-                        for (i in 0 until arr.length()) {
-                            val v = arr.opt(i)
-                            when (v) {
-                                is String -> if (v.isNotBlank()) add(v)
-                                is JSONObject -> {
-                                    val name = listOf("name", "id", "voice", "voice_id")
-                                        .firstNotNullOfOrNull { k -> v.optString(k).takeIf { it.isNotBlank() } }
-                                    if (name != null) add(name)
-                                }
-                            }
-                        }
-                    }
-                }.getOrDefault(emptyList())
             }
         }
     }
