@@ -50,6 +50,15 @@ class WakeWordEngine private constructor(
             "hej claude",
             "ahoj klaude",
             "ahoj claude",
+            // Single-word fallbacks — the cs-small Vosk model often
+            // transcribes "Claude" as just "klaude" / "claude" without the
+            // preceding "hej". Tradeoff: occasional false trigger when the
+            // word appears in normal speech.
+            "klaude",
+            "claude",
+            "klód",
+            "hej klód",
+            "ahoj klód",
         )
 
         private const val SAMPLE_RATE = 16000f
