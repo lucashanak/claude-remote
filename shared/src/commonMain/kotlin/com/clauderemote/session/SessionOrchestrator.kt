@@ -220,12 +220,10 @@ class SessionOrchestrator(
     // into a new empty session when tapped.
     var onSessionForgotten: ((serverId: String, tmuxSessionName: String) -> Unit)? = null
 
-    // Per-session usage percentages parsed from the OMC statusline. 5h and
-    // weekly are technically account-wide values but we still key by session
-    // because each session prints its own (potentially stale) snapshot — a
-    // fresh tab on the same account just shows '—' until its first turn,
-    // which is honest. Avoids cross-tab contamination where the last-emitting
-    // session's number sticks around after switching tabs.
+    // Usage percentages parsed from the OMC statusline, keyed by SERVER id.
+    // 5h and weekly limits are account-wide, so every session on the same
+    // server shares them — switch tabs and the values stay put instead of
+    // resetting to '—' until the new tab fetches them itself.
     private val _sessionUsagePercents = kotlinx.coroutines.flow.MutableStateFlow<Map<String, Int>>(emptyMap())
     val sessionUsagePercents: kotlinx.coroutines.flow.StateFlow<Map<String, Int>> = _sessionUsagePercents
     private val _weekUsagePercents = kotlinx.coroutines.flow.MutableStateFlow<Map<String, Int>>(emptyMap())
@@ -1034,17 +1032,22 @@ else:
             if (session.id in sawWorkSinceAttach) {
                 val usage = promptDetector.parseUsage(session.id, text)
                 if (usage != null) {
+                    // 5h / week limits are account-wide, so key them by SERVER,
+                    // not session — switching to another session on the same
+                    // server then keeps the values instead of resetting to "—"
+                    // until that session happens to fetch them itself.
+                    val serverId = session.server.id
                     usage["session"]?.let { s ->
-                        _sessionUsagePercents.update { it + (session.id to s) }
+                        _sessionUsagePercents.update { it + (serverId to s) }
                     }
                     usage["week"]?.let { w ->
-                        _weekUsagePercents.update { it + (session.id to w) }
+                        _weekUsagePercents.update { it + (serverId to w) }
                     }
                     usage["session_reset_min"]?.let { m ->
-                        _sessionResetMin.update { it + (session.id to m) }
+                        _sessionResetMin.update { it + (serverId to m) }
                     }
                     usage["week_reset_min"]?.let { m ->
-                        _weekResetMin.update { it + (session.id to m) }
+                        _weekResetMin.update { it + (serverId to m) }
                     }
                     onUsageUpdate?.invoke(usage["session"], usage["week"])
                 }
@@ -1672,10 +1675,9 @@ else:
         confirmedUuids.remove(sessionId)
         _sessionActivities.update { it - sessionId }
         _contextPercents.update { it - sessionId }
-        _sessionUsagePercents.update { it - sessionId }
-        _weekUsagePercents.update { it - sessionId }
-        _sessionResetMin.update { it - sessionId }
-        _weekResetMin.update { it - sessionId }
+        // Usage maps are keyed by server (account-wide), so don't clear them on
+        // a single session's disconnect — other sessions on that server still
+        // want the values.
         _latencies.update { it - sessionId }
         _gitStatuses.update { it - sessionId }
         _pendingCounts.update { it - sessionId }

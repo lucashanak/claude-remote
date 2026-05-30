@@ -57,6 +57,7 @@ fun LauncherScreen(
     onDeleteServer: (SshServer) -> Unit,
     onToggleFavorite: ((SshServer) -> Unit)? = null,
     onResumeSession: (ClaudeSession) -> Unit,
+    onSessionLongPress: ((ClaudeSession) -> Unit)? = null,
     onSettings: () -> Unit,
     onViewLog: () -> Unit = {},
     onUsageDashboard: (() -> Unit)? = null,
@@ -209,6 +210,9 @@ fun LauncherScreen(
                             SessionLauncherCard(
                                 session = s,
                                 onClick = { onResumeSession(s) },
+                                onLongPress = if (isMobile && onSessionLongPress != null) {
+                                    { onSessionLongPress(s) }
+                                } else null,
                             )
                         } else if (r != null) {
                             RemoteSessionCard(remote = r, onClick = { onAttachRemote?.invoke(r) })
@@ -283,9 +287,11 @@ private fun LauncherSectionHeader(
 // ── Session launcher card ─────────────────────────────────────────────────────
 
 @Composable
+@OptIn(ExperimentalFoundationApi::class)
 private fun SessionLauncherCard(
     session: ClaudeSession,
     onClick: () -> Unit,
+    onLongPress: (() -> Unit)? = null,
 ) {
     val c = CRTheme.colors
     val m = CRTheme.metrics
@@ -294,7 +300,7 @@ private fun SessionLauncherCard(
     val sessionAlias = session.alias.ifBlank { null }
 
     CRCard(
-        modifier = Modifier.clickable(onClick = onClick),
+        modifier = Modifier.combinedClickable(onClick = onClick, onLongClick = onLongPress),
     ) {
         if (m.sessionCardOneLine) {
             // Dense: single row — folder · alias (folder first)

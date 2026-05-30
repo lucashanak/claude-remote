@@ -3,8 +3,10 @@ package com.clauderemote.ui
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.gestures.Orientation
 import androidx.compose.foundation.gestures.draggable
 import androidx.compose.foundation.gestures.rememberDraggableState
@@ -105,6 +107,7 @@ fun TerminalScreen(
     activeTabId: String?,
     onTabSwitch: (String) -> Unit,
     onTabClose: (String) -> Unit,
+    onSessionLongPress: ((String) -> Unit)? = null,
     onNewTab: () -> Unit,
     onMenuOpen: () -> Unit,
     onSendCommand: (String) -> Unit,
@@ -266,6 +269,7 @@ fun TerminalScreen(
                     onAttachRemote = onAttachRemote,
                     onRenameSession = onRenameSession,
                     onNativeRenameDialog = onNativeRenameDialog,
+                    onSessionLongPress = onSessionLongPress,
                     modifier = Modifier.width(sidePanelWidth).fillMaxHeight()
                 )
                 if (!isMobile) {
@@ -793,6 +797,12 @@ fun TerminalScreen(
                 showSessionDrawer = false
             },
             onClose = { showSessionDrawer = false },
+            onLongPressSession = onSessionLongPress?.let { handler ->
+                { id ->
+                    handler(id)
+                    showSessionDrawer = false
+                }
+            },
         )
 
         // ── ExpandedInput overlay ──────────────────────────────────────────
@@ -1375,6 +1385,7 @@ private fun SessionSidePanel(
     onAttachRemote: ((com.clauderemote.model.RemoteSession) -> Unit)?,
     onRenameSession: ((sessionId: String, newAlias: String) -> Unit)? = null,
     onNativeRenameDialog: ((sessionId: String, currentAlias: String) -> Unit)? = null,
+    onSessionLongPress: ((String) -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
     val c = CRTheme.colors
@@ -1522,6 +1533,9 @@ private fun SessionSidePanel(
                                 renamingItem = item
                             }
                         } else null,
+                        onLongPress = if (isMobile && onSessionLongPress != null && item.tab != null) {
+                            { onSessionLongPress(item.tab.id) }
+                        } else null,
                     )
                 }
             }
@@ -1580,6 +1594,7 @@ private fun SidePanelGroupLabel(serverName: String, count: Int) {
 
 // ── Per-session row ───────────────────────────────────────────────────────────
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun SidePanelSessionRow(
     item: SessionItem,
@@ -1590,6 +1605,7 @@ private fun SidePanelSessionRow(
     onTabClose: (String) -> Unit,
     onAttachRemote: ((com.clauderemote.model.RemoteSession) -> Unit)?,
     onRename: ((String) -> Unit)?,
+    onLongPress: (() -> Unit)? = null,
 ) {
     val c = CRTheme.colors
     val crStatus = activity.sidePanelToCRStatus(item.isConnected)
@@ -1607,10 +1623,13 @@ private fun SidePanelSessionRow(
         modifier = Modifier
             .fillMaxWidth()
             .background(if (isActive) c.tintAccent else Color.Transparent)
-            .clickable {
-                if (item.isConnected && item.tab != null) onTabSwitch(item.tab.id)
-                else if (item.remote != null) onAttachRemote?.invoke(item.remote)
-            }
+            .combinedClickable(
+                onClick = {
+                    if (item.isConnected && item.tab != null) onTabSwitch(item.tab.id)
+                    else if (item.remote != null) onAttachRemote?.invoke(item.remote)
+                },
+                onLongClick = onLongPress,
+            )
             .height(IntrinsicSize.Min),
         verticalAlignment = Alignment.CenterVertically,
     ) {

@@ -9,6 +9,7 @@ import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
@@ -63,6 +64,7 @@ fun SessionDrawer(
     onAttachRemote: ((RemoteSession) -> Unit)? = null,
     onNew: () -> Unit = {},
     onClose: () -> Unit = {},
+    onLongPressSession: ((id: String) -> Unit)? = null,
 ) {
     if (!open && sessions.isEmpty() && remoteSessions.isEmpty()) return  // skip composition when not needed
 
@@ -220,6 +222,9 @@ fun SessionDrawer(
                                                 onPick(s.id)
                                                 onClose()
                                             },
+                                            onLongPress = if (isMobile && onLongPressSession != null) {
+                                                { onLongPressSession(s.id) }
+                                            } else null,
                                         )
                                     } else if (r != null) {
                                         DrawerRemoteItem(
@@ -339,11 +344,13 @@ private fun DrawerGroupLabel(server: SshServer, count: Int) {
 // ── Session item ──────────────────────────────────────────────────────────────
 
 @Composable
+@OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
 private fun DrawerItem(
     session: ClaudeSession,
     activity: SessionActivity,
     selected: Boolean,
     onClick: () -> Unit,
+    onLongPress: (() -> Unit)? = null,
 ) {
     val c = CRTheme.colors
     val bg = if (selected) c.tintAccent else Color.Transparent
@@ -352,7 +359,7 @@ private fun DrawerItem(
         modifier = Modifier
             .fillMaxWidth()
             .background(bg)
-            .clickable(onClick = onClick),
+            .combinedClickable(onClick = onClick, onLongClick = onLongPress),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         // Left accent bar for active item

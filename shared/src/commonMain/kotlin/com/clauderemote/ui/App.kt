@@ -11,9 +11,20 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.systemBars
 import androidx.compose.foundation.layout.union
 import androidx.compose.foundation.layout.windowInsetsPadding
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.unit.dp
+import com.clauderemote.model.ClaudeMode
+import com.clauderemote.ui.theme.CRType
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.drawWithContent
@@ -79,6 +90,10 @@ fun App(
     var tmuxLoading by remember { mutableStateOf(false) }
     var connectionError by remember { mutableStateOf<String?>(null) }
     var tabCloseConfirmId by remember { mutableStateOf<String?>(null) }
+    // Long-press session context menu (mobile): which session it's open for.
+    var sessionMenuId by remember { mutableStateOf<String?>(null) }
+    // Rename dialog: which session is being renamed.
+    var renameSessionId by remember { mutableStateOf<String?>(null) }
     var invertColors by remember { mutableStateOf(appSettings.invertColors) }
 
     // Collect new StateFlows from orchestrator
@@ -96,6 +111,8 @@ fun App(
     var serverList by remember { mutableStateOf(serverStorage.loadServers()) }
     val tabs by tabManager.tabs.collectAsState()
     val activeTabId by tabManager.activeTabId.collectAsState()
+    // Server of the active tab — usage chips (5h/wk) are keyed by server.
+    val activeServerId = tabs.firstOrNull { it.id == activeTabId }?.server?.id
 
     // Remote tmux sessions discovered on servers
     var remoteSessions by remember { mutableStateOf<List<RemoteSession>>(emptyList()) }
@@ -468,6 +485,7 @@ fun App(
                             sessionOrchestrator.switchTab(session.id)
                             currentScreen = Screen.TERMINAL
                         },
+                        onSessionLongPress = { session -> sessionMenuId = session.id },
                         onSettings = { currentScreen = Screen.SETTINGS },
                         onViewLog = { currentScreen = Screen.LOG_VIEWER },
                         onUsageDashboard = { currentScreen = Screen.USAGE_DASHBOARD },
@@ -591,6 +609,7 @@ fun App(
                                 tabCloseConfirmId = id
                             }
                         },
+                        onSessionLongPress = { id -> sessionMenuId = id },
                         onNewTab = { currentScreen = Screen.LAUNCHER },
                         onMenuOpen = { currentScreen = Screen.LAUNCHER },
                         onSendCommand = { cmd ->
@@ -710,10 +729,10 @@ fun App(
                                 } catch (_: Exception) {}
                             }
                         },
-                        sessionUsagePercent = activeTabId?.let { sessionUsagePercents[it] },
-                        weekUsagePercent = activeTabId?.let { weekUsagePercents[it] },
-                        sessionResetMin = activeTabId?.let { sessionResetMin[it] },
-                        weekResetMin = activeTabId?.let { weekResetMin[it] },
+                        sessionUsagePercent = activeServerId?.let { sessionUsagePercents[it] },
+                        weekUsagePercent = activeServerId?.let { weekUsagePercents[it] },
+                        sessionResetMin = activeServerId?.let { sessionResetMin[it] },
+                        weekResetMin = activeServerId?.let { weekResetMin[it] },
                         sessionActivities = sessionActivities,
                         hookActiveSessions = hookActiveSessions,
                         contextPercent = activeTabId?.let { contextPercents[it] },
@@ -795,8 +814,8 @@ fun App(
                         sessions = tabs,
                         sessionActivities = sessionActivities,
                         contextPercents = contextPercents,
-                        sessionUsagePercent = activeTabId?.let { sessionUsagePercents[it] },
-                        weekUsagePercent = activeTabId?.let { weekUsagePercents[it] },
+                        sessionUsagePercent = activeServerId?.let { sessionUsagePercents[it] },
+                        weekUsagePercent = activeServerId?.let { weekUsagePercents[it] },
                         usageTokens = usageTokensState,
                         onBack = { currentScreen = Screen.LAUNCHER }
                     )
@@ -849,6 +868,85 @@ fun App(
             )
         }
 
+        // Session long-press context menu (mobile). Desktop uses its native
+        // right-click menu instead.
+        sessionMenuId?.let { id ->
+            val session = tabManager.getTab(id)
+            AlertDialog(
+                onDismissRequest = { sessionMenuId = null },
+                title = { Text(session?.displayLabel ?: "Session") },
+                text = {
+                    Column {
+                        Text(
+                            "${session?.server?.name ?: ""} · ${session?.folder ?: ""}",
+                            style = CRType.bodyDim,
+                            color = CRTheme.colors.textDim,
+                        )
+                        Spacer(Modifier.height(12.dp))
+                        // Rename needs a live connection to rename the server-side
+                        // tmux; offline it'd only change a local alias that's lost
+                        // on restart and would desync from the tmux name. So offer
+                        // it only when connected — offline sessions get Reconnect.
+                        if (session?.status == com.clauderemote.model.SessionStatus.ACTIVE) {
+                            SessionMenuRow("Rename") {
+                                sessionMenuId = null
+                                renameSessionId = id
+                            }
+                        }
+                        SessionMenuRow("Reconnect") {
+                            sessionMenuId = null
+                            scope.launch { sessionOrchestrator.reconnectSession(id) }
+                        }
+                        SessionMenuRow("Close session", destructive = true) {
+                            sessionMenuId = null
+                            tabCloseConfirmId = id
+                        }
+                    }
+                },
+                confirmButton = {},
+                dismissButton = {
+                    TextButton(onClick = { sessionMenuId = null }) { Text("Cancel") }
+                }
+            )
+        }
+
+        // Rename session dialog (mobile / shared). Renames the alias + the
+        // server-side tmux session so it survives reconnect/reboot.
+        renameSessionId?.let { id ->
+            val session = tabManager.getTab(id)
+            var aliasText by remember(id) { mutableStateOf(session?.alias ?: "") }
+            AlertDialog(
+                onDismissRequest = { renameSessionId = null },
+                title = { Text("Rename session") },
+                text = {
+                    OutlinedTextField(
+                        value = aliasText,
+                        onValueChange = { aliasText = it },
+                        singleLine = true,
+                        label = { Text("Alias") },
+                    )
+                },
+                confirmButton = {
+                    TextButton(onClick = {
+                        renameSessionId = null
+                        val tab = tabManager.getTab(id) ?: return@TextButton
+                        val trimmed = aliasText.trim()
+                        tabManager.updateAlias(id, trimmed)
+                        val newTmux = com.clauderemote.model.TmuxNameParser.build(
+                            tab.server.name, tab.folder,
+                            tab.mode == ClaudeMode.YOLO, trimmed
+                        )
+                        scope.launch {
+                            sessionOrchestrator.renameTmuxSession(id, tab.tmuxSessionName, newTmux)
+                        }
+                    }) { Text("Rename") }
+                },
+                dismissButton = {
+                    TextButton(onClick = { renameSessionId = null }) { Text("Cancel") }
+                }
+            )
+        }
+
         // Connection error dialog
         connectionError?.let { error ->
             AlertDialog(
@@ -862,5 +960,27 @@ fun App(
         }
         } // end Box
     }
+    }
+}
+
+/** A full-width tappable row used in the session long-press context menu. */
+@androidx.compose.runtime.Composable
+private fun SessionMenuRow(
+    label: String,
+    destructive: Boolean = false,
+    onClick: () -> Unit,
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onClick)
+            .padding(vertical = 12.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.Start,
+    ) {
+        Text(
+            label,
+            color = if (destructive) CRTheme.colors.disconnected else CRTheme.colors.text,
+        )
     }
 }
