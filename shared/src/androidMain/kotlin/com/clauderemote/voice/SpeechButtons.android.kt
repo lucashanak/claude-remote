@@ -347,9 +347,13 @@ actual fun SpeakerButton(
                         Toast.makeText(context, "Není nastavená adresa serveru (Nastavení → Voice).", Toast.LENGTH_LONG).show()
                         speaking = false
                     } else {
-                        ServerTts.speak(context, cfg.url, cfg.model, cfg.voice, cfg.apiKey, payload) {
-                            speaking = false
-                        }
+                        ServerTts.speak(
+                            context, cfg.url, cfg.model, cfg.voice, cfg.apiKey, payload,
+                            onFinish = { speaking = false },
+                            onError = { msg ->
+                                Toast.makeText(context, "TTS: $msg", Toast.LENGTH_LONG).show()
+                            },
+                        )
                     }
                 } else {
                     TtsHolder.speak(context, payload) {

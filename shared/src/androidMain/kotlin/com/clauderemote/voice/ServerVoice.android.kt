@@ -45,6 +45,7 @@ internal object ServerTts {
         apiKey: String,
         text: String,
         onFinish: () -> Unit,
+        onError: ((String) -> Unit)? = null,
     ) {
         // Replace any in-flight playback + its completion.
         stop()
@@ -52,9 +53,18 @@ internal object ServerTts {
         currentCompletion.set(onFinish)
         val appContext = context.applicationContext
         scope.launch {
-            val bytes = runCatching { fetch(baseUrl, model, voice, apiKey, text) }.getOrNull()
+            val bytes = runCatching { fetch(baseUrl, model, voice, apiKey, text) }
+                .onFailure { e ->
+                    if (gen == generation.get() && onError != null) {
+                        postOnMain { onError(e.message ?: "TTS fetch selhal") }
+                    }
+                }
+                .getOrNull()
             if (gen != generation.get()) return@launch  // superseded
             if (bytes == null || bytes.isEmpty()) {
+                if (bytes != null && onError != null) {
+                    postOnMain { onError("Server vrátil prázdné audio") }
+                }
                 fireCompletion()
                 return@launch
             }
@@ -62,6 +72,7 @@ internal object ServerTts {
                 File.createTempFile("cr-tts", ".mp3", appContext.cacheDir).apply { writeBytes(bytes) }
             }.getOrNull()
             if (file == null) {
+                if (onError != null) postOnMain { onError("Nelze zapsat audio do cache") }
                 fireCompletion()
                 return@launch
             }
@@ -115,7 +126,7 @@ internal object ServerTts {
         voice: String,
         apiKey: String,
         text: String,
-    ): ByteArray? = withContext(Dispatchers.IO) {
+    ): ByteArray = withContext(Dispatchers.IO) {
         val json = JSONObject()
             .put("model", model)
             .put("input", text)
@@ -128,8 +139,11 @@ internal object ServerTts {
             .apply { if (apiKey.isNotBlank()) header("Authorization", "Bearer $apiKey") }
             .build()
         http.newCall(req).execute().use { resp ->
-            if (!resp.isSuccessful) return@withContext null
-            resp.body?.bytes()
+            if (!resp.isSuccessful) {
+                val snippet = resp.body?.string().orEmpty().take(120).replace(Regex("\\s+"), " ")
+                throw RuntimeException("HTTP ${resp.code} z /v1/audio/speech${if (snippet.isNotBlank()) " — $snippet" else ""}")
+            }
+            resp.body?.bytes() ?: ByteArray(0)
         }
     }
 }
