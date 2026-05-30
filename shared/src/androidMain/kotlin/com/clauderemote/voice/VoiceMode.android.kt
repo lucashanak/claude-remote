@@ -326,8 +326,7 @@ private class DialogueController(
         stopped = true
         sessionGen.incrementAndGet()
         mainHandler.removeCallbacksAndMessages(null)
-        TtsHolder.stop()
-        ServerTts.stop()
+        stopAllTts()
         recognizer?.let {
             runCatching { it.cancel() }
             runCatching { it.destroy() }
@@ -364,20 +363,11 @@ private class DialogueController(
                 beginListening()
             } else Unit
         }
-        if (selectedTtsEngine(context) == com.clauderemote.model.TtsEngine.SERVER) {
-            val cfg = ttsServerConfig(context)
-            if (cfg.url.isNotBlank()) {
-                ServerTts.speak(
-                    context, cfg.url, cfg.model, cfg.voice, cfg.apiKey, text,
-                    onFinish = onSpoken,
-                    onError = { msg -> onStateChange(VoiceState.Error("TTS: $msg")) },
-                )
-            } else {
-                TtsHolder.speak(context, text, onSpoken)
-            }
-        } else {
-            TtsHolder.speak(context, text, onSpoken)
-        }
+        speakRouted(
+            context, text,
+            onFinish = onSpoken,
+            onError = { msg -> onStateChange(VoiceState.Error("TTS: $msg")) },
+        )
     }
 
     private fun ensureRecognizer() {

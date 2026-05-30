@@ -334,32 +334,19 @@ actual fun SpeakerButton(
     IconButton(
         onClick = {
             if (speaking) {
-                ServerTts.stop()
-                TtsHolder.stop()
+                stopAllTts()
                 speaking = false
             } else {
                 val payload = textState.value
                 if (payload.isBlank()) return@IconButton
                 speaking = true
-                if (selectedTtsEngine(context) == com.clauderemote.model.TtsEngine.SERVER) {
-                    val cfg = ttsServerConfig(context)
-                    if (cfg.url.isBlank()) {
-                        Toast.makeText(context, "Není nastavená adresa serveru (Nastavení → Voice).", Toast.LENGTH_LONG).show()
-                        speaking = false
-                    } else {
-                        ServerTts.speak(
-                            context, cfg.url, cfg.model, cfg.voice, cfg.apiKey, payload,
-                            onFinish = { speaking = false },
-                            onError = { msg ->
-                                Toast.makeText(context, "TTS: $msg", Toast.LENGTH_LONG).show()
-                            },
-                        )
-                    }
-                } else {
-                    TtsHolder.speak(context, payload) {
-                        speaking = false
-                    }
-                }
+                speakRouted(
+                    context, payload,
+                    onFinish = { speaking = false },
+                    onError = { msg ->
+                        Toast.makeText(context, "TTS: $msg", Toast.LENGTH_LONG).show()
+                    },
+                )
             }
         },
         modifier = modifier,

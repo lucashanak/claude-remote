@@ -17,18 +17,16 @@ import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicReference
 
 /**
- * Server-side text-to-speech via an OpenAI-compatible `/v1/audio/speech`
- * endpoint (Speaches with Piper/Kokoro). POSTs text, receives audio,
- * plays it through a MediaPlayer. Mirrors [TtsHolder]'s contract: one
- * active utterance at a time, completion dispatched on the main thread so
- * voice mode's turn-taking can resume listening.
+ * Shared MediaPlayer playback core for the file-based TTS engines
+ * ([ServerTts], [GoogleCloudTts]). Given an engine-specific suspend
+ * `fetch` that returns encoded audio bytes, it writes them to a temp file
+ * and plays them, enforcing a single active utterance across ALL such
+ * engines (one MediaPlayer, one generation token) so switching engines or
+ * tapping a new SpeakerButton never overlaps audio. Completion is always
+ * dispatched on the main thread so voice mode's turn-taking can resume.
  */
-internal object ServerTts {
+internal object MediaTtsCore {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
-    private val http = OkHttpClient.Builder()
-        .connectTimeout(15, TimeUnit.SECONDS)
-        .readTimeout(60, TimeUnit.SECONDS)
-        .build()
 
     @Volatile private var player: MediaPlayer? = null
     private val currentCompletion = AtomicReference<(() -> Unit)?>(null)
@@ -39,13 +37,10 @@ internal object ServerTts {
 
     fun speak(
         context: Context,
-        baseUrl: String,
-        model: String,
-        voice: String,
-        apiKey: String,
-        text: String,
+        ext: String,
         onFinish: () -> Unit,
-        onError: ((String) -> Unit)? = null,
+        onError: ((String) -> Unit)?,
+        fetch: suspend () -> ByteArray,
     ) {
         // Replace any in-flight playback + its completion.
         stop()
@@ -53,10 +48,10 @@ internal object ServerTts {
         currentCompletion.set(onFinish)
         val appContext = context.applicationContext
         scope.launch {
-            val bytes = runCatching { fetch(baseUrl, model, voice, apiKey, text) }
+            val bytes = runCatching { fetch() }
                 .onFailure { e ->
                     if (gen == generation.get() && onError != null) {
-                        postOnMain { onError(e.message ?: "TTS fetch selhal") }
+                        postOnMain { onError(e.message ?: "TTS selhal") }
                     }
                 }
                 .getOrNull()
@@ -69,7 +64,7 @@ internal object ServerTts {
                 return@launch
             }
             val file = runCatching {
-                File.createTempFile("cr-tts", ".mp3", appContext.cacheDir).apply { writeBytes(bytes) }
+                File.createTempFile("cr-tts", ext, appContext.cacheDir).apply { writeBytes(bytes) }
             }.getOrNull()
             if (file == null) {
                 if (onError != null) postOnMain { onError("Nelze zapsat audio do cache") }
@@ -119,6 +114,35 @@ internal object ServerTts {
     private fun fireCompletion() {
         currentCompletion.getAndSet(null)?.let { postOnMain(it) }
     }
+}
+
+/**
+ * Server-side text-to-speech via an OpenAI-compatible `/v1/audio/speech`
+ * endpoint (Speaches with Piper/XTTS). POSTs text, receives mp3, plays it
+ * through the shared [MediaTtsCore].
+ */
+internal object ServerTts {
+    private val http = OkHttpClient.Builder()
+        .connectTimeout(15, TimeUnit.SECONDS)
+        .readTimeout(60, TimeUnit.SECONDS)
+        .build()
+
+    fun speak(
+        context: Context,
+        baseUrl: String,
+        model: String,
+        voice: String,
+        apiKey: String,
+        text: String,
+        onFinish: () -> Unit,
+        onError: ((String) -> Unit)? = null,
+    ) {
+        MediaTtsCore.speak(context, ".mp3", onFinish, onError) {
+            fetch(baseUrl, model, voice, apiKey, text)
+        }
+    }
+
+    fun stop() = MediaTtsCore.stop()
 
     private suspend fun fetch(
         baseUrl: String,

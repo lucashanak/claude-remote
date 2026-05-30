@@ -45,13 +45,16 @@ actual fun WakeWordSettingsCard(settings: AppSettings) {
     var loadingCatalog by remember { mutableStateOf(false) }
     var voicesCatalog by remember { mutableStateOf<List<String>>(emptyList()) }
     var loadingVoices by remember { mutableStateOf(false) }
+    var ttsEngine by remember { mutableStateOf(settings.ttsEngine) }
+    var gcloudKey by remember { mutableStateOf(settings.googleCloudApiKey) }
+    var gcloudVoice by remember { mutableStateOf(settings.googleCloudVoice) }
+    var testing by remember { mutableStateOf(false) }
 
-    // Pin both engines to SERVER — the legacy SYSTEM/Vosk/Whisper paths
-    // were removed; the app only does STT/TTS through the self-hosted
-    // OpenAI-compatible endpoint.
+    // Pin STT to SERVER — the legacy SYSTEM/Vosk/Whisper STT paths were
+    // removed; the device recognizer can't do Czech here. TTS, however,
+    // now offers a real choice (on-device Google / server / Google Cloud).
     LaunchedEffect(Unit) {
         if (settings.sttEngine != SttEngine.SERVER) settings.sttEngine = SttEngine.SERVER
-        if (settings.ttsEngine != TtsEngine.SERVER) settings.ttsEngine = TtsEngine.SERVER
     }
 
     Column(
@@ -139,71 +142,147 @@ actual fun WakeWordSettingsCard(settings: AppSettings) {
 
         androidx.compose.material3.HorizontalDivider(color = c.border)
 
-        // ── TTS (Server) ─────────────────────────────────────────────
-        Text("Předčítání — Server", style = CRType.cardTitle, color = c.text)
-        Text(
-            "Předčítání přes stejný server (např. Piper voice via /v1/audio/speech).",
-            style = CRType.bodyDim, color = c.textDim,
+        // ── TTS (engine picker) ──────────────────────────────────────
+        Text("Předčítání (TTS)", style = CRType.cardTitle, color = c.text)
+        ModelDropdown(
+            label = "Engine",
+            options = TtsEngine.entries.map { it.displayName },
+            selected = ttsEngine.displayName,
+            onSelect = { name ->
+                val picked = TtsEngine.entries.firstOrNull { it.displayName == name } ?: TtsEngine.SERVER
+                ttsEngine = picked; settings.ttsEngine = picked
+            },
         )
-        if (catalog.isNotEmpty()) {
-            ModelDropdown(
-                label = "TTS model",
-                options = catalog.filter { ServerCatalog.isTts(it) }.map { it.id },
-                selected = ttsModel,
-                onSelect = { ttsModel = it; settings.ttsServerModel = it },
-            )
-        } else {
-            androidx.compose.material3.OutlinedTextField(
-                value = ttsModel,
-                onValueChange = { ttsModel = it; settings.ttsServerModel = it },
-                label = { Text("TTS model (např. tts-1)") },
-                singleLine = true,
-                modifier = Modifier.fillMaxWidth(),
-            )
-        }
-        if (voicesCatalog.isNotEmpty()) {
-            ModelDropdown(
-                label = "Hlas (voice)",
-                options = voicesCatalog,
-                selected = ttsVoice,
-                onSelect = { ttsVoice = it; settings.ttsServerVoice = it },
-            )
-        } else {
-            androidx.compose.material3.OutlinedTextField(
-                value = ttsVoice,
-                onValueChange = { ttsVoice = it; settings.ttsServerVoice = it },
-                label = { Text("Hlas (voice)") },
-                singleLine = true,
-                modifier = Modifier.fillMaxWidth(),
-            )
-        }
-        if (serverUrl.isNotBlank()) {
-            Button(
-                onClick = {
-                    loadingVoices = true
-                    scope.launch {
-                        try {
-                            val result = ServerCatalog.fetchVoices(serverUrl, settings.sttServerApiKey)
-                            voicesCatalog = result
-                            if (result.isEmpty()) {
-                                Toast.makeText(context, "Server vrátil prázdný seznam hlasů.", Toast.LENGTH_LONG).show()
-                            }
-                        } catch (e: Throwable) {
-                            Toast.makeText(context, "Hlasy: ${e.message ?: "neznámá chyba"}", Toast.LENGTH_LONG).show()
-                        } finally {
-                            loadingVoices = false
-                        }
-                    }
-                },
-                enabled = !loadingVoices,
-                colors = ButtonDefaults.buttonColors(containerColor = c.accent, contentColor = c.accentInk),
-            ) {
+
+        when (ttsEngine) {
+            TtsEngine.SYSTEM -> {
                 Text(
-                    if (loadingVoices) "Načítám hlasy…"
-                    else if (voicesCatalog.isEmpty()) "Načíst hlasy ze serveru"
-                    else "Obnovit seznam hlasů (${voicesCatalog.size})"
+                    "Google TTS přímo v zařízení — rychlé, zdarma, offline. " +
+                        "Vynutí engine „com.google.android.tts“ (na HyperOS bývá výchozí " +
+                        "Xiaomi). Vyžaduje nainstalovaný hlas cs-CZ " +
+                        "(Nastavení Androidu → Řeč → Text na řeč).",
+                    style = CRType.bodyDim, color = c.textDim,
                 )
             }
+
+            TtsEngine.SERVER -> {
+                Text(
+                    "Předčítání přes stejný server (Piper rychlý CZ, nebo XTTS " +
+                        "pomalejší ale bilingvní — voice „xtts:default“).",
+                    style = CRType.bodyDim, color = c.textDim,
+                )
+                if (catalog.isNotEmpty()) {
+                    ModelDropdown(
+                        label = "TTS model",
+                        options = catalog.filter { ServerCatalog.isTts(it) }.map { it.id },
+                        selected = ttsModel,
+                        onSelect = { ttsModel = it; settings.ttsServerModel = it },
+                    )
+                } else {
+                    androidx.compose.material3.OutlinedTextField(
+                        value = ttsModel,
+                        onValueChange = { ttsModel = it; settings.ttsServerModel = it },
+                        label = { Text("TTS model (např. tts-1)") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                }
+                if (voicesCatalog.isNotEmpty()) {
+                    ModelDropdown(
+                        label = "Hlas (voice)",
+                        options = voicesCatalog,
+                        selected = ttsVoice,
+                        onSelect = { ttsVoice = it; settings.ttsServerVoice = it },
+                    )
+                } else {
+                    androidx.compose.material3.OutlinedTextField(
+                        value = ttsVoice,
+                        onValueChange = { ttsVoice = it; settings.ttsServerVoice = it },
+                        label = { Text("Hlas (voice) — např. cs_CZ-jirka-medium nebo xtts:default") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                }
+                if (serverUrl.isNotBlank()) {
+                    Button(
+                        onClick = {
+                            loadingVoices = true
+                            scope.launch {
+                                try {
+                                    val result = ServerCatalog.fetchVoices(serverUrl, settings.sttServerApiKey)
+                                    voicesCatalog = result
+                                    if (result.isEmpty()) {
+                                        Toast.makeText(context, "Server vrátil prázdný seznam hlasů.", Toast.LENGTH_LONG).show()
+                                    }
+                                } catch (e: Throwable) {
+                                    Toast.makeText(context, "Hlasy: ${e.message ?: "neznámá chyba"}", Toast.LENGTH_LONG).show()
+                                } finally {
+                                    loadingVoices = false
+                                }
+                            }
+                        },
+                        enabled = !loadingVoices,
+                        colors = ButtonDefaults.buttonColors(containerColor = c.accent, contentColor = c.accentInk),
+                    ) {
+                        Text(
+                            if (loadingVoices) "Načítám hlasy…"
+                            else if (voicesCatalog.isEmpty()) "Načíst hlasy ze serveru"
+                            else "Obnovit seznam hlasů (${voicesCatalog.size})"
+                        )
+                    }
+                }
+            }
+
+            TtsEngine.GOOGLE_CLOUD -> {
+                Text(
+                    "Google Cloud Text-to-Speech — nejlepší kvalita, rychlé. " +
+                        "Vyžaduje API klíč (projekt + billing) a text odchází Googlu.",
+                    style = CRType.bodyDim, color = c.textDim,
+                )
+                androidx.compose.material3.OutlinedTextField(
+                    value = gcloudKey,
+                    onValueChange = { gcloudKey = it; settings.googleCloudApiKey = it },
+                    label = { Text("Google Cloud API klíč") },
+                    singleLine = true,
+                    visualTransformation = androidx.compose.ui.text.input.PasswordVisualTransformation(),
+                    keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(
+                        keyboardType = androidx.compose.ui.text.input.KeyboardType.Password,
+                    ),
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                ModelDropdown(
+                    label = "Hlas (přednastavené)",
+                    options = listOf("cs-CZ-Wavenet-A", "cs-CZ-Standard-A"),
+                    selected = gcloudVoice,
+                    onSelect = { gcloudVoice = it; settings.googleCloudVoice = it },
+                )
+                androidx.compose.material3.OutlinedTextField(
+                    value = gcloudVoice,
+                    onValueChange = { gcloudVoice = it; settings.googleCloudVoice = it },
+                    label = { Text("Hlas (nebo zadej jiný z Google katalogu)") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+            }
+        }
+
+        Button(
+            onClick = {
+                testing = true
+                speakRouted(
+                    context,
+                    "Toto je test hlasu. Otevři pull request a smergni branch do mainu.",
+                    onFinish = { testing = false },
+                    onError = { msg ->
+                        testing = false
+                        Toast.makeText(context, "Test: $msg", Toast.LENGTH_LONG).show()
+                    },
+                )
+            },
+            enabled = !testing,
+            colors = ButtonDefaults.buttonColors(containerColor = c.accent, contentColor = c.accentInk),
+        ) {
+            Text(if (testing) "Přehrávám…" else "🔊 Otestovat hlas")
         }
     }
 }

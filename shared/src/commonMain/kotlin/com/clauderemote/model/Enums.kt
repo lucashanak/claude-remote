@@ -46,11 +46,22 @@ enum class SttEngine(val displayName: String) {
     SERVER("Server (faster-whisper)");
 }
 
-/** Text-to-speech backend for reading assistant replies aloud. */
+/**
+ * Text-to-speech backend for reading assistant replies aloud.
+ *
+ * - [SYSTEM]: on-device Android TTS, forced to the Google engine
+ *   (`com.google.android.tts`) with a device-default fallback. Instant,
+ *   free, offline; needs the cs-CZ voice installed.
+ * - [SERVER]: self-hosted OpenAI-compatible `/v1/audio/speech` (Piper fast
+ *   CZ-only, or XTTS slower bilingual).
+ * - [GOOGLE_CLOUD]: Google Cloud Text-to-Speech REST API. Best quality,
+ *   fast, but needs an API key + billing and sends text to Google.
+ */
 @Serializable
 enum class TtsEngine(val displayName: String) {
-    SYSTEM("Systémový (Android)"),
-    SERVER("Server (Piper/Speaches)");
+    SYSTEM("Google (v zařízení)"),
+    SERVER("Server (Piper/XTTS)"),
+    GOOGLE_CLOUD("Google Cloud");
 }
 
 enum class SessionStatus {
