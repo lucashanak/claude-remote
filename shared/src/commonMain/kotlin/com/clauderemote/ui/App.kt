@@ -857,6 +857,10 @@ fun App(
                         activeClaudeSessionId = activeTabId?.let { id ->
                             tabs.firstOrNull { it.id == id }?.claudeSessionId
                         },
+                        transcriptStatus = activeTabId?.let { id ->
+                            val flow = remember(id) { sessionOrchestrator.transcriptStatusFlow(id) }
+                            flow.collectAsState().value
+                        },
                         sidePanelWidthDp = appSettings.sidePanelWidthDp,
                         onSidePanelWidthChange = { appSettings.sidePanelWidthDp = it },
                     )

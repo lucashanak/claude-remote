@@ -52,6 +52,11 @@ class TranscriptStream(
     private val _contextTokens = MutableStateFlow<Long?>(null)
     val contextTokens: StateFlow<Long?> = _contextTokens.asStateFlow()
 
+    // Human-readable diagnostic for the "Waiting for transcript…" state: what
+    // the tail is doing / why it hasn't produced data yet. Null once data flows.
+    private val _status = MutableStateFlow<String?>(null)
+    val status: StateFlow<String?> = _status.asStateFlow()
+
     private val supervisor = SupervisorJob(parentScope.coroutineContext[Job])
     private val scope = CoroutineScope(parentScope.coroutineContext + supervisor)
     private var streamJob: Job? = null
@@ -90,6 +95,7 @@ class TranscriptStream(
                 _entries.value = emptyList()
                 seenIds.clear()
                 _contextTokens.value = null
+                _status.value = null
             }
             runTail(claudeSessionUuid)
         }
@@ -146,6 +152,7 @@ class TranscriptStream(
                 // no new SSH connection). Fall back to a dedicated session when
                 // the tab has no live main connection.
                 val shared = liveSession()?.takeIf { it.isConnected }
+                _status.value = if (shared != null) "connecting…" else "opening link…"
                 sawData = if (shared != null) {
                     streamFromSession(shared, cmd)
                 } else {
@@ -158,9 +165,17 @@ class TranscriptStream(
                 // resolve (ENC empty → `exit 0`) or a missing file returns
                 // cleanly with zero lines — without this guard that would
                 // reset attempt=0 and busy-reconnect with no backoff.
-                if (sawData) attempt = 0
+                if (sawData) {
+                    attempt = 0
+                } else if (_entries.value.isEmpty()) {
+                    // Connected fine but the file produced nothing (no transcript
+                    // yet, or wrong folder/uuid) — say so instead of a blank wait.
+                    _status.value = "connected, no transcript data yet"
+                }
             } catch (t: Throwable) {
+                val msg = t.message?.take(80) ?: t::class.simpleName ?: "unknown error"
                 FileLogger.log(TAG, "tail stream error (attempt $attempt): ${t.message}")
+                if (_entries.value.isEmpty()) _status.value = "retry $attempt — $msg"
             }
             if (!scope.isActive) break
             val backoff = (1_000L * attempt).coerceAtMost(15_000L)
@@ -208,6 +223,7 @@ class TranscriptStream(
                 val newEntries = TranscriptParser.parseLines(batch.asSequence())
                 if (newEntries.isNotEmpty()) {
                     sawData = true
+                    _status.value = null
                     appendEntries(newEntries)
                 }
                 // Track context size from this batch's newest assistant usage.

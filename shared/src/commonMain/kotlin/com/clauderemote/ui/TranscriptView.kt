@@ -67,7 +67,8 @@ fun TranscriptView(
     remoteStatus: RemoteSessionStatus? = null,
     activity: SessionActivity? = null,
     hookActive: Boolean = false,
-    claudeSessionId: String? = null
+    claudeSessionId: String? = null,
+    streamStatus: String? = null,
 ) {
     // Key list+scroll state on the session uuid so switching tabs resets
     // scroll position and stickiness — otherwise the new session inherits
@@ -232,6 +233,15 @@ fun TranscriptView(
                             "uuid: ${claudeSessionId.take(8)}",
                             style = CRType.bodyDim,
                             color = CRTheme.colors.textDim
+                        )
+                    }
+                    // Diagnostic: what the tail is actually doing / why no data.
+                    if (!streamStatus.isNullOrBlank()) {
+                        Spacer(Modifier.height(4.dp))
+                        Text(
+                            streamStatus,
+                            style = CRType.monoTiny,
+                            color = CRTheme.colors.textDim,
                         )
                     }
                 }

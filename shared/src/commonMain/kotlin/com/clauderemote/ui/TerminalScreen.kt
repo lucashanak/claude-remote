@@ -153,6 +153,7 @@ fun TerminalScreen(
     remoteStatus: RemoteSessionStatus? = null,
     onTerminalContentVisible: (() -> Unit)? = null,
     activeClaudeSessionId: String? = null,
+    transcriptStatus: String? = null,
     sidePanelWidthDp: Int = 220,
     onSidePanelWidthChange: ((Int) -> Unit)? = null,
 ) {
@@ -696,7 +697,8 @@ fun TerminalScreen(
                             remoteStatus = remoteStatus,
                             activity = activeTabId?.let { sessionActivities[it] },
                             hookActive = activeTabId?.let { it in hookActiveSessions } ?: false,
-                            claudeSessionId = activeClaudeSessionId
+                            claudeSessionId = activeClaudeSessionId,
+                            streamStatus = transcriptStatus,
                         )
                     }
                 } else if (splitActive && splitTerminalContent != null && wideMode) {

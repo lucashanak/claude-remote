@@ -1018,6 +1018,24 @@ else:
     }
 
     /**
+     * Diagnostic status of the transcript tail for [sessionId] — what it's doing
+     * / why no data yet (connecting, retry+error, "no transcript data yet").
+     * Null once entries flow. Shown in the "Waiting for transcript…" state.
+     */
+    fun transcriptStatusFlow(sessionId: String): kotlinx.coroutines.flow.StateFlow<String?> {
+        val tab = tabManager.getTab(sessionId)
+            ?: return kotlinx.coroutines.flow.MutableStateFlow(null)
+        val stream = synchronized(transcriptLock) {
+            transcriptStreams.getOrPut(sessionId) {
+                TranscriptStream(tab.server, tab.folder, reconnectScope) {
+                    connections[sessionId]?.getSession()
+                }
+            }
+        }
+        return stream.status
+    }
+
+    /**
      * Lazy poller for OMC remote state (active skill, in-flight subagents).
      * Polls two small state files via SSH stat+cat every ~5 s; idle traffic
      * stays under ~50 B/s. Cached per session and cleaned up on disconnect.
