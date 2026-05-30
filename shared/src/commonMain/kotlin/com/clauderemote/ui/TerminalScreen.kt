@@ -118,6 +118,8 @@ fun TerminalScreen(
     onReconnect: ((String) -> Unit)? = null,
     onRenameSession: ((sessionId: String, newAlias: String) -> Unit)? = null,
     onAttachFile: (suspend () -> String?)? = null,
+    onDownloadFile: (suspend (path: String) -> ByteArray?)? = null,
+    onSaveFile: ((bytes: ByteArray, suggestedName: String) -> Unit)? = null,
     onFetchClaudeMd: (suspend () -> String)? = null,
     onSaveClaudeMd: (suspend (String) -> Unit)? = null,
     onFetchCommands: (suspend () -> List<SlashCommand>)? = null,
@@ -166,6 +168,14 @@ fun TerminalScreen(
     var showRenameDialog by remember { mutableStateOf(false) }
     var renameText by remember { mutableStateOf("") }
     var moreMenu by remember { mutableStateOf(false) }
+    // File download / image preview state
+    var showDownloadDialog by remember { mutableStateOf(false) }
+    var downloadBusy by remember { mutableStateOf(false) }
+    var downloadError by remember { mutableStateOf<String?>(null) }
+    var previewFileName by remember { mutableStateOf<String?>(null) }
+    var previewBitmap by remember { mutableStateOf<androidx.compose.ui.graphics.ImageBitmap?>(null) }
+    var previewBytes by remember { mutableStateOf<ByteArray?>(null) }
+    var downloadJob by remember { mutableStateOf<kotlinx.coroutines.Job?>(null) }
     val inputFocusRequester = remember { FocusRequester() }
     LaunchedEffect(activeTabId) {
         if (activeTabId != null) {
@@ -384,6 +394,14 @@ fun TerminalScreen(
                                 }
                                 TextButton(onClick = { moreMenu = false; onSendCommand("c") },
                                     modifier = Modifier.fillMaxWidth()) { Text("Reset terminal", color = c.text) }
+                                if (onDownloadFile != null) {
+                                    TextButton(onClick = {
+                                        moreMenu = false
+                                        downloadError = null
+                                        downloadBusy = false
+                                        showDownloadDialog = true
+                                    }, modifier = Modifier.fillMaxWidth()) { Text("Download file…", color = c.text) }
+                                }
                                 if (splitTerminalContent != null && tabs.size > 1) {
                                     TextButton(onClick = {
                                         moreMenu = false
@@ -435,6 +453,72 @@ fun TerminalScreen(
                                 }
                             }
                         }
+                    )
+                }
+
+                // File download dialog
+                if (showDownloadDialog && onDownloadFile != null) {
+                    DownloadPathDialog(
+                        busy = downloadBusy,
+                        errorMessage = downloadError,
+                        onDismiss = {
+                            downloadJob?.cancel()
+                            downloadJob = null
+                            downloadBusy = false
+                            showDownloadDialog = false
+                        },
+                        onConfirm = { path ->
+                            downloadBusy = true
+                            downloadError = null
+                            val job = scope.launch {
+                                val bytes = onDownloadFile.invoke(path)
+                                // If the dialog was dismissed while the download ran, drop result silently.
+                                if (!showDownloadDialog) return@launch
+                                downloadBusy = false
+                                if (bytes === com.clauderemote.session.SessionOrchestrator.DOWNLOAD_TOO_LARGE) {
+                                    downloadError = "File too large (>50 MB)."
+                                    return@launch
+                                }
+                                if (bytes == null) {
+                                    downloadError = "Download failed. Check the path and try again."
+                                    return@launch
+                                }
+                                val name = fileNameFromPath(path)
+                                if (isImagePath(path)) {
+                                    previewFileName = name
+                                    previewBytes = bytes
+                                    previewBitmap = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Default) {
+                                        com.clauderemote.util.decodeImageBitmap(bytes)
+                                    }
+                                    if (showDownloadDialog) showDownloadDialog = false
+                                } else {
+                                    onSaveFile?.invoke(bytes, name)
+                                    if (showDownloadDialog) showDownloadDialog = false
+                                }
+                            }
+                            downloadJob = job
+                        },
+                    )
+                }
+
+                // Image preview dialog
+                val pName = previewFileName
+                val pBytes = previewBytes
+                if (pName != null && pBytes != null) {
+                    ImagePreviewDialog(
+                        fileName = pName,
+                        bitmap = previewBitmap,
+                        onSave = {
+                            onSaveFile?.invoke(pBytes, pName)
+                            previewFileName = null
+                            previewBytes = null
+                            previewBitmap = null
+                        },
+                        onClose = {
+                            previewFileName = null
+                            previewBytes = null
+                            previewBitmap = null
+                        },
                     )
                 }
 

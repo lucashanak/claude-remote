@@ -2168,10 +2168,25 @@ DTIMER_EOF
             val sshSession = conn.getSession() ?: return@withContext null
             val sftp = sshSession.openChannel("sftp") as com.jcraft.jsch.ChannelSftp
             sftp.connect(5000)
-            val out = java.io.ByteArrayOutputStream()
-            sftp.get(remotePath, out)
-            sftp.disconnect()
-            out.toByteArray()
+            try {
+                val home = sftp.home ?: "~"
+                val resolved = when {
+                    remotePath == "~"              -> home
+                    remotePath.startsWith("~/")    -> home + remotePath.substring(1)
+                    remotePath.startsWith("/")     -> remotePath
+                    else                           -> "$home/$remotePath"
+                }
+                val attrs = sftp.lstat(resolved)
+                if (attrs.size > DOWNLOAD_SIZE_LIMIT) {
+                    FileLogger.log(TAG, "Download refused: $resolved is ${attrs.size} bytes (limit $DOWNLOAD_SIZE_LIMIT)")
+                    return@withContext DOWNLOAD_TOO_LARGE
+                }
+                val out = java.io.ByteArrayOutputStream()
+                sftp.get(resolved, out)
+                out.toByteArray()
+            } finally {
+                sftp.disconnect()
+            }
         } catch (e: Exception) {
             FileLogger.error(TAG, "Download file failed: $remotePath", e)
             null
@@ -2204,5 +2219,8 @@ DTIMER_EOF
     companion object {
         private const val TAG = "SessionOrchestrator"
         private const val MAX_BUFFER = 64 * 1024 // 64KB per session
+        /** Sentinel returned by [downloadFile] when the remote file exceeds [DOWNLOAD_SIZE_LIMIT]. */
+        val DOWNLOAD_TOO_LARGE: ByteArray = ByteArray(0)
+        private const val DOWNLOAD_SIZE_LIMIT = 50L * 1024 * 1024 // 50 MB
     }
 }
