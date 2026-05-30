@@ -173,6 +173,15 @@ class AppSettings(private val prefs: PlatformPreferences) {
         get() = prefs.getString("tts_server_voice", "jirka")
         set(value) = prefs.putString("tts_server_voice", value.trim())
 
+    // Google Cloud Text-to-Speech (used when ttsEngine == GOOGLE_CLOUD).
+    var googleCloudApiKey: String
+        get() = prefs.getString("gcloud_tts_api_key", "")
+        set(value) = prefs.putString("gcloud_tts_api_key", value.trim())
+
+    var googleCloudVoice: String
+        get() = prefs.getString("gcloud_tts_voice", "cs-CZ-Wavenet-A")
+        set(value) = prefs.putString("gcloud_tts_voice", value.trim())
+
     fun loadAppearance(): AppearanceState = AppearanceState(
         variant = crVariant,
         density = crDensity,

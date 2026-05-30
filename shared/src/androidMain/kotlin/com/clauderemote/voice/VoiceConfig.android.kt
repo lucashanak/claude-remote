@@ -65,3 +65,14 @@ internal fun ttsServerConfig(context: Context): TtsServerConfig {
         apiKey = p.getString("stt_server_api_key", "").orEmpty(),
     )
 }
+
+internal data class GoogleCloudConfig(val apiKey: String, val voice: String)
+
+internal fun googleCloudConfig(context: Context): GoogleCloudConfig {
+    val p = context.getSharedPreferences("claude_remote", Context.MODE_PRIVATE)
+    return GoogleCloudConfig(
+        apiKey = p.getString("gcloud_tts_api_key", "").orEmpty(),
+        voice = p.getString("gcloud_tts_voice", "cs-CZ-Wavenet-A")
+            .orEmpty().ifBlank { "cs-CZ-Wavenet-A" },
+    )
+}
