@@ -696,6 +696,12 @@ fun App(
                         onSendEscape = {
                             activeTabId?.let { sessionOrchestrator.sendEscape(it) }
                         },
+                        onPageUp = {
+                            activeTabId?.let { sessionOrchestrator.tmuxScroll(it, up = true) }
+                        },
+                        onPageDown = {
+                            activeTabId?.let { sessionOrchestrator.tmuxScroll(it, up = false) }
+                        },
                         onFetchCommands = {
                             val id = activeTabId
                             if (id != null) {
