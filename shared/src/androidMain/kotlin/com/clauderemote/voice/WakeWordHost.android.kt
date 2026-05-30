@@ -37,6 +37,7 @@ actual fun WakeWordSettingsCard(settings: AppSettings) {
     val scope = rememberCoroutineScope()
 
     var serverUrl by remember { mutableStateOf(settings.sttServerUrl) }
+    var apiKey by remember { mutableStateOf(settings.sttServerApiKey) }
     var serverModel by remember { mutableStateOf(settings.sttServerModel) }
     var ttsModel by remember { mutableStateOf(settings.ttsServerModel) }
     var ttsVoice by remember { mutableStateOf(settings.ttsServerVoice) }
@@ -78,6 +79,17 @@ actual fun WakeWordSettingsCard(settings: AppSettings) {
             },
             label = { Text("URL serveru (https://…/api/v1)") },
             singleLine = true,
+            modifier = Modifier.fillMaxWidth(),
+        )
+        androidx.compose.material3.OutlinedTextField(
+            value = apiKey,
+            onValueChange = { apiKey = it; settings.sttServerApiKey = it },
+            label = { Text("API klíč (nepovinný)") },
+            singleLine = true,
+            visualTransformation = androidx.compose.ui.text.input.PasswordVisualTransformation(),
+            keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(
+                keyboardType = androidx.compose.ui.text.input.KeyboardType.Password,
+            ),
             modifier = Modifier.fillMaxWidth(),
         )
         androidx.compose.material3.OutlinedTextField(
