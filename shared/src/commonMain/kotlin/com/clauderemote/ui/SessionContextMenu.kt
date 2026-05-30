@@ -74,23 +74,23 @@ fun SessionContextSheet(
     ) {
         CRCard(
             modifier = Modifier
-                .fillMaxWidth(0.86f)
-                .widthIn(max = 360.dp),
+                .fillMaxWidth(0.66f)
+                .widthIn(min = 220.dp, max = 280.dp),
             padding = androidx.compose.foundation.layout.PaddingValues(0.dp),
         ) {
             Column(Modifier.fillMaxWidth()) {
                 // Header
                 Row(
-                    Modifier.fillMaxWidth().padding(start = 18.dp, end = 18.dp, top = 16.dp, bottom = 12.dp),
+                    Modifier.fillMaxWidth().padding(start = 14.dp, end = 14.dp, top = 12.dp, bottom = 10.dp),
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
-                    StatusIndicator(status = status, modifier = Modifier.size(8.dp))
+                    StatusIndicator(status = status, modifier = Modifier.size(7.dp))
                     Column(Modifier.weight(1f)) {
-                        Text(title, style = CRType.cardTitle, color = c.text)
+                        Text(title, style = CRType.cardTitle, color = c.text, maxLines = 1)
                         if (subtitle.isNotBlank()) {
-                            Spacer(Modifier.height(2.dp))
-                            Text(subtitle, style = CRType.monoTiny, color = c.textDim)
+                            Spacer(Modifier.height(1.dp))
+                            Text(subtitle, style = CRType.monoTiny, color = c.textDim, maxLines = 1)
                         }
                     }
                 }
@@ -105,7 +105,7 @@ fun SessionContextSheet(
                 HorizontalDivider(color = c.border, thickness = 1.dp)
                 Row(
                     Modifier.fillMaxWidth().clickable(onClick = onDismiss)
-                        .padding(horizontal = 18.dp, vertical = 14.dp),
+                        .padding(horizontal = 16.dp, vertical = 11.dp),
                     horizontalArrangement = Arrangement.Center,
                 ) {
                     Text("Cancel", style = CRType.bodyDim, color = c.textDim)
@@ -119,11 +119,11 @@ fun SessionContextSheet(
 private fun MenuRow(icon: ImageVector, label: String, tint: Color, onClick: () -> Unit) {
     Row(
         Modifier.fillMaxWidth().clickable(onClick = onClick)
-            .padding(horizontal = 18.dp, vertical = 14.dp),
+            .padding(horizontal = 16.dp, vertical = 11.dp),
         verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(14.dp),
+        horizontalArrangement = Arrangement.spacedBy(12.dp),
     ) {
-        Icon(icon, contentDescription = null, tint = tint, modifier = Modifier.size(18.dp))
+        Icon(icon, contentDescription = null, tint = tint, modifier = Modifier.size(16.dp))
         Text(label, style = CRType.cardTitle, color = tint)
     }
 }
@@ -142,8 +142,8 @@ fun RenameSessionDialog(
         properties = DialogProperties(usePlatformDefaultWidth = false),
     ) {
         CRCard(
-            modifier = Modifier.fillMaxWidth(0.86f).widthIn(max = 360.dp),
-            padding = androidx.compose.foundation.layout.PaddingValues(18.dp),
+            modifier = Modifier.fillMaxWidth(0.8f).widthIn(max = 320.dp),
+            padding = androidx.compose.foundation.layout.PaddingValues(16.dp),
         ) {
             Column(Modifier.fillMaxWidth()) {
                 Text("Rename session", style = CRType.cardTitle, color = c.text)

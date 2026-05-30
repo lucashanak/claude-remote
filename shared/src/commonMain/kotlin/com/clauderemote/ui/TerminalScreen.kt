@@ -815,12 +815,9 @@ fun TerminalScreen(
                 showSessionDrawer = false
             },
             onClose = { showSessionDrawer = false },
-            onLongPressSession = onSessionLongPress?.let { handler ->
-                { id ->
-                    handler(id)
-                    showSessionDrawer = false
-                }
-            },
+            // Keep the drawer open behind the menu — the context sheet floats
+            // over the session list instead of dismissing it.
+            onLongPressSession = onSessionLongPress,
         )
 
         // ── ExpandedInput overlay ──────────────────────────────────────────
