@@ -31,6 +31,7 @@ import com.clauderemote.model.ClaudeMode
 import com.clauderemote.model.ClaudeSession
 import com.clauderemote.model.RemoteSession
 import com.clauderemote.model.ServerHealth
+import com.clauderemote.model.SessionActivity
 import com.clauderemote.model.SessionStatus
 import com.clauderemote.model.SshServer
 import com.clauderemote.model.TmuxNameParser
@@ -47,6 +48,7 @@ import com.clauderemote.ui.theme.CRType
 fun LauncherScreen(
     servers: List<SshServer>,
     activeSessions: List<ClaudeSession>,
+    sessionActivities: Map<String, SessionActivity> = emptyMap(),
     remoteSessions: List<RemoteSession> = emptyList(),
     remoteSessionsLoading: Boolean = false,
     onRefreshRemote: (() -> Unit)? = null,
@@ -130,6 +132,31 @@ fun LauncherScreen(
                 contentPadding = PaddingValues(start = m.sectionPad, end = m.sectionPad, top = 0.dp, bottom = 80.dp),
                 verticalArrangement = Arrangement.spacedBy(m.cardGap),
             ) {
+                // ── Needs attention (pinned) ──────────────────────────
+                // Active sessions awaiting approval from the user only.
+                val needsAttention: List<ClaudeSession> = activeSessions
+                    .filter { sessionActivities[it.id] == SessionActivity.APPROVAL_NEEDED }
+                    .sortedWith(compareBy({ it.server.name.lowercase() }, { it.alias.lowercase() }, { it.id }))
+                val needsAttentionIds = needsAttention.map { it.id }.toSet()
+
+                if (needsAttention.isNotEmpty()) {
+                    item(key = "header_attention") {
+                        LauncherSectionHeader(
+                            title = "Needs attention · ${needsAttention.size}",
+                            modifier = Modifier.padding(top = m.sectionTopGap, bottom = 4.dp),
+                        )
+                    }
+                    items(needsAttention, key = { "attention_" + it.id }) { s ->
+                        SessionLauncherCard(
+                            session = s,
+                            onClick = { onResumeSession(s) },
+                            onLongPress = if (isMobile && onSessionLongPress != null) {
+                                { onSessionLongPress(s) }
+                            } else null,
+                        )
+                    }
+                }
+
                 // ── Sessions section (active + remote merged) ─────────
                 val totalSessionCount = activeSessions.size + remoteSessions.count {
                     it.tmuxSession.name !in activeSessions.map { a -> a.tmuxSessionName }.toSet()
@@ -151,6 +178,26 @@ fun LauncherScreen(
                     )
                 }
 
+                // Compact activity roll-up over all active sessions, omitting
+                // zero buckets. Derived purely from sessionActivities (no polling).
+                if (activeSessions.isNotEmpty()) {
+                    val needYou = activeSessions.count { sessionActivities[it.id] == SessionActivity.APPROVAL_NEEDED }
+                    val working = activeSessions.count { sessionActivities[it.id] == SessionActivity.WORKING }
+                    val ready = activeSessions.count { sessionActivities[it.id] == SessionActivity.WAITING_FOR_INPUT }
+                    val idle = activeSessions.count { val a = sessionActivities[it.id]; a == null || a == SessionActivity.IDLE }
+                    if (needYou + working + ready + idle > 0) {
+                        item(key = "activity_rollup") {
+                            ActivityRollup(
+                                needYou = needYou,
+                                working = working,
+                                ready = ready,
+                                idle = idle,
+                                modifier = Modifier.padding(bottom = 4.dp),
+                            )
+                        }
+                    }
+                }
+
                 // Unified list: actives + un-attached remotes merged
                 // and sorted by (server, folder, alias) regardless of
                 // connectedness. Section headers are kept separate
@@ -168,7 +215,7 @@ fun LauncherScreen(
                     val remote: RemoteSession?,
                 )
                 val merged: List<LauncherEntry> = buildList {
-                    activeSessions.forEach { s ->
+                    activeSessions.filter { it.id !in needsAttentionIds }.forEach { s ->
                         add(LauncherEntry(
                             serverKey = s.server.name.lowercase(),
                             folderKey = s.folder.trimEnd('/').substringAfterLast('/').lowercase(),
@@ -293,6 +340,38 @@ private fun LauncherSectionHeader(
         )
         trailing?.invoke()
     }
+}
+
+// ── Activity roll-up strip ────────────────────────────────────────────────────
+
+@Composable
+private fun ActivityRollup(
+    needYou: Int,
+    working: Int,
+    ready: Int,
+    idle: Int,
+    modifier: Modifier = Modifier,
+) {
+    val c = CRTheme.colors
+    Row(
+        modifier = modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
+        if (needYou > 0) ActivityRollupItem("⚠ $needYou need you", c.approval)
+        if (working > 0) ActivityRollupItem("▶ $working working", c.working)
+        if (ready > 0) ActivityRollupItem("✓ $ready ready", c.ready)
+        if (idle > 0) ActivityRollupItem("• $idle idle", c.idle)
+    }
+}
+
+@Composable
+private fun ActivityRollupItem(label: String, color: Color) {
+    Text(
+        text = label,
+        style = CRType.monoTiny,
+        color = color,
+    )
 }
 
 // ── Session launcher card ─────────────────────────────────────────────────────

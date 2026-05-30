@@ -404,6 +404,7 @@ fun App(
                         serverHealth = serverHealth,
                         onProbeServers = { force -> sessionOrchestrator.probeServers(serverList, force) },
                         activeSessions = tabs,
+                        sessionActivities = sessionActivities,
                         remoteSessions = remoteSessions,
                         remoteSessionsLoading = remoteSessionsLoading,
                         onRefreshRemote = { scanRemoteSessions() },
