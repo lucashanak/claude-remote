@@ -1,6 +1,9 @@
 package com.clauderemote.session
 
 import com.clauderemote.connection.SshManager
+import com.clauderemote.connection.SshSessionHelper
+import com.jcraft.jsch.ChannelExec
+import com.jcraft.jsch.Session
 import com.clauderemote.model.*
 import com.clauderemote.session.status.RemoteSessionStatus
 import com.clauderemote.session.status.SessionStatusPoller
@@ -835,13 +838,18 @@ else:
         model: ClaudeModel,
         connectionType: ConnectionType,
         tmuxSessionName: String,
-        isNewTmuxSession: Boolean = true
+        isNewTmuxSession: Boolean = true,
+        // When non-null, reuse this EXISTING Claude conversation UUID instead of
+        // minting a fresh one — used to resume an orphaned session discovered by
+        // ClaudeHistoryScanner. connectSsh already does `claude --resume <uuid>`
+        // when the tmux pane is missing but a transcript exists for this UUID.
+        resumeClaudeSessionId: String? = null
     ): ClaudeSession = withContext(Dispatchers.IO) {
         val sessionId = generateId()
         // Pre-generate a UUID for `claude --session-id <uuid>` so we can later
         // restore the conversation deterministically via `claude --resume <uuid>`.
         // Avoids a polling race against `~/.claude/projects/<encoded-cwd>/*.jsonl`.
-        val claudeSessionId = generateUuidV4()
+        val claudeSessionId = resumeClaudeSessionId ?: generateUuidV4()
 
         val parsedAlias = com.clauderemote.model.TmuxNameParser.parse(tmuxSessionName, server.name).alias
         val session = ClaudeSession(
@@ -1292,6 +1300,54 @@ else:
             false
         }
     }
+
+    /**
+     * Probe whether a tmux session [tmuxName] exists on [server], and if so
+     * whether its first pane's working directory matches [cwd].
+     *
+     * Returns:
+     *  - `null`  — no such tmux session (safe to create a new one)
+     *  - `true`  — session exists AND its pane cwd matches [cwd] (same conversation, attach)
+     *  - `false` — session exists with a DIFFERENT cwd (collision — do NOT kill it)
+     *
+     * Fail-open on SSH / exec errors: returns `null` so the caller falls through
+     * to the normal resume path rather than blocking the user.
+     */
+    suspend fun tmuxPaneMatchesCwd(server: SshServer, tmuxName: String, cwd: String): Boolean? =
+        withContext(Dispatchers.IO) {
+            try {
+                SshSessionHelper.withSession(server, timeout = 5000) { sess ->
+                    val escaped = tmuxName.replace("'", "'\\''")
+                    // `tmux has-session` first to avoid the display-message error noise
+                    // when the session doesn't exist.
+                    val checkCmd = "tmux has-session -t '$escaped' 2>/dev/null && " +
+                        "tmux display-message -p -t '$escaped' '#{pane_current_path}' 2>/dev/null " +
+                        "|| echo __NO_SESSION__"
+                    val ch = sess.openChannel("exec") as ChannelExec
+                    ch.setCommand(checkCmd)
+                    ch.inputStream = null
+                    val input = ch.inputStream
+                    ch.connect(4000)
+                    val out = try {
+                        input.bufferedReader().readText().trim()
+                    } finally {
+                        try { ch.disconnect() } catch (_: Throwable) {}
+                    }
+                    when {
+                        out == "__NO_SESSION__" || out.isEmpty() -> null
+                        else -> {
+                            // Normalise both paths: strip trailing slash, expand leading ~
+                            val panePath = out.trimEnd('/')
+                            val histPath = cwd.trimEnd('/')
+                            panePath == histPath
+                        }
+                    }
+                }
+            } catch (e: Exception) {
+                FileLogger.error(TAG, "tmuxPaneMatchesCwd probe failed for $tmuxName: ${e.message}", e)
+                null // fail-open
+            }
+        }
 
     private suspend fun autoReconnect(
         session: ClaudeSession,

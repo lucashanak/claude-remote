@@ -64,6 +64,7 @@ fun LauncherScreen(
     onSessionLongPress: ((ClaudeSession) -> Unit)? = null,
     onSettings: () -> Unit,
     onViewLog: () -> Unit = {},
+    onHistory: (() -> Unit)? = null,
     onUsageDashboard: (() -> Unit)? = null,
     onCheckUpdate: (() -> Unit)? = null,
     serverHealth: Map<String, ServerHealth> = emptyMap(),
@@ -168,10 +169,19 @@ fun LauncherScreen(
                     LauncherSectionHeader(
                         title = sectionTitle,
                         modifier = Modifier.padding(top = m.sectionTopGap, bottom = 4.dp),
-                        trailing = if (onUsageDashboard != null) {
+                        trailing = if (onHistory != null || onUsageDashboard != null) {
                             {
-                                TextButton(onClick = onUsageDashboard) {
-                                    Text("Usage ›", style = CRType.bodyDim, color = c.textDim)
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    if (onHistory != null) {
+                                        TextButton(onClick = onHistory) {
+                                            Text("History ›", style = CRType.bodyDim, color = c.textDim)
+                                        }
+                                    }
+                                    if (onUsageDashboard != null) {
+                                        TextButton(onClick = onUsageDashboard) {
+                                            Text("Usage ›", style = CRType.bodyDim, color = c.textDim)
+                                        }
+                                    }
                                 }
                             }
                         } else null,

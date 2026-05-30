@@ -141,10 +141,18 @@ object ClaudeConfig {
     fun escapeSequence(): String = ESCAPE
 
     private fun shellEscape(path: String): String {
-        return if (path.contains(' ') || path.contains('$') || path.contains('(')) {
-            "'$path'"
-        } else {
-            path
+        // POSIX-safe single-quoting that also closes the injection vector when
+        // `path` is untrusted (e.g. a cwd read from a .jsonl transcript on the
+        // server). The old conditional quote left embedded `'` unescaped, so a
+        // crafted cwd could break out of the `cd ...` command. Single-quote and
+        // escape embedded quotes via the standard `'\''` idiom, but keep a
+        // leading `~` / `~/` UNquoted so tilde expansion still works in the
+        // pane's shell. Avoids bash-only `${x/#~/$HOME}` so POSIX sh works too.
+        fun q(s: String) = "'" + s.replace("'", "'\\''") + "'"
+        return when {
+            path == "~" -> "~"
+            path.startsWith("~/") -> "~/" + q(path.substring(2))
+            else -> q(path)
         }
     }
 }
