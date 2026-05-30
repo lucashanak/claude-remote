@@ -122,6 +122,7 @@ fun TerminalScreen(
     onAttachRemote: ((com.clauderemote.model.RemoteSession) -> Unit)? = null,
     remoteSessions: List<com.clauderemote.model.RemoteSession> = emptyList(),
     contextPercent: Int? = null,
+    gitStatus: com.clauderemote.model.GitStatus? = null,
     sessionUsagePercent: Int? = null,
     weekUsagePercent: Int? = null,
     sessionResetMin: Int? = null,
@@ -302,6 +303,7 @@ fun TerminalScreen(
                     terminalView = terminalView,
                     latencyMs = latencyMs,
                     contextPercent = contextPercent,
+                    gitStatus = gitStatus,
                     sessionUsagePercent = sessionUsagePercent,
                     weekUsagePercent = weekUsagePercent,
                     compactMode = compactMode,
@@ -860,6 +862,7 @@ private fun CRTopBar(
     terminalView: CRTerminalView,
     latencyMs: Long?,
     contextPercent: Int?,
+    gitStatus: com.clauderemote.model.GitStatus?,
     sessionUsagePercent: Int?,
     weekUsagePercent: Int?,
     compactMode: Boolean,
@@ -920,6 +923,16 @@ private fun CRTopBar(
                         Text("▾", style = CRType.bodyDim, color = c.textDim)
                     }
                 }
+            }
+
+            // Git status chip (branch + dirty/ahead/behind) — only for git repos
+            if (gitStatus != null) {
+                GitChip(gitStatus)
+            }
+
+            // Active model chip
+            if (activeSession != null) {
+                ModelChip(activeSession.model)
             }
 
             // Latency
@@ -2237,6 +2250,55 @@ private fun MiniBar(label: String, percent: Int) {
         }
         Text("${percent}%", style = CRType.monoTiny, color = c.textDim, modifier = Modifier.padding(start = 2.dp))
     }
+}
+
+/**
+ * Compact chip showing the working-dir git branch, a dirty marker, and
+ * optional ahead/behind counts. Rendered only when git status is non-null.
+ */
+@Composable
+private fun GitChip(status: com.clauderemote.model.GitStatus) {
+    val c = CRTheme.colors
+    val branchColor = if (status.dirty) c.working else c.ready
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(2.dp),
+        modifier = Modifier
+            .padding(horizontal = 4.dp)
+            .background(c.surface2, CircleShape)
+            .padding(horizontal = 6.dp, vertical = 2.dp)
+    ) {
+        Text(
+            status.branch + if (status.dirty) " ●" else "",
+            style = CRType.monoTiny,
+            color = branchColor,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.widthIn(max = 96.dp),
+        )
+        if (status.ahead > 0) {
+            Text("↑${status.ahead}", style = CRType.monoTiny, color = c.textDim)
+        }
+        if (status.behind > 0) {
+            Text("↓${status.behind}", style = CRType.monoTiny, color = c.textDim)
+        }
+    }
+}
+
+/** Compact chip showing the session's active Claude model. */
+@Composable
+private fun ModelChip(model: com.clauderemote.model.ClaudeModel) {
+    val c = CRTheme.colors
+    Text(
+        model.displayName,
+        style = CRType.pill,
+        color = c.accent,
+        maxLines = 1,
+        modifier = Modifier
+            .padding(horizontal = 4.dp)
+            .background(c.surface2, CircleShape)
+            .padding(horizontal = 6.dp, vertical = 2.dp)
+    )
 }
 
 @Composable
