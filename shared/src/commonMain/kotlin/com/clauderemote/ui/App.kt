@@ -78,6 +78,9 @@ fun App(
     sshKeyManager: com.clauderemote.connection.SshKeyManager? = null,
     exitApp: (() -> Unit)? = null,
     onInvertColorsChanged: ((Boolean) -> Unit)? = null,
+    terminalScrolledUp: Boolean = false,
+    terminalPendingOutput: Boolean = false,
+    onJumpToLatest: (() -> Unit)? = null,
     terminalContent: @Composable (modifier: Modifier) -> Unit
 ) {
     val scope = rememberCoroutineScope()
@@ -759,6 +762,9 @@ fun App(
                         },
                         onTerminalViewChange = { tv -> updateAppearance(appearance.copy(terminalView = tv)) },
                         terminalContent = terminalContent,
+                        terminalScrolledUp = terminalScrolledUp,
+                        terminalPendingOutput = terminalPendingOutput,
+                        onJumpToLatest = onJumpToLatest,
                         transcriptEntries = activeTabId?.let { id ->
                             // Key on the Claude session UUID too, not just the tab
                             // id. transcriptFlow() only (re)starts the tail and

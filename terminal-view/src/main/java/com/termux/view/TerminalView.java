@@ -65,6 +65,12 @@ public final class TerminalView extends View {
     int mTopRow;
     int[] mDefaultSelectors = new int[]{-1,-1,-1,-1};
 
+    /** Optional host callback invoked whenever the scroll state ({@link #mTopRow}) may have changed. */
+    public Runnable mOnScrollStateChanged;
+
+    /** Latched true when new output arrives while the viewport is scrolled up; cleared on return to bottom. */
+    private boolean mNewOutputWhileScrolled;
+
     float mScaleFactor = 1.f;
     final GestureAndScaleRecognizer mGestureRecognizer;
 
@@ -408,10 +414,12 @@ public final class TerminalView extends View {
         int rowsInHistory = mEmulator.getScreen().getActiveTranscriptRows();
         if (mTopRow < -rowsInHistory) mTopRow = -rowsInHistory;
 
+        // Number of new rows that scrolled off the top since the last update.
+        int rowShift = mEmulator.getScrollCounter();
+
         boolean skipScrolling = false;
         if (isSelectingText()) {
             // Do not scroll when selecting text.
-            int rowShift = mEmulator.getScrollCounter();
             if (-mTopRow + rowShift > rowsInHistory) {
                 // .. unless we're hitting the end of history transcript, in which
                 // case we abort text selection and scroll to end.
@@ -421,23 +429,53 @@ public final class TerminalView extends View {
                 mTopRow -= rowShift;
                 decrementYTextSelectionCursors(rowShift);
             }
-        }
-
-        if (!skipScrolling && mTopRow != 0) {
-            // Scroll down if not already there.
+        } else if (mTopRow != 0) {
+            // The user has scrolled up into history. Instead of force-snapping
+            // back to the live bottom, hold the viewport on the same content by
+            // shifting it up by the number of rows that just scrolled off.
             if (mTopRow < -3) {
                 // Awaken scroll bars only if scrolling a noticeable amount
                 // - we do not want visible scroll bars during normal typing
                 // of one row at a time.
                 awakenScrollBars();
             }
-            mTopRow = 0;
+            skipScrolling = true;
+            mTopRow = Math.max(-rowsInHistory, mTopRow - rowShift);
         }
+
+        // When at the live bottom (mTopRow == 0) skipScrolling stays false and we
+        // keep following new output as before.
+
+        // Latch: new output arrived while the user was scrolled up.
+        if (rowShift > 0 && mTopRow != 0) mNewOutputWhileScrolled = true;
+        // Clear the latch once back at the live bottom.
+        if (mTopRow == 0) mNewOutputWhileScrolled = false;
 
         mEmulator.clearScrollCounter();
 
         invalidate();
         if (mAccessibilityEnabled) setContentDescription(getText());
+
+        if (mOnScrollStateChanged != null) mOnScrollStateChanged.run();
+    }
+
+    /** Whether the viewport is at the live bottom (i.e. following new output). */
+    public boolean isAtBottom() {
+        return mEmulator == null || mTopRow == 0;
+    }
+
+    /** True if new output arrived while the viewport was scrolled up (cleared on return to bottom). */
+    public boolean hasNewOutputWhileScrolled() {
+        return mNewOutputWhileScrolled;
+    }
+
+    /** Snap the viewport to the live bottom and resume auto-following. */
+    public void scrollToBottom() {
+        mTopRow = 0;
+        mNewOutputWhileScrolled = false;
+        if (mEmulator != null) mEmulator.clearScrollCounter();
+        invalidate();
+        if (mOnScrollStateChanged != null) mOnScrollStateChanged.run();
     }
 
     /**
@@ -520,6 +558,7 @@ public final class TerminalView extends View {
                 if (!awakenScrollBars()) invalidate();
             }
         }
+        if (mOnScrollStateChanged != null) mOnScrollStateChanged.run();
     }
 
     /** Overriding {@link View#onGenericMotionEvent(MotionEvent)}. */

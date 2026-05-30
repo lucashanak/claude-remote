@@ -233,6 +233,12 @@ class MainActivity : FragmentActivity() {
         } catch (_: Exception) { "1.0.0" }
 
         setContent {
+            // Compose-observable handle ref so the "Jump to latest" pill (rendered
+            // in commonMain TerminalScreen) can react to the handle's scroll state.
+            // The @Volatile terminalHandle field above is for non-Compose callers.
+            val liveHandle = androidx.compose.runtime.remember {
+                androidx.compose.runtime.mutableStateOf<SshTerminalHandle?>(null)
+            }
             App(
                 serverStorage = serverStorage,
                 appSettings = appSettings,
@@ -314,6 +320,7 @@ class MainActivity : FragmentActivity() {
                         },
                         onReady = { handle ->
                             terminalHandle = handle
+                            liveHandle.value = handle
                             FileLogger.log("MainActivity", "SshTerminal ready")
                             // Replay buffer for active tab if any
                             tabManager.activeTabId.value?.let { id ->
@@ -323,7 +330,13 @@ class MainActivity : FragmentActivity() {
                         },
                         modifier = modifier,
                     )
-                }
+                },
+                // "Jump to latest" pill state — surfaced from the TerminalView
+                // scroll listener via the handle's Compose state. Reading .value
+                // here ties recomposition to scroll/output changes.
+                terminalScrolledUp = liveHandle.value?.scrolledUp?.value == true,
+                terminalPendingOutput = liveHandle.value?.pendingOutput?.value == true,
+                onJumpToLatest = { liveHandle.value?.scrollToBottom() },
             )
         }
     }

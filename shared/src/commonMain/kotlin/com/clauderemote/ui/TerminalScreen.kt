@@ -143,6 +143,9 @@ fun TerminalScreen(
     onToggleInvertColors: (() -> Unit)? = null,
     onTerminalViewChange: ((CRTerminalView) -> Unit)? = null,
     terminalContent: @Composable (Modifier) -> Unit,
+    terminalScrolledUp: Boolean = false,
+    terminalPendingOutput: Boolean = false,
+    onJumpToLatest: (() -> Unit)? = null,
     splitTerminalContent: (@Composable (Modifier) -> Unit)? = null,
     transcriptEntries: List<TranscriptEntry> = emptyList(),
     remoteStatus: RemoteSessionStatus? = null,
@@ -616,6 +619,11 @@ fun TerminalScreen(
                     Row(modifier = Modifier.fillMaxWidth().weight(1f)) {
                         Box(modifier = Modifier.weight(1f).fillMaxHeight().background(c.bg)) {
                             terminalContent(Modifier.fillMaxSize())
+                            JumpToLatestPill(
+                                visible = terminalScrolledUp && terminalPendingOutput,
+                                onClick = { onJumpToLatest?.invoke() },
+                                modifier = Modifier.align(Alignment.BottomCenter),
+                            )
                         }
                         VerticalDivider(modifier = Modifier.fillMaxHeight().width(1.dp), color = c.border)
                         Box(modifier = Modifier.weight(1f).fillMaxHeight().background(c.bg)) {
@@ -625,6 +633,11 @@ fun TerminalScreen(
                 } else {
                     Box(modifier = Modifier.fillMaxWidth().weight(1f).background(c.bg)) {
                         terminalContent(Modifier.fillMaxSize())
+                        JumpToLatestPill(
+                            visible = terminalScrolledUp && terminalPendingOutput,
+                            onClick = { onJumpToLatest?.invoke() },
+                            modifier = Modifier.align(Alignment.BottomCenter),
+                        )
                     }
                 }
 
@@ -858,6 +871,29 @@ fun TerminalScreen(
             )
         }
     } // end BoxWithConstraints
+}
+
+// ---------------------------------------------------------------------------
+// JumpToLatestPill — overlay shown when scrolled up with new output pending.
+// ---------------------------------------------------------------------------
+
+@Composable
+private fun JumpToLatestPill(
+    visible: Boolean,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    if (!visible) return
+    val c = CRTheme.colors
+    Pill(
+        text = "Jump to latest ↓",
+        background = c.accent,
+        foreground = c.accentInk,
+        modifier = modifier
+            .padding(bottom = 12.dp)
+            .clip(CircleShape)
+            .clickable(onClick = onClick),
+    )
 }
 
 // ---------------------------------------------------------------------------
