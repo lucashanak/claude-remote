@@ -140,7 +140,6 @@ fun TerminalScreen(
     pendingInputCount: Int = 0,
     onClearPending: (() -> Unit)? = null,
     onNavigate: ((String) -> Unit)? = null,
-    onSplitView: ((secondSessionId: String?) -> Unit)? = null,
     invertColors: Boolean = false,
     onToggleInvertColors: (() -> Unit)? = null,
     onTerminalViewChange: ((CRTerminalView) -> Unit)? = null,
@@ -148,13 +147,23 @@ fun TerminalScreen(
     terminalScrolledUp: Boolean = false,
     terminalPendingOutput: Boolean = false,
     onJumpToLatest: (() -> Unit)? = null,
-    splitTerminalContent: (@Composable (Modifier) -> Unit)? = null,
     transcriptEntries: List<TranscriptEntry> = emptyList(),
     remoteStatus: RemoteSessionStatus? = null,
     onTerminalContentVisible: (() -> Unit)? = null,
     activeClaudeSessionId: String? = null,
     sidePanelWidthDp: Int = 220,
     onSidePanelWidthChange: ((Int) -> Unit)? = null,
+    // Pane grid (Phase 1, low-risk). Defaulted so existing callers compile
+    // unchanged and stay on the single-pane ONE path.
+    gridLayout: com.clauderemote.model.GridLayout = com.clauderemote.model.GridLayout.ONE,
+    paneSessions: List<String?> = listOf(null, null, null, null),
+    paneTranscripts: List<List<TranscriptEntry>> = listOf(emptyList(), emptyList(), emptyList(), emptyList()),
+    focusedPaneIndex: Int = 0,
+    onSetLayout: ((com.clauderemote.model.GridLayout) -> Unit)? = null,
+    // FIX 1: (paneIndex, sessionId?) — index-based focus guarantees exactly
+    // one cell ever hosts the single shared raw terminal.
+    onFocusPane: ((paneIndex: Int, sessionId: String?) -> Unit)? = null,
+    onAssignPane: ((paneIndex: Int, sessionId: String) -> Unit)? = null,
 ) {
     val c = CRTheme.colors
     val m = CRTheme.metrics
@@ -189,7 +198,6 @@ fun TerminalScreen(
     val activeSession = tabs.find { it.id == activeTabId }
     val scope = rememberCoroutineScope()
     var showPalette by remember { mutableStateOf(false) }
-    var splitActive by remember { mutableStateOf(false) }
     var showSessionDrawer by remember { mutableStateOf(false) }
     var showExpanded by remember { mutableStateOf(false) }
     var voiceModeActive by remember { mutableStateOf(false) }
@@ -266,6 +274,9 @@ fun TerminalScreen(
     BoxWithConstraints(modifier = Modifier.fillMaxSize().onPreviewKeyEvent { handleShortcut(it) }) {
         val hasMultiple = tabs.size > 1 || remoteSessions.any { r -> tabs.none { it.tmuxSessionName == r.tmuxSession.name } }
         val wideMode = maxWidth > 700.dp && hasMultiple
+        // Captured once: the more-menu picker runs inside an AlertDialog lambda
+        // that no longer has the BoxWithConstraintsScope receiver in scope.
+        val allowQuadLayout = maxWidth > 1000.dp
 
         var sidePanelWidth by remember { mutableStateOf(sidePanelWidthDp.dp) }
         val density = LocalDensity.current
@@ -402,18 +413,43 @@ fun TerminalScreen(
                                         showDownloadDialog = true
                                     }, modifier = Modifier.fillMaxWidth()) { Text("Download file…", color = c.text) }
                                 }
-                                if (splitTerminalContent != null && tabs.size > 1) {
-                                    TextButton(onClick = {
-                                        moreMenu = false
-                                        splitActive = !splitActive
-                                        if (splitActive) {
-                                            val otherId = tabs.firstOrNull { it.id != activeTabId }?.id
-                                            onSplitView?.invoke(otherId)
-                                        } else {
-                                            onSplitView?.invoke(null)
+                                // Pane grid layout picker — wide screens only.
+                                // Phones stay single-pane (the picker is hidden).
+                                if (wideMode && onSetLayout != null) {
+                                    HorizontalDivider(color = c.border, modifier = Modifier.padding(vertical = 4.dp))
+                                    Text(
+                                        "Layout",
+                                        style = CRType.sectionH,
+                                        color = c.textDim,
+                                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp)
+                                    )
+                                    Row(
+                                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp),
+                                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                    ) {
+                                        // "4" gated behind a wider threshold so
+                                        // quarters aren't offered on tablet-width.
+                                        val allowQuad = allowQuadLayout
+                                        val opts = buildList {
+                                            add(com.clauderemote.model.GridLayout.ONE to "1")
+                                            add(com.clauderemote.model.GridLayout.TWO to "2")
+                                            if (allowQuad) add(com.clauderemote.model.GridLayout.QUAD to "4")
                                         }
-                                    }, modifier = Modifier.fillMaxWidth()) {
-                                        Text(if (splitActive) "Close Split View" else "Split View", color = c.text)
+                                        opts.forEach { (layout, label) ->
+                                            val selected = gridLayout == layout
+                                            FilledTonalButton(
+                                                onClick = {
+                                                    moreMenu = false
+                                                    onSetLayout.invoke(layout)
+                                                },
+                                                colors = ButtonDefaults.filledTonalButtonColors(
+                                                    containerColor = if (selected) c.accent else c.surface2,
+                                                    contentColor = if (selected) c.accentInk else c.text,
+                                                ),
+                                                modifier = Modifier.size(40.dp),
+                                                contentPadding = PaddingValues(0.dp)
+                                            ) { Text(label) }
+                                        }
                                     }
                                 }
                                 HorizontalDivider(color = c.border, modifier = Modifier.padding(vertical = 4.dp))
@@ -682,7 +718,146 @@ fun TerminalScreen(
 
                 // ── Terminal body ─────────────────────────────────────────
                 val isTranscript = terminalView == CRTerminalView.Transcript
-                if (isTranscript) {
+                val gridActive = gridLayout != com.clauderemote.model.GridLayout.ONE && wideMode
+                if (gridActive) {
+                    // Additive grid path. Only the cell at focusedPaneIndex uses the
+                    // single shared raw terminal when the global toggle is Raw; every
+                    // other cell shows its own live transcript (Chat). Focus is tracked
+                    // by PANE INDEX — not session id — so exactly one cell ever hosts
+                    // terminalContent regardless of how sessions are assigned.
+                    Box(modifier = Modifier.fillMaxWidth().weight(1f).background(c.bg)) {
+                        @Composable
+                        fun PaneCell(i: Int, modifier: Modifier) {
+                            val sid = paneSessions.getOrNull(i)
+                            // FIX 1: focused by INDEX, not by sid==activeTabId.
+                            val focused = (i == focusedPaneIndex)
+                            val cellMod = modifier
+                                .background(c.bg)
+                                .border(
+                                    width = if (focused) 2.dp else 1.dp,
+                                    color = if (focused) c.accent else c.border,
+                                )
+                            if (sid == null) {
+                                // Empty pane → session picker.
+                                var pick by remember { mutableStateOf(false) }
+                                Box(
+                                    modifier = cellMod.clickable {
+                                        onFocusPane?.invoke(i, null)
+                                        pick = true
+                                    },
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Text("Tap to choose session", style = CRType.bodyDim, color = c.textDim)
+                                    DropdownMenu(expanded = pick, onDismissRequest = { pick = false }) {
+                                        tabs.forEach { t ->
+                                            DropdownMenuItem(
+                                                text = { Text(t.tabTitle.ifBlank { t.displayLabel }, color = c.text) },
+                                                onClick = {
+                                                    pick = false
+                                                    onAssignPane?.invoke(i, t.id)
+                                                }
+                                            )
+                                        }
+                                    }
+                                }
+                            } else {
+                                val tab = tabs.firstOrNull { it.id == sid }
+                                Column(modifier = cellMod.clickable { onFocusPane?.invoke(i, sid) }) {
+                                    // Thin per-cell label: activity dot + title + reassign button.
+                                    // FIX 5: "▾" opens the picker so a filled pane can be reassigned.
+                                    var reassignPick by remember { mutableStateOf(false) }
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth().background(c.surface)
+                                            .padding(horizontal = 8.dp, vertical = 3.dp),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                    ) {
+                                        val dot = activityDotColor(
+                                            sessionActivities[sid],
+                                            tab?.status ?: SessionStatus.ACTIVE
+                                        )
+                                        Box(modifier = Modifier.size(8.dp).background(dot, CircleShape))
+                                        Text(
+                                            tab?.tabTitle?.ifBlank { tab.displayLabel } ?: sid,
+                                            style = CRType.monoTiny,
+                                            color = if (focused) c.accent else c.textDim,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis,
+                                            modifier = Modifier.weight(1f),
+                                        )
+                                        // Reassign affordance — tap "▾" to swap the session in this pane.
+                                        Box {
+                                            Text(
+                                                "▾",
+                                                style = CRType.monoTiny,
+                                                color = c.textDim,
+                                                modifier = Modifier.clickable(
+                                                    interactionSource = remember { MutableInteractionSource() },
+                                                    indication = null,
+                                                ) { reassignPick = true }
+                                            )
+                                            DropdownMenu(
+                                                expanded = reassignPick,
+                                                onDismissRequest = { reassignPick = false }
+                                            ) {
+                                                tabs.forEach { t ->
+                                                    DropdownMenuItem(
+                                                        text = { Text(t.tabTitle.ifBlank { t.displayLabel }, color = c.text) },
+                                                        onClick = {
+                                                            reassignPick = false
+                                                            onAssignPane?.invoke(i, t.id)
+                                                        }
+                                                    )
+                                                }
+                                            }
+                                        }
+                                    }
+                                    Box(modifier = Modifier.fillMaxSize()) {
+                                        // FIX 1: only the focused cell (by index) renders terminalContent.
+                                        if (focused && terminalView == CRTerminalView.Raw) {
+                                            terminalContent(Modifier.fillMaxSize())
+                                            JumpToLatestPill(
+                                                visible = terminalScrolledUp && terminalPendingOutput,
+                                                onClick = { onJumpToLatest?.invoke() },
+                                                modifier = Modifier.align(Alignment.BottomCenter),
+                                            )
+                                        } else {
+                                            TranscriptView(
+                                                entries = paneTranscripts.getOrNull(i) ?: emptyList(),
+                                                modifier = Modifier.fillMaxSize(),
+                                                activity = sessionActivities[sid],
+                                                hookActive = sid in hookActiveSessions,
+                                                claudeSessionId = tab?.claudeSessionId,
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        if (gridLayout == com.clauderemote.model.GridLayout.TWO) {
+                            Row(modifier = Modifier.fillMaxSize()) {
+                                PaneCell(0, Modifier.weight(1f).fillMaxHeight())
+                                VerticalDivider(modifier = Modifier.fillMaxHeight().width(1.dp), color = c.border)
+                                PaneCell(1, Modifier.weight(1f).fillMaxHeight())
+                            }
+                        } else { // QUAD
+                            Column(modifier = Modifier.fillMaxSize()) {
+                                Row(modifier = Modifier.fillMaxWidth().weight(1f)) {
+                                    PaneCell(0, Modifier.weight(1f).fillMaxHeight())
+                                    VerticalDivider(modifier = Modifier.fillMaxHeight().width(1.dp), color = c.border)
+                                    PaneCell(1, Modifier.weight(1f).fillMaxHeight())
+                                }
+                                HorizontalDivider(modifier = Modifier.fillMaxWidth().height(1.dp), color = c.border)
+                                Row(modifier = Modifier.fillMaxWidth().weight(1f)) {
+                                    PaneCell(2, Modifier.weight(1f).fillMaxHeight())
+                                    VerticalDivider(modifier = Modifier.fillMaxHeight().width(1.dp), color = c.border)
+                                    PaneCell(3, Modifier.weight(1f).fillMaxHeight())
+                                }
+                            }
+                        }
+                    }
+                } else if (isTranscript) {
                     Box(modifier = Modifier.fillMaxWidth().weight(1f).background(c.bg)) {
                         TranscriptView(
                             entries = transcriptEntries,
@@ -698,21 +873,6 @@ fun TerminalScreen(
                             hookActive = activeTabId?.let { it in hookActiveSessions } ?: false,
                             claudeSessionId = activeClaudeSessionId
                         )
-                    }
-                } else if (splitActive && splitTerminalContent != null && wideMode) {
-                    Row(modifier = Modifier.fillMaxWidth().weight(1f)) {
-                        Box(modifier = Modifier.weight(1f).fillMaxHeight().background(c.bg)) {
-                            terminalContent(Modifier.fillMaxSize())
-                            JumpToLatestPill(
-                                visible = terminalScrolledUp && terminalPendingOutput,
-                                onClick = { onJumpToLatest?.invoke() },
-                                modifier = Modifier.align(Alignment.BottomCenter),
-                            )
-                        }
-                        VerticalDivider(modifier = Modifier.fillMaxHeight().width(1.dp), color = c.border)
-                        Box(modifier = Modifier.weight(1f).fillMaxHeight().background(c.bg)) {
-                            splitTerminalContent(Modifier.fillMaxSize())
-                        }
                     }
                 } else {
                     Box(modifier = Modifier.fillMaxWidth().weight(1f).background(c.bg)) {

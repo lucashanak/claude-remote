@@ -84,3 +84,16 @@ enum class SessionActivity(val displayName: String) {
     IDLE("Idle"),                 // Connected but no recent output
     DISCONNECTED("Disconnected")  // Connection lost
 }
+
+/**
+ * Pane-grid layout for wide screens (desktop + Android tablet/wide).
+ * ONE = single full view (current behavior, byte-for-byte unchanged path).
+ * TWO = vertical split (two columns side by side).
+ * QUAD = 2x2 quarters. Non-focused panes render the per-session transcript
+ * (Chat) view; only the focused pane uses the single shared raw terminal.
+ */
+enum class GridLayout(val paneCount: Int) {
+    ONE(1),
+    TWO(2),
+    QUAD(4)
+}
