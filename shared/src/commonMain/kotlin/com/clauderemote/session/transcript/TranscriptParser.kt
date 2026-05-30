@@ -104,6 +104,27 @@ object TranscriptParser {
         return result
     }
 
+    /**
+     * True when a "user"-role message is actually a system/tool injection rather
+     * than something the human typed. Claude Code logs these as user entries:
+     * slash-command echoes, local-command output, background-task notifications,
+     * system reminders, bash-tool I/O, prompt-submit hook output. They start
+     * with a recognizable wrapper tag. Without this they render as bogus USER
+     * bubbles (e.g. a <task-notification> showing the assistant's own summary).
+     */
+    private fun isSyntheticUserText(text: String): Boolean {
+        val t = text.trimStart()
+        return t.startsWith("<command-") ||
+            t.startsWith("<local-command-stdout>") ||
+            t.startsWith("<local-command-caveat>") ||
+            t.startsWith("<task-notification>") ||
+            t.startsWith("<system-reminder>") ||
+            t.startsWith("<user-prompt-submit-hook>") ||
+            t.startsWith("<bash-input>") ||
+            t.startsWith("<bash-stdout>") ||
+            t.startsWith("<bash-stderr>")
+    }
+
     private fun parseUser(obj: JsonObject, out: MutableList<TranscriptEntry>) {
         val uuid = obj["uuid"]?.jsonPrimitive?.contentOrNull ?: return
         // Meta records are Claude Code's own synthetic injections (caveats,
@@ -125,10 +146,9 @@ object TranscriptParser {
                         name = slash.groupValues[1].trim(),
                         args = slash.groupValues[2].trim()
                     )
-                    text.startsWith("<local-command-stdout>") ||
-                        text.startsWith("<local-command-caveat>") ||
-                        text.startsWith("<command-") -> {
-                        // Skip internal local-command bookkeeping.
+                    isSyntheticUserText(text) -> {
+                        // Skip system/tool injections (local-command output,
+                        // task notifications, system reminders, …) — not human input.
                     }
                     else -> out += TranscriptEntry.UserPrompt(
                         id = uuid,
@@ -162,7 +182,10 @@ object TranscriptParser {
                         // User input can arrive as a content-block array (pasted
                         // images, multi-part input) rather than a plain string —
                         // collect the text blocks so the prompt isn't dropped.
-                        "text" -> b["text"]?.jsonPrimitive?.contentOrNull?.let { textParts += it }
+                        // Skip system/tool injections that arrive in array form.
+                        "text" -> b["text"]?.jsonPrimitive?.contentOrNull
+                            ?.takeUnless { isSyntheticUserText(it) }
+                            ?.let { textParts += it }
                         else -> {}
                     }
                 }
