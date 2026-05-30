@@ -111,6 +111,7 @@ fun App(
     val latencies by sessionOrchestrator.latencies.collectAsState()
     val gitStatuses by sessionOrchestrator.gitStatuses.collectAsState()
     val pendingCounts by sessionOrchestrator.pendingCounts.collectAsState()
+    val serverHealth by sessionOrchestrator.serverHealth.collectAsState()
 
     var serverList by remember { mutableStateOf(serverStorage.loadServers()) }
     val tabs by tabManager.tabs.collectAsState()
@@ -400,6 +401,8 @@ fun App(
                 Screen.LAUNCHER -> {
                     LauncherScreen(
                         servers = serverList,
+                        serverHealth = serverHealth,
+                        onProbeServers = { force -> sessionOrchestrator.probeServers(serverList, force) },
                         activeSessions = tabs,
                         remoteSessions = remoteSessions,
                         remoteSessionsLoading = remoteSessionsLoading,
@@ -476,10 +479,12 @@ fun App(
                             )
                             serverStorage.addServer(copy)
                             refreshServers()
+                            sessionOrchestrator.probeServers(serverList, force = true)
                         },
                         onDeleteServer = { server ->
                             serverStorage.deleteServer(server.id)
                             refreshServers()
+                            sessionOrchestrator.pruneServerHealth(server.id)
                         },
                         onToggleFavorite = { server ->
                             serverStorage.updateServer(server.copy(favorite = !server.favorite))
@@ -866,12 +871,14 @@ fun App(
                         serverStorage.addServer(server)
                     }
                     refreshServers()
+                    sessionOrchestrator.probeServers(serverList, force = true)
                     showServerDialog = false
                 },
                 onPickKeyFile = onPickKeyFile,
                 onDelete = { server ->
                     serverStorage.deleteServer(server.id)
                     refreshServers()
+                    sessionOrchestrator.pruneServerHealth(server.id)
                     showServerDialog = false
                 }
             )

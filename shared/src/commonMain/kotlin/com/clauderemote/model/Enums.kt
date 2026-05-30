@@ -61,6 +61,19 @@ enum class SessionStatus {
 }
 
 /**
+ * Reachability of a configured server, shown as a colored dot in the launcher
+ * so the user can see which servers are online before opening a session.
+ * Kept as a separate StateFlow map in the orchestrator (not persisted on
+ * [com.clauderemote.model.SshServer]).
+ */
+enum class ServerHealth {
+    UNKNOWN,   // not probed yet, or probe skipped (e.g. Cloudflare proxy)
+    CHECKING,  // probe in flight
+    ONLINE,    // reachable (live SSH connection or TCP connect succeeded)
+    OFFLINE    // TCP connect failed / timed out
+}
+
+/**
  * Fine-grained activity state derived from prompt detection + connection status.
  * Used for colored health dots in the UI.
  */

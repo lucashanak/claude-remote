@@ -31,7 +31,7 @@ class SessionOrchestrator(
     private val tabManager: TabManager,
     private val sessionStorage: SessionStorage? = null
 ) {
-    private val connections = mutableMapOf<String, SshManager>()
+    private val connections = java.util.concurrent.ConcurrentHashMap<String, SshManager>()
     private val moshConnections = mutableMapOf<String, com.clauderemote.connection.MoshManager>()
 
     // Per-session transcript streams (JSONL tail readers).
@@ -127,6 +127,13 @@ class SessionOrchestrator(
     private val pendingInputs = java.util.concurrent.ConcurrentHashMap<String, MutableList<String>>()
     private val _pendingCounts = kotlinx.coroutines.flow.MutableStateFlow<Map<String, Int>>(emptyMap())
     val pendingCounts: kotlinx.coroutines.flow.StateFlow<Map<String, Int>> = _pendingCounts
+
+    // Per-server reachability for the launcher health dot. Keyed by server id.
+    // Separate from the serialized SshServer model (mirrors gitStatuses etc.).
+    private val _serverHealth = kotlinx.coroutines.flow.MutableStateFlow<Map<String, ServerHealth>>(emptyMap())
+    val serverHealth: kotlinx.coroutines.flow.StateFlow<Map<String, ServerHealth>> = _serverHealth
+    // Debounce: last probe time per server id, so pull-to-refresh spam doesn't storm.
+    private val lastServerProbeAt = java.util.concurrent.ConcurrentHashMap<String, Long>()
 
     private fun updateActivity(sessionId: String, activity: SessionActivity) {
         if (activity == SessionActivity.WORKING) sawWorkSinceAttach.add(sessionId)
@@ -370,6 +377,68 @@ class SessionOrchestrator(
             parseGitStatus(sessionId, output)
         } catch (_: Exception) {
             _gitStatuses.update { it - sessionId }
+        }
+    }
+
+    /**
+     * Probe reachability of each [servers] entry and publish to [serverHealth]
+     * (keyed by server id). Off the UI thread, time-bounded, and debounced.
+     * Branches per server:
+     *  - A live, connected SSH session already exists for the server →
+     *    [ServerHealth.ONLINE] immediately (no redundant socket probe).
+     *  - [SshServer.useCloudflareProxy] → [ServerHealth.UNKNOWN] (a raw TCP
+     *    probe to a Cloudflare-tunneled host is misleading; don't show false
+     *    OFFLINE).
+     *  - Otherwise → [ServerHealth.CHECKING], then a 2.5s TCP connect on
+     *    Dispatchers.IO; success → ONLINE, any failure/timeout → OFFLINE.
+     * Skipped entirely while [isInBackground]; per-server debounced to ~5s.
+     */
+    /** Remove a deleted server's health entry so no stale state leaks. */
+    fun pruneServerHealth(serverId: String) {
+        _serverHealth.update { it - serverId }
+        lastServerProbeAt.remove(serverId)
+    }
+
+    fun probeServers(servers: List<SshServer>, force: Boolean = false) {
+        if (isInBackground) return
+        val now = System.currentTimeMillis()
+        for (server in servers) {
+            val last = lastServerProbeAt[server.id] ?: 0L
+            if (!force && now - last < 5_000L) continue
+            lastServerProbeAt[server.id] = now
+            reconnectScope.launch {
+                // 1) Reuse a live connection → ONLINE without a socket probe.
+                val hasLiveConnection = connections.any { (sessionId, mgr) ->
+                    mgr.isConnected && tabManager.getTab(sessionId)?.server?.id == server.id
+                }
+                if (hasLiveConnection) {
+                    _serverHealth.update { it + (server.id to ServerHealth.ONLINE) }
+                    return@launch
+                }
+                // 2) Cloudflare-tunneled host → a raw TCP probe is misleading.
+                if (server.useCloudflareProxy) {
+                    _serverHealth.update { it + (server.id to ServerHealth.UNKNOWN) }
+                    return@launch
+                }
+                // 3) Raw TCP connect, time-bounded, off the UI thread.
+                _serverHealth.update { if (it[server.id] == null) it + (server.id to ServerHealth.CHECKING) else it }
+                val reachable = withContext(Dispatchers.IO) {
+                    val socket = java.net.Socket()
+                    try {
+                        socket.connect(java.net.InetSocketAddress(server.host, server.port), 2500)
+                        true
+                    } catch (e: kotlinx.coroutines.CancellationException) {
+                        throw e
+                    } catch (_: Exception) {
+                        false
+                    } finally {
+                        try { socket.close() } catch (_: Exception) {}
+                    }
+                }
+                _serverHealth.update {
+                    it + (server.id to if (reachable) ServerHealth.ONLINE else ServerHealth.OFFLINE)
+                }
+            }
         }
     }
 
