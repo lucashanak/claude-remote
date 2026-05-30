@@ -710,7 +710,14 @@ else:
             ?: return kotlinx.coroutines.flow.MutableStateFlow(emptyList())
         val stream = synchronized(transcriptLock) {
             transcriptStreams.getOrPut(sessionId) {
-                TranscriptStream(tab.server, tab.folder, reconnectScope)
+                // Reuse this session's main terminal SSH connection for the tail
+                // (one extra exec channel) instead of dialing a fresh connection
+                // per tab — that exhausted sshd MaxStartups / Cloudflare limits
+                // with several tabs open, so the terminal connected but the chat
+                // hung on "Waiting for transcript…".
+                TranscriptStream(tab.server, tab.folder, reconnectScope) {
+                    connections[sessionId]?.getSession()
+                }
             }
         }
         val uuid = tab.claudeSessionId

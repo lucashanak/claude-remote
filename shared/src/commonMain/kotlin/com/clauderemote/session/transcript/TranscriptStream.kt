@@ -30,7 +30,17 @@ import java.io.InputStreamReader
 class TranscriptStream(
     private val server: SshServer,
     private val cwd: String,
-    private val parentScope: CoroutineScope
+    private val parentScope: CoroutineScope,
+    /**
+     * Supplies the session's MAIN terminal SSH session, if connected. The tail
+     * reuses it (one extra exec channel) instead of dialing a brand-new SSH
+     * connection: with several tabs open, a separate connection per transcript
+     * exhausts sshd `MaxStartups` / Cloudflare-tunnel limits, so the terminal
+     * connects but the chat silently fails to — the "Waiting for transcript…"
+     * hang. Returns null when there is no live main connection (disconnected
+     * tab), in which case we fall back to a dedicated short-lived session.
+     */
+    private val liveSession: () -> com.jcraft.jsch.Session? = { null }
 ) {
     private val _entries = MutableStateFlow<List<TranscriptEntry>>(emptyList())
     val entries: StateFlow<List<TranscriptEntry>> = _entries.asStateFlow()
@@ -124,46 +134,15 @@ class TranscriptStream(
             attempt++
             var sawData = false
             try {
-                SshSessionHelper.withSession(server, timeout = 15_000) { sess ->
-                    val ch = sess.openChannel("exec") as com.jcraft.jsch.ChannelExec
-                    ch.setCommand(cmd)
-                    ch.inputStream = null
-                    val inStream = ch.inputStream
-                    withContext(Dispatchers.IO) { ch.connect(10_000) }
-                    try {
-                        val reader = BufferedReader(InputStreamReader(inStream, Charsets.UTF_8))
-                        while (scope.isActive && !ch.isClosed) {
-                            // Let read errors (broken pipe, channel reset) propagate
-                            // to the outer catch so they go through the backoff +
-                            // logging path. The old `catch { null }` collapsed errors
-                            // into clean-EOF, which reset attempt=0 → delay(0) →
-                            // tight reconnect loop hammering SSH on a dead channel.
-                            val first = withContext(Dispatchers.IO) { reader.readLine() } ?: break
-                            // Coalesce a burst — the 2 000-line replay on (re)connect
-                            // and rapid streaming — into ONE flow emission instead of
-                            // one per line. Each emission triggers a full list copy
-                            // here plus ~4 O(n) recomputes in the Compose transcript
-                            // view, so per-line emission janks badly on long sessions.
-                            // reader.ready() drains only what's already buffered, so a
-                            // genuinely idle stream still emits promptly per line.
-                            val batch = ArrayList<String>()
-                            batch.add(first)
-                            while (batch.size < MAX_BATCH &&
-                                withContext(Dispatchers.IO) { reader.ready() }
-                            ) {
-                                val more = withContext(Dispatchers.IO) { reader.readLine() } ?: break
-                                batch.add(more)
-                            }
-                            // Partial lines (tail caught mid-write) fail parse cleanly
-                            // and are dropped by the parser.
-                            val newEntries = TranscriptParser.parseLines(batch.asSequence())
-                            if (newEntries.isNotEmpty()) {
-                                sawData = true
-                                appendEntries(newEntries)
-                            }
-                        }
-                    } finally {
-                        try { ch.disconnect() } catch (_: Throwable) {}
+                // Prefer the main terminal connection (extra exec channel only,
+                // no new SSH connection). Fall back to a dedicated session when
+                // the tab has no live main connection.
+                val shared = liveSession()?.takeIf { it.isConnected }
+                sawData = if (shared != null) {
+                    streamFromSession(shared, cmd)
+                } else {
+                    SshSessionHelper.withSession(server, timeout = 15_000) { sess ->
+                        streamFromSession(sess, cmd)
                     }
                 }
                 // Only treat the connection as healthy (reset backoff) if it
@@ -179,6 +158,55 @@ class TranscriptStream(
             val backoff = (1_000L * attempt).coerceAtMost(15_000L)
             delay(backoff)
         }
+    }
+
+    /**
+     * Run the `tail -F` command on [sess] (the main terminal session when
+     * available, otherwise a dedicated one) and pump parsed entries into the
+     * flow. Closes ONLY the exec channel, never [sess] — the caller / SshManager
+     * owns the session lifecycle. Returns true if any transcript data was read.
+     */
+    private suspend fun streamFromSession(sess: com.jcraft.jsch.Session, cmd: String): Boolean {
+        var sawData = false
+        val ch = sess.openChannel("exec") as com.jcraft.jsch.ChannelExec
+        ch.setCommand(cmd)
+        ch.inputStream = null
+        val inStream = ch.inputStream
+        withContext(Dispatchers.IO) { ch.connect(10_000) }
+        try {
+            val reader = BufferedReader(InputStreamReader(inStream, Charsets.UTF_8))
+            while (scope.isActive && !ch.isClosed) {
+                // Let read errors (broken pipe, channel reset) propagate to the
+                // outer catch so they go through the backoff + logging path. The
+                // old `catch { null }` collapsed errors into clean-EOF, which
+                // reset attempt=0 → delay(0) → tight reconnect loop.
+                val first = withContext(Dispatchers.IO) { reader.readLine() } ?: break
+                // Coalesce a burst — the 2 000-line replay on (re)connect and
+                // rapid streaming — into ONE flow emission instead of one per
+                // line. Each emission is a full list copy plus ~4 O(n) recomputes
+                // in the Compose view, so per-line emission janks on long
+                // sessions. reader.ready() drains only what's already buffered,
+                // so a genuinely idle stream still emits promptly per line.
+                val batch = ArrayList<String>()
+                batch.add(first)
+                while (batch.size < MAX_BATCH &&
+                    withContext(Dispatchers.IO) { reader.ready() }
+                ) {
+                    val more = withContext(Dispatchers.IO) { reader.readLine() } ?: break
+                    batch.add(more)
+                }
+                // Partial lines (tail caught mid-write) fail parse cleanly and
+                // are dropped by the parser.
+                val newEntries = TranscriptParser.parseLines(batch.asSequence())
+                if (newEntries.isNotEmpty()) {
+                    sawData = true
+                    appendEntries(newEntries)
+                }
+            }
+        } finally {
+            try { ch.disconnect() } catch (_: Throwable) {}
+        }
+        return sawData
     }
 
     /**
