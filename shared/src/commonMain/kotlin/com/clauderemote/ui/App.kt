@@ -71,6 +71,7 @@ fun App(
     onPickKeyFile: ((callback: (String) -> Unit) -> Unit)? = null,
     onImportServers: (() -> Unit)? = null,
     onPickFile: ((callback: (List<Pair<ByteArray, String>>) -> Unit) -> Unit)? = null,
+    onSaveFile: ((bytes: ByteArray, suggestedName: String) -> Unit)? = null,
     onApplyFontSize: ((Int) -> Unit)? = null,
     onShowNativeMenu: (() -> Unit)? = null,
     onNativeRenameDialog: ((sessionId: String, currentAlias: String) -> Unit)? = null,
@@ -652,6 +653,24 @@ fun App(
                                 if (paths.isEmpty()) null else paths.joinToString("\n")
                             }
                         } else null,
+                        onDownloadFile = { path ->
+                            val id = activeTabId
+                            if (id == null) {
+                                null
+                            } else {
+                                // Resolve a relative path against the session folder so
+                                // the user can type "output.png" instead of an absolute
+                                // path; absolute paths are passed through untouched.
+                                val folder = tabManager.getTab(id)?.folder ?: "~"
+                                val remotePath = if (path.startsWith("/") || path.startsWith("~")) {
+                                    path
+                                } else {
+                                    "${folder.trimEnd('/')}/$path"
+                                }
+                                sessionOrchestrator.downloadFile(id, remotePath)
+                            }
+                        },
+                        onSaveFile = onSaveFile,
                         onSwitchModel = { model ->
                             activeTabId?.let { sessionOrchestrator.switchModel(it, model) }
                         },

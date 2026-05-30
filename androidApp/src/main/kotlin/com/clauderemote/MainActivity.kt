@@ -36,6 +36,7 @@ class MainActivity : FragmentActivity() {
     @Volatile private var terminalHandle: SshTerminalHandle? = null
     private var keyFileCallback: ((String) -> Unit)? = null
     private var attachFileCallback: ((List<Pair<ByteArray, String>>) -> Unit)? = null
+    @Volatile private var pendingSaveBytes: ByteArray? = null
 
     private val keyFilePicker = registerForActivityResult(
         androidx.activity.result.contract.ActivityResultContracts.GetContent()
@@ -88,6 +89,22 @@ class MainActivity : FragmentActivity() {
         }
         attachFileCallback?.invoke(files)
         attachFileCallback = null
+    }
+
+    private val saveFilePicker = registerForActivityResult(
+        androidx.activity.result.contract.ActivityResultContracts.CreateDocument("*/*")
+    ) { uri ->
+        val bytes = pendingSaveBytes
+        pendingSaveBytes = null
+        if (uri != null && bytes != null) {
+            try {
+                contentResolver.openOutputStream(uri)?.use { it.write(bytes) }
+                android.widget.Toast.makeText(this, "File saved", android.widget.Toast.LENGTH_SHORT).show()
+            } catch (e: Exception) {
+                FileLogger.error("MainActivity", "Failed to save file", e)
+                android.widget.Toast.makeText(this, "Save failed: ${e.message}", android.widget.Toast.LENGTH_LONG).show()
+            }
+        }
     }
 
     @Volatile private var isAppInForeground = false
@@ -268,6 +285,10 @@ class MainActivity : FragmentActivity() {
                 onPickFile = { callback ->
                     attachFileCallback = callback
                     attachFilePicker.launch(arrayOf("*/*"))
+                },
+                onSaveFile = { bytes, suggestedName ->
+                    pendingSaveBytes = bytes
+                    saveFilePicker.launch(suggestedName)
                 },
                 onTerminalScreenVisible = {
                     val activeId = tabManager.activeTabId.value ?: return@App

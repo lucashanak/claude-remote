@@ -495,6 +495,37 @@ fun main() = application {
                     }
                 }
             },
+            onSaveFile = { bytes, suggestedName ->
+                // Show the native save dialog on the EDT, then write bytes on a
+                // background thread so the EDT is never blocked by I/O.
+                javax.swing.SwingUtilities.invokeLater {
+                    try {
+                        val parent = javax.swing.SwingUtilities.getWindowAncestor(termWidget) as? java.awt.Frame
+                        val dialog = java.awt.FileDialog(parent, "Save File", java.awt.FileDialog.SAVE)
+                        dialog.file = suggestedName
+                        dialog.isVisible = true
+                        val dir = dialog.directory
+                        val name = dialog.file
+                        if (dir != null && name != null) {
+                            val target = java.io.File(dir, name)
+                            Thread {
+                                try {
+                                    target.writeBytes(bytes)
+                                    com.clauderemote.util.FileLogger.log("Main", "Saved file: ${target.absolutePath}")
+                                } catch (e: Exception) {
+                                    com.clauderemote.util.FileLogger.error(
+                                        "Main", "Failed to write saved file: ${e.message}", e
+                                    )
+                                }
+                            }.start()
+                        }
+                    } catch (e: Throwable) {
+                        com.clauderemote.util.FileLogger.error(
+                            "Main", "Save FileDialog failed: ${e.message}", e
+                        )
+                    }
+                }
+            },
             onShowNativeMenu = {
                 javax.swing.SwingUtilities.invokeLater {
                     val popup = javax.swing.JPopupMenu()
