@@ -45,6 +45,13 @@ class TranscriptStream(
     private val _entries = MutableStateFlow<List<TranscriptEntry>>(emptyList())
     val entries: StateFlow<List<TranscriptEntry>> = _entries.asStateFlow()
 
+    // Context size (tokens) of the latest assistant message. The orchestrator
+    // turns this into the ctx-window % — derived from the transcript we already
+    // stream rather than scraping the TUI statusline. Null until a message with
+    // usage arrives.
+    private val _contextTokens = MutableStateFlow<Long?>(null)
+    val contextTokens: StateFlow<Long?> = _contextTokens.asStateFlow()
+
     private val supervisor = SupervisorJob(parentScope.coroutineContext[Job])
     private val scope = CoroutineScope(parentScope.coroutineContext + supervisor)
     private var streamJob: Job? = null
@@ -82,6 +89,7 @@ class TranscriptStream(
             if (uuidChanged) {
                 _entries.value = emptyList()
                 seenIds.clear()
+                _contextTokens.value = null
             }
             runTail(claudeSessionUuid)
         }
@@ -201,6 +209,10 @@ class TranscriptStream(
                 if (newEntries.isNotEmpty()) {
                     sawData = true
                     appendEntries(newEntries)
+                }
+                // Track context size from this batch's newest assistant usage.
+                TranscriptParser.latestContextTokens(batch.asSequence())?.let {
+                    _contextTokens.value = it
                 }
             }
         } finally {

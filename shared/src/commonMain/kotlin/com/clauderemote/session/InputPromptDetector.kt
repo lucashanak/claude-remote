@@ -177,16 +177,22 @@ class InputPromptDetector(
         // Reset times in total minutes — only captured when paired with the
         // OMC short-form, since /usage doesn't print them in this layout.
         SESSION_RESET_REGEX.find(stripped)?.let { m ->
-            val h = m.groupValues.getOrNull(1)?.toIntOrNull() ?: 0
-            val mins = m.groupValues.getOrNull(2)?.toIntOrNull() ?: 0
-            result["session_reset_min"] = h * 60 + mins
+            resetToMinutes(m)?.let { result["session_reset_min"] = it }
         }
         WEEK_RESET_REGEX.find(stripped)?.let { m ->
-            val h = m.groupValues.getOrNull(1)?.toIntOrNull() ?: 0
-            val mins = m.groupValues.getOrNull(2)?.toIntOrNull() ?: 0
-            result["week_reset_min"] = h * 60 + mins
+            resetToMinutes(m)?.let { result["week_reset_min"] = it }
         }
         return result.ifEmpty { null }
+    }
+
+    /** Total minutes from a reset match with optional (d, h, m) groups, or null
+     *  if the parenthesised duration was empty. */
+    private fun resetToMinutes(m: MatchResult): Int? {
+        val d = m.groupValues.getOrNull(1)?.toIntOrNull() ?: 0
+        val h = m.groupValues.getOrNull(2)?.toIntOrNull() ?: 0
+        val mins = m.groupValues.getOrNull(3)?.toIntOrNull() ?: 0
+        val total = d * 1440 + h * 60 + mins
+        return if (total > 0) total else null
     }
 
     private fun parseTokenCount(s: String): Double {
@@ -236,12 +242,16 @@ class InputPromptDetector(
         // `(XhYm)` — e.g. `5h:33%(2h59m)`, `wk:73%(15h9m)`. We anchor each
         // reset capture to its own prefix so 5h's window doesn't get
         // confused with wk's.
+        // Reset is rendered as (XdYhZm) with any field optional and absent
+        // fields dropped — e.g. session "(2h27m)", week "(5d10h)" or "(45m)".
+        // The old pattern required a trailing `m`, so "5d10h" never matched and
+        // the week-reset chip stayed blank.
         private val SESSION_RESET_REGEX = Regex(
-            "5h[:\\s]+\\d{1,3}%\\s*\\((?:(\\d+)h)?(\\d+)m\\)",
+            "5h[:\\s]+\\d{1,3}%\\s*\\((?:(\\d+)d)?(?:(\\d+)h)?(?:(\\d+)m)?\\)",
             RegexOption.IGNORE_CASE
         )
         private val WEEK_RESET_REGEX = Regex(
-            "wk[:\\s]+\\d{1,3}%\\s*\\((?:(\\d+)h)?(\\d+)m\\)",
+            "wk[:\\s]+\\d{1,3}%\\s*\\((?:(\\d+)d)?(?:(\\d+)h)?(?:(\\d+)m)?\\)",
             RegexOption.IGNORE_CASE
         )
 

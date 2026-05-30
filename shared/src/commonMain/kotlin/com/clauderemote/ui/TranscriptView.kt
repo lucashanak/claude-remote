@@ -1180,9 +1180,14 @@ private fun buildUsageLabel(prefix: String, pct: Int?, resetMin: Int?): String {
 }
 
 private fun formatReset(minutes: Int): String {
-    val h = minutes / 60
+    val d = minutes / 1440
+    val h = (minutes % 1440) / 60
     val m = minutes % 60
-    return if (h > 0) "${h}h${m}m" else "${m}m"
+    return when {
+        d > 0 -> "${d}d${h}h"
+        h > 0 -> "${h}h${m}m"
+        else -> "${m}m"
+    }
 }
 
 private val openTodoRegex = Regex("\"status\"\\s*:\\s*\"(pending|in_progress)\"")

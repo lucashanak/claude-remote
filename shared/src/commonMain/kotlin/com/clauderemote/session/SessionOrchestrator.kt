@@ -85,9 +85,25 @@ class SessionOrchestrator(
         _hookActiveSessions.update { if (active) it + sessionId else it - sessionId }
     }
 
-    // Per-session context window usage (0-100)
+    // Per-session context window usage (0-100). Derived from the transcript's
+    // latest assistant-message token usage (see startContextTokenCollector),
+    // not scraped from the TUI.
     private val _contextPercents = kotlinx.coroutines.flow.MutableStateFlow<Map<String, Int>>(emptyMap())
     val contextPercents: kotlinx.coroutines.flow.StateFlow<Map<String, Int>> = _contextPercents
+
+    // Latest context-size (tokens) seen per session, mirrored from the
+    // transcript stream so emit()'s statusline scrape can calibrate the window.
+    private val latestContextTokens = java.util.concurrent.ConcurrentHashMap<String, Long>()
+    // Calibrated context-window size (tokens) per session: learned from one
+    // statusline `ctx:NN%` sighting (window ≈ tokens / pct), snapped to the
+    // 200k / 1M tier. Until known, a session whose tokens exceed 200k is
+    // assumed 1M (unambiguous); otherwise ctx % is withheld.
+    private val contextWindowTokens = java.util.concurrent.ConcurrentHashMap<String, Long>()
+    // Sessions that have been WORKING at least once since the app attached.
+    // Status chips stay empty until then — so we never surface stale scrollback
+    // values on a fresh attach (per product decision).
+    private val sawWorkSinceAttach = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
+    private val contextTokenCollectors = java.util.concurrent.ConcurrentHashMap<String, kotlinx.coroutines.Job>()
 
     // Per-session SSH latency (ms)
     private val _latencies = kotlinx.coroutines.flow.MutableStateFlow<Map<String, Long>>(emptyMap())
@@ -99,7 +115,43 @@ class SessionOrchestrator(
     val pendingCounts: kotlinx.coroutines.flow.StateFlow<Map<String, Int>> = _pendingCounts
 
     private fun updateActivity(sessionId: String, activity: SessionActivity) {
+        if (activity == SessionActivity.WORKING) sawWorkSinceAttach.add(sessionId)
         _sessionActivities.update { it + (sessionId to activity) }
+    }
+
+    /**
+     * Collect the transcript stream's context-token count and turn it into the
+     * ctx-window %. Launched once per session (idempotent). The % is only
+     * surfaced after the session has actually worked (so a fresh attach shows no
+     * stale value) and once the window size is known — either calibrated from a
+     * statusline `ctx:NN%` sighting in emit(), or inferred as 1M when tokens
+     * already exceed the 200k tier.
+     */
+    // Caller holds transcriptLock so create-and-bind stays atomic with the
+    // transcriptStreams map (and with disconnectSession's remove-and-cancel).
+    // computeIfAbsent makes the single-launch race-free.
+    private fun startContextTokenCollector(sessionId: String, stream: TranscriptStream) {
+        contextTokenCollectors.computeIfAbsent(sessionId) {
+            reconnectScope.launch {
+                stream.contextTokens.collect { tokens ->
+                    if (tokens == null) {
+                        // /clear or /compact reset the conversation — drop the
+                        // now-stale % instead of holding the pre-clear value.
+                        _contextPercents.update { it - sessionId }
+                        latestContextTokens.remove(sessionId)
+                        return@collect
+                    }
+                    if (tokens <= 0L) return@collect
+                    latestContextTokens[sessionId] = tokens
+                    if (sessionId !in sawWorkSinceAttach) return@collect
+                    val window = contextWindowTokens[sessionId]
+                        ?: if (tokens > 200_000L) 1_000_000L else return@collect
+                    val pct = ((tokens.toDouble() / window) * 100).toInt().coerceIn(0, 100)
+                    updateContextPercent(sessionId, pct)
+                    onContextUpdate?.invoke(sessionId, pct)
+                }
+            }
+        }
     }
 
     /** Dispatch [onClaudeNeedsInput] no more than once per [notifyDebounceMs] per
@@ -709,7 +761,7 @@ else:
         val tab = tabManager.getTab(sessionId)
             ?: return kotlinx.coroutines.flow.MutableStateFlow(emptyList())
         val stream = synchronized(transcriptLock) {
-            transcriptStreams.getOrPut(sessionId) {
+            val s = transcriptStreams.getOrPut(sessionId) {
                 // Reuse this session's main terminal SSH connection for the tail
                 // (one extra exec channel) instead of dialing a fresh connection
                 // per tab — that exhausted sshd MaxStartups / Cloudflare limits
@@ -719,6 +771,11 @@ else:
                     connections[sessionId]?.getSession()
                 }
             }
+            // Derive the ctx-window % from this stream's token usage. Inside the
+            // lock so it binds to the exact stream instance and stays atomic with
+            // disconnectSession's teardown.
+            startContextTokenCollector(sessionId, s)
+            s
         }
         val uuid = tab.claudeSessionId
         if (uuid != null) stream.start(uuid)
@@ -823,28 +880,46 @@ else:
             // Detection fires asynchronously via promptDetector.onDetection callback
             // once the rendered screen state classifies as IDLE.
             promptDetector.onOutput(session.id, text)
-            // Parse context window usage
-            val ctx = promptDetector.parseContextPercent(session.id, text)
-            if (ctx != null) {
-                updateContextPercent(session.id, ctx)
-                onContextUpdate?.invoke(session.id, ctx)
+            // ctx % is derived from the transcript (startContextTokenCollector),
+            // not scraped. We still read the statusline's `ctx:NN%` here, but
+            // only to CALIBRATE the window size for this session: with the live
+            // token count we can back out whether it's a 200k or 1M window and
+            // cache it. One sighting is enough; afterwards the transcript drives
+            // the displayed %.
+            if (session.id in sawWorkSinceAttach && !contextWindowTokens.containsKey(session.id)) {
+                // Gate on sawWork so we only pair a FRESH statusline ctx:NN% with
+                // the live token count. Calibrating off a stale scrollback pct
+                // (e.g. 5% paired with 180k live tokens) would mis-snap the
+                // window to 1M and stick the chip wrong for the whole session.
+                val ctxPct = promptDetector.parseContextPercent(session.id, text)
+                val tokens = latestContextTokens[session.id]
+                if (ctxPct != null && ctxPct in 1..100 && tokens != null && tokens > 0L) {
+                    val est = tokens.toDouble() / (ctxPct / 100.0)
+                    // Snap to the nearest tier (the two windows are 5x apart, so
+                    // the geometric midpoint ~447k cleanly separates them).
+                    contextWindowTokens[session.id] = if (est > 450_000L) 1_000_000L else 200_000L
+                }
             }
-            // Parse usage stats from terminal output (OMC statusline or /usage).
-            val usage = promptDetector.parseUsage(session.id, text)
-            if (usage != null) {
-                usage["session"]?.let { s ->
-                    _sessionUsagePercents.update { it + (session.id to s) }
+            // 5h / week usage are account-level (not in the transcript) so they
+            // stay scraped from the OMC statusline — but only once the session
+            // has actually worked, so we don't surface stale scrollback values.
+            if (session.id in sawWorkSinceAttach) {
+                val usage = promptDetector.parseUsage(session.id, text)
+                if (usage != null) {
+                    usage["session"]?.let { s ->
+                        _sessionUsagePercents.update { it + (session.id to s) }
+                    }
+                    usage["week"]?.let { w ->
+                        _weekUsagePercents.update { it + (session.id to w) }
+                    }
+                    usage["session_reset_min"]?.let { m ->
+                        _sessionResetMin.update { it + (session.id to m) }
+                    }
+                    usage["week_reset_min"]?.let { m ->
+                        _weekResetMin.update { it + (session.id to m) }
+                    }
+                    onUsageUpdate?.invoke(usage["session"], usage["week"])
                 }
-                usage["week"]?.let { w ->
-                    _weekUsagePercents.update { it + (session.id to w) }
-                }
-                usage["session_reset_min"]?.let { m ->
-                    _sessionResetMin.update { it + (session.id to m) }
-                }
-                usage["week_reset_min"]?.let { m ->
-                    _weekResetMin.update { it + (session.id to m) }
-                }
-                onUsageUpdate?.invoke(usage["session"], usage["week"])
             }
         }
 
@@ -1443,7 +1518,14 @@ else:
             transcriptStreams.remove(sessionId)?.let { stream ->
                 reconnectScope.launch { stream.stop() }
             }
+            // Cancel the ctx collector inside the same lock so it can't be
+            // relaunched against this now-stopped stream by a racing
+            // transcriptFlow.
+            contextTokenCollectors.remove(sessionId)?.cancel()
         }
+        latestContextTokens.remove(sessionId)
+        contextWindowTokens.remove(sessionId)
+        sawWorkSinceAttach.remove(sessionId)
         synchronized(statusLock) {
             statusPollers.remove(sessionId)?.stop()
         }

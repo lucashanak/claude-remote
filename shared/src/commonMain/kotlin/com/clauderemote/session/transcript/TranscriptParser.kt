@@ -7,6 +7,7 @@ import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.longOrNull
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
@@ -71,6 +72,36 @@ object TranscriptParser {
             }
         }
         return out
+    }
+
+    /**
+     * Context size in tokens of the MOST RECENT assistant message in [lines]
+     * (input + cache-creation + cache-read), or null if none carries usage.
+     * This is the exact figure Claude Code's statusline turns into `ctx:NN%`,
+     * so the app can derive the context-window percentage from the same
+     * transcript it already streams instead of scraping the TUI. Updates
+     * naturally per assistant message — i.e. only while Claude is working.
+     */
+    fun latestContextTokens(lines: Sequence<String>): Long? {
+        var result: Long? = null
+        for (raw in lines) {
+            val line = raw.trim()
+            // Cheap pre-filter so we don't JSON-parse every line twice.
+            if (line.isEmpty() || !line.contains("\"usage\"")) continue
+            val obj = try {
+                json.parseToJsonElement(line) as? JsonObject ?: continue
+            } catch (_: Throwable) {
+                continue
+            }
+            if (obj["type"]?.jsonPrimitive?.contentOrNull != "assistant") continue
+            val usage = obj["message"]?.jsonObject?.get("usage")?.jsonObject ?: continue
+            val input = usage["input_tokens"]?.jsonPrimitive?.longOrNull ?: 0L
+            val cacheCreate = usage["cache_creation_input_tokens"]?.jsonPrimitive?.longOrNull ?: 0L
+            val cacheRead = usage["cache_read_input_tokens"]?.jsonPrimitive?.longOrNull ?: 0L
+            val total = input + cacheCreate + cacheRead
+            if (total > 0L) result = total
+        }
+        return result
     }
 
     private fun parseUser(obj: JsonObject, out: MutableList<TranscriptEntry>) {
