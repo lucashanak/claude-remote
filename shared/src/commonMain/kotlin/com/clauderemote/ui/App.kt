@@ -54,7 +54,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 enum class Screen {
-    LAUNCHER, CONNECT, TERMINAL, SETTINGS, LOG_VIEWER, USAGE_DASHBOARD
+    LAUNCHER, CONNECT, TERMINAL, SETTINGS, LOG_VIEWER, USAGE_DASHBOARD, HISTORY
 }
 
 @Composable
@@ -123,6 +123,46 @@ fun App(
     var remoteSessions by remember { mutableStateOf<List<RemoteSession>>(emptyList()) }
     var remoteSessionsLoading by remember { mutableStateOf(false) }
 
+    // Past Claude conversations discovered from server transcripts (history browser)
+    var historySessions by remember { mutableStateOf<List<ClaudeHistorySession>>(emptyList()) }
+    var historyLoading by remember { mutableStateOf(false) }
+    var historyTotalCount by remember { mutableStateOf(0) }
+
+    fun scanHistory() {
+        val servers = serverList
+        if (servers.isEmpty()) {
+            historySessions = emptyList()
+            historyTotalCount = 0
+            return
+        }
+        scope.launch {
+            historyLoading = true
+            try {
+                val results = withContext(Dispatchers.IO) {
+                    servers.map { server ->
+                        async {
+                            try {
+                                com.clauderemote.session.ClaudeHistoryScanner.scan(server)
+                            } catch (_: Exception) {
+                                com.clauderemote.session.ClaudeHistoryScanner.ScanResult(emptyList(), 0)
+                            }
+                        }
+                    }.awaitAll()
+                }
+                historySessions = results.flatMap { it.sessions }
+                    .sortedByDescending { it.lastModifiedEpoch }
+                historyTotalCount = results.sumOf { it.totalCount }
+                if (historyTotalCount > historySessions.size) {
+                    FileLogger.log("App", "History: showing ${historySessions.size} of $historyTotalCount transcripts (capped)")
+                }
+            } catch (_: Exception) {
+                historySessions = emptyList()
+                historyTotalCount = 0
+            }
+            historyLoading = false
+        }
+    }
+
     fun scanRemoteSessions() {
         val servers = serverList
         if (servers.isEmpty()) return
@@ -181,6 +221,10 @@ fun App(
     LaunchedEffect(Unit) { scanRemoteSessions() }
     LaunchedEffect(currentScreen) {
         if (currentScreen == Screen.LAUNCHER) scanRemoteSessions()
+    }
+    // Scan transcript history whenever the history browser is opened.
+    LaunchedEffect(currentScreen) {
+        if (currentScreen == Screen.HISTORY) scanHistory()
     }
     // Periodically refresh remote sessions while on terminal screen
     // so the side panel stays up-to-date
@@ -498,6 +542,7 @@ fun App(
                         onSessionLongPress = { session -> sessionMenuId = session.id },
                         onSettings = { currentScreen = Screen.SETTINGS },
                         onViewLog = { currentScreen = Screen.LOG_VIEWER },
+                        onHistory = { currentScreen = Screen.HISTORY },
                         onUsageDashboard = { currentScreen = Screen.USAGE_DASHBOARD },
                         onCheckUpdate = { checkForUpdate() },
                     )
@@ -855,6 +900,89 @@ fun App(
                         weekUsagePercent = activeServerId?.let { weekUsagePercents[it] },
                         usageTokens = usageTokensState,
                         onBack = { currentScreen = Screen.LAUNCHER }
+                    )
+                }
+
+                Screen.HISTORY -> {
+                    // Live detection: uuid-only (primary). Cwd-basename heuristic
+                    // removed — it caused false-LIVE when unrelated projects share a
+                    // folder name, and false-Resume when the same uuid appeared under
+                    // two encoded-cwd dirs.
+                    val liveUuids = tabs.mapNotNull { it.claudeSessionId }.toSet()
+                    HistoryScreen(
+                        sessions = historySessions,
+                        loading = historyLoading,
+                        liveUuids = liveUuids,
+                        totalCount = historyTotalCount,
+                        onBack = { currentScreen = Screen.LAUNCHER },
+                        onRefresh = { scanHistory() },
+                        onResume = { hist ->
+                            scope.launch {
+                                try {
+                                    connectionError = null
+                                    val tmuxSessionName = TmuxNameParser.build(
+                                        hist.server.name, hist.cwd, isYolo = false
+                                    )
+                                    // FIX 2: guard against killing an unrelated live session.
+                                    // TmuxNameParser.build uses only the folder basename, so
+                                    // two projects with the same basename produce the same
+                                    // tmux name. Probe first: if a session exists with a
+                                    // different cwd, abort rather than kill it.
+                                    val paneMatch = sessionOrchestrator.tmuxPaneMatchesCwd(
+                                        hist.server, tmuxSessionName, hist.cwd
+                                    )
+                                    when (paneMatch) {
+                                        false -> {
+                                            // Collision: a DIFFERENT live session owns that name.
+                                            connectionError =
+                                                "A different session is already running as '$tmuxSessionName'. " +
+                                                "Rename or close it first."
+                                        }
+                                        true -> {
+                                            // Same cwd — session is already there; just attach.
+                                            sessionOrchestrator.launchSession(
+                                                server = hist.server,
+                                                folder = hist.cwd,
+                                                mode = hist.server.defaultClaudeMode,
+                                                model = hist.server.defaultClaudeModel,
+                                                connectionType = ConnectionType.SSH,
+                                                tmuxSessionName = tmuxSessionName,
+                                                isNewTmuxSession = false,
+                                                resumeClaudeSessionId = hist.uuid
+                                            )
+                                            currentScreen = Screen.TERMINAL
+                                        }
+                                        null -> {
+                                            // No existing session — safe to create & resume.
+                                            sessionOrchestrator.launchSession(
+                                                server = hist.server,
+                                                folder = hist.cwd,
+                                                mode = hist.server.defaultClaudeMode,
+                                                model = hist.server.defaultClaudeModel,
+                                                connectionType = ConnectionType.SSH,
+                                                tmuxSessionName = tmuxSessionName,
+                                                isNewTmuxSession = false,
+                                                resumeClaudeSessionId = hist.uuid
+                                            )
+                                            currentScreen = Screen.TERMINAL
+                                        }
+                                    }
+                                } catch (e: Exception) {
+                                    connectionError = e.message
+                                }
+                            }
+                        },
+                        onAttachLive = { hist ->
+                            // Switch to the already-open tab (uuid matched).
+                            val tab = tabs.firstOrNull { it.claudeSessionId == hist.uuid }
+                            if (tab != null) {
+                                sessionOrchestrator.switchTab(tab.id)
+                                currentScreen = Screen.TERMINAL
+                            }
+                            // No remote-tmux fallback here: if uuid is in liveUuids
+                            // there must be an open tab. If none, fall through silently
+                            // (stale snapshot — next scan will correct it).
+                        },
                     )
                 }
             }
