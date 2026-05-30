@@ -110,6 +110,8 @@ fun TerminalScreen(
     onSendCommand: (String) -> Unit,
     onSwitchModel: (ClaudeModel) -> Unit,
     onSendEscape: () -> Unit,
+    onPageUp: () -> Unit = {},
+    onPageDown: () -> Unit = {},
     onReconnect: ((String) -> Unit)? = null,
     onRenameSession: ((sessionId: String, newAlias: String) -> Unit)? = null,
     onAttachFile: (suspend () -> String?)? = null,
@@ -754,8 +756,11 @@ fun TerminalScreen(
                     if (showControlBar && activeSession != null) {
                         CRControlBar(
                             session = activeSession,
+                            activity = sessionActivities[activeSession.id],
                             onSendCommand = onSendCommand,
                             onSendEscape = onSendEscape,
+                            onPageUp = onPageUp,
+                            onPageDown = onPageDown,
                             onSwitchModel = onSwitchModel,
                             onOpenCommands = {
                                 showCommandPicker = true
@@ -1186,8 +1191,11 @@ private fun SpecialKeyBtn(
 @Composable
 private fun CRControlBar(
     session: ClaudeSession,
+    activity: com.clauderemote.model.SessionActivity? = null,
     onSendCommand: (String) -> Unit,
     onSendEscape: () -> Unit,
+    onPageUp: () -> Unit = {},
+    onPageDown: () -> Unit = {},
     onSwitchModel: (ClaudeModel) -> Unit,
     onOpenCommands: () -> Unit,
 ) {
@@ -1338,6 +1346,12 @@ private fun CRControlBar(
 
             Spacer(Modifier.weight(1f))
 
+            // Right-hand button cluster — scrollable so it never clips on narrow phones
+            Row(
+                modifier = Modifier.horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
             // /cmd
             Surface(
                 onClick = onOpenCommands,
@@ -1348,13 +1362,18 @@ private fun CRControlBar(
                     modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp))
             }
 
+            // Scroll the tmux pane via copy-mode (NOT stdin)
+            CtrlButton("PgUp") { onPageUp() }
+            CtrlButton("PgDn") { onPageDown() }
             // Esc
             CtrlButton("Esc") { onSendEscape() }
             // C-c
             CtrlButton("C-c") { onSendCommand("") }
-            // y / n
-            CtrlButton("y") { onSendCommand("y\r") }
-            CtrlButton("n") { onSendCommand("n\r") }
+            // y / n — emphasized when the agent is waiting for approval
+            val awaiting = activity == com.clauderemote.model.SessionActivity.APPROVAL_NEEDED
+            CtrlButton("y", emphasized = awaiting) { onSendCommand("y\r") }
+            CtrlButton("n", emphasized = awaiting) { onSendCommand("n\r") }
+            } // end scrollable button Row
         }
     }
 }
@@ -2302,7 +2321,7 @@ private fun ModelChip(model: com.clauderemote.model.ClaudeModel) {
 }
 
 @Composable
-private fun CtrlButton(label: String, onClick: () -> Unit) {
+private fun CtrlButton(label: String, emphasized: Boolean = false, onClick: () -> Unit) {
     val c = CRTheme.colors
     val haptic = androidx.compose.ui.hapticfeedback.HapticFeedbackType.TextHandleMove
     val hapticFeedback = androidx.compose.ui.platform.LocalHapticFeedback.current
@@ -2310,9 +2329,11 @@ private fun CtrlButton(label: String, onClick: () -> Unit) {
         onClick = { hapticFeedback.performHapticFeedback(haptic); onClick() },
         modifier = Modifier.height(28.dp),
         contentPadding = PaddingValues(horizontal = 8.dp),
-        colors = ButtonDefaults.filledTonalButtonColors(containerColor = c.surface2)
+        colors = ButtonDefaults.filledTonalButtonColors(
+            containerColor = if (emphasized) c.accent else c.surface2
+        )
     ) {
-        Text(label, style = CRType.keyboardKey, color = c.text)
+        Text(label, style = CRType.keyboardKey, color = if (emphasized) c.accentInk else c.text)
     }
 }
 

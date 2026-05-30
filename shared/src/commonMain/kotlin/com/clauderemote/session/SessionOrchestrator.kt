@@ -16,6 +16,8 @@ import com.clauderemote.util.FileLogger
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlin.random.Random
 
@@ -49,6 +51,13 @@ class SessionOrchestrator(
         onDetection = { det ->
             val isActive = tabManager.activeTabId.value == det.sessionId
             fireNeedsInput(det.sessionId, det.type.displayHint, isActive)
+            // Bridge prompt types that require explicit user approval to the
+            // APPROVAL_NEEDED activity so the y/n buttons visually emphasize.
+            // The onStateChange callback will overwrite this on the next state
+            // change (e.g. WORKING), so it self-clears automatically.
+            if (det.type == PromptType.APPROVAL_NEEDED || det.type == PromptType.PERMISSION_PROMPT) {
+                updateActivity(det.sessionId, SessionActivity.APPROVAL_NEEDED)
+            }
         }
         onStateChange = { sessionId, state ->
             when (state) {
@@ -1486,6 +1495,45 @@ else:
 
     fun sendEscape(sessionId: String) {
         sendInput(sessionId, ClaudeConfig.escapeSequence())
+    }
+
+    /**
+     * Scroll the tmux pane via copy-mode (NOT via stdin) so the agent's input
+     * is never disturbed. Enters copy-mode then sends one page-up / page-down.
+     * Page-down at the bottom of history auto-exits copy-mode (back to live).
+     * Runs off the UI thread on the IO scope.
+     */
+    // Per-session mutex so rapid scroll taps queue rather than storm SSH MaxSessions.
+    private val scrollMutexes = mutableMapOf<String, Mutex>()
+    private fun scrollMutex(sessionId: String) =
+        synchronized(scrollMutexes) { scrollMutexes.getOrPut(sessionId) { Mutex() } }
+
+    fun tmuxScroll(sessionId: String, up: Boolean) {
+        val tmuxName = tabManager.getTab(sessionId)?.tmuxSessionName ?: return
+        reconnectScope.launch {
+            scrollMutex(sessionId).withLock {
+                try {
+                    kotlinx.coroutines.withContext(Dispatchers.IO) {
+                        val sshSession = connections[sessionId]?.getSession() ?: return@withContext
+                        val escaped = tmuxName.replace("'", "\\'")
+                        val key = if (up) "page-up" else "page-down"
+                        val cmd = "tmux copy-mode -e -t '$escaped'; tmux send-keys -t '$escaped' -X $key"
+                        val ch = sshSession.openChannel("exec") as com.jcraft.jsch.ChannelExec
+                        ch.setCommand(cmd)
+                        ch.inputStream = null
+                        val input = ch.inputStream
+                        try {
+                            ch.connect(1500)
+                            input.bufferedReader().readText()
+                        } finally {
+                            ch.disconnect()
+                        }
+                    }
+                } catch (e: Exception) {
+                    FileLogger.error(TAG, "tmuxScroll failed for $sessionId: ${e.message}", e)
+                }
+            }
+        }
     }
 
     /**
