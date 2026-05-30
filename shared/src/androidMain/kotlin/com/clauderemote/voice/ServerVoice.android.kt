@@ -69,7 +69,7 @@ internal object ServerTts {
                 return@launch
             }
             val file = runCatching {
-                File.createTempFile("cr-tts", ".mp3", appContext.cacheDir).apply { writeBytes(bytes) }
+                File.createTempFile("cr-tts", ".wav", appContext.cacheDir).apply { writeBytes(bytes) }
             }.getOrNull()
             if (file == null) {
                 if (onError != null) postOnMain { onError("Nelze zapsat audio do cache") }
@@ -131,7 +131,7 @@ internal object ServerTts {
             .put("model", model)
             .put("input", text)
             .put("voice", voice)
-            .put("response_format", "mp3")
+            .put("response_format", "wav")
             .toString()
         val req = Request.Builder()
             .url(normalizeApiBase(baseUrl) + "/v1/audio/speech")
