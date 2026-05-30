@@ -7,6 +7,8 @@ import android.view.KeyEvent
 import android.view.MotionEvent
 import android.view.ViewGroup
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.MutableState
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.viewinterop.AndroidView
 import com.clauderemote.session.ScreenStateSnapshot
@@ -29,6 +31,31 @@ class SshTerminalHandle internal constructor(
 ) {
     /** Whether the underlying [TerminalEmulator] has been initialized (first layout has happened). */
     val isReady: Boolean get() = session.emulator != null
+
+    /**
+     * Compose-observable scroll state. [scrolledUp] is true when the viewport is
+     * not at the live bottom; [pendingOutput] is true when new output arrived
+     * while scrolled up. The "Jump to latest" pill shows when both are true.
+     */
+    val scrolledUp: MutableState<Boolean> = mutableStateOf(false)
+    val pendingOutput: MutableState<Boolean> = mutableStateOf(false)
+
+    fun isAtBottom(): Boolean = view.isAtBottom()
+
+    fun scrollToBottom() = view.scrollToBottom()
+
+    /**
+     * Recompute scroll state after a scroll/output event. Called from
+     * [TerminalView.mOnScrollStateChanged]. When scrolled up and new content
+     * arrived, latch [pendingOutput]; clear it once back at the bottom.
+     */
+    internal fun onScrollStateChanged() {
+        val atBottom = view.isAtBottom()
+        scrolledUp.value = !atBottom
+        // pendingOutput is only true when genuinely new output arrived while
+        // scrolled up — not on a plain manual scroll in a quiet session.
+        pendingOutput.value = !atBottom && view.hasNewOutputWhileScrolled()
+    }
 
     fun feedSshBytes(bytes: ByteArray) = session.receiveSshBytes(bytes)
 
@@ -54,7 +81,9 @@ class SshTerminalHandle internal constructor(
                 System.arraycopy(bufferedOutput, 0, it, CLEAR_PRELUDE.size, bufferedOutput.size)
             }
         session.appendDirect(combined)
-        view.onScreenUpdated()
+        // Reset to live bottom deterministically on tab switch, clearing any
+        // held scroll position and pending-output latch from the previous view.
+        view.scrollToBottom()
     }
 
     fun applyFontSize(dp: Int) {
@@ -125,6 +154,7 @@ fun SshTerminal(
             // deferred until the emulator actually exists so callers can't feed
             // bytes into a null emulator.
             val handle = SshTerminalHandle(view, session)
+            view.mOnScrollStateChanged = Runnable { handle.onScrollStateChanged() }
             var readyFired = false
             var lastW = 0
             var lastH = 0
