@@ -291,6 +291,19 @@ object TranscriptParser {
             ?: obj["durationMs"]?.jsonPrimitive?.contentOrNull?.let { "turn took $it ms" }
             ?: ""
         val text = raw.trim()
+        // stop_hook_summary marks the end of a turn (Claude stopped). Its body is
+        // normally empty, but the UI relies on it as an in-band "Claude finished"
+        // boundary — far more reliable in chat view than scraping the statusline —
+        // so always emit it (with a label when blank).
+        if (subtype == "stop_hook_summary") {
+            out += TranscriptEntry.SystemNote(
+                id = uuid,
+                timestamp = ts,
+                subtype = subtype,
+                text = text.ifEmpty { "Claude finished" },
+            )
+            return
+        }
         // Drop empty bodies and internal local-command bookkeeping (same filter
         // as the user path) — neither is meaningful to show.
         if (text.isEmpty() ||

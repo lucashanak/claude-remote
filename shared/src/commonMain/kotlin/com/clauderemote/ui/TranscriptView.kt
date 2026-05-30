@@ -93,11 +93,29 @@ fun TranscriptView(
             .mapNotNull { resultsByToolId[it.toolUseId]?.id }
             .toSet()
     }
-    // A tool call in the CURRENT turn whose result hasn't arrived yet ⇒ Claude
-    // is working, even when the OMC statusline shows no "thinking" segment
-    // (it doesn't during tool execution). Bounded to after the last user
-    // message so an interrupted tool from an earlier turn doesn't stick, and it
-    // clears as soon as the user sends again.
+    // Working/idle from the transcript itself — the only reliable source in
+    // chat view (the screen classifier can't read the disposed terminal, and the
+    // OMC statusline can scroll out of the parse buffer during heavy streaming).
+    // Claude Code writes a `stop_hook_summary` system entry at the end of every
+    // turn, AFTER the final assistant text. So: conversation content sitting
+    // after the last stop marker ⇒ Claude is working; the marker being last ⇒
+    // idle. No timer needed — the marker is the authoritative boundary.
+    val transcriptWorking = remember(entries) {
+        val lastStopIdx = entries.indexOfLast {
+            it is TranscriptEntry.SystemNote && it.subtype == "stop_hook_summary"
+        }
+        val lastTurnIdx = entries.indexOfLast {
+            it is TranscriptEntry.AssistantText || it is TranscriptEntry.AssistantThinking ||
+                it is TranscriptEntry.ToolCall || it is TranscriptEntry.ToolResult ||
+                it is TranscriptEntry.UserPrompt || it is TranscriptEntry.SlashCommand
+        }
+        // hasStops null ⇒ no marker yet (fresh session / hook off) → caller falls
+        // back to statusline + pending-tool heuristics.
+        if (lastStopIdx < 0) null else lastTurnIdx > lastStopIdx
+    }
+    // Fallback signal when there are no stop markers: a tool call whose result
+    // hasn't arrived ⇒ Claude is working (the statusline shows no "thinking"
+    // during tool execution).
     val pendingTool = remember(entries, resultsByToolId) {
         val lastUserIdx = entries.indexOfLast {
             it is TranscriptEntry.UserPrompt || it is TranscriptEntry.SlashCommand
@@ -153,18 +171,20 @@ fun TranscriptView(
             kotlinx.coroutines.delay(1000)
         }
     }
+    // Whether Claude is working, deciding by the most reliable available signal.
+    val working = when {
+        // Transcript stop-marker present → authoritative (no timer).
+        transcriptWorking != null -> transcriptWorking
+        // No markers yet: a pending tool, or a fresh statusline WORKING that
+        // hasn't gone stale, means working.
+        pendingTool -> true
+        else -> activity == SessionActivity.WORKING && now - lastChangeAt <= STALE_WORKING_MS
+    }
     val effectiveActivity = when {
-        // A tool is in-flight this turn — Claude is definitely working. The OMC
-        // statusline shows no "thinking" segment during tool execution, so
-        // activity alone misses this. No decay here: a long tool legitimately
-        // produces no new entries for a while.
-        pendingTool -> SessionActivity.WORKING
-        activity != SessionActivity.WORKING -> activity
-        // Stale WORKING fallback: the statusline/hook said working but no fresh
-        // transcript content has arrived for a long time (e.g. a missed Stop
-        // hook after Claude finished) — treat as ready so the skeleton stops.
-        now - lastChangeAt > STALE_WORKING_MS -> SessionActivity.WAITING_FOR_INPUT
-        else -> activity
+        activity == SessionActivity.DISCONNECTED -> SessionActivity.DISCONNECTED
+        working -> SessionActivity.WORKING
+        activity == SessionActivity.APPROVAL_NEEDED -> SessionActivity.APPROVAL_NEEDED
+        else -> SessionActivity.WAITING_FOR_INPUT
     }
 
     val skeletonShowing = effectiveActivity == SessionActivity.WORKING
