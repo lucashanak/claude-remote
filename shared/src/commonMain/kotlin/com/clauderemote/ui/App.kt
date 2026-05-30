@@ -119,6 +119,49 @@ fun App(
     // Server of the active tab — usage chips (5h/wk) are keyed by server.
     val activeServerId = tabs.firstOrNull { it.id == activeTabId }?.server?.id
 
+    // ── Pane grid (Phase 1, low-risk) ──────────────────────────────────────
+    var gridLayout by remember { mutableStateOf(GridLayout.ONE) }
+    var paneSessions by remember { mutableStateOf(listOf<String?>(null, null, null, null)) }
+    // FIX 1: Focus is tracked by PANE INDEX, not session id match, so the
+    // single shared raw terminal is guaranteed to be hosted in exactly one cell.
+    var focusedPaneIndex by remember { mutableStateOf(0) }
+
+    // FIX 3: Purge dead session ids when tabs change.
+    LaunchedEffect(tabs) {
+        val validIds = tabs.map { it.id }.toSet()
+        paneSessions = paneSessions.map { sid -> if (sid != null && sid !in validIds) null else sid }
+        // focusedPaneIndex is left wherever it is; that cell will show the picker.
+    }
+    // FIX 4: Reset grid entirely when tab count drops to 1 (can't split a
+    // single session) — prevents stale TWO/QUAD resurfacing on next open.
+    LaunchedEffect(tabs.size) {
+        if (tabs.size <= 1) {
+            gridLayout = GridLayout.ONE
+            paneSessions = listOf(null, null, null, null)
+            focusedPaneIndex = 0
+        }
+    }
+
+    // FIX 2: Per-pane transcript collection keyed on BOTH sid AND claudeSessionId
+    // so UUID rotation (/clear, /compact, /resume, first null→real reconcile)
+    // restarts the flow against the new .jsonl — matching the single-pane logic.
+    // Exactly 4 unconditional call sites; the helper makes each one invariant
+    // (empty slot → empty list) without varying the Compose hook count.
+    @Composable
+    fun rememberPaneTranscript(sid: String?): List<com.clauderemote.session.transcript.TranscriptEntry> {
+        val claudeUuid = sid?.let { id -> tabs.firstOrNull { it.id == id }?.claudeSessionId }
+        val flow = remember(sid, claudeUuid) {
+            if (sid != null) sessionOrchestrator.transcriptFlow(sid)
+            else kotlinx.coroutines.flow.MutableStateFlow(emptyList())
+        }
+        return flow.collectAsState().value
+    }
+    val pane0Tx = rememberPaneTranscript(paneSessions[0])
+    val pane1Tx = rememberPaneTranscript(paneSessions[1])
+    val pane2Tx = rememberPaneTranscript(paneSessions[2])
+    val pane3Tx = rememberPaneTranscript(paneSessions[3])
+    val paneTranscripts = listOf(pane0Tx, pane1Tx, pane2Tx, pane3Tx)
+
     // Remote tmux sessions discovered on servers
     var remoteSessions by remember { mutableStateOf<List<RemoteSession>>(emptyList()) }
     var remoteSessionsLoading by remember { mutableStateOf(false) }
@@ -863,6 +906,46 @@ fun App(
                         },
                         sidePanelWidthDp = appSettings.sidePanelWidthDp,
                         onSidePanelWidthChange = { appSettings.sidePanelWidthDp = it },
+                        gridLayout = gridLayout,
+                        paneSessions = paneSessions,
+                        paneTranscripts = paneTranscripts,
+                        focusedPaneIndex = focusedPaneIndex,
+                        onSetLayout = { layout ->
+                            gridLayout = layout
+                            focusedPaneIndex = 0
+                            if (layout == GridLayout.ONE) {
+                                // Back to single pane: raw terminal shows activeTabId.
+                                paneSessions = listOf(null, null, null, null)
+                            } else {
+                                // Auto-fill: pane 0 = active tab, remaining from
+                                // the first other tabs, extra slots stay empty.
+                                val active = activeTabId
+                                val others = tabs.map { it.id }.filter { it != active }
+                                val filled = mutableListOf<String?>(active)
+                                for (i in 1 until 4) filled.add(others.getOrNull(i - 1))
+                                paneSessions = filled
+                            }
+                        },
+                        // FIX 1: index-aware focus — switch raw terminal only when
+                        // the chosen pane holds a different session.
+                        onFocusPane = { index, sid ->
+                            focusedPaneIndex = index
+                            if (sid != null && sid != activeTabId) {
+                                sessionOrchestrator.switchTab(sid)
+                            }
+                        },
+                        // FIX 1 + dedup: if the chosen sid is already in another
+                        // pane, clear that other pane to prevent two cells sharing
+                        // the same session (and both rendering terminalContent).
+                        onAssignPane = { index, sid ->
+                            val current = paneSessions.toMutableList()
+                            // Clear any existing pane that already holds this sid.
+                            for (j in current.indices) {
+                                if (j != index && current[j] == sid) current[j] = null
+                            }
+                            if (index in current.indices) current[index] = sid
+                            paneSessions = current
+                        },
                     )
                 }
 
