@@ -93,6 +93,19 @@ fun TranscriptView(
             .mapNotNull { resultsByToolId[it.toolUseId]?.id }
             .toSet()
     }
+    // A tool call in the CURRENT turn whose result hasn't arrived yet ⇒ Claude
+    // is working, even when the OMC statusline shows no "thinking" segment
+    // (it doesn't during tool execution). Bounded to after the last user
+    // message so an interrupted tool from an earlier turn doesn't stick, and it
+    // clears as soon as the user sends again.
+    val pendingTool = remember(entries, resultsByToolId) {
+        val lastUserIdx = entries.indexOfLast {
+            it is TranscriptEntry.UserPrompt || it is TranscriptEntry.SlashCommand
+        }
+        entries.asSequence().drop(lastUserIdx + 1).any {
+            it is TranscriptEntry.ToolCall && resultsByToolId[it.toolUseId] == null
+        }
+    }
 
     val filtered = remember(entries, showSystem, showThinking, pairedResultIds) {
         entries.filter { entry ->
@@ -131,27 +144,25 @@ fun TranscriptView(
     }
     LaunchedEffect(contentTick) { lastChangeAt = System.currentTimeMillis() }
     var now by remember { mutableStateOf(System.currentTimeMillis()) }
-    // Only tick the stale-WORKING clock for sessions WITHOUT the Stop hook —
-    // hook sessions get an authoritative WAITING the instant Claude finishes,
-    // so they never need the timer.
-    LaunchedEffect(activity == SessionActivity.WORKING, hookActive) {
-        while (activity == SessionActivity.WORKING && !hookActive) {
+    // Tick a clock while the statusline/hook reports WORKING so a stale WORKING
+    // (hook miss after Claude finished) can decay. A pending tool is handled
+    // separately below and does NOT decay.
+    LaunchedEffect(activity == SessionActivity.WORKING) {
+        while (activity == SessionActivity.WORKING) {
             now = System.currentTimeMillis()
             kotlinx.coroutines.delay(1000)
         }
     }
     val effectiveActivity = when {
+        // A tool is in-flight this turn — Claude is definitely working. The OMC
+        // statusline shows no "thinking" segment during tool execution, so
+        // activity alone misses this. No decay here: a long tool legitimately
+        // produces no new entries for a while.
+        pendingTool -> SessionActivity.WORKING
         activity != SessionActivity.WORKING -> activity
-        // The Stop hook flips activity → WAITING the moment Claude finishes,
-        // even while the user is in chat view, so trust it outright. The old
-        // 6s decay second-guessed it and hid "Claude is working…" during any
-        // tool gap longer than 6s (a build, a test run) while Claude was still
-        // working — the flicker the user reported.
-        hookActive -> activity
-        // Non-hook fallback: the screen-scrape detector can't read the disposed
-        // terminal in chat view, so a stale WORKING would otherwise freeze here.
-        // Decay after a window generous enough to span a slow tool so we don't
-        // flicker on normal gaps.
+        // Stale WORKING fallback: the statusline/hook said working but no fresh
+        // transcript content has arrived for a long time (e.g. a missed Stop
+        // hook after Claude finished) — treat as ready so the skeleton stops.
         now - lastChangeAt > STALE_WORKING_MS -> SessionActivity.WAITING_FOR_INPUT
         else -> activity
     }
