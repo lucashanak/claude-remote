@@ -875,44 +875,25 @@ fun App(
         }
 
         // Session long-press context menu (mobile). Desktop uses its native
-        // right-click menu instead.
+        // right-click menu instead. Styled to match the CR design system.
         sessionMenuId?.let { id ->
             val session = tabManager.getTab(id)
-            AlertDialog(
-                onDismissRequest = { sessionMenuId = null },
-                title = { Text(session?.displayLabel ?: "Session") },
-                text = {
-                    Column {
-                        Text(
-                            "${session?.server?.name ?: ""} · ${session?.folder ?: ""}",
-                            style = CRType.bodyDim,
-                            color = CRTheme.colors.textDim,
-                        )
-                        Spacer(Modifier.height(12.dp))
-                        // Rename needs a live connection to rename the server-side
-                        // tmux; offline it'd only change a local alias that's lost
-                        // on restart and would desync from the tmux name. So offer
-                        // it only when connected — offline sessions get Reconnect.
-                        if (session?.status == com.clauderemote.model.SessionStatus.ACTIVE) {
-                            SessionMenuRow("Rename") {
-                                sessionMenuId = null
-                                renameSessionId = id
-                            }
-                        }
-                        SessionMenuRow("Reconnect") {
-                            sessionMenuId = null
-                            scope.launch { sessionOrchestrator.reconnectSession(id) }
-                        }
-                        SessionMenuRow("Close session", destructive = true) {
-                            sessionMenuId = null
-                            tabCloseConfirmId = id
-                        }
-                    }
+            SessionContextSheet(
+                title = session?.displayLabel ?: "Session",
+                subtitle = "${session?.server?.name ?: ""} · ${session?.folder ?: ""}",
+                status = (sessionActivities[id] ?: SessionActivity.IDLE).toMenuCRStatus(),
+                // Rename needs a live connection to rename the server-side tmux;
+                // offline it'd only change a local alias that's lost on restart
+                // and would desync from the tmux name. So offer it only when
+                // connected — offline sessions get Reconnect.
+                canRename = session?.status == com.clauderemote.model.SessionStatus.ACTIVE,
+                onRename = { sessionMenuId = null; renameSessionId = id },
+                onReconnect = {
+                    sessionMenuId = null
+                    scope.launch { sessionOrchestrator.reconnectSession(id) }
                 },
-                confirmButton = {},
-                dismissButton = {
-                    TextButton(onClick = { sessionMenuId = null }) { Text("Cancel") }
-                }
+                onClose = { sessionMenuId = null; tabCloseConfirmId = id },
+                onDismiss = { sessionMenuId = null },
             )
         }
 
@@ -920,36 +901,21 @@ fun App(
         // server-side tmux session so it survives reconnect/reboot.
         renameSessionId?.let { id ->
             val session = tabManager.getTab(id)
-            var aliasText by remember(id) { mutableStateOf(session?.alias ?: "") }
-            AlertDialog(
-                onDismissRequest = { renameSessionId = null },
-                title = { Text("Rename session") },
-                text = {
-                    OutlinedTextField(
-                        value = aliasText,
-                        onValueChange = { aliasText = it },
-                        singleLine = true,
-                        label = { Text("Alias") },
+            RenameSessionDialog(
+                initialAlias = session?.alias ?: "",
+                onConfirm = { trimmed ->
+                    renameSessionId = null
+                    val tab = tabManager.getTab(id) ?: return@RenameSessionDialog
+                    tabManager.updateAlias(id, trimmed)
+                    val newTmux = com.clauderemote.model.TmuxNameParser.build(
+                        tab.server.name, tab.folder,
+                        tab.mode == ClaudeMode.YOLO, trimmed
                     )
+                    scope.launch {
+                        sessionOrchestrator.renameTmuxSession(id, tab.tmuxSessionName, newTmux)
+                    }
                 },
-                confirmButton = {
-                    TextButton(onClick = {
-                        renameSessionId = null
-                        val tab = tabManager.getTab(id) ?: return@TextButton
-                        val trimmed = aliasText.trim()
-                        tabManager.updateAlias(id, trimmed)
-                        val newTmux = com.clauderemote.model.TmuxNameParser.build(
-                            tab.server.name, tab.folder,
-                            tab.mode == ClaudeMode.YOLO, trimmed
-                        )
-                        scope.launch {
-                            sessionOrchestrator.renameTmuxSession(id, tab.tmuxSessionName, newTmux)
-                        }
-                    }) { Text("Rename") }
-                },
-                dismissButton = {
-                    TextButton(onClick = { renameSessionId = null }) { Text("Cancel") }
-                }
+                onDismiss = { renameSessionId = null },
             )
         }
 
@@ -969,24 +935,3 @@ fun App(
     }
 }
 
-/** A full-width tappable row used in the session long-press context menu. */
-@androidx.compose.runtime.Composable
-private fun SessionMenuRow(
-    label: String,
-    destructive: Boolean = false,
-    onClick: () -> Unit,
-) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .clickable(onClick = onClick)
-            .padding(vertical = 12.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.Start,
-    ) {
-        Text(
-            label,
-            color = if (destructive) CRTheme.colors.disconnected else CRTheme.colors.text,
-        )
-    }
-}
