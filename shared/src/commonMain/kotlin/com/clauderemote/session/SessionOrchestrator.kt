@@ -880,6 +880,17 @@ else:
             // Detection fires asynchronously via promptDetector.onDetection callback
             // once the rendered screen state classifies as IDLE.
             promptDetector.onOutput(session.id, text)
+            // Drive working/idle from the OMC statusline (flows in every view,
+            // unlike the screen classifier which can't read a disposed terminal
+            // in chat view, or the Stop hook which can silently fail). This is
+            // the continuous ground truth that keeps the status dot/badge honest
+            // and was missing for hook-active sessions in chat view.
+            promptDetector.parseClaudeWorking(session.id)?.let { working ->
+                updateActivity(
+                    session.id,
+                    if (working) SessionActivity.WORKING else SessionActivity.WAITING_FOR_INPUT
+                )
+            }
             // ctx % is derived from the transcript (startContextTokenCollector),
             // not scraped. We still read the statusline's `ctx:NN%` here, but
             // only to CALIBRATE the window size for this session: with the live
@@ -1422,6 +1433,13 @@ else:
         try {
             connectSsh(session, false) // attach to existing tmux
             tabManager.updateTabStatus(sessionId, SessionStatus.ACTIVE)
+            // Clear the DISCONNECTED activity left over from restore/disconnect —
+            // otherwise the session shows "Offline" (badge + status + empty
+            // chips) even though it's connected. autoReconnect already does
+            // this; reconnectSession (restore + manual) was missing it. The real
+            // working/idle state is then driven by the statusline parse in emit()
+            // as soon as output flows.
+            updateActivity(sessionId, SessionActivity.WAITING_FOR_INPUT)
             onSessionActive?.invoke(session)
             connections[sessionId]?.let { startNotifyWatcher(sessionId, session.tmuxSessionName, it) }
             connections[sessionId]?.let { startSessionIdRefresh(sessionId, session.tmuxSessionName, it) }
@@ -1429,6 +1447,7 @@ else:
         } catch (e: Exception) {
             FileLogger.error(TAG, "Reconnect failed", e)
             tabManager.updateTabStatus(sessionId, SessionStatus.ERROR)
+            updateActivity(sessionId, SessionActivity.DISCONNECTED)
         }
     }
 

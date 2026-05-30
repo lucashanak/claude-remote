@@ -195,6 +195,29 @@ class InputPromptDetector(
         return if (total > 0) total else null
     }
 
+    /**
+     * Working/idle from the OMC statusline, which flows through terminal output
+     * in EVERY view (unlike the rendered-screen classifier, which can't read the
+     * disposed terminal in chat view, or the Stop hook, which can silently fail).
+     *
+     * The statusline carries a state segment between the weekly-usage block and
+     * `session:` only while Claude is active:
+     *   working: `... wk:14%(10h52m) | thinking | session:6464m | ctx:42% ...`
+     *   idle:    `... wk:14%(6d10h) | session:6m | ctx:6% ...`
+     * Any non-empty segment there (thinking / a skill / compacting / …) means
+     * working; going straight to `session:` means idle. Returns null when no
+     * statusline is in the recent buffer (can't tell — leave activity as is).
+     */
+    fun parseClaudeWorking(sessionId: String): Boolean? {
+        val s = recentOutput[sessionId]?.toString() ?: return null
+        // recentOutput is a rolling buffer holding MANY concatenated statusline
+        // renders. Take the LAST (current/bottom) one, not the first — otherwise
+        // on a working→idle transition an older "thinking" render still in the
+        // window would re-assert WORKING after the session went idle.
+        val m = OMC_STATE_REGEX.findAll(s).lastOrNull() ?: return null
+        return m.groupValues[1].replace("|", " ").trim().isNotEmpty()
+    }
+
     private fun parseTokenCount(s: String): Double {
         val clean = s.replace(",", "").trim()
         return when {
@@ -252,6 +275,13 @@ class InputPromptDetector(
         )
         private val WEEK_RESET_REGEX = Regex(
             "wk[:\\s]+\\d{1,3}%\\s*\\((?:(\\d+)d)?(?:(\\d+)h)?(?:(\\d+)m)?\\)",
+            RegexOption.IGNORE_CASE
+        )
+        // Captures the OMC statusline segment between the weekly-usage block and
+        // `session:`. Non-empty → Claude is active. Single-line (no
+        // DOT_MATCHES_ALL) so a wrapped statusline simply yields no match.
+        private val OMC_STATE_REGEX = Regex(
+            "wk:\\d{1,3}%\\([^)]*\\)\\s*\\|(.*?)session:",
             RegexOption.IGNORE_CASE
         )
 
