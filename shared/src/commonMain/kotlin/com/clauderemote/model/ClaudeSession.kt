@@ -1,5 +1,17 @@
 package com.clauderemote.model
 
+/**
+ * Git status snapshot of a session's working directory, polled periodically
+ * off the UI thread. Null (absent from the map) means "not a git repo" — the
+ * UI shows no chip in that case.
+ */
+data class GitStatus(
+    val branch: String,
+    val dirty: Boolean,
+    val ahead: Int = 0,
+    val behind: Int = 0
+)
+
 data class ClaudeSession(
     val id: String,
     val server: SshServer,

@@ -90,6 +90,7 @@ fun App(
     val sessionResetMin by sessionOrchestrator.sessionResetMin.collectAsState()
     val weekResetMin by sessionOrchestrator.weekResetMin.collectAsState()
     val latencies by sessionOrchestrator.latencies.collectAsState()
+    val gitStatuses by sessionOrchestrator.gitStatuses.collectAsState()
     val pendingCounts by sessionOrchestrator.pendingCounts.collectAsState()
 
     var serverList by remember { mutableStateOf(serverStorage.loadServers()) }
@@ -716,6 +717,7 @@ fun App(
                         sessionActivities = sessionActivities,
                         hookActiveSessions = hookActiveSessions,
                         contextPercent = activeTabId?.let { contextPercents[it] },
+                        gitStatus = activeTabId?.let { gitStatuses[it] },
                         latencyMs = activeTabId?.let { latencies[it] },
                         pendingInputCount = activeTabId?.let { pendingCounts[it] } ?: 0,
                         onClearPending = activeTabId?.let { id ->
