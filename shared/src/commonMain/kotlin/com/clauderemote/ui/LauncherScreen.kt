@@ -23,12 +23,14 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.clauderemote.model.ClaudeMode
 import com.clauderemote.model.ClaudeSession
 import com.clauderemote.model.RemoteSession
+import com.clauderemote.model.ServerHealth
 import com.clauderemote.model.SessionStatus
 import com.clauderemote.model.SshServer
 import com.clauderemote.model.TmuxNameParser
@@ -62,10 +64,15 @@ fun LauncherScreen(
     onViewLog: () -> Unit = {},
     onUsageDashboard: (() -> Unit)? = null,
     onCheckUpdate: (() -> Unit)? = null,
+    serverHealth: Map<String, ServerHealth> = emptyMap(),
+    onProbeServers: (Boolean) -> Unit = {},
 ) {
     val c = CRTheme.colors
     val m = CRTheme.metrics
     val sortedServers = servers.sortedByDescending { it.favorite }
+
+    // Probe server reachability on first composition (debounced); pull-to-refresh forces.
+    LaunchedEffect(Unit) { onProbeServers(false) }
 
     Scaffold(
         containerColor = c.bg,
@@ -110,7 +117,10 @@ fun LauncherScreen(
     ) { padding ->
         PullToRefreshBox(
             isRefreshing = remoteSessionsLoading,
-            onRefresh = { onRefreshRemote?.invoke() },
+            onRefresh = {
+                onProbeServers(true)
+                onRefreshRemote?.invoke()
+            },
             modifier = Modifier
                 .fillMaxSize()
                 .padding(padding),
@@ -247,6 +257,7 @@ fun LauncherScreen(
                         ServerLauncherCard(
                             server = server,
                             activeSessionCount = activeCount,
+                            health = serverHealth[server.id] ?: ServerHealth.UNKNOWN,
                             onConnect = { onConnectServer(server) },
                             onQuickConnect = onQuickConnect?.let { qc -> { qc(server) } },
                             onEdit = { onEditServer(server) },
@@ -429,6 +440,7 @@ private fun ModePillSmall(mode: ClaudeMode) {
 private fun ServerLauncherCard(
     server: SshServer,
     activeSessionCount: Int = 0,
+    health: ServerHealth = ServerHealth.UNKNOWN,
     onConnect: () -> Unit,
     onQuickConnect: (() -> Unit)? = null,
     onEdit: () -> Unit,
@@ -453,6 +465,7 @@ private fun ServerLauncherCard(
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
             ) {
+                ServerHealthDot(health)
                 ServerGlyph(name = server.name, modifier = Modifier.size(18.dp))
                 Text(
                     server.name,
@@ -498,6 +511,7 @@ private fun ServerLauncherCard(
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(6.dp),
                     ) {
+                        ServerHealthDot(health)
                         Text(
                             server.name,
                             style = CRType.cardTitle,
@@ -597,6 +611,27 @@ private fun ServerLauncherCard(
             },
         )
     }
+}
+
+/**
+ * Small colored reachability dot for a server, mirroring the session activity
+ * dot styling. ONLINE→green, OFFLINE→red, CHECKING→amber, UNKNOWN→dim grey.
+ */
+@Composable
+private fun ServerHealthDot(health: ServerHealth) {
+    val c = CRTheme.colors
+    val color: Color = when (health) {
+        ServerHealth.ONLINE -> c.ready
+        ServerHealth.OFFLINE -> c.disconnected
+        ServerHealth.CHECKING -> c.working
+        ServerHealth.UNKNOWN -> c.idle
+    }
+    Box(
+        Modifier
+            .size(8.dp)
+            .clip(RoundedCornerShape(999.dp))
+            .background(color),
+    )
 }
 
 // ── Remote session card ───────────────────────────────────────────────────────
