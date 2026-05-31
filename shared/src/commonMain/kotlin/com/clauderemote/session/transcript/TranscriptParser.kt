@@ -296,6 +296,15 @@ object TranscriptParser {
             "Agent", "Task" -> input["description"]?.jsonPrimitive?.contentOrNull.orEmpty()
             "WebFetch" -> input["url"]?.jsonPrimitive?.contentOrNull.orEmpty()
             "WebSearch" -> input["query"]?.jsonPrimitive?.contentOrNull.orEmpty()
+            "AskUserQuestion" -> {
+                // Summary = the first question's text so the collapsed/chat row
+                // is readable ("questions" alone is meaningless). full stays the
+                // pretty input JSON for the prominent card to re-parse.
+                (input["questions"] as? JsonArray)
+                    ?.firstOrNull()?.let { it as? JsonObject }
+                    ?.get("question")?.jsonPrimitive?.contentOrNull
+                    .orEmpty()
+            }
             else -> input.keys.joinToString(", ")
         }
         return summary.take(200) to pretty

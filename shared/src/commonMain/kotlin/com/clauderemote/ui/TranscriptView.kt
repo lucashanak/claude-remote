@@ -378,7 +378,11 @@ fun TranscriptView(
                                 is TranscriptEntry.SlashCommand -> SlashCommandRow(e)
                                 is TranscriptEntry.AssistantText -> AssistantTextCard(e)
                                 is TranscriptEntry.AssistantThinking -> ThinkingCard(e)
-                                is TranscriptEntry.ToolCall -> ToolRow(e, resultsByToolId[e.toolUseId])
+                                is TranscriptEntry.ToolCall ->
+                                    if (e.name == "AskUserQuestion")
+                                        AskUserQuestionCard(e, resultsByToolId[e.toolUseId])
+                                    else
+                                        ToolRow(e, resultsByToolId[e.toolUseId])
                                 is TranscriptEntry.ToolResult -> ToolResultCard(e)
                                 is TranscriptEntry.SystemNote -> SystemNoteRow(e)
                             }
@@ -739,6 +743,150 @@ private fun DiffLine(
     }
 }
 
+private data class AskOption(val label: String, val description: String)
+private data class AskQuestion(
+    val header: String,
+    val question: String,
+    val multiSelect: Boolean,
+    val options: List<AskOption>,
+)
+
+/**
+ * Parse the AskUserQuestion tool_use input (the pretty JSON in fullInput) into
+ * a list of questions + options. Returns empty on any shape mismatch.
+ */
+private fun parseAskUserQuestions(json: String): List<AskQuestion> {
+    if (json.isBlank()) return emptyList()
+    return try {
+        val obj = kotlinx.serialization.json.Json
+            .parseToJsonElement(json) as? kotlinx.serialization.json.JsonObject ?: return emptyList()
+        val arr = obj["questions"] as? kotlinx.serialization.json.JsonArray ?: return emptyList()
+        arr.mapNotNull { q ->
+            val qo = q as? kotlinx.serialization.json.JsonObject ?: return@mapNotNull null
+            fun str(key: String): String =
+                (qo[key] as? kotlinx.serialization.json.JsonPrimitive)?.content ?: ""
+            // FIX E: parse boolean properly — toBooleanStrictOrNull handles both
+            // JSON true (unquoted) and string "true" defensively.
+            val multi = (qo["multiSelect"] as? kotlinx.serialization.json.JsonPrimitive)
+                ?.content?.toBooleanStrictOrNull() ?: false
+            val opts = (qo["options"] as? kotlinx.serialization.json.JsonArray)
+                ?.mapNotNull { o ->
+                    val oo = o as? kotlinx.serialization.json.JsonObject ?: return@mapNotNull null
+                    AskOption(
+                        label = (oo["label"] as? kotlinx.serialization.json.JsonPrimitive)?.content ?: "",
+                        description = (oo["description"] as? kotlinx.serialization.json.JsonPrimitive)?.content ?: "",
+                    )
+                } ?: emptyList()
+            AskQuestion(
+                header = str("header"),
+                question = str("question"),
+                multiSelect = multi,
+                options = opts,
+            )
+        }
+    } catch (_: Throwable) { emptyList() }
+}
+
+/**
+ * Prominent card for Claude's AskUserQuestion tool call: shows each question's
+ * header/question with a numbered list of options. When the paired tool_result
+ * is present, shows the chosen answer(s) (the result content as-is — Claude
+ * writes the selected label(s) there). When still unanswered, hints the user
+ * to answer in the terminal where the real TUI widget lives.
+ */
+@Composable
+private fun AskUserQuestionCard(
+    entry: TranscriptEntry.ToolCall,
+    result: TranscriptEntry.ToolResult?,
+) {
+    val c = CRTheme.colors
+    val m = CRTheme.metrics
+    val questions = remember(entry.fullInput) { parseAskUserQuestions(entry.fullInput) }
+    val answered = result != null
+    val accent = if (answered) c.ready else c.approval
+    CRCard(
+        background = c.surface,
+        borderColor = accent.copy(alpha = 0.6f),
+        padding = PaddingValues(horizontal = m.cardPadH, vertical = m.cardPadV),
+    ) {
+        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween,
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Pill(
+                    text = if (answered) "ANSWERED" else "CLAUDE ASKS",
+                    background = accent.copy(alpha = 0.18f),
+                    foreground = accent,
+                )
+                if (entry.timestamp != null) {
+                    Text(formatTimestamp(entry.timestamp), style = CRType.monoTiny, color = c.textDim)
+                }
+            }
+            if (questions.isEmpty()) {
+                // Fallback: couldn't parse the expected shape — show the summary.
+                Text(entry.inputSummary, style = CRType.bodyDim, color = c.text)
+            } else {
+                questions.forEach { q ->
+                    Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                        if (q.header.isNotBlank()) {
+                            Text(q.header, style = CRType.cardTitle, color = accent)
+                        }
+                        if (q.question.isNotBlank()) {
+                            Text(q.question, style = CRType.bodyDim, color = c.text)
+                        }
+                        q.options.forEachIndexed { idx, opt ->
+                            val line = buildString {
+                                append("${idx + 1}. ")
+                                append(opt.label)
+                                if (opt.description.isNotBlank()) append(" — ${opt.description}")
+                            }
+                            Text(line, style = CRType.mono, color = c.textDim)
+                        }
+                        // FIX E: surface multiSelect hint when true.
+                        if (q.multiSelect) {
+                            Text("(select multiple)", style = CRType.monoTiny, color = c.textDim)
+                        }
+                    }
+                }
+            }
+            if (answered) {
+                // FIX E: extract just the answer value(s) from the verbose tool_result
+                // text. Claude writes e.g. `User has answered your questions: "q"="a". …`
+                // Pull out all `="<value>"` portions; fall back to the trimmed raw text.
+                val rawAnswer = result!!.text.trim()
+                val answer = extractAskAnswers(rawAnswer).ifBlank { rawAnswer }
+                if (answer.isNotBlank()) {
+                    Spacer(Modifier.height(2.dp))
+                    Text("Answer", style = CRType.monoTiny, color = c.textDim)
+                    Text(answer, style = CRType.mono, color = c.ready)
+                }
+            } else {
+                Text(
+                    "Answer in the terminal view.",
+                    style = CRType.monoTiny,
+                    color = c.textDim,
+                )
+            }
+        }
+    }
+}
+
+/**
+ * Extract just the answer value(s) from Claude's verbose tool_result text.
+ * Format: `User has answered your questions: "question"="answer". You can now…`
+ * We pull all `="<value>"` matches and join them. Returns blank if no match so
+ * the caller can fall back to the full trimmed text. Defensive — no crash.
+ */
+private fun extractAskAnswers(text: String): String {
+    return try {
+        val regex = Regex("=\"([^\"]*)\"")
+        val matches = regex.findAll(text).map { it.groupValues[1] }.toList()
+        matches.joinToString(", ")
+    } catch (_: Throwable) { "" }
+}
+
 private fun parseEditInput(json: String): Triple<String, String, String>? {
     if (json.isBlank()) return null
     return try {
@@ -827,9 +975,13 @@ private fun groupConsecutiveTools(entries: List<TranscriptEntry>): List<RenderIt
     var i = 0
     while (i < entries.size) {
         val e = entries[i]
-        if (e is TranscriptEntry.ToolCall) {
+        // AskUserQuestion is rendered as a standalone prominent card — never
+        // fold it into a collapsed tool group.
+        if (e is TranscriptEntry.ToolCall && e.name != "AskUserQuestion") {
             var j = i + 1
-            while (j < entries.size && entries[j] is TranscriptEntry.ToolCall) j++
+            while (j < entries.size && entries[j] is TranscriptEntry.ToolCall &&
+                (entries[j] as TranscriptEntry.ToolCall).name != "AskUserQuestion"
+            ) j++
             if (j - i >= 2) {
                 @Suppress("UNCHECKED_CAST")
                 val run = entries.subList(i, j).toList() as List<TranscriptEntry.ToolCall>
