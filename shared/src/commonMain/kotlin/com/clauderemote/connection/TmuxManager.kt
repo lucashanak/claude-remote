@@ -51,7 +51,7 @@ object TmuxManager {
         // set-clipboard on + terminal-features clipboard → tmux sends the selected
         // text back to the terminal via OSC 52 after a mouse-drag selection, which
         // both the desktop app (custom interceptor) and Termux on Android honor.
-        val escapedName = sessionName.replace("'", "\\'")
+        val escapedName = sessionName.replace("'", "'\\''")
         return "tmux new-session -A -s '$escapedName' \\; " +
             "set-option -g mouse on \\; " +
             "set-option -g set-clipboard on \\; " +
@@ -63,7 +63,7 @@ object TmuxManager {
      * Rename a tmux session (blocking, call from IO thread).
      */
     fun renameSession(session: Session, oldName: String, newName: String) {
-        execCommand(session, "tmux rename-session -t '${oldName.replace("'", "\\'")}' '${newName.replace("'", "\\'")}'")
+        execCommand(session, "tmux rename-session -t '${oldName.replace("'", "'\\''")}' '${newName.replace("'", "'\\''")}'")
     }
 
     /**
@@ -71,7 +71,7 @@ object TmuxManager {
      */
     suspend fun killSession(session: Session, sessionName: String): Boolean = withContext(Dispatchers.IO) {
         try {
-            execCommand(session, "tmux kill-session -t '${sessionName.replace("'", "\\'")}'")
+            execCommand(session, "tmux kill-session -t '${sessionName.replace("'", "'\\''")}'")
             true
         } catch (e: Exception) {
             false
@@ -96,7 +96,7 @@ object TmuxManager {
      */
     suspend fun ensureFolder(session: Session, path: String): Boolean = withContext(Dispatchers.IO) {
         try {
-            val result = execCommand(session, "mkdir -p ${path.replace("'", "\\'")} && echo OK")
+            val result = execCommand(session, "mkdir -p '${path.replace("'", "'\\''")}' && echo OK")
             result.trim() == "OK"
         } catch (e: Exception) {
             false

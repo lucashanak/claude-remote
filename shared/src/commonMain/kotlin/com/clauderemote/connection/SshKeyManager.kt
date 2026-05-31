@@ -137,7 +137,7 @@ class SshKeyManager(private val prefs: PlatformPreferences) {
 
                 val pubKey = key.publicKey.trim()
                 val command = "mkdir -p ~/.ssh && chmod 700 ~/.ssh && " +
-                        "echo '${pubKey.replace("'", "\\'")}' >> ~/.ssh/authorized_keys && " +
+                        "echo '${pubKey.replace("'", "'\\''")}' >> ~/.ssh/authorized_keys && " +
                         "chmod 600 ~/.ssh/authorized_keys"
 
                 val ch = sess.openChannel("exec") as com.jcraft.jsch.ChannelExec

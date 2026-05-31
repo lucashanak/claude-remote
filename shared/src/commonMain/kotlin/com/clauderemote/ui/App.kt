@@ -766,7 +766,7 @@ fun App(
                                         if (sess != null) {
                                             kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
                                                 val ch = sess.openChannel("exec") as com.jcraft.jsch.ChannelExec
-                                                ch.setCommand("tmux rename-session -t '${tab.tmuxSessionName.replace("'", "\\'")}' '${newTmuxName.replace("'", "\\'")}'")
+                                                ch.setCommand("tmux rename-session -t '${tab.tmuxSessionName.replace("'", "'\\''")}' '${newTmuxName.replace("'", "'\\''")}'")
                                                 ch.connect(5000)
                                                 ch.inputStream.bufferedReader().readText()
                                                 ch.disconnect()

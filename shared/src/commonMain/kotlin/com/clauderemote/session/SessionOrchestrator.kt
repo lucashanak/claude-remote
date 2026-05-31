@@ -1216,7 +1216,7 @@ else:
             // someone killed it), recreate it and re-launch claude with --resume
             // so the conversation continues. Otherwise plain attach.
             val tmuxExists = probeTmuxSession(sshManager, session.tmuxSessionName)
-            val escaped = session.tmuxSessionName.replace("'", "\\'")
+            val escaped = session.tmuxSessionName.replace("'", "'\\''")
             val command = if (tmuxExists) {
                 "tmux set-option -g window-size latest 2>/dev/null; tmux set-option -g history-limit 100000 2>/dev/null; tmux attach-session -t '$escaped'"
             } else if (session.claudeSessionId != null) {
@@ -1271,7 +1271,7 @@ else:
     private fun probeTmuxSession(sshManager: SshManager, sessionName: String): Boolean {
         return try {
             val sshSession = sshManager.getSession() ?: return true
-            val escaped = sessionName.replace("'", "\\'")
+            val escaped = sessionName.replace("'", "'\\''")
             val ch = sshSession.openChannel("exec") as com.jcraft.jsch.ChannelExec
             ch.setCommand("tmux has-session -t '$escaped' 2>/dev/null && echo YES || echo NO")
             ch.inputStream = null
@@ -1474,7 +1474,7 @@ else:
                 model = session.model
             )
         } else {
-            val escaped = session.tmuxSessionName.replace("'", "\\'")
+            val escaped = session.tmuxSessionName.replace("'", "'\\''")
             "tmux set-option -g window-size latest 2>/dev/null; tmux set-option -g history-limit 100000 2>/dev/null; tmux attach-session -t '$escaped' 2>/dev/null || tmux new-session -A -s '$escaped' \\; set-option -g mouse on \\; set-option -g history-limit 100000"
         }
 
@@ -1666,7 +1666,7 @@ else:
                 try {
                     kotlinx.coroutines.withContext(Dispatchers.IO) {
                         val sshSession = connections[sessionId]?.getSession() ?: return@withContext
-                        val escaped = tmuxName.replace("'", "\\'")
+                        val escaped = tmuxName.replace("'", "'\\''")
                         val key = if (up) "page-up" else "page-down"
                         val cmd = "tmux copy-mode -e -t '$escaped'; tmux send-keys -t '$escaped' -X $key"
                         val ch = sshSession.openChannel("exec") as com.jcraft.jsch.ChannelExec

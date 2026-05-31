@@ -77,15 +77,20 @@ object ClaudeConfig {
         resume: Boolean = false
     ): String {
         val claudeCmd = buildLaunchCommand(folder, mode, model, claudeSessionId, resume)
-        val escaped = tmuxSessionName.replace("'", "\\'")
+        // POSIX single-quote wrap: a literal ' inside a '...' string must be
+        // written as '\'' — NOT \' (you can't backslash-escape a quote inside
+        // single quotes). The old `\'` produced an unterminated quote because
+        // claudeCmd already contains the single-quoted `cd '<folder>'`, so the
+        // launch hung at the bash continuation prompt and Claude never started.
+        fun sq(s: String) = "'" + s.replace("'", "'\\''") + "'"
         // Kill existing session with same name to avoid -A reattaching
         // and sending keystrokes into a running program
-        return "tmux kill-session -t '$escaped' 2>/dev/null; " +
+        return "tmux kill-session -t ${sq(tmuxSessionName)} 2>/dev/null; " +
                 "tmux set-option -g history-limit 100000 2>/dev/null; " +
-                "tmux new-session -s '$escaped' " +
+                "tmux new-session -s ${sq(tmuxSessionName)} " +
                 "\\; set-option -g mouse on " +
                 "\\; set-option -g history-limit 100000 " +
-                "\\; send-keys '${claudeCmd.replace("'", "\\'")}' Enter"
+                "\\; send-keys ${sq(claudeCmd)} Enter"
     }
 
     // ======================== RUNTIME CONTROLS ========================
