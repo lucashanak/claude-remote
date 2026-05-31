@@ -358,6 +358,10 @@ class MainActivity : FragmentActivity() {
                 terminalScrolledUp = liveHandle.value?.scrolledUp?.value == true,
                 terminalPendingOutput = liveHandle.value?.pendingOutput?.value == true,
                 onJumpToLatest = { liveHandle.value?.scrollToBottom() },
+                // #75: keep emulator composed under the Chat overlay so screenReader
+                // stays fed and can detect a pending prompt in Chat view (Android only;
+                // desktop stays false — SwingPanel bleeds through a Compose overlay).
+                composeTerminalUnderTranscript = true,
             )
         }
     }

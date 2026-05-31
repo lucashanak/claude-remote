@@ -1101,10 +1101,12 @@ else:
             // once the rendered screen state classifies as IDLE.
             promptDetector.onOutput(session.id, text)
             // Drive working/idle from the OMC statusline (flows in every view,
-            // unlike the screen classifier which can't read a disposed terminal
-            // in chat view, or the Stop hook which can silently fail). This is
-            // the continuous ground truth that keeps the status dot/badge honest
-            // and was missing for hook-active sessions in chat view.
+            // unlike the Stop hook which can silently fail). The screen classifier
+            // now also works in Chat for the active single-pane session on Android
+            // (#75: emulator is kept composed under the Chat overlay), but the
+            // statusline remains the ground truth for all other cases. This is the
+            // continuous source that keeps the status dot/badge honest and was
+            // missing for hook-active sessions in chat view.
             promptDetector.parseClaudeWorking(session.id)?.let { working ->
                 val next = if (working) SessionActivity.WORKING else SessionActivity.WAITING_FOR_INPUT
                 // FIX 3: when the statusline says "not working" (→ WAITING_FOR_INPUT),
