@@ -42,6 +42,9 @@ internal object TtsHolder {
     @Volatile private var triedFallback = false
     @Volatile private var pendingText: String? = null
     @Volatile private var appContext: Context? = null
+    @Volatile private var rate = 1.0f
+    @Volatile private var pitch = 1.0f
+    @Volatile private var voiceName = ""
     private val currentUtterance = AtomicReference<String?>(null)
     private val currentCompletion = AtomicReference<(() -> Unit)?>(null)
     private val currentError = AtomicReference<((String) -> Unit)?>(null)
@@ -55,6 +58,8 @@ internal object TtsHolder {
         currentCompletion.getAndSet(onFinish)?.let { postOnMain(it) }
         currentError.set(onError)
         appContext = context.applicationContext
+        val cfg = systemTtsConfig(context)
+        rate = cfg.rate; pitch = cfg.pitch; voiceName = cfg.voice
 
         val existing = engine
         if (existing != null && ready) {
@@ -127,6 +132,14 @@ internal object TtsHolder {
         val id = "cr-utt-${System.nanoTime()}"
         currentUtterance.set(id)
         t.stop()
+        // Apply per-utterance so settings changes take effect immediately.
+        runCatching { t.setSpeechRate(rate) }
+        runCatching { t.setPitch(pitch) }
+        if (voiceName.isNotBlank()) {
+            runCatching {
+                t.voices?.firstOrNull { it.name == voiceName }?.let { t.voice = it }
+            }
+        }
         t.speak(text, TextToSpeech.QUEUE_FLUSH, Bundle(), id)
     }
 
@@ -161,6 +174,7 @@ internal fun speakRouted(
     onError: ((String) -> Unit)? = null,
 ) {
     stopAllTts()
+    val rate = ttsSpeechRate(context)
     when (selectedTtsEngine(context)) {
         com.clauderemote.model.TtsEngine.SERVER -> {
             val cfg = ttsServerConfig(context)
@@ -168,7 +182,7 @@ internal fun speakRouted(
                 onError?.invoke("Není nastavená adresa serveru (Nastavení → Voice).")
                 onFinish()
             } else {
-                ServerTts.speak(context, cfg.url, cfg.model, cfg.voice, cfg.apiKey, text, onFinish, onError)
+                ServerTts.speak(context, cfg.url, cfg.model, cfg.voice, cfg.apiKey, text, rate, onFinish, onError)
             }
         }
         com.clauderemote.model.TtsEngine.GOOGLE_CLOUD -> {
@@ -177,7 +191,7 @@ internal fun speakRouted(
                 onError?.invoke("Chybí Google Cloud API klíč (Nastavení → Voice).")
                 onFinish()
             } else {
-                GoogleCloudTts.speak(context, cfg.apiKey, cfg.voice, text, onFinish, onError)
+                GoogleCloudTts.speak(context, cfg.apiKey, cfg.voice, text, rate, onFinish, onError)
             }
         }
         com.clauderemote.model.TtsEngine.SYSTEM -> {
@@ -190,4 +204,47 @@ internal fun speakRouted(
 internal fun stopAllTts() {
     MediaTtsCore.stop()
     TtsHolder.stop()
+}
+
+/**
+ * Lists the Czech voices installed in the on-device Google TTS engine so the
+ * settings UI can offer a picker. Spins up a throwaway TextToSpeech (forced
+ * to Google, device-default fallback), reads `voices` filtered to `cs`, then
+ * shuts it down. Result is delivered on the main thread.
+ */
+internal object SystemTtsVoices {
+    fun load(context: Context, onResult: (List<String>) -> Unit, onError: (String) -> Unit) {
+        val appCtx = context.applicationContext
+        val holder = AtomicReference<TextToSpeech?>(null)
+        fun start(pkg: String?, triedFallback: Boolean) {
+            val tts = runCatching {
+                val listener = TextToSpeech.OnInitListener { status ->
+                    val t = holder.get()
+                    if (status != TextToSpeech.SUCCESS) {
+                        if (pkg != null && !triedFallback) {
+                            runCatching { t?.shutdown() }
+                            start(null, true)
+                        } else {
+                            runCatching { t?.shutdown() }
+                            postOnMain { onError("TTS engine se nepodařilo spustit.") }
+                        }
+                        return@OnInitListener
+                    }
+                    val names = runCatching {
+                        (t?.voices ?: emptySet())
+                            .filter { it.locale?.language == "cs" }
+                            .map { it.name }
+                            .sorted()
+                    }.getOrDefault(emptyList())
+                    runCatching { t?.shutdown() }
+                    postOnMain { onResult(names) }
+                }
+                if (pkg != null) TextToSpeech(appCtx, listener, pkg) else TextToSpeech(appCtx, listener)
+            }.getOrNull()
+            holder.set(tts)
+            if (tts == null && pkg != null && !triedFallback) start(null, true)
+            else if (tts == null) postOnMain { onError("TTS engine se nepodařilo spustit.") }
+        }
+        start(GOOGLE_TTS_PACKAGE, false)
+    }
 }

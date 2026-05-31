@@ -134,11 +134,12 @@ internal object ServerTts {
         voice: String,
         apiKey: String,
         text: String,
+        speed: Float = 1.0f,
         onFinish: () -> Unit,
         onError: ((String) -> Unit)? = null,
     ) {
         MediaTtsCore.speak(context, ".mp3", onFinish, onError) {
-            fetch(baseUrl, model, voice, apiKey, text)
+            fetch(baseUrl, model, voice, apiKey, text, speed)
         }
     }
 
@@ -150,12 +151,16 @@ internal object ServerTts {
         voice: String,
         apiKey: String,
         text: String,
+        speed: Float,
     ): ByteArray = withContext(Dispatchers.IO) {
         val json = JSONObject()
             .put("model", model)
             .put("input", text)
             .put("voice", voice)
             .put("response_format", "mp3")
+            // OpenAI-compatible 'speed' (0.25–4.0). Only send when non-default
+            // so servers that don't support it keep working at normal speed.
+            .apply { if (speed != 1.0f) put("speed", speed.coerceIn(0.25f, 4.0f).toDouble()) }
             .toString()
         val req = Request.Builder()
             .url(normalizeApiBase(baseUrl) + "/v1/audio/speech")

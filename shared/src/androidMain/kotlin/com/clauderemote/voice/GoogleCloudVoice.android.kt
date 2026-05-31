@@ -31,11 +31,12 @@ internal object GoogleCloudTts {
         apiKey: String,
         voiceName: String,
         text: String,
+        rate: Float = 1.0f,
         onFinish: () -> Unit,
         onError: ((String) -> Unit)? = null,
     ) {
         MediaTtsCore.speak(context, ".mp3", onFinish, onError) {
-            fetch(apiKey, voiceName, text)
+            fetch(apiKey, voiceName, text, rate)
         }
     }
 
@@ -45,16 +46,21 @@ internal object GoogleCloudTts {
         apiKey: String,
         voiceName: String,
         text: String,
+        rate: Float,
     ): ByteArray = withContext(Dispatchers.IO) {
         if (apiKey.isBlank()) throw RuntimeException("Chybí Google Cloud API klíč")
         val languageCode = voiceName.split("-").take(2).joinToString("-").ifBlank { "cs-CZ" }
+        val audioConfig = JSONObject()
+            .put("audioEncoding", "MP3")
+            // Google Cloud speakingRate is 0.25–4.0 (1.0 = normal).
+            .apply { if (rate != 1.0f) put("speakingRate", rate.coerceIn(0.25f, 4.0f).toDouble()) }
         val json = JSONObject()
             .put("input", JSONObject().put("text", text))
             .put(
                 "voice",
                 JSONObject().put("languageCode", languageCode).put("name", voiceName),
             )
-            .put("audioConfig", JSONObject().put("audioEncoding", "MP3"))
+            .put("audioConfig", audioConfig)
             .toString()
         val req = Request.Builder()
             .url("https://texttospeech.googleapis.com/v1/text:synthesize?key=$apiKey")

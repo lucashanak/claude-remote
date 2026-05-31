@@ -76,3 +76,21 @@ internal fun googleCloudConfig(context: Context): GoogleCloudConfig {
             .orEmpty().ifBlank { "cs-CZ-Wavenet-A" },
     )
 }
+
+/** Reading-speed multiplier (1.0 = normal), shared by all TTS engines. */
+internal fun ttsSpeechRate(context: Context): Float {
+    val pct = context.getSharedPreferences("claude_remote", Context.MODE_PRIVATE)
+        .getInt("tts_speech_rate_pct", 100).coerceIn(25, 400)
+    return pct / 100f
+}
+
+internal data class SystemTtsConfig(val rate: Float, val pitch: Float, val voice: String)
+
+internal fun systemTtsConfig(context: Context): SystemTtsConfig {
+    val p = context.getSharedPreferences("claude_remote", Context.MODE_PRIVATE)
+    return SystemTtsConfig(
+        rate = p.getInt("tts_speech_rate_pct", 100).coerceIn(25, 400) / 100f,
+        pitch = p.getInt("tts_pitch_pct", 100).coerceIn(25, 300) / 100f,
+        voice = p.getString("tts_system_voice", "").orEmpty(),
+    )
+}

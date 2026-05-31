@@ -181,6 +181,20 @@ class AppSettings(private val prefs: PlatformPreferences) {
         get() = prefs.getString("tts_server_voice", "jirka")
         set(value) = prefs.putString("tts_server_voice", value.trim())
 
+    // Reading speed / pitch as integer percent (100 = 1.0x) — prefs has no
+    // Float. Rate applies to every engine; pitch + voice are on-device only.
+    var ttsSpeechRatePct: Int
+        get() = prefs.getInt("tts_speech_rate_pct", 100)
+        set(value) = prefs.putInt("tts_speech_rate_pct", value)
+
+    var ttsPitchPct: Int
+        get() = prefs.getInt("tts_pitch_pct", 100)
+        set(value) = prefs.putInt("tts_pitch_pct", value)
+
+    var ttsSystemVoice: String
+        get() = prefs.getString("tts_system_voice", "")
+        set(value) = prefs.putString("tts_system_voice", value.trim())
+
     // Google Cloud Text-to-Speech (used when ttsEngine == GOOGLE_CLOUD).
     var googleCloudApiKey: String
         get() = prefs.getString("gcloud_tts_api_key", "")

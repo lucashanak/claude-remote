@@ -49,6 +49,11 @@ actual fun WakeWordSettingsCard(settings: AppSettings) {
     var gcloudKey by remember { mutableStateOf(settings.googleCloudApiKey) }
     var gcloudVoice by remember { mutableStateOf(settings.googleCloudVoice) }
     var testing by remember { mutableStateOf(false) }
+    var speechRatePct by remember { mutableStateOf(settings.ttsSpeechRatePct) }
+    var pitchPct by remember { mutableStateOf(settings.ttsPitchPct) }
+    var systemVoice by remember { mutableStateOf(settings.ttsSystemVoice) }
+    var systemVoices by remember { mutableStateOf<List<String>>(emptyList()) }
+    var loadingSystemVoices by remember { mutableStateOf(false) }
 
     // Pin STT to SERVER — the legacy SYSTEM/Vosk/Whisper STT paths were
     // removed; the device recognizer can't do Czech here. TTS, however,
@@ -154,6 +159,14 @@ actual fun WakeWordSettingsCard(settings: AppSettings) {
             },
         )
 
+        // Reading speed — applies to every engine.
+        PercentSlider(
+            label = "Rychlost čtení",
+            valuePct = speechRatePct,
+            range = 50..300,
+            onChange = { speechRatePct = it; settings.ttsSpeechRatePct = it },
+        )
+
         when (ttsEngine) {
             TtsEngine.SYSTEM -> {
                 Text(
@@ -163,6 +176,50 @@ actual fun WakeWordSettingsCard(settings: AppSettings) {
                         "(Nastavení Androidu → Řeč → Text na řeč).",
                     style = CRType.bodyDim, color = c.textDim,
                 )
+                PercentSlider(
+                    label = "Výška hlasu",
+                    valuePct = pitchPct,
+                    range = 50..200,
+                    onChange = { pitchPct = it; settings.ttsPitchPct = it },
+                )
+                if (systemVoices.isNotEmpty()) {
+                    ModelDropdown(
+                        label = "Hlas zařízení",
+                        options = listOf("(výchozí)") + systemVoices,
+                        selected = systemVoice.ifBlank { "(výchozí)" },
+                        onSelect = {
+                            val v = if (it == "(výchozí)") "" else it
+                            systemVoice = v; settings.ttsSystemVoice = v
+                        },
+                    )
+                }
+                Button(
+                    onClick = {
+                        loadingSystemVoices = true
+                        SystemTtsVoices.load(
+                            context,
+                            onResult = { names ->
+                                loadingSystemVoices = false
+                                systemVoices = names
+                                if (names.isEmpty()) {
+                                    Toast.makeText(context, "Zařízení nehlásí žádný český hlas.", Toast.LENGTH_LONG).show()
+                                }
+                            },
+                            onError = { msg ->
+                                loadingSystemVoices = false
+                                Toast.makeText(context, "Hlasy zařízení: $msg", Toast.LENGTH_LONG).show()
+                            },
+                        )
+                    },
+                    enabled = !loadingSystemVoices,
+                    colors = ButtonDefaults.buttonColors(containerColor = c.accent, contentColor = c.accentInk),
+                ) {
+                    Text(
+                        if (loadingSystemVoices) "Načítám…"
+                        else if (systemVoices.isEmpty()) "Načíst hlasy zařízení"
+                        else "Obnovit hlasy (${systemVoices.size})"
+                    )
+                }
             }
 
             TtsEngine.SERVER -> {
@@ -327,5 +384,28 @@ private fun ModelDropdown(
                 }
             }
         }
+    }
+}
+
+/** Labeled slider that edits an integer-percent value (100 = 1.0x), snapped
+ * to multiples of 5. */
+@Composable
+private fun PercentSlider(
+    label: String,
+    valuePct: Int,
+    range: IntRange,
+    onChange: (Int) -> Unit,
+) {
+    val c = CRTheme.colors
+    val step = 5
+    val steps = ((range.last - range.first) / step - 1).coerceAtLeast(0)
+    Column(modifier = Modifier.fillMaxWidth()) {
+        Text("$label — $valuePct %", style = CRType.bodyDim, color = c.textDim)
+        androidx.compose.material3.Slider(
+            value = valuePct.coerceIn(range.first, range.last).toFloat(),
+            onValueChange = { onChange(Math.round(it)) },
+            valueRange = range.first.toFloat()..range.last.toFloat(),
+            steps = steps,
+        )
     }
 }
