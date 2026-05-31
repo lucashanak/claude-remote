@@ -55,6 +55,22 @@ object ScreenStateClassifier {
         pattern = """\b\d+h\s*\d+m\s*\d+s\b|\b\d+m\s*\d+s\b|\b[1-9]\d*s\b"""
     )
 
+    /**
+     * Matches the `❯ N.` selected-option pointer of Claude Code's numbered
+     * selector (permission dialog AND the AskUserQuestion TUI).
+     */
+    private val APPROVAL_POINTER_REGEX = Regex("""❯\s*\d+\.\s""")
+
+    /**
+     * Matches the `N. ` option-number pattern on a row that has NO pointer glyph.
+     * Used together with [APPROVAL_POINTER_REGEX]: we require BOTH a pointer row
+     * AND at least one sibling row to avoid false-positives when the user types a
+     * numbered list into the input box (only one `❯ N.` line, no sibling). Real
+     * selectors always render ≥2 options. Not anchored at start so box-frame
+     * characters (`│   2. No │`) are tolerated.
+     */
+    private val APPROVAL_SIBLING_REGEX = Regex("""\d+\.\s""")
+
     fun classify(snapshot: ScreenStateSnapshot): ClaudeState {
         val boxRow = findInputBoxRow(snapshot) ?: return ClaudeState.UNKNOWN
 
@@ -81,7 +97,46 @@ object ScreenStateClassifier {
             }
         }
 
+        // Approval check — runs AFTER the WORKING scans (a real working
+        // indicator always wins) and BEFORE returning IDLE. Conservative,
+        // structural markers only. Note: the 8-row snapshot window may miss the
+        // first option of a very tall AskUserQuestion (acceptable — #70 covers
+        // that via the transcript; this targets permission prompts).
+        if (isApprovalSelector(snapshot)) return ClaudeState.APPROVAL
+
         return ClaudeState.IDLE
+    }
+
+    /**
+     * Detect Claude's approval/permission selector by structure, not prose.
+     *
+     * Numbered-option check (FIX 1): require BOTH a pointer row (`❯ N.`) AND a
+     * separate sibling row (`  N.` without `❯`). A user typing "❯ 1. fix the
+     * parser bug" into the input box produces only one `❯ N.` line with no
+     * sibling → no false positive. Real selectors always render ≥2 options.
+     *
+     * Shell-confirm check (FIX 2): only test the bottom-most non-empty row.
+     * `[Y/n]` in assistant prose appears higher in the viewport, not on the
+     * last line — restricting to the last non-blank row eliminates those hits.
+     */
+    private fun isApprovalSelector(snapshot: ScreenStateSnapshot): Boolean {
+        // Numbered-option selector: need pointer row + at least one sibling row.
+        var hasPointer = false
+        var hasSibling = false
+        for (row in snapshot.rows) {
+            val text = row.text
+            if (APPROVAL_POINTER_REGEX.containsMatchIn(text)) hasPointer = true
+            // A sibling must NOT also contain the pointer glyph (rules out the
+            // pointer row itself matching the sibling regex).
+            else if (APPROVAL_SIBLING_REGEX.containsMatchIn(text)) hasSibling = true
+        }
+        if (hasPointer && hasSibling) return true
+
+        // Shell confirm prompt: only the bottom-most non-empty row counts.
+        val lastNonEmpty = snapshot.rows.lastOrNull { it.text.isNotBlank() }
+        if (lastNonEmpty != null && Regex("""\[[Yy]/[Nn]\]""").containsMatchIn(lastNonEmpty.text)) return true
+
+        return false
     }
 
     /**
