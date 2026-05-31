@@ -255,6 +255,13 @@ fun SettingsScreen(
                         onCheckedChange = { keepAlive = it; settings.keepAliveEnabled = it }
                     )
 
+                    var autoOpenTerminalOnPrompt by remember { mutableStateOf(settings.autoOpenTerminalOnPrompt) }
+                    SettingsSwitch(
+                        label = "Open terminal on prompts",
+                        checked = autoOpenTerminalOnPrompt,
+                        onCheckedChange = { autoOpenTerminalOnPrompt = it; settings.autoOpenTerminalOnPrompt = it }
+                    )
+
                     SettingsSlider(
                         label = "Connect timeout (s)",
                         value = connectTimeout,

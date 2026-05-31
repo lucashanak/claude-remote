@@ -165,10 +165,31 @@ fun TerminalScreen(
     // one cell ever hosts the single shared raw terminal.
     onFocusPane: ((paneIndex: Int, sessionId: String?) -> Unit)? = null,
     onAssignPane: ((paneIndex: Int, sessionId: String) -> Unit)? = null,
+    // #70: Claude is awaiting a choice (AskUserQuestion or permission prompt) on
+    // the active session. When the user is in Chat and the feature is enabled, we
+    // transiently render the raw terminal so they can answer the real TUI widget.
+    awaitingChoice: Boolean = false,
+    autoOpenTerminalOnPrompt: Boolean = true,
+    // FIX B: per-pane pending-ask flags (size 4, mirrors paneTranscripts).
+    // A non-focused pane with pendingAsk=true shows a small "Claude asks" badge;
+    // the focused pane uses the existing awaitingChoice auto-switch instead.
+    panePendingAsk: List<Boolean> = listOf(false, false, false, false),
 ) {
     val c = CRTheme.colors
     val m = CRTheme.metrics
     val terminalView = LocalCRTerminalView.current
+
+    // #70: transient auto-switch to raw when Claude is awaiting a choice. The
+    // user can dismiss (stay in Chat) per-prompt; a NEW prompt re-triggers the
+    // switch because the dismiss flag is reset whenever awaitingChoice clears.
+    // FIX C: key dismiss state on activeTabId so switching to a different tab
+    // that is also awaiting re-arms the auto-switch (no stale dismiss leak).
+    var userDismissedPrompt by remember(activeTabId) { mutableStateOf(false) }
+    LaunchedEffect(awaitingChoice) { if (!awaitingChoice) userDismissedPrompt = false }
+    val promptAutoSwitch = autoOpenTerminalOnPrompt && awaitingChoice &&
+        terminalView == CRTerminalView.Transcript && !userDismissedPrompt
+    // Render-only view: the persisted `terminalView` is never mutated here.
+    val effectiveTerminalView = if (promptAutoSwitch) CRTerminalView.Raw else terminalView
 
     // State — preserved from original
     var showControlBar by remember { mutableStateOf(true) }
@@ -210,9 +231,10 @@ fun TerminalScreen(
         null
     }
 
-    // Replay terminal buffer when switching back from transcript
-    LaunchedEffect(terminalView, activeTabId) {
-        if (terminalView == CRTerminalView.Raw) onTerminalContentVisible?.invoke()
+    // Replay terminal buffer when switching back from transcript. Keyed on the
+    // EFFECTIVE view so the #70 auto-switch to Raw also triggers a replay.
+    LaunchedEffect(effectiveTerminalView, activeTabId) {
+        if (effectiveTerminalView == CRTerminalView.Raw) onTerminalContentVisible?.invoke()
     }
 
     // Unified session list
@@ -717,8 +739,31 @@ fun TerminalScreen(
                     )
                 }
 
+                // #70: thin banner shown only while the auto-switch is active.
+                if (promptAutoSwitch) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .background(c.approval.copy(alpha = 0.18f))
+                            .padding(horizontal = 12.dp, vertical = 4.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                    ) {
+                        Text(
+                            "Claude is asking — answer here",
+                            style = CRType.bodyDim,
+                            color = c.approval,
+                        )
+                        TextButton(onClick = { userDismissedPrompt = true }) {
+                            Text("Back to chat", style = CRType.bodyDim, color = c.accent)
+                        }
+                    }
+                }
+
                 // ── Terminal body ─────────────────────────────────────────
-                val isTranscript = terminalView == CRTerminalView.Transcript
+                // #70: render off the EFFECTIVE view so the prompt auto-switch
+                // can transiently show raw without touching the persisted setting.
+                val isTranscript = effectiveTerminalView == CRTerminalView.Transcript
                 val gridActive = gridLayout != com.clauderemote.model.GridLayout.ONE && wideMode
                 if (gridActive) {
                     // Additive grid path. Only the cell at focusedPaneIndex uses the
@@ -812,10 +857,19 @@ fun TerminalScreen(
                                                 }
                                             }
                                         }
+                                        // FIX B: badge on non-focused pane that is awaiting a choice.
+                                        // Focused pane uses the full auto-switch; badge is for background panes.
+                                        if (!focused && panePendingAsk.getOrElse(i) { false }) {
+                                            Pill(
+                                                text = "asks",
+                                                background = c.approval.copy(alpha = 0.25f),
+                                                foreground = c.approval,
+                                            )
+                                        }
                                     }
                                     Box(modifier = Modifier.fillMaxSize()) {
                                         // FIX 1: only the focused cell (by index) renders terminalContent.
-                                        if (focused && terminalView == CRTerminalView.Raw) {
+                                        if (focused && effectiveTerminalView == CRTerminalView.Raw) {
                                             terminalContent(Modifier.fillMaxSize())
                                             JumpToLatestPill(
                                                 visible = terminalScrolledUp && terminalPendingOutput,

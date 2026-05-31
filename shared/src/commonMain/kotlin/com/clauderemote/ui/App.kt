@@ -652,6 +652,53 @@ fun App(
                     LaunchedEffect(Unit) {
                         onTerminalScreenVisible?.invoke()
                     }
+                    // Active session's live transcript (collected once; shared by
+                    // the chat view and the #70 awaiting-choice detection below).
+                    val activeTranscript: List<com.clauderemote.session.transcript.TranscriptEntry> = activeTabId?.let { id ->
+                        // Key on the Claude session UUID too, not just the tab
+                        // id. transcriptFlow() only (re)starts the tail and
+                        // fires the UUID kick-probe WHEN IT IS CALLED, and the
+                        // remember block is the only caller. Keying on id alone
+                        // meant a UUID rotation (/clear, /compact, /resume, or
+                        // the first null→real reconcile) never re-invoked it, so
+                        // the stream stayed pinned to the old/dead .jsonl and the
+                        // chat only refreshed after an app restart. Re-keying on
+                        // the UUID re-subscribes against the live file.
+                        val claudeUuid = tabs.firstOrNull { it.id == id }?.claudeSessionId
+                        val flow = remember(id, claudeUuid) { sessionOrchestrator.transcriptFlow(id) }
+                        flow.collectAsState().value
+                    } ?: emptyList()
+                    // #70: Claude awaiting a choice on the ACTIVE session.
+                    //  • AskUserQuestion (transcript tool) is the reliable trigger today.
+                    //    APPROVAL_NEEDED would also cover [y/n] permission prompts, but
+                    //    that activity is currently never emitted (screen-state classifier
+                    //    doesn't detect permission dialogs yet) — kept here so #70 lights up
+                    //    automatically once permission detection is wired.
+                    // FIX D: only count an AskUserQuestion as pending if the conversation
+                    // has NOT moved on (no UserPrompt or AssistantText after the ask), so
+                    // dead/abandoned sessions don't keep awaitingChoice stuck true.
+                    val awaitingChoice = remember(activeTranscript, sessionActivities, activeTabId) {
+                        val resultIds = activeTranscript
+                            .filterIsInstance<com.clauderemote.session.transcript.TranscriptEntry.ToolResult>()
+                            .mapNotNull { it.toolUseId }
+                            .toSet()
+                        val pendingAsk = hasPendingAskUserQuestion(activeTranscript, resultIds)
+                        pendingAsk ||
+                            activeTabId?.let { sessionActivities[it] } == SessionActivity.APPROVAL_NEEDED
+                    }
+                    // FIX B: per-pane awaiting-choice flags for the #58 grid. Same
+                    // "moved-on" guard as awaitingChoice (FIX D) so abandoned panes
+                    // don't badge forever. Badge rendered on non-focused panes only;
+                    // focused pane keeps the existing full auto-switch behavior.
+                    val panePendingAsk = remember(paneTranscripts) {
+                        paneTranscripts.map { entries ->
+                            val rIds = entries
+                                .filterIsInstance<com.clauderemote.session.transcript.TranscriptEntry.ToolResult>()
+                                .mapNotNull { it.toolUseId }
+                                .toSet()
+                            hasPendingAskUserQuestion(entries, rIds)
+                        }
+                    }
                     TerminalScreen(
                         tabs = tabs,
                         activeTabId = activeTabId,
@@ -878,20 +925,9 @@ fun App(
                         terminalScrolledUp = terminalScrolledUp,
                         terminalPendingOutput = terminalPendingOutput,
                         onJumpToLatest = onJumpToLatest,
-                        transcriptEntries = activeTabId?.let { id ->
-                            // Key on the Claude session UUID too, not just the tab
-                            // id. transcriptFlow() only (re)starts the tail and
-                            // fires the UUID kick-probe WHEN IT IS CALLED, and the
-                            // remember block is the only caller. Keying on id alone
-                            // meant a UUID rotation (/clear, /compact, /resume, or
-                            // the first null→real reconcile) never re-invoked it, so
-                            // the stream stayed pinned to the old/dead .jsonl and the
-                            // chat only refreshed after an app restart. Re-keying on
-                            // the UUID re-subscribes against the live file.
-                            val claudeUuid = tabs.firstOrNull { it.id == id }?.claudeSessionId
-                            val flow = remember(id, claudeUuid) { sessionOrchestrator.transcriptFlow(id) }
-                            flow.collectAsState().value
-                        } ?: emptyList(),
+                        transcriptEntries = activeTranscript,
+                        awaitingChoice = awaitingChoice,
+                        autoOpenTerminalOnPrompt = appSettings.autoOpenTerminalOnPrompt,
                         remoteStatus = activeTabId?.let { id ->
                             val flow = remember(id) { sessionOrchestrator.remoteStatusFlow(id) }
                             flow.collectAsState().value
@@ -909,6 +945,7 @@ fun App(
                         gridLayout = gridLayout,
                         paneSessions = paneSessions,
                         paneTranscripts = paneTranscripts,
+                        panePendingAsk = panePendingAsk,
                         focusedPaneIndex = focusedPaneIndex,
                         onSetLayout = { layout ->
                             gridLayout = layout
@@ -1180,6 +1217,31 @@ fun App(
         }
         } // end Box
     }
+    }
+}
+
+/**
+ * True if [entries] contains an AskUserQuestion ToolCall whose tool_use_id is
+ * not in [resultIds] AND no UserPrompt or AssistantText appears AFTER it (i.e.
+ * the conversation has not moved on past the question). This prevents a dead /
+ * abandoned session from keeping awaitingChoice stuck true forever (FIX D).
+ */
+private fun hasPendingAskUserQuestion(
+    entries: List<com.clauderemote.session.transcript.TranscriptEntry>,
+    resultIds: Set<String>,
+): Boolean {
+    // Walk backwards; the last unanswered AskUserQuestion is the relevant one.
+    val lastAskIdx = entries.indexOfLast {
+        it is com.clauderemote.session.transcript.TranscriptEntry.ToolCall &&
+            it.name == "AskUserQuestion" &&
+            it.toolUseId !in resultIds
+    }
+    if (lastAskIdx < 0) return false
+    // If anything that signals "conversation moved on" appears AFTER the ask,
+    // treat it as abandoned/answered out-of-band.
+    return entries.drop(lastAskIdx + 1).none {
+        it is com.clauderemote.session.transcript.TranscriptEntry.UserPrompt ||
+            it is com.clauderemote.session.transcript.TranscriptEntry.AssistantText
     }
 }
 

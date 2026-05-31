@@ -67,6 +67,14 @@ class AppSettings(private val prefs: PlatformPreferences) {
         get() = prefs.getBoolean("haptic_feedback", false)
         set(value) = prefs.putBoolean("haptic_feedback", value)
 
+    // When Claude is awaiting a choice (AskUserQuestion / permission prompt),
+    // transiently switch the active session to the raw terminal so the user can
+    // answer the real TUI widget. Render-only override — never touches the
+    // persisted Raw/Chat view setting.
+    var autoOpenTerminalOnPrompt: Boolean
+        get() = prefs.getBoolean("auto_open_terminal_on_prompt", true)
+        set(value) = prefs.putBoolean("auto_open_terminal_on_prompt", value)
+
     // Keep alive (Android)
     var keepAliveEnabled: Boolean
         get() = prefs.getBoolean("keep_alive_enabled", true)
