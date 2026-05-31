@@ -205,8 +205,11 @@ class InputPromptDetector(
 
     /**
      * Working/idle from the OMC statusline, which flows through terminal output
-     * in EVERY view (unlike the rendered-screen classifier, which can't read the
-     * disposed terminal in chat view, or the Stop hook, which can silently fail).
+     * in EVERY view (unlike the Stop hook, which can silently fail). The
+     * rendered-screen classifier now also works in Chat for the active
+     * single-pane session on Android (#75: emulator is kept composed under the
+     * Chat overlay), but the statusline remains the ground truth for all other
+     * cases (background tabs, desktop, grid panes).
      *
      * The statusline carries a state segment between the weekly-usage block and
      * `session:` only while Claude is active:

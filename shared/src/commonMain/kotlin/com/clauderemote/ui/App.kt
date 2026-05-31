@@ -82,7 +82,11 @@ fun App(
     terminalScrolledUp: Boolean = false,
     terminalPendingOutput: Boolean = false,
     onJumpToLatest: (() -> Unit)? = null,
-    terminalContent: @Composable (modifier: Modifier) -> Unit
+    terminalContent: @Composable (modifier: Modifier) -> Unit,
+    // #75: keep emulator composed under the Chat overlay so screenReader works in
+    // Chat. Android single-pane passes true; desktop stays false (SwingPanel bleeds
+    // through a Compose overlay).
+    composeTerminalUnderTranscript: Boolean = false
 ) {
     val scope = rememberCoroutineScope()
 
@@ -1021,6 +1025,7 @@ fun App(
                             if (index in current.indices) current[index] = sid
                             paneSessions = current
                         },
+                        composeTerminalUnderTranscript = composeTerminalUnderTranscript,
                     )
                 }
 

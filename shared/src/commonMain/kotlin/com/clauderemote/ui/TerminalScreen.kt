@@ -40,6 +40,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.input.key.*
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.dp
@@ -174,6 +175,11 @@ fun TerminalScreen(
     // A non-focused pane with pendingAsk=true shows a small "Claude asks" badge;
     // the focused pane uses the existing awaitingChoice auto-switch instead.
     panePendingAsk: List<Boolean> = listOf(false, false, false, false),
+    // #75: when true the terminal emulator is kept composed under the Chat overlay
+    // so screenReader stays fed in Chat view (Android single-pane only). Desktop
+    // keeps the old swap behaviour (false) because AWT SwingPanel bleeds through
+    // a Compose overlay and cannot be reliably occluded by a lightweight layer.
+    composeTerminalUnderTranscript: Boolean = false,
 ) {
     val c = CRTheme.colors
     val m = CRTheme.metrics
@@ -233,8 +239,22 @@ fun TerminalScreen(
 
     // Replay terminal buffer when switching back from transcript. Keyed on the
     // EFFECTIVE view so the #70 auto-switch to Raw also triggers a replay.
+    // #75: when composeTerminalUnderTranscript is true (Android single-pane) the
+    // emulator was never torn down in Chat, so a Chat→Raw transition does NOT need
+    // a buffer replay — the live screen is already correct. Replaying would wipe
+    // the very prompt the user switched to answer (#70 auto-switch). We still
+    // fire the replay on genuine tab-switches (activeTabId changes) because the
+    // single shared emulator needs to be seeded with the new session's buffer.
+    val prevActiveTabId = remember { mutableStateOf(activeTabId) }
     LaunchedEffect(effectiveTerminalView, activeTabId) {
-        if (effectiveTerminalView == CRTerminalView.Raw) onTerminalContentVisible?.invoke()
+        val tabSwitched = activeTabId != prevActiveTabId.value
+        prevActiveTabId.value = activeTabId
+        if (effectiveTerminalView == CRTerminalView.Raw) {
+            // Skip view-only Chat→Raw replay when the terminal stayed composed
+            // and no tab switch happened (the emulator already shows live state).
+            val skipReplay = composeTerminalUnderTranscript && !tabSwitched
+            if (!skipReplay) onTerminalContentVisible?.invoke()
+        }
     }
 
     // Unified session list
@@ -912,32 +932,56 @@ fun TerminalScreen(
                             }
                         }
                     }
-                } else if (isTranscript) {
-                    Box(modifier = Modifier.fillMaxWidth().weight(1f).background(c.bg)) {
-                        TranscriptView(
-                            entries = transcriptEntries,
-                            modifier = Modifier.fillMaxSize(),
-                            contextPercent = contextPercent,
-                            sessionUsagePercent = sessionUsagePercent,
-                            weekUsagePercent = weekUsagePercent,
-                            sessionResetMin = sessionResetMin,
-                            weekResetMin = weekResetMin,
-                            latencyMs = latencyMs,
-                            remoteStatus = remoteStatus,
-                            activity = activeTabId?.let { sessionActivities[it] },
-                            hookActive = activeTabId?.let { it in hookActiveSessions } ?: false,
-                            claudeSessionId = activeClaudeSessionId,
-                            streamStatus = transcriptStatus,
-                        )
-                    }
                 } else {
                     Box(modifier = Modifier.fillMaxWidth().weight(1f).background(c.bg)) {
-                        terminalContent(Modifier.fillMaxSize())
-                        JumpToLatestPill(
-                            visible = terminalScrolledUp && terminalPendingOutput,
-                            onClick = { onJumpToLatest?.invoke() },
-                            modifier = Modifier.align(Alignment.BottomCenter),
-                        )
+                        // Compose the terminal when showing Raw, OR on Android single-pane
+                        // in Chat (#75): the emulator must stay alive so screenReader can
+                        // detect a pending prompt that is visible on-screen but not yet in
+                        // the transcript JSONL. Desktop keeps the old swap (no SwingPanel in
+                        // tree during Chat) because a Compose overlay cannot reliably occlude
+                        // a heavyweight AWT component.
+                        if (!isTranscript || composeTerminalUnderTranscript) {
+                            terminalContent(Modifier.fillMaxSize())
+                        }
+                        if (isTranscript) {
+                            // Chat overlay — opaque so the hidden terminal doesn't bleed
+                            // through; pointer events consumed so taps don't reach the
+                            // focusable TerminalView underneath (keyboard / keystroke leak).
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxSize()
+                                    .background(c.bg)
+                                    .pointerInput(Unit) {
+                                        awaitPointerEventScope {
+                                            while (true) {
+                                                awaitPointerEvent().changes.forEach { it.consume() }
+                                            }
+                                        }
+                                    }
+                            ) {
+                                TranscriptView(
+                                    entries = transcriptEntries,
+                                    modifier = Modifier.fillMaxSize(),
+                                    contextPercent = contextPercent,
+                                    sessionUsagePercent = sessionUsagePercent,
+                                    weekUsagePercent = weekUsagePercent,
+                                    sessionResetMin = sessionResetMin,
+                                    weekResetMin = weekResetMin,
+                                    latencyMs = latencyMs,
+                                    remoteStatus = remoteStatus,
+                                    activity = activeTabId?.let { sessionActivities[it] },
+                                    hookActive = activeTabId?.let { it in hookActiveSessions } ?: false,
+                                    claudeSessionId = activeClaudeSessionId,
+                                    streamStatus = transcriptStatus,
+                                )
+                            }
+                        } else {
+                            JumpToLatestPill(
+                                visible = terminalScrolledUp && terminalPendingOutput,
+                                onClick = { onJumpToLatest?.invoke() },
+                                modifier = Modifier.align(Alignment.BottomCenter),
+                            )
+                        }
                     }
                 }
 
