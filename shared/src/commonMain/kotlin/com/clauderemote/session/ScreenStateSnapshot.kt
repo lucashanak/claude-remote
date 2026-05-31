@@ -33,6 +33,8 @@ enum class ClaudeState {
     WORKING,
     /** Input box visible, no working indicator → Claude is waiting for input. */
     IDLE,
+    /** Approval/permission selector visible → Claude is blocked waiting for a choice. */
+    APPROVAL,
     /** Input box not visible / insufficient signal → don't trust this reading. */
     UNKNOWN,
 }

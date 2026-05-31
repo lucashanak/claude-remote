@@ -96,7 +96,15 @@ class InputPromptDetector(
 
         onStateChange?.invoke(sessionId, classified)
 
-        if (classified != ClaudeState.IDLE) return
+        // Both IDLE (ready for input) and APPROVAL (blocked on a choice) are
+        // notify-worthy "needs the user" states. They SHARE one latch so a new
+        // prompt of either kind notifies once until the user types — no spam,
+        // no double-fire when a permission dialog resolves into the input box.
+        val promptType = when (classified) {
+            ClaudeState.IDLE -> PromptType.INPUT_PROMPT
+            ClaudeState.APPROVAL -> PromptType.APPROVAL_NEEDED
+            else -> return
+        }
         // Don't notify on startup prompt — only after user has interacted at least once.
         if (!state.userHasInteracted) return
         // Already notified; wait for user input to reset.
@@ -107,7 +115,7 @@ class InputPromptDetector(
 
         state.waitingForInput = true
         state.lastDetectionTime = now
-        onDetection?.invoke(PromptDetection(sessionId, PromptType.INPUT_PROMPT))
+        onDetection?.invoke(PromptDetection(sessionId, promptType))
     }
 
     /** Reset the latch so the next idle transition will fire a detection. */

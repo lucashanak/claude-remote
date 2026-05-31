@@ -66,6 +66,7 @@ class SessionOrchestrator(
             when (state) {
                 ClaudeState.WORKING -> updateActivity(sessionId, SessionActivity.WORKING)
                 ClaudeState.IDLE -> updateActivity(sessionId, SessionActivity.WAITING_FOR_INPUT)
+                ClaudeState.APPROVAL -> updateActivity(sessionId, SessionActivity.APPROVAL_NEEDED)
                 ClaudeState.UNKNOWN -> {} // keep last known activity
             }
         }
@@ -910,6 +911,15 @@ else:
      * SIGWINCH kick after tab switch.
      */
     fun switchTab(id: String) {
+        // FIX 4: when switching away from a session whose activity is APPROVAL_NEEDED,
+        // reset it to WAITING_FOR_INPUT — we can no longer read its screen to confirm
+        // the dialog is still showing, so leaving APPROVAL_NEEDED would produce a stale
+        // "needs attention" badge (#55) that never clears.
+        val previousId = tabManager.activeTabId.value
+        if (previousId != null && previousId != id &&
+            _sessionActivities.value[previousId] == SessionActivity.APPROVAL_NEEDED) {
+            updateActivity(previousId, SessionActivity.WAITING_FOR_INPUT)
+        }
         tabManager.switchTab(id)
         promptDetector.onUserInput(id)
         // Re-verify the Claude session UUID whenever we (re)enter a session.
@@ -1096,10 +1106,14 @@ else:
             // the continuous ground truth that keeps the status dot/badge honest
             // and was missing for hook-active sessions in chat view.
             promptDetector.parseClaudeWorking(session.id)?.let { working ->
-                updateActivity(
-                    session.id,
-                    if (working) SessionActivity.WORKING else SessionActivity.WAITING_FOR_INPUT
-                )
+                val next = if (working) SessionActivity.WORKING else SessionActivity.WAITING_FOR_INPUT
+                // FIX 3: when the statusline says "not working" (→ WAITING_FOR_INPUT),
+                // do NOT overwrite APPROVAL_NEEDED — the permission dialog is still on
+                // screen and the OMC statusline shows no elapsed time while it waits.
+                // A genuine WORKING result from the statusline may still override APPROVAL.
+                if (next == SessionActivity.WAITING_FOR_INPUT &&
+                    _sessionActivities.value[session.id] == SessionActivity.APPROVAL_NEEDED) return@let
+                updateActivity(session.id, next)
             }
             // ctx % is derived from the transcript (startContextTokenCollector),
             // not scraped. We still read the statusline's `ctx:NN%` here, but

@@ -683,11 +683,11 @@ fun App(
                         flow.collectAsState().value
                     } ?: emptyList()
                     // #70: Claude awaiting a choice on the ACTIVE session.
-                    //  • AskUserQuestion (transcript tool) is the reliable trigger today.
-                    //    APPROVAL_NEEDED would also cover [y/n] permission prompts, but
-                    //    that activity is currently never emitted (screen-state classifier
-                    //    doesn't detect permission dialogs yet) — kept here so #70 lights up
-                    //    automatically once permission detection is wired.
+                    //  • AskUserQuestion (transcript tool) is the reliable trigger for
+                    //    assistant-initiated questions.
+                    //  • APPROVAL_NEEDED is now also emitted by ScreenStateClassifier
+                    //    (#71) when a permission/selector dialog is detected on screen —
+                    //    permission prompts are covered.
                     // FIX D: only count an AskUserQuestion as pending if the conversation
                     // has NOT moved on (no UserPrompt or AssistantText after the ask), so
                     // dead/abandoned sessions don't keep awaitingChoice stuck true.
