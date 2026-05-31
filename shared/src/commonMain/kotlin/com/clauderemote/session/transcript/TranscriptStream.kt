@@ -31,16 +31,6 @@ class TranscriptStream(
     private val server: SshServer,
     private val cwd: String,
     private val parentScope: CoroutineScope,
-    /**
-     * Supplies the session's MAIN terminal SSH session, if connected. The tail
-     * reuses it (one extra exec channel) instead of dialing a brand-new SSH
-     * connection: with several tabs open, a separate connection per transcript
-     * exhausts sshd `MaxStartups` / Cloudflare-tunnel limits, so the terminal
-     * connects but the chat silently fails to — the "Waiting for transcript…"
-     * hang. Returns null when there is no live main connection (disconnected
-     * tab), in which case we fall back to a dedicated short-lived session.
-     */
-    private val liveSession: () -> com.jcraft.jsch.Session? = { null }
 ) {
     private val _entries = MutableStateFlow<List<TranscriptEntry>>(emptyList())
     val entries: StateFlow<List<TranscriptEntry>> = _entries.asStateFlow()
@@ -148,17 +138,15 @@ class TranscriptStream(
             attempt++
             var sawData = false
             try {
-                // Prefer the main terminal connection (extra exec channel only,
-                // no new SSH connection). Fall back to a dedicated session when
-                // the tab has no live main connection.
-                val shared = liveSession()?.takeIf { it.isConnected }
-                _status.value = if (shared != null) "connecting…" else "opening link…"
-                sawData = if (shared != null) {
-                    streamFromSession(shared, cmd)
-                } else {
-                    SshSessionHelper.withSession(server, timeout = 15_000) { sess ->
-                        streamFromSession(sess, cmd)
-                    }
+                // Use a dedicated short-lived SSH session for the tail. NOTE: an
+                // earlier optimization reused the main terminal session (one exec
+                // channel) to save connections, but an exec channel opened on the
+                // shell-bearing main session never delivered output — the tail hung
+                // forever at "connecting…" (confirmed via the on-screen status).
+                // A dedicated session reliably delivers.
+                _status.value = "connecting…"
+                sawData = SshSessionHelper.withSession(server, timeout = 15_000) { sess ->
+                    streamFromSession(sess, cmd)
                 }
                 // Only treat the connection as healthy (reset backoff) if it
                 // actually delivered transcript data. A folder that doesn't

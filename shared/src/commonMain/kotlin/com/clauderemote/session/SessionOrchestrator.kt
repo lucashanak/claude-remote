@@ -963,14 +963,7 @@ else:
             ?: return kotlinx.coroutines.flow.MutableStateFlow(emptyList())
         val stream = synchronized(transcriptLock) {
             val s = transcriptStreams.getOrPut(sessionId) {
-                // Reuse this session's main terminal SSH connection for the tail
-                // (one extra exec channel) instead of dialing a fresh connection
-                // per tab — that exhausted sshd MaxStartups / Cloudflare limits
-                // with several tabs open, so the terminal connected but the chat
-                // hung on "Waiting for transcript…".
-                TranscriptStream(tab.server, tab.folder, reconnectScope) {
-                    connections[sessionId]?.getSession()
-                }
+                TranscriptStream(tab.server, tab.folder, reconnectScope)
             }
             // Derive the ctx-window % from this stream's token usage. Inside the
             // lock so it binds to the exact stream instance and stays atomic with
@@ -1027,9 +1020,7 @@ else:
             ?: return kotlinx.coroutines.flow.MutableStateFlow(null)
         val stream = synchronized(transcriptLock) {
             transcriptStreams.getOrPut(sessionId) {
-                TranscriptStream(tab.server, tab.folder, reconnectScope) {
-                    connections[sessionId]?.getSession()
-                }
+                TranscriptStream(tab.server, tab.folder, reconnectScope)
             }
         }
         return stream.status
