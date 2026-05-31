@@ -179,11 +179,19 @@ class TranscriptStream(
      */
     private suspend fun streamFromSession(sess: com.jcraft.jsch.Session, cmd: String): Boolean {
         var sawData = false
+        // Granular status so the "Waiting…" screen pinpoints the stuck phase:
+        // "connecting…"      → SSH session handshake (set by the caller) hanging
+        //                      ⇒ connection-level problem (too many connections).
+        // "opening channel…" → exec channel open/connect hanging.
+        // "reading…"         → connected & tail running but no output ⇒ tail/
+        //                      exec-delivery problem (not a connection issue).
+        if (_entries.value.isEmpty()) _status.value = "opening channel…"
         val ch = sess.openChannel("exec") as com.jcraft.jsch.ChannelExec
         ch.setCommand(cmd)
         ch.inputStream = null
         val inStream = ch.inputStream
         withContext(Dispatchers.IO) { ch.connect(10_000) }
+        if (_entries.value.isEmpty()) _status.value = "reading…"
         try {
             val reader = BufferedReader(InputStreamReader(inStream, Charsets.UTF_8))
             while (scope.isActive && !ch.isClosed) {
