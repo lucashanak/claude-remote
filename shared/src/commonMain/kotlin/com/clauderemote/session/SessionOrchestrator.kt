@@ -973,7 +973,7 @@ else:
             ?: return kotlinx.coroutines.flow.MutableStateFlow(emptyList())
         val stream = synchronized(transcriptLock) {
             val s = transcriptStreams.getOrPut(sessionId) {
-                TranscriptStream(tab.server, tab.folder, reconnectScope)
+                TranscriptStream(tab.server, tab.folder, reconnectScope) { connections[sessionId]?.getSession() }
             }
             // Derive the ctx-window % from this stream's token usage. Inside the
             // lock so it binds to the exact stream instance and stays atomic with
@@ -1030,7 +1030,7 @@ else:
             ?: return kotlinx.coroutines.flow.MutableStateFlow(null)
         val stream = synchronized(transcriptLock) {
             transcriptStreams.getOrPut(sessionId) {
-                TranscriptStream(tab.server, tab.folder, reconnectScope)
+                TranscriptStream(tab.server, tab.folder, reconnectScope) { connections[sessionId]?.getSession() }
             }
         }
         return stream.status

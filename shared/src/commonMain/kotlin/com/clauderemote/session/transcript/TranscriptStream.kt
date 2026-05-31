@@ -16,21 +16,33 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import java.io.BufferedReader
-import java.io.InputStreamReader
 
 /**
  * Streams a Claude Code transcript file (`~/.claude/projects/<enc>/<uuid>.jsonl`)
- * over SSH using `tail -n +1 -F`, parses each line incrementally, and exposes
- * the accumulated entries via a [StateFlow].
+ * by POLLING it over SSH with a one-shot incremental `tail` every few seconds,
+ * parsing new lines and exposing the accumulated entries via a [StateFlow].
  *
- * One instance per active session; reconnects/restarts on transcript file
- * changes via [restart] when the Claude Code session UUID rotates.
+ * Polling (a short exec that completes, read with readText) rather than a
+ * long-lived `tail -F` channel: the latter did not deliver stdout on the
+ * desktop JVM (hung at "reading…"), while the one-shot exec+readText pattern is
+ * the same one readRealSessionId uses and works on every platform.
+ *
+ * One instance per active session; [start] restarts it against a new UUID when
+ * the Claude Code session id rotates (/clear, /resume).
  */
 class TranscriptStream(
     private val server: SshServer,
     private val cwd: String,
     private val parentScope: CoroutineScope,
+    /**
+     * The session's live MAIN terminal SSH session, if connected. The poll runs
+     * a one-shot exec on it (no extra connection) — the SAME proven pattern as
+     * readRealSessionId/fetchSessionsFromServer, which work on both Android and
+     * the desktop JVM. (A long-lived `tail -F` + readLine loop did NOT deliver
+     * stdout on the desktop JVM — it hung at "reading…".) Null ⇒ no live main
+     * connection, so we fall back to a short-lived dedicated session per poll.
+     */
+    private val liveSession: () -> com.jcraft.jsch.Session? = { null },
 ) {
     private val _entries = MutableStateFlow<List<TranscriptEntry>>(emptyList())
     val entries: StateFlow<List<TranscriptEntry>> = _entries.asStateFlow()
@@ -99,144 +111,118 @@ class TranscriptStream(
     }
 
     private suspend fun runTail(uuid: String) {
-        // Resolve the encoded cwd server-side: Claude Code keys
-        // ~/.claude/projects/<enc>/ by `pwd | sed 's|/|-|g'` of the absolute
-        // path, so we must shell-expand (handles `~`, relative paths) and
-        // then dash-replace there — doing it client-side breaks for any
-        // folder that needs shell expansion.
         val safeFolder = cwd.replace("'", "'\\''")
         val safeUuid = uuid.replace("'", "'\\''")
-        val cmd = buildString {
-            // Set FOLDER from a single-quoted literal (safe against shell
-            // metacharacters), then do a portable tilde expansion before cd.
-            append("F='").append(safeFolder).append("'; ")
-            append("case \"\$F\" in \"~\"*) F=\"\$HOME\${F#\"~\"}\";; esac; ")
-            append("ENC=\$(cd \"\$F\" 2>/dev/null && pwd | sed 's|/|-|g'); ")
-            append("[ -z \"\$ENC\" ] && exit 0; ")
-            append("DIR=\"\$HOME/.claude/projects/\$ENC\"; ")
-            // Tail strictly the UUID-targeted jsonl. NEVER fall back to
-            // "newest *.jsonl in this folder" — two tabs that share a
-            // cwd (e.g. "second" and "third" aliases of the same
-            // server/folder) would both pick the same newest file and
-            // cross-pollute. Rotation across /clear and /resume is
-            // handled at the SessionOrchestrator layer: the 60 s
-            // reconcile loop polls the server's sessions.json AND, when
-            // that's empty, the per-pid ~/.claude/sessions/<pid>.json
-            // probe directly. Either path updates tab.claudeSessionId
-            // and triggers notifyClaudeSessionIdChanged, which restarts
-            // this stream against the correct uuid.
-            //
-            // tail -F waits patiently for the file to appear, so a
-            // freshly-launched session with no transcript yet hangs on
-            // "Waiting for transcript…" until claude writes the first
-            // line — that's the correct behaviour, not a bug.
-            append("tail -n ").append(INITIAL_LINES)
-            append(" -F \"\$DIR/").append(safeUuid).append(".jsonl\" 2>/dev/null")
-        }
+        // byteOffset = how many bytes of the .jsonl we've already consumed.
+        // The poll command echoes the file's current size as `__OFFSET__<n>`
+        // so we resume from exactly there next time — only NEW bytes are sent
+        // over the wire after the initial backlog (keeps idle traffic tiny).
+        var byteOffset = 0L
         var attempt = 0
         while (scope.isActive) {
             attempt++
-            var sawData = false
             try {
-                // Use a dedicated short-lived SSH session for the tail. NOTE: an
-                // earlier optimization reused the main terminal session (one exec
-                // channel) to save connections, but an exec channel opened on the
-                // shell-bearing main session never delivered output — the tail hung
-                // forever at "connecting…" (confirmed via the on-screen status).
-                // A dedicated session reliably delivers.
-                _status.value = "connecting…"
-                sawData = SshSessionHelper.withSession(server, timeout = 15_000) { sess ->
-                    streamFromSession(sess, cmd)
+                _status.value = if (_entries.value.isEmpty()) "connecting…" else null
+                // Prefer the main connection (no extra SSH connection, no
+                // handshake per poll); fall back to a short-lived dedicated
+                // session only when the tab has no live main connection.
+                val shared = liveSession()?.takeIf { it.isConnected }
+                val (lines, newOffset) = if (shared != null) {
+                    pollOnce(shared, safeFolder, safeUuid, byteOffset)
+                } else {
+                    SshSessionHelper.withSession(server, timeout = 15_000) { sess ->
+                        pollOnce(sess, safeFolder, safeUuid, byteOffset)
+                    }
                 }
-                // Only treat the connection as healthy (reset backoff) if it
-                // actually delivered transcript data. A folder that doesn't
-                // resolve (ENC empty → `exit 0`) or a missing file returns
-                // cleanly with zero lines — without this guard that would
-                // reset attempt=0 and busy-reconnect with no backoff.
-                if (sawData) {
-                    attempt = 0
-                } else if (_entries.value.isEmpty()) {
-                    // Connected fine but the file produced nothing (no transcript
-                    // yet, or wrong folder/uuid) — say so instead of a blank wait.
+                if (newOffset >= 0) byteOffset = newOffset
+                if (lines.isNotEmpty()) {
+                    val newEntries = TranscriptParser.parseLines(lines.asSequence())
+                    if (newEntries.isNotEmpty()) {
+                        _status.value = null
+                        appendEntries(newEntries)
+                    }
+                    TranscriptParser.latestContextTokens(lines.asSequence())?.let {
+                        _contextTokens.value = it
+                    }
+                }
+                attempt = 0
+                if (_entries.value.isEmpty()) {
+                    // Connected & polled fine, but nothing parseable yet (no
+                    // transcript written, or wrong folder/uuid).
                     _status.value = "connected, no transcript data yet"
                 }
             } catch (t: Throwable) {
                 val msg = t.message?.take(80) ?: t::class.simpleName ?: "unknown error"
-                FileLogger.log(TAG, "tail stream error (attempt $attempt): ${t.message}")
+                FileLogger.log(TAG, "transcript poll error (attempt $attempt): ${t.message}")
                 if (_entries.value.isEmpty()) _status.value = "retry $attempt — $msg"
             }
             if (!scope.isActive) break
-            val backoff = (1_000L * attempt).coerceAtMost(15_000L)
-            delay(backoff)
+            // Steady poll cadence; back off only after errors.
+            val wait = if (attempt > 1) (1_000L * attempt).coerceAtMost(10_000L)
+                       else if (_entries.value.isEmpty()) 1_500L else POLL_MS
+            delay(wait)
         }
     }
 
     /**
-     * Run the `tail -F` command on [sess] (the main terminal session when
-     * available, otherwise a dedicated one) and pump parsed entries into the
-     * flow. Closes ONLY the exec channel, never [sess] — the caller / SshManager
-     * owns the session lifecycle. Returns true if any transcript data was read.
+     * One-shot incremental read of the transcript file. Returns the new JSONL
+     * lines (since [offset]) and the file's current byte size (the next
+     * offset), or (empty, -1) when the file/folder can't be resolved yet.
+     *
+     * Uses a short exec that COMPLETES (channel closes → readText hits EOF) —
+     * the same pattern as readRealSessionId, which works on the desktop JVM
+     * where a long-lived `tail -F` channel did not deliver stdout.
      */
-    private suspend fun streamFromSession(sess: com.jcraft.jsch.Session, cmd: String): Boolean {
-        var sawData = false
-        // Granular status so the "Waiting…" screen pinpoints the stuck phase:
-        // "connecting…"      → SSH session handshake (set by the caller) hanging
-        //                      ⇒ connection-level problem (too many connections).
-        // "opening channel…" → exec channel open/connect hanging.
-        // "reading…"         → connected & tail running but no output ⇒ tail/
-        //                      exec-delivery problem (not a connection issue).
-        if (_entries.value.isEmpty()) _status.value = "opening channel…"
+    private suspend fun pollOnce(
+        sess: com.jcraft.jsch.Session,
+        safeFolder: String,
+        safeUuid: String,
+        offset: Long,
+    ): Pair<List<String>, Long> {
+        if (_entries.value.isEmpty()) _status.value = "reading…"
+        val cmd = buildString {
+            append("F='").append(safeFolder).append("'; ")
+            append("case \"\$F\" in \"~\"*) F=\"\$HOME\${F#\"~\"}\";; esac; ")
+            append("ENC=\$(cd \"\$F\" 2>/dev/null && pwd | sed 's|/|-|g'); ")
+            append("[ -z \"\$ENC\" ] && { echo __OFFSET__-1; exit 0; }; ")
+            append("FILE=\"\$HOME/.claude/projects/\$ENC/").append(safeUuid).append(".jsonl\"; ")
+            append("[ -f \"\$FILE\" ] || { echo __OFFSET__-1; exit 0; }; ")
+            append("SZ=\$(wc -c < \"\$FILE\" 2>/dev/null || echo 0); ")
+            // Initial (offset<=0) or file shrank (rotation) → last N lines;
+            // otherwise only the bytes appended since the last poll. Offsets sit
+            // on line boundaries (jsonl ends every line with \n), so appended
+            // bytes are always whole lines.
+            append("if [ ").append(offset).append(" -le 0 ] || [ \"\$SZ\" -lt ").append(offset).append(" ]; then ")
+            append("tail -n ").append(INITIAL_LINES).append(" \"\$FILE\" 2>/dev/null; ")
+            append("elif [ \"\$SZ\" -gt ").append(offset).append(" ]; then ")
+            append("tail -c +\$(("); append(offset.toString()); append("+1)) \"\$FILE\" 2>/dev/null; fi; ")
+            append("printf '\\n__OFFSET__%s\\n' \"\$SZ\"")
+        }
         val ch = sess.openChannel("exec") as com.jcraft.jsch.ChannelExec
         ch.setCommand(cmd)
         ch.inputStream = null
         val inStream = ch.inputStream
-        withContext(Dispatchers.IO) { ch.connect(10_000) }
-        if (_entries.value.isEmpty()) _status.value = "reading…"
-        try {
-            val reader = BufferedReader(InputStreamReader(inStream, Charsets.UTF_8))
-            while (scope.isActive && !ch.isClosed) {
-                // Let read errors (broken pipe, channel reset) propagate to the
-                // outer catch so they go through the backoff + logging path. The
-                // old `catch { null }` collapsed errors into clean-EOF, which
-                // reset attempt=0 → delay(0) → tight reconnect loop.
-                val first = withContext(Dispatchers.IO) { reader.readLine() } ?: break
-                // Coalesce a burst — the 2 000-line replay on (re)connect and
-                // rapid streaming — into ONE flow emission instead of one per
-                // line. Each emission is a full list copy plus ~4 O(n) recomputes
-                // in the Compose view, so per-line emission janks on long
-                // sessions. reader.ready() drains only what's already buffered,
-                // so a genuinely idle stream still emits promptly per line.
-                val batch = ArrayList<String>()
-                batch.add(first)
-                while (batch.size < MAX_BATCH &&
-                    withContext(Dispatchers.IO) { reader.ready() }
-                ) {
-                    val more = withContext(Dispatchers.IO) { reader.readLine() } ?: break
-                    batch.add(more)
-                }
-                // Partial lines (tail caught mid-write) fail parse cleanly and
-                // are dropped by the parser.
-                val newEntries = TranscriptParser.parseLines(batch.asSequence())
-                if (newEntries.isNotEmpty()) {
-                    sawData = true
-                    _status.value = null
-                    appendEntries(newEntries)
-                }
-                // Track context size from this batch's newest assistant usage.
-                TranscriptParser.latestContextTokens(batch.asSequence())?.let {
-                    _contextTokens.value = it
-                }
-            }
-        } finally {
-            try { ch.disconnect() } catch (_: Throwable) {}
+        val out = withContext(Dispatchers.IO) {
+            ch.connect(10_000)
+            inStream.bufferedReader(Charsets.UTF_8).readText()
         }
-        return sawData
+        try { ch.disconnect() } catch (_: Throwable) {}
+        var newOffset = -1L
+        val lines = ArrayList<String>()
+        for (line in out.lineSequence()) {
+            if (line.startsWith("__OFFSET__")) {
+                line.removePrefix("__OFFSET__").trim().toLongOrNull()?.let { newOffset = it }
+            } else if (line.isNotBlank()) {
+                lines.add(line)
+            }
+        }
+        return lines to newOffset
     }
 
     /**
-     * Append a parsed batch, deduped by id. Dedup matters because the outer
-     * retry loop reopens `tail -F` on reconnect, which re-emits the last
-     * [INITIAL_LINES] lines — without this every reconnect would clone the
+     * Append a parsed batch, deduped by id. Dedup matters because a poll whose
+     * byte offset got reset (first poll, or file rotation/shrink) re-reads the
+     * last [INITIAL_LINES] lines — without this that re-read would clone the
      * backlog. The `seenIds.add` side effect runs exactly once here (outside
      * the StateFlow.update lambda, which can be retried), and seenIds is
      * bounded so a long-lived stream doesn't grow it without limit.
@@ -252,9 +238,9 @@ class TranscriptStream(
         }
         // Keep seenIds from growing unbounded across a very long session by
         // pruning back to the currently-visible ids. This is safe against the
-        // reconnect replay: `tail -n INITIAL_LINES -F` re-emits only the NEWEST
+        // offset-reset re-read: a reset poll re-reads only the NEWEST
         // <= INITIAL_LINES (2000) lines, and INITIAL_LINES < MAX_ENTRIES (5000),
-        // so every replayable entry is always within the retained visible
+        // so every re-readable entry is always within the retained visible
         // window and stays deduped. Prune lazily (at 2x) to avoid rebuilding
         // the set on every batch.
         if (seenIds.size > MAX_ENTRIES * 2) {
@@ -269,7 +255,8 @@ class TranscriptStream(
         private const val INITIAL_LINES = 2000
         // Hard cap on entries held in memory; oldest get dropped when exceeded.
         private const val MAX_ENTRIES = 5000
-        // Max lines coalesced into a single flow emission during a burst.
-        private const val MAX_BATCH = 500
+        // Steady-state poll interval once the backlog has loaded. New content
+        // only sends the bytes appended since the last poll, so this is cheap.
+        private const val POLL_MS = 3_000L
     }
 }
