@@ -495,6 +495,20 @@ fun App(
                         remoteSessions = remoteSessions,
                         remoteSessionsLoading = remoteSessionsLoading,
                         onRefreshRemote = { scanRemoteSessions() },
+                        onConnectAll = {
+                            // Reconnect every not-connected tab so their data
+                            // (terminal, usage, activity) loads after an app
+                            // restart. Sequential to avoid a connection storm
+                            // across many sessions.
+                            scope.launch {
+                                tabs.filter { it.status != SessionStatus.ACTIVE }
+                                    .forEach { tab ->
+                                        try {
+                                            sessionOrchestrator.reconnectSession(tab.id)
+                                        } catch (_: Exception) {}
+                                    }
+                            }
+                        },
                         onAttachRemote = { remote ->
                             scope.launch {
                                 try {

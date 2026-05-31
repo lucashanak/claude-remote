@@ -15,6 +15,7 @@ import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.DateRange
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material3.*
@@ -52,6 +53,7 @@ fun LauncherScreen(
     remoteSessions: List<RemoteSession> = emptyList(),
     remoteSessionsLoading: Boolean = false,
     onRefreshRemote: (() -> Unit)? = null,
+    onConnectAll: (() -> Unit)? = null,
     onAttachRemote: ((RemoteSession) -> Unit)? = null,
     onConnectServer: (SshServer) -> Unit,
     onQuickConnect: ((SshServer) -> Unit)? = null,
@@ -88,6 +90,15 @@ fun LauncherScreen(
                     )
                 },
                 actions = {
+                    if (onConnectAll != null) {
+                        IconButton(onClick = onConnectAll) {
+                            Icon(
+                                Icons.Default.PlayArrow,
+                                contentDescription = "Connect all sessions",
+                                tint = c.accent,
+                            )
+                        }
+                    }
                     if (onUsageDashboard != null) {
                         IconButton(onClick = onUsageDashboard) {
                             Icon(Icons.Default.DateRange, contentDescription = "Usage", tint = c.textDim)
