@@ -13,10 +13,15 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.selection.SelectionContainer
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontFamily
@@ -398,6 +403,38 @@ fun TranscriptView(
     }
 }
 
+/** Small per-message button that copies [text] to the clipboard, with a brief
+ *  check-mark confirmation. */
+@Composable
+private fun CopyButton(
+    text: String,
+    modifier: Modifier = Modifier,
+    tint: Color = CRTheme.colors.textDim,
+) {
+    val clipboard = LocalClipboardManager.current
+    var copied by remember { mutableStateOf(false) }
+    LaunchedEffect(copied) {
+        if (copied) {
+            kotlinx.coroutines.delay(1500)
+            copied = false
+        }
+    }
+    IconButton(
+        onClick = {
+            clipboard.setText(AnnotatedString(text))
+            copied = true
+        },
+        modifier = modifier,
+    ) {
+        Icon(
+            imageVector = if (copied) Icons.Default.Check else Icons.Default.ContentCopy,
+            contentDescription = "Copy message",
+            tint = if (copied) CRTheme.colors.ready else tint,
+            modifier = Modifier.size(15.dp),
+        )
+    }
+}
+
 @Composable
 private fun UserPromptCard(entry: TranscriptEntry.UserPrompt) {
     val c = CRTheme.colors
@@ -419,12 +456,18 @@ private fun UserPromptCard(entry: TranscriptEntry.UserPrompt) {
                 modifier = Modifier.fillMaxWidth()
             ) {
                 Pill(text = "USER", background = c.tintAccent, foreground = c.accent)
-                if (entry.timestamp != null) {
-                    Text(
-                        formatTimestamp(entry.timestamp),
-                        style = CRType.monoTiny,
-                        color = c.textDim
-                    )
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    if (entry.timestamp != null) {
+                        Text(
+                            formatTimestamp(entry.timestamp),
+                            style = CRType.monoTiny,
+                            color = c.textDim
+                        )
+                    }
+                    CopyButton(entry.text, modifier = Modifier.size(26.dp), tint = c.accent)
                 }
             }
             Spacer(Modifier.height(4.dp))
@@ -484,6 +527,7 @@ private fun AssistantTextCard(entry: TranscriptEntry.AssistantText) {
                 if (entry.timestamp != null) {
                     Text(formatTimestamp(entry.timestamp), style = CRType.monoTiny, color = c.textDim)
                 }
+                CopyButton(entry.text, modifier = Modifier.size(26.dp))
                 SpeakerButton(
                     text = entry.text,
                     modifier = Modifier.size(28.dp),
@@ -509,11 +553,20 @@ private fun ThinkingCard(entry: TranscriptEntry.AssistantThinking) {
             .clickable { expanded = !expanded }
     ) {
         Column(modifier = Modifier.padding(horizontal = m.cardPadH, vertical = 6.dp)) {
-            Text(
-                if (expanded) "▼ thinking" else "▶ thinking",
-                style = CRType.monoTiny,
-                color = c.textDim
-            )
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween,
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Text(
+                    if (expanded) "▼ thinking" else "▶ thinking",
+                    style = CRType.monoTiny,
+                    color = c.textDim
+                )
+                if (expanded) {
+                    CopyButton(entry.text, modifier = Modifier.size(24.dp))
+                }
+            }
             if (expanded) {
                 Spacer(Modifier.height(4.dp))
                 Text(
@@ -1031,6 +1084,8 @@ private fun ToolResultCard(entry: TranscriptEntry.ToolResult) {
                         color = c.textDim
                     )
                 }
+                Spacer(Modifier.weight(1f))
+                CopyButton(entry.text, modifier = Modifier.size(24.dp))
             }
             Spacer(Modifier.height(4.dp))
             MonospaceBlock(if (expanded) entry.text else preview)
