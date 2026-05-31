@@ -496,15 +496,39 @@ fun App(
                         remoteSessionsLoading = remoteSessionsLoading,
                         onRefreshRemote = { scanRemoteSessions() },
                         onConnectAll = {
-                            // Reconnect every not-connected tab so their data
-                            // (terminal, usage, activity) loads after an app
-                            // restart. Sequential to avoid a connection storm
-                            // across many sessions.
+                            // Connect everything in the list so all sessions' data
+                            // (terminal, usage, activity, transcript) loads after an
+                            // app restart. Sequential to avoid a connection storm.
                             scope.launch {
+                                // 1) Reconnect restored-but-disconnected tabs.
                                 tabs.filter { it.status != SessionStatus.ACTIVE }
                                     .forEach { tab ->
                                         try {
                                             sessionOrchestrator.reconnectSession(tab.id)
+                                        } catch (_: Exception) {}
+                                    }
+                                // 2) Attach remote tmux sessions that aren't open as
+                                //    a tab yet (the "1w" entries discovered on the
+                                //    server) — reconnectSession only covers tabs.
+                                val openTmux = tabManager.tabs.value
+                                    .map { it.tmuxSessionName }.toSet()
+                                remoteSessions
+                                    .filter { it.tmuxSession.name !in openTmux }
+                                    .forEach { remote ->
+                                        try {
+                                            val parsed = TmuxNameParser.parse(
+                                                remote.tmuxSession.name, remote.server.name
+                                            )
+                                            sessionOrchestrator.launchSession(
+                                                server = remote.server,
+                                                folder = parsed.folder,
+                                                mode = if (parsed.isYolo) ClaudeMode.YOLO
+                                                    else remote.server.defaultClaudeMode,
+                                                model = remote.server.defaultClaudeModel,
+                                                connectionType = ConnectionType.SSH,
+                                                tmuxSessionName = remote.tmuxSession.name,
+                                                isNewTmuxSession = false,
+                                            )
                                         } catch (_: Exception) {}
                                     }
                             }
