@@ -42,6 +42,10 @@ internal class ServerDictation(
     private val continuous: Boolean,
     private val onFinal: (String) -> Unit,
     private val onError: (String) -> Unit,
+    // Fired (on main) the instant the mic is actually capturing, so the UI
+    // shows "listening" only when speech will really be recorded — not while
+    // AudioRecord is still warming up (which clipped the user's first word).
+    private val onListening: (() -> Unit)? = null,
 ) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private var job: Job? = null
@@ -101,6 +105,8 @@ internal class ServerDictation(
         }
 
         val captured = ByteArrayOutputStream()
+        val preRoll = ArrayDeque<ByteArray>()
+        val preRollFrames = (PREROLL_MS / FRAME_MS).coerceAtLeast(1)
         var inSpeech = false
         var silenceFrames = 0
         var speechFrames = 0
@@ -109,19 +115,33 @@ internal class ServerDictation(
         val minSpeechFrames = (MIN_SPEECH_MS / FRAME_MS)
         try {
             recorder.startRecording()
+            postOnMain { if (!stopped) onListening?.invoke() }
             while (!stopped && scope.isActive) {
                 val n = recorder.read(buf, 0, buf.size)
                 if (n <= 0) continue
+                val frame = frameBytes(buf, n)
                 val rms = rms(buf, n)
                 val voiced = rms > RMS_THRESHOLD
                 if (voiced) {
-                    inSpeech = true
+                    if (!inSpeech) {
+                        // Entering speech — prepend the pre-roll so the soft
+                        // onset of the first word (often below threshold)
+                        // isn't clipped.
+                        inSpeech = true
+                        while (preRoll.isNotEmpty()) captured.write(preRoll.removeFirst())
+                    }
                     silenceFrames = 0
                     speechFrames++
                 } else if (inSpeech) {
                     silenceFrames++
                 }
-                if (inSpeech) appendPcm(captured, buf, n)
+                if (inSpeech) {
+                    captured.write(frame)
+                } else {
+                    // Keep a rolling window of the most recent quiet frames.
+                    preRoll.addLast(frame)
+                    while (preRoll.size > preRollFrames) preRoll.removeFirst()
+                }
 
                 val endOfUtterance = inSpeech &&
                     silenceFrames >= silenceFrameLimit &&
@@ -200,12 +220,16 @@ internal class ServerDictation(
         return Math.sqrt(sum / n)
     }
 
-    private fun appendPcm(out: ByteArrayOutputStream, buf: ShortArray, n: Int) {
+    /** Little-endian 16-bit PCM bytes for one captured frame. */
+    private fun frameBytes(buf: ShortArray, n: Int): ByteArray {
+        val out = ByteArray(n * 2)
+        var j = 0
         for (i in 0 until n) {
             val v = buf[i].toInt()
-            out.write(v and 0xFF)
-            out.write((v shr 8) and 0xFF)
+            out[j++] = (v and 0xFF).toByte()
+            out[j++] = ((v shr 8) and 0xFF).toByte()
         }
+        return out
     }
 
     private fun wrapWav(pcm: ByteArray): ByteArray {
@@ -223,9 +247,10 @@ internal class ServerDictation(
 
     companion object {
         private const val SAMPLE_RATE = 16000
-        private const val FRAME = 1600          // 100 ms @ 16 kHz
-        private const val FRAME_MS = 100
-        private const val SILENCE_MS = 700      // end-of-utterance silence
+        private const val FRAME = 480           // 30 ms @ 16 kHz — fine onset/endpoint granularity
+        private const val FRAME_MS = 30
+        private const val PREROLL_MS = 300      // audio kept before speech onset, prepended so the first word isn't clipped
+        private const val SILENCE_MS = 600      // end-of-utterance silence
         // Tuned permissively — RMS 1200 / min 500 ms dropped the user's
         // own voice; rely on the Whisper `prompt` + hallucination filter
         // to handle quiet-audio attractors instead of the VAD gating.
