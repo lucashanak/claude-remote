@@ -1,7 +1,14 @@
 package com.clauderemote.voice
 
+import android.Manifest
 import android.content.Context
+import android.content.Intent
+import android.content.pm.PackageManager
+import android.speech.RecognizerIntent
 import android.widget.Toast
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.core.content.ContextCompat
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
@@ -62,6 +69,78 @@ actual fun WakeWordSettingsCard(settings: AppSettings) {
     var wakeEnabled by remember { mutableStateOf(settings.wakeWordEnabled) }
     var wakePhrase by remember { mutableStateOf(settings.wakeWord) }
     var sttEngine by remember { mutableStateOf(settings.sttEngine) }
+    var sttTesting by remember { mutableStateOf(false) }
+    var sttTestResult by remember { mutableStateOf("") }
+    var pendingSttTest by remember { mutableStateOf(false) }
+    val sttTestDictation = remember { java.util.concurrent.atomic.AtomicReference<ServerDictation?>(null) }
+
+    DisposableEffect(Unit) { onDispose { sttTestDictation.get()?.stop() } }
+
+    fun startServerSttTest() {
+        val cfg = sttServerConfig(context)
+        if (cfg.url.isBlank()) {
+            Toast.makeText(context, "Není nastavená adresa serveru.", Toast.LENGTH_LONG).show()
+            return
+        }
+        sttTesting = true; sttTestResult = ""
+        val d = ServerDictation(
+            context = context.applicationContext,
+            baseUrl = cfg.url, model = cfg.model, apiKey = cfg.apiKey,
+            continuous = false,
+            onFinal = { text ->
+                sttTestDictation.set(null); sttTesting = false
+                sttTestResult = text.ifBlank { "(nic nerozpoznáno)" }
+            },
+            onError = { msg ->
+                sttTestDictation.set(null); sttTesting = false
+                Toast.makeText(context, "STT test: $msg", Toast.LENGTH_LONG).show()
+            },
+            onListening = { Toast.makeText(context, "Mluvte teď…", Toast.LENGTH_SHORT).show() },
+        )
+        sttTestDictation.set(d); d.start()
+    }
+
+    val sttPermLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        if (granted && pendingSttTest) startServerSttTest()
+        else if (!granted) Toast.makeText(context, "Bez oprávnění mikrofonu nelze testovat.", Toast.LENGTH_LONG).show()
+        pendingSttTest = false
+    }
+    val sttGoogleLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.StartActivityForResult()
+    ) { result ->
+        sttTesting = false
+        val text = result.data
+            ?.getStringArrayListExtra(RecognizerIntent.EXTRA_RESULTS)
+            ?.firstOrNull()
+            .orEmpty()
+        sttTestResult = text.ifBlank { "(nic nerozpoznáno)" }
+    }
+
+    fun runSttTest() {
+        sttTestResult = ""
+        if (sttEngine == SttEngine.SERVER) {
+            val granted = ContextCompat.checkSelfPermission(
+                context, Manifest.permission.RECORD_AUDIO
+            ) == PackageManager.PERMISSION_GRANTED
+            if (granted) startServerSttTest()
+            else { pendingSttTest = true; sttPermLauncher.launch(Manifest.permission.RECORD_AUDIO) }
+        } else {
+            // SYSTEM (Google): the system voice dialog activity.
+            sttTesting = true
+            val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
+                putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+                putExtra(RecognizerIntent.EXTRA_LANGUAGE, CZECH_LOCALE_TAG)
+                putExtra(RecognizerIntent.EXTRA_LANGUAGE_PREFERENCE, CZECH_LOCALE_TAG)
+                putExtra(RecognizerIntent.EXTRA_PROMPT, "Mluvte česky…")
+            }
+            runCatching { sttGoogleLauncher.launch(intent) }.onFailure {
+                sttTesting = false
+                Toast.makeText(context, "Nelze spustit hlasový dialog.", Toast.LENGTH_LONG).show()
+            }
+        }
+    }
 
     Column(
         modifier = Modifier
@@ -160,6 +239,19 @@ actual fun WakeWordSettingsCard(settings: AppSettings) {
                 }
             }
         }
+
+        Button(
+            onClick = { runSttTest() },
+            enabled = !sttTesting,
+            colors = ButtonDefaults.buttonColors(containerColor = c.accent, contentColor = c.accentInk),
+        ) {
+            Text(if (sttTesting) "Poslouchám…" else "🎤 Otestovat rozpoznávání")
+        }
+        if (sttTestResult.isNotBlank()) {
+            Text("Rozpoznáno: \"$sttTestResult\"", style = CRType.bodyDim, color = c.text)
+        }
+
+        androidx.compose.material3.HorizontalDivider(color = c.border)
 
         // ── Voice activation (wake word) ─────────────────────────────
         androidx.compose.foundation.layout.Row(
