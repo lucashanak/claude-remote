@@ -123,6 +123,22 @@ actual fun VoiceModeScreen(
         }
     }
 
+    // SYSTEM (Google) engine fallback: a launcher for the system voice dialog
+    // activity, driven one turn at a time by the controller on devices whose
+    // bound recognizer can't do Czech. controllerRef breaks the cycle (the
+    // launcher callback needs the controller; the controller needs the
+    // launcher).
+    val controllerRef = remember { mutableStateOf<DialogueController?>(null) }
+    val googleVoiceLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.StartActivityForResult()
+    ) { result ->
+        val text = result.data
+            ?.getStringArrayListExtra(RecognizerIntent.EXTRA_RESULTS)
+            ?.firstOrNull()
+            .orEmpty()
+        controllerRef.value?.submitExternalResult(text)
+    }
+
     val controller = remember {
         DialogueController(
             context = context.applicationContext,
@@ -133,7 +149,16 @@ actual fun VoiceModeScreen(
                 onSendState.value(text)
             },
             onStateChange = { state = it },
-        )
+            requestExternalListen = {
+                val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
+                    putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+                    putExtra(RecognizerIntent.EXTRA_LANGUAGE, CZECH_LOCALE_TAG)
+                    putExtra(RecognizerIntent.EXTRA_LANGUAGE_PREFERENCE, CZECH_LOCALE_TAG)
+                    putExtra(RecognizerIntent.EXTRA_PROMPT, "Mluvte česky…")
+                }
+                runCatching { googleVoiceLauncher.launch(intent) }
+            },
+        ).also { controllerRef.value = it }
     }
 
     DisposableEffect(hasPermission) {
@@ -301,6 +326,10 @@ private class DialogueController(
     private val onPartial: (String) -> Unit,
     private val onCommit: (String) -> Unit,
     private val onStateChange: (VoiceState) -> Unit,
+    // For the SYSTEM (Google) engine on devices whose bound recognizer can't
+    // do Czech (e.g. HyperOS): invoked to launch the system Google voice
+    // dialog activity for one turn. Results come back via submitExternalResult.
+    private val requestExternalListen: (() -> Unit)? = null,
 ) {
     private val mainHandler = Handler(Looper.getMainLooper())
     private var recognizer: SpeechRecognizer? = null
@@ -312,6 +341,10 @@ private class DialogueController(
     private val sessionGen = AtomicInteger(0)
     @Volatile private var stopped = false
     @Volatile private var paused = false  // true while TTS is speaking
+    // Flips on once the bound recognizer reports no Czech: route SYSTEM
+    // listening through the Google voice dialog activity for the rest of the
+    // session instead of erroring out.
+    @Volatile private var forceExternal = false
 
     fun start() {
         stopped = false
@@ -344,6 +377,21 @@ private class DialogueController(
         if (stopped) return
         paused = false
         beginListening()
+    }
+
+    /**
+     * Result from the Google voice dialog activity (SYSTEM engine fallback).
+     * Commits a non-empty phrase; on empty/cancel, re-listens after a beat so
+     * a dismissed dialog doesn't reopen in a tight loop.
+     */
+    fun submitExternalResult(text: String) {
+        if (stopped || paused) return
+        val t = text.trim()
+        if (t.isNotBlank()) {
+            onCommit(t)
+        } else {
+            mainHandler.postDelayed({ if (!stopped && !paused) beginListening() }, 700)
+        }
     }
 
     fun speak(text: String) {
@@ -394,6 +442,16 @@ private class DialogueController(
             beginWhisperListening()
             return
         }
+        // SYSTEM (Google). If the device's bound recognizer already failed on
+        // Czech, drive listening through the Google voice dialog activity.
+        if (forceExternal && requestExternalListen != null) {
+            onStateChange(VoiceState.Listening)
+            // Small delay so any prior recognizer/mic is released first.
+            mainHandler.postDelayed({
+                if (!stopped && !paused) requestExternalListen.invoke()
+            }, 150)
+            return
+        }
         val rec = recognizer ?: return
         val mySession = sessionGen.incrementAndGet()
         val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
@@ -425,18 +483,23 @@ private class DialogueController(
                     SpeechRecognizer.ERROR_CLIENT -> scheduleRestart()
                     SpeechRecognizer.ERROR_LANGUAGE_NOT_SUPPORTED,
                     SpeechRecognizer.ERROR_LANGUAGE_UNAVAILABLE -> {
-                        // System recognizer doesn't know Czech. Switch the
-                        // whole controller to the offline Vosk fallback for
-                        // the rest of the session and surface an error.
+                        // Bound recognizer doesn't know Czech. If we can launch
+                        // the system Google voice dialog, switch to that for the
+                        // rest of the session; otherwise surface an error.
                         runCatching { rec.cancel() }
                         runCatching { rec.destroy() }
                         recognizer = null
-                        onStateChange(
-                            VoiceState.Error(
-                                "Tento přístroj nepodporuje českou Google STT. " +
-                                    "Přepněte na engine Server v Nastavení → Voice."
+                        if (requestExternalListen != null) {
+                            forceExternal = true
+                            beginListening()
+                        } else {
+                            onStateChange(
+                                VoiceState.Error(
+                                    "Tento přístroj nepodporuje českou Google STT. " +
+                                        "Přepněte na engine Server v Nastavení → Voice."
+                                )
                             )
-                        )
+                        }
                     }
                     else -> onStateChange(VoiceState.Error(recognizerErrorLabel(error)))
                 }
