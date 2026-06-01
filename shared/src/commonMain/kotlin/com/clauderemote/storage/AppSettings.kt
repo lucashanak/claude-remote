@@ -204,6 +204,17 @@ class AppSettings(private val prefs: PlatformPreferences) {
         get() = prefs.getString("gcloud_tts_voice", "cs-CZ-Wavenet-A")
         set(value) = prefs.putString("gcloud_tts_voice", value.trim())
 
+    // Voice activation (wake word) — opt-in, foreground-only. Reuses the STT
+    // server: while idle + foregrounded it VAD-listens and opens the dialog
+    // when the transcript contains [wakeWord]. Off by default (always-on mic).
+    var wakeWordEnabled: Boolean
+        get() = prefs.getBoolean("wake_word_enabled", false)
+        set(value) = prefs.putBoolean("wake_word_enabled", value)
+
+    var wakeWord: String
+        get() = prefs.getString("wake_word_phrase", "claude")
+        set(value) = prefs.putString("wake_word_phrase", value.trim())
+
     fun loadAppearance(): AppearanceState = AppearanceState(
         variant = crVariant,
         density = crDensity,
