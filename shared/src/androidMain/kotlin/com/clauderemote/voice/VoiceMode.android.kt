@@ -28,9 +28,11 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.systemBarsPadding
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Mic
@@ -178,59 +180,58 @@ private fun VoiceModeFrame(
     partial: String,
     onClose: () -> Unit,
 ) {
-    Surface(
-        modifier = Modifier.fillMaxSize(),
-        color = Color(0xFF050A12),
-        contentColor = Color.White,
-    ) {
-        Column(
-            modifier = Modifier.fillMaxSize().systemBarsPadding().padding(24.dp),
-            verticalArrangement = Arrangement.SpaceBetween,
-            horizontalAlignment = Alignment.CenterHorizontally,
+    // Bottom panel only — the chat stays visible above it, so the user sees
+    // the conversation (with the assistant reply being read aloud) and their
+    // own live transcript at the same time, instead of an opaque orb screen.
+    Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.BottomCenter) {
+        Surface(
+            modifier = Modifier.fillMaxWidth(),
+            color = Color(0xFF0B1422),
+            contentColor = Color.White,
+            shape = RoundedCornerShape(topStart = 20.dp, topEnd = 20.dp),
+            tonalElevation = 8.dp,
+            shadowElevation = 12.dp,
         ) {
-            Row(onClose)
-            Orb(state)
-            Column(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalAlignment = Alignment.CenterHorizontally,
+            androidx.compose.foundation.layout.Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .navigationBarsPadding()
+                    .padding(horizontal = 20.dp, vertical = 14.dp),
+                verticalAlignment = Alignment.CenterVertically,
             ) {
-                Text(
-                    text = stateLabel(state),
-                    color = Color(0xFFBFD0F0),
-                    fontSize = 18.sp,
-                    fontWeight = FontWeight.SemiBold,
-                )
-                Spacer(Modifier.height(12.dp))
-                Text(
-                    text = partial.ifBlank { hintFor(state) },
-                    color = if (partial.isBlank()) Color(0xFF6F7E96) else Color.White,
-                    fontSize = 16.sp,
-                    textAlign = TextAlign.Center,
-                )
-                Spacer(Modifier.height(24.dp))
+                Orb(state, sizeDp = 56.dp)
+                Spacer(Modifier.width(14.dp))
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = stateLabel(state),
+                        color = Color(0xFFBFD0F0),
+                        fontSize = 15.sp,
+                        fontWeight = FontWeight.SemiBold,
+                    )
+                    Spacer(Modifier.height(2.dp))
+                    Text(
+                        text = partial.ifBlank { hintFor(state) },
+                        color = if (partial.isBlank()) Color(0xFF6F7E96) else Color.White,
+                        fontSize = 15.sp,
+                        maxLines = 3,
+                        overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+                    )
+                }
+                Spacer(Modifier.width(8.dp))
+                IconButton(onClick = onClose) {
+                    Icon(
+                        Icons.Filled.Close,
+                        contentDescription = "Close voice mode",
+                        tint = Color(0xFFBFD0F0),
+                    )
+                }
             }
         }
     }
 }
 
 @Composable
-private fun Row(onClose: () -> Unit) {
-    androidx.compose.foundation.layout.Row(
-        modifier = Modifier.fillMaxWidth(),
-        horizontalArrangement = Arrangement.End,
-    ) {
-        IconButton(onClick = onClose) {
-            Icon(
-                Icons.Filled.Close,
-                contentDescription = "Close voice mode",
-                tint = Color(0xFFBFD0F0),
-            )
-        }
-    }
-}
-
-@Composable
-private fun Orb(state: VoiceState) {
+private fun Orb(state: VoiceState, sizeDp: androidx.compose.ui.unit.Dp = 220.dp) {
     val infinite = rememberInfiniteTransition(label = "orb")
     val (color, durationMs, minScale, maxScale) = when (state) {
         is VoiceState.Listening    -> OrbAnim(Color(0xFF4E9CFF), 1100, 0.92f, 1.08f)
@@ -250,7 +251,7 @@ private fun Orb(state: VoiceState) {
     )
     Box(
         modifier = Modifier
-            .size(220.dp)
+            .size(sizeDp)
             .scale(scale)
             .clip(CircleShape)
             .background(color.copy(alpha = 0.18f)),
@@ -258,7 +259,7 @@ private fun Orb(state: VoiceState) {
     ) {
         Box(
             modifier = Modifier
-                .size(140.dp)
+                .size(sizeDp * 0.64f)
                 .clip(CircleShape)
                 .background(color.copy(alpha = 0.35f)),
             contentAlignment = Alignment.Center,
@@ -267,7 +268,7 @@ private fun Orb(state: VoiceState) {
                 imageVector = Icons.Filled.Mic,
                 contentDescription = null,
                 tint = color,
-                modifier = Modifier.size(64.dp),
+                modifier = Modifier.size(sizeDp * 0.3f),
             )
         }
     }
