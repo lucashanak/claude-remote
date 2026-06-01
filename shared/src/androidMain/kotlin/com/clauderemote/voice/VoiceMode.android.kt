@@ -492,9 +492,13 @@ private class DialogueController(
                 serverDictation = null
                 onStateChange(VoiceState.Error(msg))
             },
+            onListening = {
+                if (!stopped && !paused && sessionGen.get() == mySession) {
+                    onStateChange(VoiceState.Listening)
+                }
+            },
         )
         serverDictation = dictation
-        onStateChange(VoiceState.Listening)
         dictation.start()
     }
 
