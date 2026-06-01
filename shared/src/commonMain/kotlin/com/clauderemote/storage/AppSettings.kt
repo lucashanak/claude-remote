@@ -215,6 +215,13 @@ class AppSettings(private val prefs: PlatformPreferences) {
         get() = prefs.getString("wake_word_phrase", "claude")
         set(value) = prefs.putString("wake_word_phrase", value.trim())
 
+    // Which wake-word engine: "SERVER" (Whisper VAD via the STT server),
+    // "PORCUPINE" (on-device, needs AccessKey), or "SHERPA" (on-device KWS,
+    // no account). Kept as a choice so each user can pick their tradeoff.
+    var wakeEngine: String
+        get() = prefs.getString("wake_engine", "SERVER")
+        set(value) = prefs.putString("wake_engine", value.trim())
+
     // Porcupine on-device wake word (offline; access key is a license check).
     var porcupineAccessKey: String
         get() = prefs.getString("porcupine_access_key", "")
