@@ -233,6 +233,12 @@ class AppSettings(private val prefs: PlatformPreferences) {
         get() = prefs.getString("porcupine_keyword", "JARVIS")
         set(value) = prefs.putString("porcupine_keyword", value.trim())
 
+    // Chosen wake word for the on-device sherpa-onnx KWS engine — see
+    // SherpaKws.KEYWORDS (English, BPE-encoded at build time).
+    var sherpaKeyword: String
+        get() = prefs.getString("sherpa_keyword", "HEY CLAUDE")
+        set(value) = prefs.putString("sherpa_keyword", value.trim())
+
     fun loadAppearance(): AppearanceState = AppearanceState(
         variant = crVariant,
         density = crDensity,

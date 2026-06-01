@@ -71,6 +71,7 @@ actual fun WakeWordSettingsCard(settings: AppSettings) {
     var wakePhrase by remember { mutableStateOf(settings.wakeWord) }
     var porcupineKey by remember { mutableStateOf(settings.porcupineAccessKey) }
     var porcupineKeyword by remember { mutableStateOf(settings.porcupineKeyword) }
+    var sherpaKeyword by remember { mutableStateOf(settings.sherpaKeyword) }
     var sttEngine by remember { mutableStateOf(settings.sttEngine) }
     var sttTesting by remember { mutableStateOf(false) }
     var sttTestResult by remember { mutableStateOf("") }
@@ -278,17 +279,40 @@ actual fun WakeWordSettingsCard(settings: AppSettings) {
         }
         if (wakeEnabled) {
             val serverLabel = "Server (Whisper)"
+            val sherpaLabel = "On-device (sherpa, bez účtu)"
             val porcupineLabel = "Porcupine (on-device)"
             ModelDropdown(
                 label = "Engine aktivace",
-                options = listOf(serverLabel, porcupineLabel),
-                selected = if (wakeEngine == "PORCUPINE") porcupineLabel else serverLabel,
+                options = listOf(serverLabel, sherpaLabel, porcupineLabel),
+                selected = when (wakeEngine) {
+                    "PORCUPINE" -> porcupineLabel
+                    "SHERPA" -> sherpaLabel
+                    else -> serverLabel
+                },
                 onSelect = { name ->
-                    val picked = if (name == porcupineLabel) "PORCUPINE" else "SERVER"
+                    val picked = when (name) {
+                        porcupineLabel -> "PORCUPINE"
+                        sherpaLabel -> "SHERPA"
+                        else -> "SERVER"
+                    }
                     wakeEngine = picked; settings.wakeEngine = picked
                 },
             )
             when (wakeEngine) {
+                "SHERPA" -> {
+                    ModelDropdown(
+                        label = "Klíčové slovo",
+                        options = SherpaKws.KEYWORDS.keys.toList(),
+                        selected = sherpaKeyword,
+                        onSelect = { sherpaKeyword = it; settings.sherpaKeyword = it },
+                    )
+                    Text(
+                        "On-device, offline, bez účtu — model je v appce. Vyslov " +
+                            "slovo anglicky. Mikrofon naslouchá průběžně (baterie), " +
+                            "ale zvuk nikam neodchází.",
+                        style = CRType.bodyDim, color = c.textDim,
+                    )
+                }
                 "PORCUPINE" -> {
                     androidx.compose.material3.OutlinedTextField(
                         value = porcupineKey,
@@ -630,7 +654,38 @@ actual fun WakeWordListener(paused: Boolean, onWake: () -> Unit) {
     if (active) {
         when (engine) {
             "PORCUPINE" -> PorcupineWake(onWake)
+            "SHERPA" -> SherpaWake(onWake)
             else -> ServerWake(onWake) // SERVER (Whisper VAD) — the default
+        }
+    }
+}
+
+/** On-device wake via sherpa-onnx KWS (offline, no account; bundled model). */
+@Composable
+private fun SherpaWake(onWake: () -> Unit) {
+    val context = LocalContext.current
+    val onWakeState = rememberUpdatedState(onWake)
+    val holder = remember { java.util.concurrent.atomic.AtomicReference<SherpaKws?>(null) }
+    val prefs = context.getSharedPreferences("claude_remote", Context.MODE_PRIVATE)
+    val word = prefs.getString("sherpa_keyword", "HEY CLAUDE").orEmpty().ifBlank { "HEY CLAUDE" }
+    val tokens = SherpaKws.KEYWORDS[word] ?: SherpaKws.KEYWORDS.values.first()
+    val hasPermission = ContextCompat.checkSelfPermission(
+        context, Manifest.permission.RECORD_AUDIO
+    ) == PackageManager.PERMISSION_GRANTED
+
+    DisposableEffect(tokens, hasPermission) {
+        if (!hasPermission) {
+            onDispose { }
+        } else {
+            val kws = SherpaKws(
+                context = context.applicationContext,
+                keywordTokens = tokens,
+                onWake = { onWakeState.value() },
+                onError = { msg -> Toast.makeText(context, "Wake (KWS): $msg", Toast.LENGTH_LONG).show() },
+            )
+            holder.set(kws)
+            kws.start()
+            onDispose { kws.stop(); holder.set(null) }
         }
     }
 }
