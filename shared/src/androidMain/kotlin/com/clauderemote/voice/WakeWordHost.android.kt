@@ -1,5 +1,6 @@
 package com.clauderemote.voice
 
+import android.content.Context
 import android.widget.Toast
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -13,14 +14,19 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalLifecycleOwner
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
 import androidx.compose.ui.unit.dp
 import com.clauderemote.model.SttEngine
 import com.clauderemote.model.TtsEngine
@@ -54,6 +60,8 @@ actual fun WakeWordSettingsCard(settings: AppSettings) {
     var systemVoice by remember { mutableStateOf(settings.ttsSystemVoice) }
     var systemVoices by remember { mutableStateOf<List<String>>(emptyList()) }
     var loadingSystemVoices by remember { mutableStateOf(false) }
+    var wakeEnabled by remember { mutableStateOf(settings.wakeWordEnabled) }
+    var wakePhrase by remember { mutableStateOf(settings.wakeWord) }
 
     // Pin STT to SERVER — the legacy SYSTEM/Vosk/Whisper STT paths were
     // removed; the device recognizer can't do Czech here. TTS, however,
@@ -143,6 +151,40 @@ actual fun WakeWordSettingsCard(settings: AppSettings) {
                     onSelect = { serverModel = it; settings.sttServerModel = it },
                 )
             }
+        }
+
+        // ── Voice activation (wake word) ─────────────────────────────
+        androidx.compose.foundation.layout.Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = androidx.compose.ui.Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween,
+        ) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text("Aktivace hlasem", style = CRType.cardTitle, color = c.text)
+                Text(
+                    "Spustí dialog vyslovením fráze. Jen když je appka vepředu; " +
+                        "poslouchá přes STT server (vyžaduje nastavenou adresu).",
+                    style = CRType.bodyDim, color = c.textDim,
+                )
+            }
+            androidx.compose.material3.Switch(
+                checked = wakeEnabled,
+                onCheckedChange = { wakeEnabled = it; settings.wakeWordEnabled = it },
+            )
+        }
+        if (wakeEnabled) {
+            androidx.compose.material3.OutlinedTextField(
+                value = wakePhrase,
+                onValueChange = { wakePhrase = it; settings.wakeWord = it },
+                label = { Text("Aktivační fráze (např. claude / hej claude)") },
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth(),
+            )
+            Text(
+                "Pozor: mikrofon poslouchá průběžně (baterie/soukromí) a každou " +
+                    "větu posílá na server. Doporučeno jen pro krátké relace.",
+                style = CRType.bodyDim, color = c.textDim,
+            )
         }
 
         androidx.compose.material3.HorizontalDivider(color = c.border)
@@ -408,4 +450,73 @@ private fun PercentSlider(
             steps = steps,
         )
     }
+}
+
+@Composable
+actual fun WakeWordListener(paused: Boolean, onWake: () -> Unit) {
+    val context = LocalContext.current
+    val lifecycleOwner = LocalLifecycleOwner.current
+    val onWakeState = rememberUpdatedState(onWake)
+    val holder = remember { java.util.concurrent.atomic.AtomicReference<ServerDictation?>(null) }
+
+    var foreground by remember { mutableStateOf(true) }
+    DisposableEffect(lifecycleOwner) {
+        val obs = LifecycleEventObserver { _, event ->
+            when (event) {
+                Lifecycle.Event.ON_RESUME -> foreground = true
+                Lifecycle.Event.ON_PAUSE -> foreground = false
+                else -> {}
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(obs)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(obs) }
+    }
+
+    // Re-read opt-in + config each composition so toggling in settings takes
+    // effect when this screen recomposes.
+    val prefs = context.getSharedPreferences("claude_remote", Context.MODE_PRIVATE)
+    val enabled = prefs.getBoolean("wake_word_enabled", false)
+    val phrase = normalizeWake(
+        prefs.getString("wake_word_phrase", "claude").orEmpty().ifBlank { "claude" }
+    )
+    val cfg = sttServerConfig(context)
+    val shouldListen = enabled && !paused && foreground && cfg.url.isNotBlank() && phrase.isNotBlank()
+
+    DisposableEffect(shouldListen, cfg.url, phrase) {
+        if (!shouldListen) {
+            onDispose { }
+        } else {
+            val dictation = ServerDictation(
+                context = context.applicationContext,
+                baseUrl = cfg.url,
+                model = cfg.model,
+                apiKey = cfg.apiKey,
+                continuous = true,
+                onFinal = { text ->
+                    if (matchesWake(text, phrase)) {
+                        // Release the mic now, then open the dialog a beat
+                        // later so its recorder can grab the mic cleanly.
+                        holder.get()?.stop()
+                        android.os.Handler(android.os.Looper.getMainLooper())
+                            .postDelayed({ onWakeState.value() }, 300)
+                    }
+                },
+                onError = { /* best-effort; ignore (e.g. mic briefly busy) */ },
+            )
+            holder.set(dictation)
+            dictation.start()
+            onDispose { dictation.stop(); holder.set(null) }
+        }
+    }
+}
+
+/** Lowercase + strip diacritics so "Hej Claude" matches phrase "claude". */
+private fun normalizeWake(s: String): String =
+    java.text.Normalizer.normalize(s.lowercase(), java.text.Normalizer.Form.NFD)
+        .replace(Regex("\\p{Mn}+"), "")
+        .trim()
+
+private fun matchesWake(transcript: String, normalizedPhrase: String): Boolean {
+    if (normalizedPhrase.isBlank()) return false
+    return normalizeWake(transcript).contains(normalizedPhrase)
 }

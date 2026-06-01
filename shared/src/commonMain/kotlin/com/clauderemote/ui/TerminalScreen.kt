@@ -58,6 +58,7 @@ import com.clauderemote.session.status.RemoteSessionStatus
 import com.clauderemote.session.transcript.TranscriptEntry
 import com.clauderemote.voice.MicButton
 import com.clauderemote.voice.VoiceModeScreen
+import com.clauderemote.voice.WakeWordListener
 import com.clauderemote.ui.components.CRCard
 import com.clauderemote.ui.components.CRStatus
 import com.clauderemote.ui.components.Pill
@@ -1195,7 +1196,7 @@ fun TerminalScreen(
         }
         // Voice-mode overlay sits on top of all the regular UI. Rendered as
         // the last BoxWithConstraints child so it stacks above everything;
-        // VoiceModeScreen fills the screen with its own opaque surface.
+        // VoiceModeScreen is a bottom panel, leaving the chat visible behind.
         if (voiceModeActive) {
             VoiceModeScreen(
                 onSend = { text ->
@@ -1211,6 +1212,13 @@ fun TerminalScreen(
                 onClose = { voiceModeActive = false },
             )
         }
+
+        // Foreground-only wake word: opens the dialog hands-free when enabled
+        // in settings. Paused while the dialog is already open.
+        WakeWordListener(
+            paused = voiceModeActive,
+            onWake = { voiceModeActive = true },
+        )
     } // end BoxWithConstraints
 }
 
