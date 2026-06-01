@@ -39,6 +39,9 @@ kotlin {
                 implementation("androidx.activity:activity-compose:1.9.3")
                 implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")
                 implementation("com.github.k2-fsa:sherpa-onnx:1.13.1")
+                // On-device wake-word engine (offline; AccessKey is a license
+                // check only — no audio leaves the device).
+                implementation("ai.picovoice:porcupine-android:3.0.2")
             }
         }
         val desktopMain by getting {

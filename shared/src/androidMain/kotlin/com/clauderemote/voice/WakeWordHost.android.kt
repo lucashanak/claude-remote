@@ -67,7 +67,8 @@ actual fun WakeWordSettingsCard(settings: AppSettings) {
     var systemVoices by remember { mutableStateOf<List<String>>(emptyList()) }
     var loadingSystemVoices by remember { mutableStateOf(false) }
     var wakeEnabled by remember { mutableStateOf(settings.wakeWordEnabled) }
-    var wakePhrase by remember { mutableStateOf(settings.wakeWord) }
+    var porcupineKey by remember { mutableStateOf(settings.porcupineAccessKey) }
+    var porcupineKeyword by remember { mutableStateOf(settings.porcupineKeyword) }
     var sttEngine by remember { mutableStateOf(settings.sttEngine) }
     var sttTesting by remember { mutableStateOf(false) }
     var sttTestResult by remember { mutableStateOf("") }
@@ -262,8 +263,9 @@ actual fun WakeWordSettingsCard(settings: AppSettings) {
             Column(modifier = Modifier.weight(1f)) {
                 Text("Aktivace hlasem", style = CRType.cardTitle, color = c.text)
                 Text(
-                    "Spustí dialog vyslovením fráze. Jen když je appka vepředu; " +
-                        "poslouchá přes STT server (vyžaduje nastavenou adresu).",
+                    "Spustí dialog vyslovením klíčového slova. On-device " +
+                        "(Porcupine) — offline, zvuk nikam neodchází. Jen když " +
+                        "je appka vepředu.",
                     style = CRType.bodyDim, color = c.textDim,
                 )
             }
@@ -274,15 +276,29 @@ actual fun WakeWordSettingsCard(settings: AppSettings) {
         }
         if (wakeEnabled) {
             androidx.compose.material3.OutlinedTextField(
-                value = wakePhrase,
-                onValueChange = { wakePhrase = it; settings.wakeWord = it },
-                label = { Text("Aktivační fráze (např. claude / hej claude)") },
+                value = porcupineKey,
+                onValueChange = { porcupineKey = it; settings.porcupineAccessKey = it },
+                label = { Text("Picovoice AccessKey (zdarma z console.picovoice.ai)") },
                 singleLine = true,
+                visualTransformation = androidx.compose.ui.text.input.PasswordVisualTransformation(),
+                keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(
+                    keyboardType = androidx.compose.ui.text.input.KeyboardType.Password,
+                ),
                 modifier = Modifier.fillMaxWidth(),
             )
+            ModelDropdown(
+                label = "Klíčové slovo",
+                options = listOf(
+                    "JARVIS", "COMPUTER", "BUMBLEBEE", "PORCUPINE", "PICOVOICE",
+                    "ALEXA", "TERMINATOR", "BLUEBERRY", "GRASSHOPPER",
+                ),
+                selected = porcupineKeyword,
+                onSelect = { porcupineKeyword = it; settings.porcupineKeyword = it },
+            )
             Text(
-                "Pozor: mikrofon poslouchá průběžně (baterie/soukromí) a každou " +
-                    "větu posílá na server. Doporučeno jen pro krátké relace.",
+                "Vyslov zvolené slovo (anglicky). Vlastní „Hey Claude“ jde " +
+                    "natrénovat v Picovoice konzoli (.ppn) — řekni, doděláme. " +
+                    "Pozn.: mikrofon naslouchá průběžně (baterie), ale lokálně.",
                 style = CRType.bodyDim, color = c.textDim,
             )
         }
@@ -557,7 +573,6 @@ actual fun WakeWordListener(paused: Boolean, onWake: () -> Unit) {
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
     val onWakeState = rememberUpdatedState(onWake)
-    val holder = remember { java.util.concurrent.atomic.AtomicReference<ServerDictation?>(null) }
 
     var foreground by remember { mutableStateOf(true) }
     DisposableEffect(lifecycleOwner) {
@@ -576,63 +591,47 @@ actual fun WakeWordListener(paused: Boolean, onWake: () -> Unit) {
     // effect when this screen recomposes.
     val prefs = context.getSharedPreferences("claude_remote", Context.MODE_PRIVATE)
     val enabled = prefs.getBoolean("wake_word_enabled", false)
-    val phrase = normalizeWake(
-        prefs.getString("wake_word_phrase", "claude").orEmpty().ifBlank { "claude" }
-    )
-    val cfg = sttServerConfig(context)
-    val shouldListen = enabled && !paused && foreground && cfg.url.isNotBlank() && phrase.isNotBlank()
+    val accessKey = prefs.getString("porcupine_access_key", "").orEmpty()
+    val keywordName = prefs.getString("porcupine_keyword", "JARVIS").orEmpty().ifBlank { "JARVIS" }
+    val hasPermission = ContextCompat.checkSelfPermission(
+        context, Manifest.permission.RECORD_AUDIO
+    ) == PackageManager.PERMISSION_GRANTED
 
-    DisposableEffect(shouldListen, cfg.url, phrase) {
+    val shouldListen = enabled && !paused && foreground && accessKey.isNotBlank() && hasPermission
+
+    DisposableEffect(shouldListen, accessKey, keywordName) {
         if (!shouldListen) {
             onDispose { }
         } else {
-            val dictation = ServerDictation(
-                context = context.applicationContext,
-                baseUrl = cfg.url,
-                model = cfg.model,
-                apiKey = cfg.apiKey,
-                continuous = true,
-                onFinal = { text ->
-                    val matched = matchesWake(text, phrase)
-                    // DIAGNOSTIC: show what the wake listener heard + whether
-                    // it matched, so we can see Whisper's rendering of the
-                    // wake phrase and tune it.
-                    Toast.makeText(
-                        context,
-                        "Wake ${if (matched) "✓" else "·"}: \"$text\"",
-                        Toast.LENGTH_SHORT,
-                    ).show()
-                    if (matched) {
-                        // Release the mic now, then open the dialog a beat
-                        // later so its recorder can grab the mic cleanly.
-                        holder.get()?.stop()
-                        android.os.Handler(android.os.Looper.getMainLooper())
-                            .postDelayed({ onWakeState.value() }, 300)
+            val keyword = runCatching {
+                ai.picovoice.porcupine.Porcupine.BuiltInKeyword.valueOf(keywordName)
+            }.getOrDefault(ai.picovoice.porcupine.Porcupine.BuiltInKeyword.JARVIS)
+            // Porcupine runs fully on-device; AccessKey is a license check only.
+            val manager = runCatching {
+                ai.picovoice.porcupine.PorcupineManager.Builder()
+                    .setAccessKey(accessKey)
+                    .setKeyword(keyword)
+                    .setSensitivity(0.6f)
+                    .build(context.applicationContext) { _ ->
+                        postOnMain { onWakeState.value() }
                     }
-                },
-                onError = { msg ->
-                    // DIAGNOSTIC: surface permission / mic / server failures
-                    // instead of silently doing nothing.
-                    Toast.makeText(context, "Wake chyba: $msg", Toast.LENGTH_LONG).show()
-                },
-                onListening = {
-                    Toast.makeText(context, "Wake: poslouchám „$phrase\"…", Toast.LENGTH_SHORT).show()
-                },
-            )
-            holder.set(dictation)
-            dictation.start()
-            onDispose { dictation.stop(); holder.set(null) }
+            }.getOrElse { e ->
+                Toast.makeText(
+                    context,
+                    "Wake (Porcupine): ${e.message ?: "init selhal — zkontroluj AccessKey"}",
+                    Toast.LENGTH_LONG,
+                ).show()
+                null
+            }
+            if (manager != null) {
+                runCatching { manager.start() }.onFailure {
+                    Toast.makeText(context, "Wake: nelze spustit mikrofon", Toast.LENGTH_LONG).show()
+                }
+            }
+            onDispose {
+                runCatching { manager?.stop() }
+                runCatching { manager?.delete() }
+            }
         }
     }
-}
-
-/** Lowercase + strip diacritics so "Hej Claude" matches phrase "claude". */
-private fun normalizeWake(s: String): String =
-    java.text.Normalizer.normalize(s.lowercase(), java.text.Normalizer.Form.NFD)
-        .replace(Regex("\\p{Mn}+"), "")
-        .trim()
-
-private fun matchesWake(transcript: String, normalizedPhrase: String): Boolean {
-    if (normalizedPhrase.isBlank()) return false
-    return normalizeWake(transcript).contains(normalizedPhrase)
 }
