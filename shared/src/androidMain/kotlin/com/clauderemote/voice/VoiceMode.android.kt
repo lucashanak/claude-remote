@@ -497,6 +497,9 @@ private class DialogueController(
                     onStateChange(VoiceState.Listening)
                 }
             },
+            onPartial = { text ->
+                if (!stopped && !paused && sessionGen.get() == mySession) onPartial(text)
+            },
         )
         serverDictation = dictation
         dictation.start()

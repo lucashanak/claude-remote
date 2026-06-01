@@ -46,10 +46,16 @@ internal class ServerDictation(
     // shows "listening" only when speech will really be recorded — not while
     // AudioRecord is still warming up (which clipped the user's first word).
     private val onListening: (() -> Unit)? = null,
+    // Fired (on main) with a rolling interim transcript while the user is
+    // still speaking, so the UI can show the words progressively instead of
+    // only after end-of-utterance. Whisper is batch, so this re-transcribes
+    // the audio-so-far on a cadence — a few extra calls per utterance.
+    private val onPartial: ((String) -> Unit)? = null,
 ) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private var job: Job? = null
     @Volatile private var stopped = false
+    private val interimInFlight = java.util.concurrent.atomic.AtomicBoolean(false)
     private val http = OkHttpClient.Builder()
         .connectTimeout(15, TimeUnit.SECONDS)
         .readTimeout(60, TimeUnit.SECONDS)
@@ -110,9 +116,11 @@ internal class ServerDictation(
         var inSpeech = false
         var silenceFrames = 0
         var speechFrames = 0
+        var framesSinceInterim = 0
         val buf = ShortArray(FRAME)
         val silenceFrameLimit = (SILENCE_MS / FRAME_MS)
         val minSpeechFrames = (MIN_SPEECH_MS / FRAME_MS)
+        val interimEveryFrames = (INTERIM_MS / FRAME_MS).coerceAtLeast(1)
         try {
             recorder.startRecording()
             postOnMain { if (!stopped) onListening?.invoke() }
@@ -128,6 +136,7 @@ internal class ServerDictation(
                         // onset of the first word (often below threshold)
                         // isn't clipped.
                         inSpeech = true
+                        framesSinceInterim = 0
                         while (preRoll.isNotEmpty()) captured.write(preRoll.removeFirst())
                     }
                     silenceFrames = 0
@@ -137,10 +146,20 @@ internal class ServerDictation(
                 }
                 if (inSpeech) {
                     captured.write(frame)
+                    framesSinceInterim++
                 } else {
                     // Keep a rolling window of the most recent quiet frames.
                     preRoll.addLast(frame)
                     while (preRoll.size > preRollFrames) preRoll.removeFirst()
+                }
+
+                // Progressive transcription: while still speaking, re-transcribe
+                // the audio-so-far on a cadence and surface it as a partial.
+                if (onPartial != null && inSpeech && speechFrames >= minSpeechFrames &&
+                    framesSinceInterim >= interimEveryFrames
+                ) {
+                    framesSinceInterim = 0
+                    maybeInterim(captured.toByteArray())
                 }
 
                 val endOfUtterance = inSpeech &&
@@ -149,7 +168,7 @@ internal class ServerDictation(
                 if (endOfUtterance) {
                     val pcm = captured.toByteArray()
                     captured.reset()
-                    inSpeech = false; silenceFrames = 0; speechFrames = 0
+                    inSpeech = false; silenceFrames = 0; speechFrames = 0; framesSinceInterim = 0
                     flush(pcm)
                     if (!continuous) {
                         stopped = true
@@ -176,6 +195,22 @@ internal class ServerDictation(
             return
         }
         if (text.isNotBlank()) postOnMain { onFinal(text) }
+    }
+
+    /**
+     * Fire-and-forget interim transcription of the audio captured so far.
+     * Runs off the capture loop and skips if one is already in flight, so a
+     * slow round-trip can't stall recording or pile up requests. Errors are
+     * swallowed — interim is best-effort; the final flush is authoritative.
+     */
+    private fun maybeInterim(pcm: ByteArray) {
+        if (pcm.isEmpty()) return
+        if (!interimInFlight.compareAndSet(false, true)) return
+        scope.launch {
+            val text = runCatching { transcribe(pcm) }.getOrNull()
+            interimInFlight.set(false)
+            if (!stopped && !text.isNullOrBlank()) postOnMain { onPartial?.invoke(text) }
+        }
     }
 
     private fun transcribe(pcm: ByteArray): String {
@@ -255,6 +290,7 @@ internal class ServerDictation(
         // own voice; rely on the Whisper `prompt` + hallucination filter
         // to handle quiet-audio attractors instead of the VAD gating.
         private const val MIN_SPEECH_MS = 300
+        private const val INTERIM_MS = 900      // cadence of progressive re-transcription while speaking
         private const val RMS_THRESHOLD = 600.0
 
         private val HALLUCINATIONS = listOf(
