@@ -215,6 +215,17 @@ class AppSettings(private val prefs: PlatformPreferences) {
         get() = prefs.getString("wake_word_phrase", "claude")
         set(value) = prefs.putString("wake_word_phrase", value.trim())
 
+    // Porcupine on-device wake word (offline; access key is a license check).
+    var porcupineAccessKey: String
+        get() = prefs.getString("porcupine_access_key", "")
+        set(value) = prefs.putString("porcupine_access_key", value.trim())
+
+    // Built-in Porcupine keyword name (e.g. JARVIS, COMPUTER) — see
+    // ai.picovoice.porcupine.Porcupine.BuiltInKeyword.
+    var porcupineKeyword: String
+        get() = prefs.getString("porcupine_keyword", "JARVIS")
+        set(value) = prefs.putString("porcupine_keyword", value.trim())
+
     fun loadAppearance(): AppearanceState = AppearanceState(
         variant = crVariant,
         density = crDensity,
