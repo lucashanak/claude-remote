@@ -174,6 +174,12 @@ internal fun speakRouted(
     onError: ((String) -> Unit)? = null,
 ) {
     stopAllTts()
+    // Read the words, not the markdown syntax (*, `, #, \, …).
+    val clean = speakableFromMarkdown(text)
+    if (clean.isBlank()) {
+        onFinish()
+        return
+    }
     val rate = ttsSpeechRate(context)
     when (selectedTtsEngine(context)) {
         com.clauderemote.model.TtsEngine.SERVER -> {
@@ -182,7 +188,7 @@ internal fun speakRouted(
                 onError?.invoke("Není nastavená adresa serveru (Nastavení → Voice).")
                 onFinish()
             } else {
-                ServerTts.speak(context, cfg.url, cfg.model, cfg.voice, cfg.apiKey, text, rate, onFinish, onError)
+                ServerTts.speak(context, cfg.url, cfg.model, cfg.voice, cfg.apiKey, clean, rate, onFinish, onError)
             }
         }
         com.clauderemote.model.TtsEngine.GOOGLE_CLOUD -> {
@@ -191,11 +197,11 @@ internal fun speakRouted(
                 onError?.invoke("Chybí Google Cloud API klíč (Nastavení → Voice).")
                 onFinish()
             } else {
-                GoogleCloudTts.speak(context, cfg.apiKey, cfg.voice, text, rate, onFinish, onError)
+                GoogleCloudTts.speak(context, cfg.apiKey, cfg.voice, clean, rate, onFinish, onError)
             }
         }
         com.clauderemote.model.TtsEngine.SYSTEM -> {
-            TtsHolder.speak(context, text, onFinish, onError)
+            TtsHolder.speak(context, clean, onFinish, onError)
         }
     }
 }
