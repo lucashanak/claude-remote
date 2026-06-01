@@ -493,7 +493,16 @@ actual fun WakeWordListener(paused: Boolean, onWake: () -> Unit) {
                 apiKey = cfg.apiKey,
                 continuous = true,
                 onFinal = { text ->
-                    if (matchesWake(text, phrase)) {
+                    val matched = matchesWake(text, phrase)
+                    // DIAGNOSTIC: show what the wake listener heard + whether
+                    // it matched, so we can see Whisper's rendering of the
+                    // wake phrase and tune it.
+                    Toast.makeText(
+                        context,
+                        "Wake ${if (matched) "✓" else "·"}: \"$text\"",
+                        Toast.LENGTH_SHORT,
+                    ).show()
+                    if (matched) {
                         // Release the mic now, then open the dialog a beat
                         // later so its recorder can grab the mic cleanly.
                         holder.get()?.stop()
@@ -501,7 +510,14 @@ actual fun WakeWordListener(paused: Boolean, onWake: () -> Unit) {
                             .postDelayed({ onWakeState.value() }, 300)
                     }
                 },
-                onError = { /* best-effort; ignore (e.g. mic briefly busy) */ },
+                onError = { msg ->
+                    // DIAGNOSTIC: surface permission / mic / server failures
+                    // instead of silently doing nothing.
+                    Toast.makeText(context, "Wake chyba: $msg", Toast.LENGTH_LONG).show()
+                },
+                onListening = {
+                    Toast.makeText(context, "Wake: poslouchám „$phrase\"…", Toast.LENGTH_SHORT).show()
+                },
             )
             holder.set(dictation)
             dictation.start()
