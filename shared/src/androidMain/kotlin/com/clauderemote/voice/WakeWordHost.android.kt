@@ -15,7 +15,6 @@ import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -62,13 +61,7 @@ actual fun WakeWordSettingsCard(settings: AppSettings) {
     var loadingSystemVoices by remember { mutableStateOf(false) }
     var wakeEnabled by remember { mutableStateOf(settings.wakeWordEnabled) }
     var wakePhrase by remember { mutableStateOf(settings.wakeWord) }
-
-    // Pin STT to SERVER — the legacy SYSTEM/Vosk/Whisper STT paths were
-    // removed; the device recognizer can't do Czech here. TTS, however,
-    // now offers a real choice (on-device Google / server / Google Cloud).
-    LaunchedEffect(Unit) {
-        if (settings.sttEngine != SttEngine.SERVER) settings.sttEngine = SttEngine.SERVER
-    }
+    var sttEngine by remember { mutableStateOf(settings.sttEngine) }
 
     Column(
         modifier = Modifier
@@ -79,13 +72,27 @@ actual fun WakeWordSettingsCard(settings: AppSettings) {
             .padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
-        // ── STT (Server) ─────────────────────────────────────────────
-        Text("Rozpoznávání řeči — Server", style = CRType.cardTitle, color = c.text)
-        Text(
-            "OpenAI-kompatibilní endpoint (např. Open WebUI / Speaches / " +
-                "faster-whisper-server).",
-            style = CRType.bodyDim, color = c.textDim,
+        // ── STT (engine picker) ──────────────────────────────────────
+        Text("Rozpoznávání řeči (STT)", style = CRType.cardTitle, color = c.text)
+        ModelDropdown(
+            label = "Engine",
+            options = listOf(SttEngine.SYSTEM.displayName, SttEngine.SERVER.displayName),
+            selected = sttEngine.displayName,
+            onSelect = { name ->
+                val picked = if (name == SttEngine.SYSTEM.displayName) SttEngine.SYSTEM else SttEngine.SERVER
+                sttEngine = picked; settings.sttEngine = picked
+            },
         )
+        if (sttEngine == SttEngine.SYSTEM) {
+            Text(
+                "Google rozpoznávání přes Android. Na zařízeních bez české " +
+                    "podpory v systému (např. HyperOS) se použije systémový " +
+                    "Google hlasový dialog — stejný, co jede v Gboardu.",
+                style = CRType.bodyDim, color = c.textDim,
+            )
+        }
+
+        // Server — sdílené pro STT / TTS / aktivaci. URL + klíč vždy viditelné.
         androidx.compose.material3.OutlinedTextField(
             value = serverUrl,
             onValueChange = {
@@ -108,48 +115,49 @@ actual fun WakeWordSettingsCard(settings: AppSettings) {
             ),
             modifier = Modifier.fillMaxWidth(),
         )
-        androidx.compose.material3.OutlinedTextField(
-            value = serverModel,
-            onValueChange = { serverModel = it; settings.sttServerModel = it },
-            label = { Text("STT model") },
-            singleLine = true,
-            modifier = Modifier.fillMaxWidth(),
-        )
-
-        if (serverUrl.isNotBlank()) {
-            Button(
-                onClick = {
-                    loadingCatalog = true
-                    scope.launch {
-                        try {
-                            val result = ServerCatalog.fetchModels(serverUrl, settings.sttServerApiKey)
-                            catalog = result
-                            if (result.isEmpty()) {
-                                Toast.makeText(context, "Server vrátil prázdný seznam modelů.", Toast.LENGTH_LONG).show()
+        if (sttEngine == SttEngine.SERVER) {
+            androidx.compose.material3.OutlinedTextField(
+                value = serverModel,
+                onValueChange = { serverModel = it; settings.sttServerModel = it },
+                label = { Text("STT model") },
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth(),
+            )
+            if (serverUrl.isNotBlank()) {
+                Button(
+                    onClick = {
+                        loadingCatalog = true
+                        scope.launch {
+                            try {
+                                val result = ServerCatalog.fetchModels(serverUrl, settings.sttServerApiKey)
+                                catalog = result
+                                if (result.isEmpty()) {
+                                    Toast.makeText(context, "Server vrátil prázdný seznam modelů.", Toast.LENGTH_LONG).show()
+                                }
+                            } catch (e: Throwable) {
+                                Toast.makeText(context, "Modely: ${e.message ?: "neznámá chyba"}", Toast.LENGTH_LONG).show()
+                            } finally {
+                                loadingCatalog = false
                             }
-                        } catch (e: Throwable) {
-                            Toast.makeText(context, "Modely: ${e.message ?: "neznámá chyba"}", Toast.LENGTH_LONG).show()
-                        } finally {
-                            loadingCatalog = false
                         }
-                    }
-                },
-                enabled = !loadingCatalog,
-                colors = ButtonDefaults.buttonColors(containerColor = c.accent, contentColor = c.accentInk),
-            ) {
-                Text(
-                    if (loadingCatalog) "Načítám…"
-                    else if (catalog.isEmpty()) "Načíst modely ze serveru"
-                    else "Obnovit modely (${catalog.size})"
-                )
-            }
-            if (catalog.isNotEmpty()) {
-                ModelDropdown(
-                    label = "STT model",
-                    options = catalog.filter { ServerCatalog.isStt(it) }.map { it.id },
-                    selected = serverModel,
-                    onSelect = { serverModel = it; settings.sttServerModel = it },
-                )
+                    },
+                    enabled = !loadingCatalog,
+                    colors = ButtonDefaults.buttonColors(containerColor = c.accent, contentColor = c.accentInk),
+                ) {
+                    Text(
+                        if (loadingCatalog) "Načítám…"
+                        else if (catalog.isEmpty()) "Načíst modely ze serveru"
+                        else "Obnovit modely (${catalog.size})"
+                    )
+                }
+                if (catalog.isNotEmpty()) {
+                    ModelDropdown(
+                        label = "STT model",
+                        options = catalog.filter { ServerCatalog.isStt(it) }.map { it.id },
+                        selected = serverModel,
+                        onSelect = { serverModel = it; settings.sttServerModel = it },
+                    )
+                }
             }
         }
 
