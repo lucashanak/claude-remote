@@ -188,12 +188,22 @@ fun TranscriptView(
     }
     val effectiveActivity = when {
         activity == SessionActivity.DISCONNECTED -> SessionActivity.DISCONNECTED
-        working -> SessionActivity.WORKING
+        // A permission / AskUserQuestion selector detected on the LIVE screen is
+        // the single most reliable "Claude is blocked waiting for YOU" signal, so
+        // it must win over the transcript-derived `working` guess. During a
+        // pending AskUserQuestion the tool_use line isn't flushed to the .jsonl
+        // until it's answered (see TranscriptParser) — so the pre-question
+        // assistant text is the last transcript entry and sits after the last
+        // stop marker, making transcriptWorking read true. Without this branch
+        // first, "Claude is working…" sticks while Claude is actually awaiting
+        // the answer.
         activity == SessionActivity.APPROVAL_NEEDED -> SessionActivity.APPROVAL_NEEDED
+        working -> SessionActivity.WORKING
         else -> SessionActivity.WAITING_FOR_INPUT
     }
 
     val skeletonShowing = effectiveActivity == SessionActivity.WORKING
+    val awaitingShowing = effectiveActivity == SessionActivity.APPROVAL_NEEDED
 
     Column(modifier = modifier) {
         StatusBar(
@@ -259,7 +269,7 @@ fun TranscriptView(
         // Pre-group consecutive ToolCalls so a run of Read/Edit/Bash collapses
         // to one tight stack instead of N bordered cards.
         val rendered = remember(filtered) { groupConsecutiveTools(filtered) }
-        val itemsCount = rendered.size + if (skeletonShowing) 1 else 0
+        val itemsCount = rendered.size + if (skeletonShowing || awaitingShowing) 1 else 0
 
         // Stickiness is decided by user scroll gestures, not by snapshotting
         // layoutInfo at the moment a content effect fires. Previous logic
@@ -396,6 +406,13 @@ fun TranscriptView(
                     }
                     if (effectiveActivity == SessionActivity.WORKING) {
                         item(key = "__working_skeleton__") { WorkingSkeletonCard() }
+                    } else if (effectiveActivity == SessionActivity.APPROVAL_NEEDED) {
+                        // Claude is showing a permission / AskUserQuestion selector
+                        // on the live screen. The tool_use isn't flushed to the
+                        // transcript until it's answered, so we can't render the
+                        // real question card yet — surface a banner instead of
+                        // leaving the chat looking idle (or stuck "working…").
+                        item(key = "__awaiting_answer__") { AwaitingAnswerCard() }
                     }
                 }
             }
@@ -1378,6 +1395,58 @@ private fun WorkingSkeletonCard() {
                 style = CRType.mono,
                 color = c.textDim.copy(alpha = alpha)
             )
+        }
+    }
+}
+
+/**
+ * Bottom-of-chat banner shown while a permission / AskUserQuestion selector is
+ * live on screen. Claude Code does not flush the AskUserQuestion tool_use to the
+ * .jsonl until the user answers, so the real question card can't render yet —
+ * this tells the user Claude is blocked on them and where to answer, instead of
+ * the chat looking idle or (before the effectiveActivity fix) stuck "working…".
+ */
+@Composable
+private fun AwaitingAnswerCard() {
+    val c = CRTheme.colors
+    val m = CRTheme.metrics
+    val t = rememberInfiniteTransition(label = "awaiting")
+    val alpha by t.animateFloat(
+        initialValue = 0.4f,
+        targetValue = 1f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(800),
+            repeatMode = RepeatMode.Reverse
+        ),
+        label = "awaiting-alpha"
+    )
+    CRCard(
+        background = c.surface,
+        borderColor = c.approval,
+        padding = PaddingValues(horizontal = m.cardPadH, vertical = m.cardPadV)
+    ) {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            Box(
+                modifier = Modifier
+                    .size(8.dp)
+                    .alpha(alpha)
+                    .background(c.approval, CircleShape)
+            )
+            Column {
+                Text(
+                    "Claude is asking you a question",
+                    style = CRType.mono,
+                    color = c.approval
+                )
+                Text(
+                    "Open the terminal view to answer",
+                    style = CRType.bodyDim,
+                    color = c.textDim
+                )
+            }
         }
     }
 }
