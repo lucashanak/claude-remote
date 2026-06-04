@@ -34,9 +34,12 @@ class InputPromptDetector(
 
     /**
      * Sessions whose idle detection is handled by the Claude Code `Stop` hook
-     * watcher. For these sessions, quiescence-based screen-state checks are
-     * skipped — the hook fires a shell command the moment Claude finishes,
-     * which is faster and more reliable than polling the rendered terminal.
+     * watcher. The hook fires a shell command the moment Claude finishes a
+     * turn — faster and more reliable than polling the rendered terminal — so
+     * for these sessions the screen-state check runs in APPROVAL-ONLY mode:
+     * WORKING/IDLE classifications are dropped (the hook owns them) and only
+     * an on-screen selector (APPROVAL) is acted on, because a mid-turn
+     * AskUserQuestion / permission prompt never triggers the Stop hook.
      */
     private val hookActiveSessions = mutableSetOf<String>()
 
@@ -75,8 +78,13 @@ class InputPromptDetector(
     fun onOutput(sessionId: String, text: String) {
         feedRecentOutput(sessionId, text)
 
-        // Hook-based detection is authoritative — skip screen-state polling.
-        if (sessionId in hookActiveSessions) return
+        // Hook-active sessions still run the quiescence screen check, but in
+        // APPROVAL-ONLY mode (see runIdleCheck). The Stop hook is authoritative
+        // for end-of-turn (idle), but it CANNOT see a pending AskUserQuestion /
+        // permission selector — those block MID-turn, the hook never fires, and
+        // the old unconditional skip here meant APPROVAL_NEEDED was never
+        // emitted for hook-active sessions: the chat stayed "Claude is
+        // working…" while Claude sat waiting for an answer.
         if (currentTimeMillis() < suppressUntil) return
 
         val state = sessionStates.getOrPut(sessionId) { SessionState() }
@@ -93,6 +101,14 @@ class InputPromptDetector(
         val state = sessionStates[sessionId] ?: return
         val snapshot = screenReader?.invoke(sessionId) ?: return
         val classified = ScreenStateClassifier.classify(snapshot)
+
+        // Approval-only mode for hook-active sessions: the hook + statusline own
+        // WORKING/IDLE (screen-based idle is the flappy signal the hook replaced),
+        // so the screen check contributes ONLY the one state they can't see — a
+        // selector awaiting the user. APPROVAL never gets stuck from here: a
+        // working statusline overrides it (orchestrator FIX 3 allows WORKING
+        // over APPROVAL) and the Stop hook forces WAITING at end of turn.
+        if (sessionId in hookActiveSessions && classified != ClaudeState.APPROVAL) return
 
         onStateChange?.invoke(sessionId, classified)
 
