@@ -289,8 +289,12 @@ fun TranscriptView(
         // Read the map in composition (snapshot-tracked) so toggling a turn
         // recomposes; the plain copy doubles as a stable remember key.
         val expandedSnapshot = expandedTurns.toMap()
-        val rendered = remember(filtered, turnMeta, expandedSnapshot) {
-            buildRenderList(filtered, turnMeta) { key -> expandedSnapshot[key] == true }
+        // Frame the live turn's answer only once the stop marker confirms the
+        // turn is over (transcriptWorking == false); while working — or with
+        // no marker info at all — leave it flat to avoid frame flicker.
+        val liveTurnDone = transcriptWorking == false
+        val rendered = remember(filtered, turnMeta, expandedSnapshot, liveTurnDone) {
+            buildRenderList(filtered, turnMeta, liveTurnDone) { key -> expandedSnapshot[key] == true }
         }
         val itemsCount = rendered.size + if (skeletonShowing || awaitingShowing) 1 else 0
 
@@ -549,7 +553,8 @@ fun TranscriptView(
                                     is RenderItem.Single -> when (val e = item.entry) {
                                         is TranscriptEntry.UserPrompt -> UserPromptCard(e)
                                         is TranscriptEntry.SlashCommand -> SlashCommandRow(e)
-                                        is TranscriptEntry.AssistantText -> AssistantTextCard(e)
+                                        is TranscriptEntry.AssistantText ->
+                                            AssistantTextCard(e, framed = item.isFinalAnswer)
                                         is TranscriptEntry.AssistantThinking -> ThinkingCard(e)
                                         is TranscriptEntry.ToolCall -> when (e.name) {
                                             "AskUserQuestion" ->
@@ -780,11 +785,11 @@ private fun UserPromptCard(entry: TranscriptEntry.UserPrompt) {
         Column(
             modifier = Modifier
                 .widthIn(max = 600.dp)
-                // Fill only, no border — bubble shape + right alignment already
-                // say "user"; borders are reserved for needs-attention states
-                // (errors, questions). Tint slightly stronger than the bordered
-                // version so the bubble doesn't wash out on the dark bg.
-                .background(c.accent.copy(alpha = 0.22f), RoundedCornerShape(topStart = 14.dp, topEnd = 14.dp, bottomStart = 14.dp, bottomEnd = 4.dp))
+                // Bordered on purpose: prompts and final answers are the TURN
+                // ANCHORS the eye scans for — they get frames, the working
+                // middle stays flat (user feedback after trying fill-only).
+                .background(c.tintAccent, RoundedCornerShape(topStart = 14.dp, topEnd = 14.dp, bottomStart = 14.dp, bottomEnd = 4.dp))
+                .border(1.dp, c.accent.copy(alpha = 0.35f), RoundedCornerShape(topStart = 14.dp, topEnd = 14.dp, bottomStart = 14.dp, bottomEnd = 4.dp))
                 .padding(horizontal = m.cardPadH, vertical = m.cardPadV)
         ) {
             Row(
@@ -856,15 +861,28 @@ private fun SlashCommandRow(entry: TranscriptEntry.SlashCommand) {
 }
 
 /**
- * Assistant text is the primary content of the chat — render it flat (no
- * card chrome, no role pill). Metadata (model · time, copy, speaker) sits in
- * a single quiet hairline row under the body so it's available but doesn't
- * compete with the content.
+ * Assistant text. Intermediate messages render flat (no chrome) — they're
+ * part of the working middle. The turn's FINAL answer ([framed] = true) gets
+ * a card frame: together with the user bubble it forms the pair of turn
+ * anchors the eye scans for. Metadata (model · time, copy, speaker) sits in
+ * a quiet hairline row under the body either way.
  */
 @Composable
-private fun AssistantTextCard(entry: TranscriptEntry.AssistantText) {
+private fun AssistantTextCard(
+    entry: TranscriptEntry.AssistantText,
+    framed: Boolean = false,
+) {
     val c = CRTheme.colors
-    Column(modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp)) {
+    val m = CRTheme.metrics
+    val frameModifier = if (framed) {
+        Modifier
+            .background(c.surface2, RoundedCornerShape(m.cardRadius))
+            .border(1.dp, c.border, RoundedCornerShape(m.cardRadius))
+            .padding(horizontal = m.cardPadH, vertical = m.cardPadV)
+    } else {
+        Modifier.padding(vertical = 2.dp)
+    }
+    Column(modifier = Modifier.fillMaxWidth().then(frameModifier)) {
         RichBody(entry.text)
         Row(
             verticalAlignment = Alignment.CenterVertically,
@@ -1597,7 +1615,11 @@ private fun ToolGroupBlock(
 }
 
 private sealed class RenderItem {
-    data class Single(val entry: TranscriptEntry) : RenderItem()
+    data class Single(
+        val entry: TranscriptEntry,
+        /** True for a turn's final assistant answer — rendered with a frame. */
+        val isFinalAnswer: Boolean = false,
+    ) : RenderItem()
     data class ToolGroup(val calls: List<TranscriptEntry.ToolCall>) : RenderItem()
     data class TurnSteps(
         val turnKey: String,
@@ -1668,6 +1690,7 @@ private fun computeTurnMeta(entries: List<TranscriptEntry>): Map<String, TurnMet
 private fun buildRenderList(
     filtered: List<TranscriptEntry>,
     meta: Map<String, TurnMeta>,
+    liveTurnDone: Boolean,
     isExpanded: (String) -> Boolean,
 ): List<RenderItem> {
     val anchors = filtered.indices.filter {
@@ -1683,22 +1706,20 @@ private fun buildRenderList(
         val body = filtered.subList(start + 1, end)
         out += RenderItem.Single(prompt)
         if (ai == anchors.size - 1) {
-            // Live turn — never collapsed.
-            out += groupConsecutiveTools(body)
+            // Live turn — never collapsed. Frame the trailing answer only once
+            // the turn is complete (stop marker seen), so the frame doesn't
+            // flicker on and off while Claude streams tools after a text block.
+            val fIdx = if (liveTurnDone) finalAnswerIndex(body) else -1
+            if (fIdx >= 0) {
+                out += groupConsecutiveTools(body.subList(0, fIdx))
+                out += RenderItem.Single(body[fIdx], isFinalAnswer = true)
+                for (t in body.subList(fIdx + 1, body.size)) out += RenderItem.Single(t)
+            } else {
+                out += groupConsecutiveTools(body)
+            }
             continue
         }
-        // Final answer = the last AssistantText followed only by system notes.
-        // With showSystem on, turn_duration/stop_hook_summary notes trail the
-        // answer in the filtered body — skipping them keeps the answer visible
-        // outside the collapse. Any other entry kind after the text means the
-        // turn has no final answer (e.g. it ended in a tool call).
-        var finalIdx = -1
-        for (i in body.indices.reversed()) {
-            val e = body[i]
-            if (e is TranscriptEntry.SystemNote) continue
-            if (e is TranscriptEntry.AssistantText) finalIdx = i
-            break
-        }
+        val finalIdx = finalAnswerIndex(body)
         val final = if (finalIdx >= 0) body[finalIdx] else null
         val middle = if (finalIdx >= 0) body.subList(0, finalIdx) else body
         val trailing = if (finalIdx >= 0) body.subList(finalIdx + 1, body.size) else emptyList()
@@ -1716,10 +1737,25 @@ private fun buildRenderList(
             )
             if (expanded) out += groupConsecutiveTools(middle)
         }
-        if (final != null) out += RenderItem.Single(final)
+        if (final != null) out += RenderItem.Single(final, isFinalAnswer = true)
         for (t in trailing) out += RenderItem.Single(t)
     }
     return insertTimeGaps(out)
+}
+
+/**
+ * Index of the turn's final answer: the last AssistantText followed only by
+ * system notes (turn_duration / stop_hook_summary trail the answer when
+ * system notes are shown). -1 when the turn ends in anything else (e.g. a
+ * tool call) — then there is no final answer.
+ */
+private fun finalAnswerIndex(body: List<TranscriptEntry>): Int {
+    for (i in body.indices.reversed()) {
+        val e = body[i]
+        if (e is TranscriptEntry.SystemNote) continue
+        return if (e is TranscriptEntry.AssistantText) i else -1
+    }
+    return -1
 }
 
 /** Minimum quiet period between two entries that earns a visual separator. */
