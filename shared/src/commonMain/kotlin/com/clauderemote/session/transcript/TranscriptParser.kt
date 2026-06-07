@@ -318,9 +318,10 @@ object TranscriptParser {
         // turn_duration has neither content nor stopReason (only durationMs);
         // emitting a SystemNote with an empty body produced hundreds of blank
         // rows when the user toggled system notes on.
+        val durationMs = obj["durationMs"]?.jsonPrimitive?.longOrNull
         val raw = obj["content"]?.jsonPrimitive?.contentOrNull
             ?: obj["stopReason"]?.jsonPrimitive?.contentOrNull
-            ?: obj["durationMs"]?.jsonPrimitive?.contentOrNull?.let { "turn took $it ms" }
+            ?: durationMs?.let { "turn took $it ms" }
             ?: ""
         val text = raw.trim()
         // stop_hook_summary marks the end of a turn (Claude stopped). Its body is
@@ -346,7 +347,8 @@ object TranscriptParser {
             id = uuid,
             timestamp = ts,
             subtype = subtype,
-            text = text
+            text = text,
+            durationMs = durationMs
         )
     }
 

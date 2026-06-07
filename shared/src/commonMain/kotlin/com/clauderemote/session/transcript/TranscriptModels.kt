@@ -58,6 +58,8 @@ sealed class TranscriptEntry {
         override val id: String,
         override val timestamp: String?,
         val subtype: String,
-        val text: String
+        val text: String,
+        /** Structured turn duration for `turn_duration` notes (ms), else null. */
+        val durationMs: Long? = null
     ) : TranscriptEntry()
 }
