@@ -311,6 +311,7 @@ fun TranscriptView(
                         for (call in item.calls) put(call.id, k)
                     }
                     is RenderItem.TurnSteps -> {}
+                    is RenderItem.TimeGap -> {}
                 }
             }
         }
@@ -487,7 +488,7 @@ fun TranscriptView(
         }
         val currentMatchKey =
             if (searchOpen && searchMatches.isNotEmpty())
-                keyByEntryId[searchMatches.getOrNull(searchPos)]
+                searchMatches.getOrNull(searchPos)?.let { keyByEntryId[it] }
             else null
 
         if (searchOpen) {
@@ -540,11 +541,15 @@ fun TranscriptView(
                                         is TranscriptEntry.SlashCommand -> SlashCommandRow(e)
                                         is TranscriptEntry.AssistantText -> AssistantTextCard(e)
                                         is TranscriptEntry.AssistantThinking -> ThinkingCard(e)
-                                        is TranscriptEntry.ToolCall ->
-                                            if (e.name == "AskUserQuestion")
+                                        is TranscriptEntry.ToolCall -> when (e.name) {
+                                            "AskUserQuestion" ->
                                                 AskUserQuestionCard(e, resultsByToolId[e.toolUseId])
-                                            else
-                                                ToolRow(e, resultsByToolId[e.toolUseId])
+                                            "TodoWrite" ->
+                                                TodoChecklistCard(e, resultsByToolId[e.toolUseId])
+                                            "Task", "Agent" ->
+                                                AgentCard(e, resultsByToolId[e.toolUseId])
+                                            else -> ToolRow(e, resultsByToolId[e.toolUseId])
+                                        }
                                         is TranscriptEntry.ToolResult -> ToolResultCard(e)
                                         is TranscriptEntry.SystemNote -> SystemNoteRow(e)
                                     }
@@ -553,6 +558,7 @@ fun TranscriptView(
                                         expandedTurns[item.turnKey] =
                                             !(expandedTurns[item.turnKey] ?: false)
                                     }
+                                    is RenderItem.TimeGap -> TimeGapRow(item.label)
                                 }
                             }
                         }
@@ -694,6 +700,7 @@ private fun itemKey(item: RenderItem): String = when (item) {
     is RenderItem.Single -> "s:" + item.entry.id
     is RenderItem.ToolGroup -> "tg:" + item.calls.first().id
     is RenderItem.TurnSteps -> "ts:" + item.turnKey
+    is RenderItem.TimeGap -> item.key
 }
 
 private fun entryMatchesQuery(e: TranscriptEntry, q: String): Boolean = when (e) {
@@ -788,7 +795,26 @@ private fun UserPromptCard(entry: TranscriptEntry.UserPrompt) {
                 }
             }
             Spacer(Modifier.height(4.dp))
-            RichBody(entry.text, textAlign = androidx.compose.ui.text.style.TextAlign.End)
+            // Long pasted prompts (logs, stack traces) collapse to the first
+            // 10 lines so they don't dominate the conversation.
+            val lines = remember(entry.text) { entry.text.lines() }
+            val collapsible = lines.size > 12
+            var promptExpanded by rememberSaveable(entry.id) { mutableStateOf(false) }
+            val shown = if (collapsible && !promptExpanded)
+                lines.take(10).joinToString("\n")
+            else entry.text
+            RichBody(shown, textAlign = androidx.compose.ui.text.style.TextAlign.End)
+            if (collapsible) {
+                Text(
+                    if (promptExpanded) "▲ show less" else "▼ show all (${lines.size} lines)",
+                    style = CRType.monoTiny,
+                    color = c.accent,
+                    modifier = Modifier
+                        .align(Alignment.End)
+                        .clickable { promptExpanded = !promptExpanded }
+                        .padding(top = 2.dp)
+                )
+            }
         }
     }
 }
@@ -1324,6 +1350,141 @@ private fun IndentedMono(text: String, error: Boolean = false) {
  * a still-running call as a pulsing dot. Tap toggles the full row list.
  * Collapsed by default — the group is working noise, not content.
  */
+private data class TodoLine(val content: String, val status: String)
+
+/** Parse a TodoWrite input `{"todos":[{"content","status",…}]}`; empty on mismatch. */
+private fun parseTodoInput(json: String): List<TodoLine> {
+    if (json.isBlank()) return emptyList()
+    return try {
+        val obj = kotlinx.serialization.json.Json
+            .parseToJsonElement(json) as? kotlinx.serialization.json.JsonObject ?: return emptyList()
+        val arr = obj["todos"] as? kotlinx.serialization.json.JsonArray ?: return emptyList()
+        arr.mapNotNull { t ->
+            val to = t as? kotlinx.serialization.json.JsonObject ?: return@mapNotNull null
+            val content = (to["content"] as? kotlinx.serialization.json.JsonPrimitive)?.content
+                ?: (to["subject"] as? kotlinx.serialization.json.JsonPrimitive)?.content
+                ?: return@mapNotNull null
+            val status = (to["status"] as? kotlinx.serialization.json.JsonPrimitive)?.content ?: "pending"
+            TodoLine(content, status)
+        }
+    } catch (_: Throwable) {
+        emptyList()
+    }
+}
+
+/**
+ * TodoWrite rendered as an actual checklist (☐ / ◐ / ☑) instead of a generic
+ * tool row — the plan is content, not plumbing. Falls back to the generic row
+ * when the input doesn't parse.
+ */
+@Composable
+private fun TodoChecklistCard(
+    entry: TranscriptEntry.ToolCall,
+    result: TranscriptEntry.ToolResult?,
+) {
+    val c = CRTheme.colors
+    val todos = remember(entry.fullInput) { parseTodoInput(entry.fullInput) }
+    if (todos.isEmpty()) {
+        ToolRow(entry, result)
+        return
+    }
+    val done = todos.count { it.status == "completed" }
+    Column(modifier = Modifier.fillMaxWidth().padding(start = 4.dp, top = 2.dp, bottom = 2.dp)) {
+        Text(
+            "todos · $done/${todos.size} done",
+            style = CRType.monoTiny,
+            color = c.textDim
+        )
+        Spacer(Modifier.height(2.dp))
+        todos.forEach { t ->
+            val (glyph, glyphColor) = when (t.status) {
+                "completed" -> "☑" to c.ready
+                "in_progress" -> "◐" to c.working
+                else -> "☐" to c.textDim
+            }
+            Row(verticalAlignment = Alignment.Top) {
+                Text(glyph, style = CRType.mono, color = glyphColor, modifier = Modifier.padding(end = 6.dp))
+                Text(
+                    t.content,
+                    style = if (t.status == "completed")
+                        CRType.mono.copy(textDecoration = androidx.compose.ui.text.style.TextDecoration.LineThrough)
+                    else CRType.mono,
+                    color = when (t.status) {
+                        "completed" -> c.textDim
+                        "in_progress" -> c.text
+                        else -> c.textDim
+                    }
+                )
+            }
+        }
+    }
+}
+
+/**
+ * Prominent card for a subagent launch (Task/Agent tool): the description is
+ * the headline, with a running pulse until the result lands and a short tail
+ * of the agent's final report once it does. Tap for full input/result detail.
+ */
+@Composable
+private fun AgentCard(
+    entry: TranscriptEntry.ToolCall,
+    result: TranscriptEntry.ToolResult?,
+) {
+    val c = CRTheme.colors
+    val m = CRTheme.metrics
+    var expanded by rememberSaveable(entry.id) { mutableStateOf(false) }
+    val running = result == null
+    val accent = if (result?.isError == true) c.disconnected else c.modePlan
+    CRCard(
+        background = c.surface,
+        borderColor = accent.copy(alpha = 0.4f),
+        padding = PaddingValues(horizontal = m.cardPadH, vertical = 6.dp)
+    ) {
+        Column {
+            Row(
+                modifier = Modifier.fillMaxWidth().clickable { expanded = !expanded },
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Pill(
+                    text = "AGENT",
+                    background = accent.copy(alpha = 0.18f),
+                    foreground = accent
+                )
+                Spacer(Modifier.width(6.dp))
+                Text(
+                    entry.inputSummary.ifBlank { entry.name },
+                    style = CRType.cardTitle,
+                    color = c.text,
+                    maxLines = 2,
+                    modifier = Modifier.weight(1f)
+                )
+                if (running) {
+                    PendingDot(modifier = Modifier.padding(start = 4.dp))
+                } else if (result.isError) {
+                    Text("!", style = CRType.monoTiny, color = c.disconnected, modifier = Modifier.padding(start = 4.dp))
+                }
+            }
+            if (running) {
+                Text("running…", style = CRType.monoTiny, color = c.textDim, modifier = Modifier.padding(top = 2.dp))
+            } else if (!expanded) {
+                val tail = result.text.lines().takeLast(2).joinToString("\n").trim()
+                if (tail.isNotBlank()) {
+                    Text(
+                        tail,
+                        style = CRType.monoTiny,
+                        color = c.textDim,
+                        maxLines = 2,
+                        modifier = Modifier.padding(top = 2.dp)
+                    )
+                }
+            }
+            if (expanded) {
+                ToolExpandedDetail(entry, result)
+            }
+        }
+    }
+}
+
 @Composable
 private fun ToolGroupBlock(
     calls: List<TranscriptEntry.ToolCall>,
@@ -1405,6 +1566,7 @@ private sealed class RenderItem {
         val durationMs: Long?,
         val expanded: Boolean,
     ) : RenderItem()
+    data class TimeGap(val key: String, val label: String) : RenderItem()
 }
 
 private data class TurnMeta(val steps: Int, val durationMs: Long?)
@@ -1472,7 +1634,7 @@ private fun buildRenderList(
     val anchors = filtered.indices.filter {
         filtered[it] is TranscriptEntry.UserPrompt || filtered[it] is TranscriptEntry.SlashCommand
     }
-    if (anchors.isEmpty()) return groupConsecutiveTools(filtered)
+    if (anchors.isEmpty()) return insertTimeGaps(groupConsecutiveTools(filtered))
     val out = ArrayList<RenderItem>(filtered.size)
     // Pre-anchor prefix (post-compaction summary etc.) renders as-is.
     out += groupConsecutiveTools(filtered.subList(0, anchors.first()))
@@ -1486,8 +1648,21 @@ private fun buildRenderList(
             out += groupConsecutiveTools(body)
             continue
         }
-        val final = body.lastOrNull() as? TranscriptEntry.AssistantText
-        val middle = if (final != null) body.subList(0, body.size - 1) else body
+        // Final answer = the last AssistantText followed only by system notes.
+        // With showSystem on, turn_duration/stop_hook_summary notes trail the
+        // answer in the filtered body — skipping them keeps the answer visible
+        // outside the collapse. Any other entry kind after the text means the
+        // turn has no final answer (e.g. it ended in a tool call).
+        var finalIdx = -1
+        for (i in body.indices.reversed()) {
+            val e = body[i]
+            if (e is TranscriptEntry.SystemNote) continue
+            if (e is TranscriptEntry.AssistantText) finalIdx = i
+            break
+        }
+        val final = if (finalIdx >= 0) body[finalIdx] else null
+        val middle = if (finalIdx >= 0) body.subList(0, finalIdx) else body
+        val trailing = if (finalIdx >= 0) body.subList(finalIdx + 1, body.size) else emptyList()
         if (middle.isNotEmpty()) {
             val key = prompt.id
             val m = meta[key]
@@ -1503,8 +1678,83 @@ private fun buildRenderList(
             if (expanded) out += groupConsecutiveTools(middle)
         }
         if (final != null) out += RenderItem.Single(final)
+        for (t in trailing) out += RenderItem.Single(t)
+    }
+    return insertTimeGaps(out)
+}
+
+/** Minimum quiet period between two entries that earns a visual separator. */
+private const val TIME_GAP_MINUTES = 30L
+
+/**
+ * Insert a thin `── 14:32 ──` separator wherever two adjacent items are more
+ * than [TIME_GAP_MINUTES] apart — an anchor for "I came back hours later".
+ */
+private fun insertTimeGaps(items: List<RenderItem>): List<RenderItem> {
+    if (items.size < 2) return items
+    val out = ArrayList<RenderItem>(items.size + 4)
+    var prev: Long? = null
+    items.forEachIndexed { i, item ->
+        val ts = itemTimestamp(item)
+        val cur = isoToEpochMinutes(ts)
+        if (prev != null && cur != null && cur - prev!! >= TIME_GAP_MINUTES) {
+            out += RenderItem.TimeGap(key = "gap:$i:$ts", label = formatTimestamp(ts!!).take(5))
+        }
+        if (cur != null) prev = cur
+        out += item
     }
     return out
+}
+
+private fun itemTimestamp(item: RenderItem): String? = when (item) {
+    is RenderItem.Single -> item.entry.timestamp
+    is RenderItem.ToolGroup -> item.calls.first().timestamp
+    is RenderItem.TurnSteps -> null
+    is RenderItem.TimeGap -> null
+}
+
+/**
+ * ISO-8601 UTC timestamp → minutes since epoch, or null on malformed input.
+ * Uses the exact civil-date day count (Hinnant's days_from_civil) — no
+ * platform date APIs exist in commonMain and second precision isn't needed
+ * for gap detection.
+ */
+private fun isoToEpochMinutes(iso: String?): Long? {
+    if (iso == null || iso.length < 16) return null
+    return try {
+        val y = iso.substring(0, 4).toInt()
+        val mo = iso.substring(5, 7).toInt()
+        val d = iso.substring(8, 10).toInt()
+        val h = iso.substring(11, 13).toInt()
+        val mi = iso.substring(14, 16).toInt()
+        val yy = if (mo <= 2) y - 1 else y
+        val era = (if (yy >= 0) yy else yy - 399) / 400
+        val yoe = yy - era * 400
+        val doy = (153 * (if (mo > 2) mo - 3 else mo + 9) + 2) / 5 + d - 1
+        val doe = yoe * 365 + yoe / 4 - yoe / 100 + doy
+        val days = era * 146097L + doe - 719468L
+        days * 1440 + h * 60 + mi
+    } catch (_: Throwable) {
+        null
+    }
+}
+
+@Composable
+private fun TimeGapRow(label: String) {
+    val c = CRTheme.colors
+    Row(
+        modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        HorizontalDivider(modifier = Modifier.weight(1f), color = c.border.copy(alpha = 0.4f))
+        Text(
+            label,
+            style = CRType.monoTiny,
+            color = c.textDim,
+            modifier = Modifier.padding(horizontal = 8.dp)
+        )
+        HorizontalDivider(modifier = Modifier.weight(1f), color = c.border.copy(alpha = 0.4f))
+    }
 }
 
 /** Collapsed-middle expander row for an old turn: `▶ 23 steps · 1m 42s`. */
@@ -1546,6 +1796,12 @@ private fun formatDuration(ms: Long): String {
 }
 
 /**
+ * Tool calls that render as standalone prominent cards — never folded into a
+ * collapsed tool group: questions, todo checklists, subagent launches.
+ */
+private val standaloneTools = setOf("AskUserQuestion", "TodoWrite", "Task", "Agent")
+
+/**
  * Walk the entries and fuse any run of two-or-more consecutive ToolCall
  * entries into a single ToolGroup item.
  */
@@ -1554,12 +1810,10 @@ private fun groupConsecutiveTools(entries: List<TranscriptEntry>): List<RenderIt
     var i = 0
     while (i < entries.size) {
         val e = entries[i]
-        // AskUserQuestion is rendered as a standalone prominent card — never
-        // fold it into a collapsed tool group.
-        if (e is TranscriptEntry.ToolCall && e.name != "AskUserQuestion") {
+        if (e is TranscriptEntry.ToolCall && e.name !in standaloneTools) {
             var j = i + 1
             while (j < entries.size && entries[j] is TranscriptEntry.ToolCall &&
-                (entries[j] as TranscriptEntry.ToolCall).name != "AskUserQuestion"
+                (entries[j] as TranscriptEntry.ToolCall).name !in standaloneTools
             ) j++
             if (j - i >= 2) {
                 @Suppress("UNCHECKED_CAST")
@@ -1579,10 +1833,12 @@ private fun groupConsecutiveTools(entries: List<TranscriptEntry>): List<RenderIt
 private fun ToolResultCard(entry: TranscriptEntry.ToolResult) {
     val c = CRTheme.colors
     val m = CRTheme.metrics
-    var expanded by remember { mutableStateOf(false) }
+    var expanded by rememberSaveable(entry.id) { mutableStateOf(false) }
     val lines = entry.text.lines()
-    val preview = lines.take(3).joinToString("\n")
-    val hasMore = lines.size > 3 || entry.text.length > preview.length
+    // Tail, not head: the interesting part of command output (exit status,
+    // error message, summary line) is at the END.
+    val preview = lines.takeLast(3).joinToString("\n")
+    val hasMore = lines.size > 3
     val bg = if (entry.isError) c.disconnected.copy(alpha = 0.12f) else c.surface2
     val borderCol = if (entry.isError) c.disconnected.copy(alpha = 0.4f) else c.border
 
@@ -1614,14 +1870,14 @@ private fun ToolResultCard(entry: TranscriptEntry.ToolResult) {
                 CopyButton(entry.text, modifier = Modifier.size(24.dp))
             }
             Spacer(Modifier.height(4.dp))
-            MonospaceBlock(if (expanded) entry.text else preview)
             if (!expanded && hasMore) {
                 Text(
-                    "(${lines.size - 3} more lines — tap to expand)",
+                    "(${lines.size - 3} earlier lines — tap to expand)",
                     style = CRType.monoTiny,
                     color = c.textDim
                 )
             }
+            MonospaceBlock(if (expanded) entry.text else preview)
         }
     }
 }
