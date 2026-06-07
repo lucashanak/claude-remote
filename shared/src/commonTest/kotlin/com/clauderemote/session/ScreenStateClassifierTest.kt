@@ -128,4 +128,79 @@ class ScreenStateClassifierTest {
         )
         assertEquals(ClaudeState.IDLE, ScreenStateClassifier.classify(snapshot))
     }
+
+    // --- Unnumbered selector: the CURRENT AskUserQuestion / permission TUI ---
+
+    @Test
+    fun unnumberedAskUserQuestion_isApproval() {
+        // Modern AskUserQuestion renders options WITHOUT `N.` numbering. The old
+        // numbered-only detection returned IDLE here, so a pending question was
+        // never surfaced in chat view ("Claude is working…" stuck forever).
+        val snapshot = snapshotOf(
+            "╭──────────────────────────────────────╮",
+            "│ Which library should we use?         │",
+            "│ $prompt Use kotlinx-datetime              │",
+            "│   Use java.time                      │",
+            "│   Other                              │",
+            "╰──────────────────────────────────────╯",
+            "  ↑/↓ to select · enter to confirm · esc to cancel",
+        )
+        assertEquals(ClaudeState.APPROVAL, ScreenStateClassifier.classify(snapshot))
+    }
+
+    @Test
+    fun multiSelectCheckboxQuestion_isApprovalNotWorking() {
+        // Multi-select renders radio/checkbox glyphs (◯ ◉) that are ALSO in the
+        // spinner set — they sit inside the bordered box, so the spinner scan
+        // must skip box rows or the waiting dialog reads as WORKING.
+        val snapshot = snapshotOf(
+            "│ Which fixes should I apply?          │",
+            "│   ◉ Fix the parser                   │",
+            "│ $prompt ◯ Fix the renderer               │",
+            "  space to toggle · enter to confirm · esc to cancel",
+        )
+        assertEquals(ClaudeState.APPROVAL, ScreenStateClassifier.classify(snapshot))
+    }
+
+    @Test
+    fun tallAskPointerScrolledOffscreen_isApproval() {
+        // A tall AskUserQuestion can push its `❯` pointer (and the input box)
+        // above the snapshot window — no ❯ anywhere. Previously classified
+        // UNKNOWN; the box content + rounded border + hint footer is enough.
+        val snapshot = snapshotOf(
+            "│   Use a worktree                     │",
+            "│   Skip the refactor                  │",
+            "╰──────────────────────────────────────╯",
+            "  ↑/↓ to select · esc to cancel",
+        )
+        assertEquals(ClaudeState.APPROVAL, ScreenStateClassifier.classify(snapshot))
+    }
+
+    @Test
+    fun multiLineTypedInputWithoutHint_isIdle() {
+        // The plain input box also renders `│ ❯ … │`, and multi-line typed input
+        // gives it sibling content rows — but there is no selection hint, so it
+        // must stay IDLE.
+        val snapshot = snapshotOf(
+            "╭──────────────────────────────────────╮",
+            "│ $prompt fix the parser bug                │",
+            "│   and add tests for the edge cases   │",
+            "╰──────────────────────────────────────╯",
+            "  ? for shortcuts",
+        )
+        assertEquals(ClaudeState.IDLE, ScreenStateClassifier.classify(snapshot))
+    }
+
+    @Test
+    fun markdownTableInProse_isIdleNotApproval() {
+        // Claude prose containing a │-drawn table plus an arrow character must
+        // not satisfy the tall-ask fallback (no rounded border + no pointer).
+        val snapshot = snapshotOf(
+            "│ col A │ col B │",
+            "│ 1     │ 2     │",
+            "Press ↑ in your editor to navigate history.",
+            "$prompt ",
+        )
+        assertEquals(ClaudeState.IDLE, ScreenStateClassifier.classify(snapshot))
+    }
 }

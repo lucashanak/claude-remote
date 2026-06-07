@@ -88,6 +88,7 @@ class InputPromptDetector(
         if (currentTimeMillis() < suppressUntil) return
 
         val state = sessionStates.getOrPut(sessionId) { SessionState() }
+        state.recheckCount = 0 // fresh output → fresh retry budget
         state.pendingCheck?.cancel()
         state.pendingCheck = scope.launch {
             delay(QUIESCENCE_MS)
@@ -96,11 +97,34 @@ class InputPromptDetector(
     }
 
     private suspend fun runIdleCheck(sessionId: String) {
-        if (currentTimeMillis() < suppressUntil) return
-
         val state = sessionStates[sessionId] ?: return
-        val snapshot = screenReader?.invoke(sessionId) ?: return
+        // The quiescence check is OUTPUT-driven: while a question/selector sits
+        // on screen there is NO further output, so a check eaten by the
+        // suppress window, a transiently-null screenReader, or an UNKNOWN
+        // classification used to be a PERMANENT miss ("I only find out Claude
+        // asked something when I get suspicious and switch to Raw").
+        // scheduleRecheck re-arms a bounded retry so a single bad sample
+        // self-heals; an APPROVAL result also re-checks (unbounded, 3s cadence)
+        // so the activity stays asserted against statusline WORKING clobbers
+        // for as long as the dialog is actually on screen.
+        if (currentTimeMillis() < suppressUntil) {
+            scheduleRecheck(state, sessionId)
+            return
+        }
+        val snapshot = screenReader?.invoke(sessionId)
+        if (snapshot == null) {
+            scheduleRecheck(state, sessionId)
+            return
+        }
         val classified = ScreenStateClassifier.classify(snapshot)
+        when (classified) {
+            ClaudeState.UNKNOWN -> scheduleRecheck(state, sessionId)
+            ClaudeState.APPROVAL -> {
+                state.recheckCount = 0
+                scheduleRecheck(state, sessionId)
+            }
+            else -> {}
+        }
 
         // Claude is visibly WORKING again → a new turn started. Re-arm the
         // notify latch so the NEXT idle/approval fires even when the user
@@ -139,6 +163,20 @@ class InputPromptDetector(
         state.waitingForInput = true
         state.lastDetectionTime = now
         onDetection?.invoke(PromptDetection(sessionId, promptType))
+    }
+
+    /**
+     * Re-arm a delayed screen re-check. Bounded by [MAX_RECHECKS] consecutive
+     * tries (reset whenever fresh output arrives or APPROVAL is confirmed) so a
+     * disconnected/scrolled session doesn't poll the snapshot forever.
+     */
+    private fun scheduleRecheck(state: SessionState, sessionId: String) {
+        if (state.recheckCount >= MAX_RECHECKS) return
+        state.recheckCount++
+        state.pendingCheck = scope.launch {
+            delay(RECHECK_MS)
+            runIdleCheck(sessionId)
+        }
     }
 
     /** Reset the latch so the next idle transition will fire a detection. */
@@ -287,6 +325,8 @@ class InputPromptDetector(
         var lastDetectionTime = 0L
         var userHasInteracted = false
         var pendingCheck: Job? = null
+        /** Consecutive scheduled re-checks since the last fresh output/APPROVAL. */
+        var recheckCount = 0
     }
 
     companion object {
@@ -294,6 +334,10 @@ class InputPromptDetector(
         private const val QUIESCENCE_MS = 1000L
         /** Minimum time between two detections on the same session. */
         private const val COOLDOWN_MS = 3000L
+        /** Delay between screen re-checks when a check was eaten / confirmed APPROVAL. */
+        private const val RECHECK_MS = 3000L
+        /** Max consecutive re-checks without fresh output (≈15s of self-healing). */
+        private const val MAX_RECHECKS = 5
 
         private val ANSI_REGEX = Regex("\u001B(?:\\[\\??[0-9;]*[a-zA-Z]|\\][^\u0007]*\u0007)")
         private val CONTEXT_RATIO_REGEX = Regex("([\\d,.]+[km]?)\\s*/\\s*([\\d,.]+[km]?)\\s*tokens", RegexOption.IGNORE_CASE)

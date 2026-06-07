@@ -107,7 +107,7 @@ class SshTerminalSession(
      * Used by [com.clauderemote.session.ScreenStateClassifier] to distinguish
      * Claude's dark-red "working indicator" from idle chat content.
      */
-    fun readBottomRowsSnapshot(rowCount: Int = 8): ScreenStateSnapshot? {
+    fun readBottomRowsSnapshot(rowCount: Int = 16): ScreenStateSnapshot? {
         val emu = mEmulator ?: return null
         val buffer = emu.screen ?: return null
         val cols = emu.mColumns

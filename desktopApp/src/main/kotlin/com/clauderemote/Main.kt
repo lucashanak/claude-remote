@@ -262,7 +262,7 @@ fun main() = application {
     // iteration). Shadow emulators per session would lift this — left for later.
     sessionOrchestrator.screenReader = { sessionId ->
         if (tabManager.activeTabId.value != sessionId) null
-        else readJediTermSnapshot(termWidget, rowCount = 8)
+        else readJediTermSnapshot(termWidget, rowCount = 16)
     }
 
     // Desktop notifications via SystemTray

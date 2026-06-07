@@ -102,7 +102,7 @@ class SshTerminalHandle internal constructor(
      * emulator is not thread-safe. Callers in coroutines should use
      * `withContext(Dispatchers.Main) { handle.readScreenStateSnapshot() }`.
      */
-    fun readScreenStateSnapshot(rowCount: Int = 8): ScreenStateSnapshot? =
+    fun readScreenStateSnapshot(rowCount: Int = 16): ScreenStateSnapshot? =
         session.readBottomRowsSnapshot(rowCount)
 
     private companion object {

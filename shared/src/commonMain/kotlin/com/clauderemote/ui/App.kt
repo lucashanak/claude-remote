@@ -1055,6 +1055,13 @@ fun App(
                             }
                             if (index in current.indices) current[index] = sid
                             paneSessions = current
+                            // The raw terminal is bound to activeTabId, not paneSessions.
+                            // When the focused pane is reassigned we must switch the active
+                            // tab so terminalContent follows — mirroring what onFocusPane
+                            // already does.
+                            if (index == focusedPaneIndex && sid != activeTabId) {
+                                sessionOrchestrator.switchTab(sid)
+                            }
                         },
                         composeTerminalUnderTranscript = composeTerminalUnderTranscript,
                     )

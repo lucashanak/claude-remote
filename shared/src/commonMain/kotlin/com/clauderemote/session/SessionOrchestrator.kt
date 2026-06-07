@@ -139,8 +139,17 @@ class SessionOrchestrator(
     // Debounce: last probe time per server id, so pull-to-refresh spam doesn't storm.
     private val lastServerProbeAt = java.util.concurrent.ConcurrentHashMap<String, Long>()
 
+    // When APPROVAL_NEEDED was last asserted per session — used to protect a
+    // fresh screen-detected approval from being clobbered by a stale statusline
+    // WORKING render (see the grace check in emit()). Refreshed every ~3s by
+    // the detector's APPROVAL re-check while the dialog is on screen.
+    private val lastApprovalAt = java.util.concurrent.ConcurrentHashMap<String, Long>()
+
     private fun updateActivity(sessionId: String, activity: SessionActivity) {
         if (activity == SessionActivity.WORKING) sawWorkSinceAttach.add(sessionId)
+        if (activity == SessionActivity.APPROVAL_NEEDED) {
+            lastApprovalAt[sessionId] = System.currentTimeMillis()
+        }
         val previous = _sessionActivities.value[sessionId]
         _sessionActivities.update { it + (sessionId to activity) }
         // Refresh git status when the session goes idle (e.g. a command just
@@ -1282,6 +1291,16 @@ else:
                 // A genuine WORKING result from the statusline may still override APPROVAL.
                 if (next == SessionActivity.WAITING_FOR_INPUT &&
                     _sessionActivities.value[session.id] == SessionActivity.APPROVAL_NEEDED) return@let
+                // Grace: a WORKING statusline within 8s of APPROVAL being asserted
+                // is more likely a STALE render flowing back through the buffer
+                // (kickRedraw / replay re-printing an old "thinking" segment) than
+                // a real resume. The detector re-confirms APPROVAL from the screen
+                // every ~3s while the dialog is up (refreshing the timestamp), so
+                // a genuine resume still takes over within a beat of the dialog
+                // actually closing.
+                if (next == SessionActivity.WORKING &&
+                    _sessionActivities.value[session.id] == SessionActivity.APPROVAL_NEEDED &&
+                    System.currentTimeMillis() - (lastApprovalAt[session.id] ?: 0L) < 8_000L) return@let
                 updateActivity(session.id, next)
             }
             // ctx % is derived from the transcript (startContextTokenCollector),

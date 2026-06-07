@@ -56,8 +56,8 @@ object ScreenStateClassifier {
     )
 
     /**
-     * Matches the `❯ N.` selected-option pointer of Claude Code's numbered
-     * selector (permission dialog AND the AskUserQuestion TUI).
+     * Matches the `❯ N.` selected-option pointer of Claude Code's LEGACY
+     * numbered selector (older permission dialogs).
      */
     private val APPROVAL_POINTER_REGEX = Regex("""❯\s*\d+\.\s""")
 
@@ -71,40 +71,68 @@ object ScreenStateClassifier {
      */
     private val APPROVAL_SIBLING_REGEX = Regex("""\d+\.\s""")
 
+    /** A bordered-box row that carries actual content (not just the frame). */
+    private val BOX_CONTENT_REGEX = Regex("""│\s*[^│\s]""")
+
+    /** Rounded top/bottom border of Claude Code's dialog boxes. */
+    private val BOX_BORDER_REGEX = Regex("""[╭╰]─""")
+
+    /** `❯ <label>` pointer with any (non-numbered) label — the CURRENT
+     *  AskUserQuestion / permission selector renders options unnumbered. */
+    private val UNNUMBERED_POINTER_REGEX = Regex("""❯\s+\S""")
+
+    /**
+     * Keyboard hints rendered under selector dialogs (`↑/↓ to select`,
+     * `enter to confirm`, `esc to cancel`, `space to toggle`, …). The plain
+     * input box never renders these, which is what disambiguates a selector
+     * box from multi-line text the user typed into the input box.
+     */
+    private val SELECTOR_HINT_REGEX = Regex(
+        """(?i)to select|to choose|to confirm|to navigate|to toggle|esc to cancel|esc to skip|↑/↓|[↑↓]"""
+    )
+
     fun classify(snapshot: ScreenStateSnapshot): ClaudeState {
-        val boxRow = findInputBoxRow(snapshot) ?: return ClaudeState.UNKNOWN
+        val boxRow = findInputBoxRow(snapshot)
 
-        // Signal 1 + 2: scan the tail ABOVE the input box for red cells or spinner glyphs.
-        val scanStart = (boxRow - INDICATOR_LOOKBACK).coerceAtLeast(0)
-        for (r in scanStart until boxRow) {
-            val row = snapshot.rows[r]
-            val text = row.text
-            val reds = row.isRedFg
-            for (i in text.indices) {
-                val ch = text[i]
-                if (ch in SPINNER_CHARS) return ClaudeState.WORKING
-                if (i >= reds.size) continue
-                if (!isContentCell(ch)) continue
-                if (reds[i]) return ClaudeState.WORKING
+        if (boxRow != null) {
+            // Signal 1 + 2: scan the tail ABOVE the input box for red cells or
+            // spinner glyphs. Bordered-box content rows are SKIPPED: the radio /
+            // checkbox glyphs of a multi-select AskUserQuestion (◯ ◉) are in the
+            // spinner set, and counting them would misclassify a dialog that is
+            // WAITING for the user as WORKING.
+            val scanStart = (boxRow - INDICATOR_LOOKBACK).coerceAtLeast(0)
+            for (r in scanStart until boxRow) {
+                val row = snapshot.rows[r]
+                val text = row.text
+                if (BOX_CONTENT_REGEX.containsMatchIn(text)) continue
+                val reds = row.isRedFg
+                for (i in text.indices) {
+                    val ch = text[i]
+                    if (ch in SPINNER_CHARS) return ClaudeState.WORKING
+                    if (i >= reds.size) continue
+                    if (!isContentCell(ch)) continue
+                    if (reds[i]) return ClaudeState.WORKING
+                }
             }
-        }
 
-        // Signal 3: Claude status line below the input box shows elapsed time
-        // while a turn is running.
-        for (r in (boxRow + 1) until snapshot.rows.size) {
-            if (ELAPSED_TIME_REGEX.containsMatchIn(snapshot.rows[r].text)) {
-                return ClaudeState.WORKING
+            // Signal 3: Claude status line below the input box shows elapsed time
+            // while a turn is running.
+            for (r in (boxRow + 1) until snapshot.rows.size) {
+                if (ELAPSED_TIME_REGEX.containsMatchIn(snapshot.rows[r].text)) {
+                    return ClaudeState.WORKING
+                }
             }
         }
 
         // Approval check — runs AFTER the WORKING scans (a real working
-        // indicator always wins) and BEFORE returning IDLE. Conservative,
-        // structural markers only. Note: the 8-row snapshot window may miss the
-        // first option of a very tall AskUserQuestion (acceptable — #70 covers
-        // that via the transcript; this targets permission prompts).
+        // indicator always wins) and ALSO when no `❯` is visible at all: a
+        // tall AskUserQuestion (many options + previews) can scroll its pointer
+        // above the snapshot window, leaving only option rows + the hint
+        // footer — previously that returned UNKNOWN and the pending question
+        // was never detected.
         if (isApprovalSelector(snapshot)) return ClaudeState.APPROVAL
 
-        return ClaudeState.IDLE
+        return if (boxRow == null) ClaudeState.UNKNOWN else ClaudeState.IDLE
     }
 
     /**
@@ -131,6 +159,30 @@ object ScreenStateClassifier {
             else if (APPROVAL_SIBLING_REGEX.containsMatchIn(text)) hasSibling = true
         }
         if (hasPointer && hasSibling) return true
+
+        // Unnumbered selector — the CURRENT AskUserQuestion / permission TUI.
+        // Options render inside a rounded box as `│ ❯ Label │` / `│   Other │`
+        // with NO `N.` numbering, so the numbered branch above never matches
+        // (this is why pending questions were stuck on "Claude is working…" in
+        // chat view). Required structure:
+        //  • a keyboard-hint row (`↑/↓ to select`, `esc to cancel`, …) — the
+        //    plain input box ALSO renders as `│ ❯ … │` and multi-line typed
+        //    input gives it sibling rows, but it never has a selection hint;
+        //  • a `❯ <label>` pointer row inside the box + ≥1 sibling content row
+        //    (other options / the question text), OR — tall-ask fallback — the
+        //    pointer scrolled above the snapshot window, leaving ≥2 box content
+        //    rows plus a rounded border (border required so `│`-drawn markdown
+        //    tables in prose don't qualify).
+        val hintPresent = snapshot.rows.any { SELECTOR_HINT_REGEX.containsMatchIn(it.text) }
+        if (hintPresent) {
+            val boxRows = snapshot.rows.map { it.text }
+                .filter { BOX_CONTENT_REGEX.containsMatchIn(it) }
+            val pointerInBox = boxRows.any { UNNUMBERED_POINTER_REGEX.containsMatchIn(it) }
+            val boxSiblings = boxRows.count { !it.contains(PROMPT_MARKER) }
+            if (pointerInBox && boxSiblings >= 1) return true
+            val hasBorder = snapshot.rows.any { BOX_BORDER_REGEX.containsMatchIn(it.text) }
+            if (hasBorder && boxSiblings >= 2) return true
+        }
 
         // Shell confirm prompt: only the bottom-most non-empty row counts.
         val lastNonEmpty = snapshot.rows.lastOrNull { it.text.isNotBlank() }
