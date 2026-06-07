@@ -28,6 +28,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.draw.alpha
+import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
@@ -1430,7 +1431,8 @@ private fun TodoChecklistCard(
 }
 
 /**
- * Prominent card for a subagent launch (Task/Agent tool): the description is
+ * Subagent launch (Task/Agent tool) as a purple LEFT ACCENT BAR block — no
+ * box chrome; borders are reserved for needs-attention states. Description is
  * the headline, with a running pulse until the result lands and a short tail
  * of the agent's final report once it does. Tap for full input/result detail.
  */
@@ -1444,23 +1446,19 @@ private fun AgentCard(
     val running = result == null
     val isError = result?.isError == true
     val accent = if (isError) c.disconnected else c.modePlan
-    // Left accent bar instead of a bordered card: the agent stays instantly
-    // recognizable (purple stripe + ⚡) without box chrome. Borders are
-    // reserved for needs-attention states.
-    Row(
+    // The bar is drawn (drawBehind), not laid out: an IntrinsicSize.Min row
+    // would query intrinsics of horizontalScroll descendants in the expanded
+    // detail — drawing sidesteps intrinsic measurement entirely and always
+    // spans the full block height.
+    Column(
         modifier = Modifier
             .fillMaxWidth()
-            .height(IntrinsicSize.Min)
             .clickable { expanded = !expanded }
             .padding(vertical = 2.dp)
+            .leftAccentBar(accent, width = 3.dp)
+            .padding(start = 11.dp)
     ) {
-        Box(
-            modifier = Modifier
-                .width(3.dp)
-                .fillMaxHeight()
-                .background(accent, RoundedCornerShape(2.dp))
-        )
-        Column(modifier = Modifier.weight(1f).padding(start = 8.dp)) {
+        Column(modifier = Modifier.fillMaxWidth()) {
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 verticalAlignment = Alignment.CenterVertically
@@ -1516,10 +1514,12 @@ private fun agentResultTail(text: String): String =
         .map { it.trim() }
         .filter { it.isNotBlank() }
         .filterNot {
-            it.startsWith("output_file:") ||
-                it.startsWith("agentId:") ||
-                it.startsWith("Do NOT ") ||
-                it.startsWith("The agent is working")
+            // Best-effort, case-insensitive: if the spawn-result wording ever
+            // drifts, the worst case is boilerplate reappearing in a preview.
+            it.startsWith("output_file:", ignoreCase = true) ||
+                it.startsWith("agentId:", ignoreCase = true) ||
+                it.startsWith("Do not ", ignoreCase = true) ||
+                it.startsWith("The agent is working", ignoreCase = true)
         }
         .takeLast(2)
         .joinToString("\n")
@@ -1932,22 +1932,29 @@ private fun ToolResultCard(entry: TranscriptEntry.ToolResult) {
             modifier = Modifier.padding(start = 16.dp)
         ) { body() }
     } else {
-        Row(
+        Box(
             modifier = Modifier
                 .fillMaxWidth()
                 .padding(start = 16.dp)
-                .height(IntrinsicSize.Min)
-        ) {
-            Box(
-                modifier = Modifier
-                    .width(2.dp)
-                    .fillMaxHeight()
-                    .background(c.border)
-            )
-            Box(modifier = Modifier.weight(1f).padding(start = 8.dp)) { body() }
-        }
+                .leftAccentBar(c.border, width = 2.dp)
+                .padding(start = 10.dp)
+        ) { body() }
     }
 }
+
+/**
+ * Rounded vertical accent bar along the start edge, drawn rather than laid
+ * out — drawBehind needs no intrinsic measurement, so it composes safely with
+ * horizontalScroll descendants and always spans the block's full height.
+ */
+private fun Modifier.leftAccentBar(color: Color, width: androidx.compose.ui.unit.Dp): Modifier =
+    drawBehind {
+        drawRoundRect(
+            color = color,
+            size = androidx.compose.ui.geometry.Size(width.toPx(), size.height),
+            cornerRadius = androidx.compose.ui.geometry.CornerRadius(width.toPx() / 2)
+        )
+    }
 
 @Composable
 private fun SystemNoteRow(entry: TranscriptEntry.SystemNote) {
