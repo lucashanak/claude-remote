@@ -41,6 +41,7 @@ fun SettingsScreen(
     onExportServers: (() -> Unit)? = null,
     onImportServers: (() -> Unit)? = null,
     onViewLog: (() -> Unit)? = null,
+    onTestNotification: (() -> Unit)? = null,
     sshKeyManager: com.clauderemote.connection.SshKeyManager? = null,
     appearance: AppearanceState = settings.loadAppearance(),
     onAppearanceChange: (AppearanceState) -> Unit = { settings.saveAppearance(it) }
@@ -366,6 +367,12 @@ fun SettingsScreen(
                         checked = notifyTaskComplete,
                         onCheckedChange = { notifyTaskComplete = it; settings.notifyOnTaskComplete = it }
                     )
+                    if (onTestNotification != null) {
+                        OutlinedButton(
+                            onClick = onTestNotification,
+                            modifier = Modifier.fillMaxWidth(),
+                        ) { Text("Otestovat notifikaci", color = c.accent) }
+                    }
                 }
             }
 

@@ -272,6 +272,17 @@ class MainActivity : FragmentActivity() {
                     }
                     startActivity(Intent.createChooser(intent, "Share Log"))
                 },
+                onTestNotification = {
+                    // Exercises the real alert path (channel, sound, Wear
+                    // bridge, Reply + Play actions) on demand. Uses the active
+                    // session id if any so Reply targets a real session.
+                    val sid = tabManager.activeTabId.value ?: "test-session"
+                    val title = tabManager.getTab(sid)?.tabTitle ?: "Test"
+                    AlertNotifier.post(
+                        applicationContext, sid, title,
+                        "Toto je testovací notifikace. Zkus „Odpovědět“ a „Přehrát“.",
+                    )
+                },
                 onPickKeyFile = { callback ->
                     keyFileCallback = callback
                     keyFilePicker.launch("*/*")
