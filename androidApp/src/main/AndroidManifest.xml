@@ -33,6 +33,10 @@
             android:name="com.clauderemote.ReplyReceiver"
             android:exported="false" />
 
+        <receiver
+            android:name="com.clauderemote.PlayReceiver"
+            android:exported="false" />
+
         <service
             android:name="com.clauderemote.KeepAliveService"
             android:exported="false"

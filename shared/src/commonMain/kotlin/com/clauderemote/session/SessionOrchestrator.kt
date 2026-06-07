@@ -1133,6 +1133,20 @@ else:
      * auto-start when [notifyClaudeSessionIdChanged] fires, so callers don't
      * need to re-call this method.
      */
+    /**
+     * The most recent assistant message text for a session, for the
+     * "Claude is ready" notification body. Reads whatever transcript stream
+     * already exists (one is running once the session has been opened); null
+     * if none yet, in which case the caller keeps the generic hint.
+     */
+    fun lastAssistantText(sessionId: String): String? {
+        val stream = synchronized(transcriptLock) { transcriptStreams[sessionId] } ?: return null
+        return stream.entries.value
+            .lastOrNull { it is TranscriptEntry.AssistantText }
+            ?.let { (it as TranscriptEntry.AssistantText).text }
+            ?.takeIf { it.isNotBlank() }
+    }
+
     fun transcriptFlow(sessionId: String): kotlinx.coroutines.flow.StateFlow<List<TranscriptEntry>> {
         val tab = tabManager.getTab(sessionId)
             ?: return kotlinx.coroutines.flow.MutableStateFlow(emptyList())
