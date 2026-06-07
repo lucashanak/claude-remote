@@ -148,7 +148,19 @@ class InputPromptDetector(
         // prompt of either kind notifies once until the user types — no spam,
         // no double-fire when a permission dialog resolves into the input box.
         val promptType = when (classified) {
-            ClaudeState.IDLE -> PromptType.INPUT_PROMPT
+            ClaudeState.IDLE -> {
+                // The rendered screen can momentarily look IDLE mid-turn: after
+                // a message and before the next tool call, the input box is
+                // visible and the dark-red "working" indicator hasn't repainted
+                // yet — which fired "Claude is ready" notifications WHILE Claude
+                // was still working. The OMC statusline is the reliable mid-turn
+                // signal (it carries a state segment while active); if it says
+                // Claude is still working, treat this IDLE as transient and
+                // don't notify. APPROVAL is unaffected (a selector genuinely
+                // needs the user even mid-turn).
+                if (parseClaudeWorking(sessionId) == true) return
+                PromptType.INPUT_PROMPT
+            }
             ClaudeState.APPROVAL -> PromptType.APPROVAL_NEEDED
             else -> return
         }
