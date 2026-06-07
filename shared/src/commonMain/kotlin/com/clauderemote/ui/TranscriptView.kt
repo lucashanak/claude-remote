@@ -266,9 +266,18 @@ fun TranscriptView(
 
         val baseDensity = LocalDensity.current
         val cardGap = CRTheme.metrics.cardGap
-        // Pre-group consecutive ToolCalls so a run of Read/Edit/Bash collapses
-        // to one tight stack instead of N bordered cards.
-        val rendered = remember(filtered) { groupConsecutiveTools(filtered) }
+        // Turn-aware render list: every turn except the live last one collapses
+        // its working middle (tools / thinking / intermediate text) behind a
+        // "N steps · duration" expander; within expanded content consecutive
+        // ToolCalls still fuse into a single group row.
+        val turnMeta = remember(entries) { computeTurnMeta(entries) }
+        val expandedTurns = remember(sessionKey) { mutableStateMapOf<String, Boolean>() }
+        // Read the map in composition (snapshot-tracked) so toggling a turn
+        // recomposes; the plain copy doubles as a stable remember key.
+        val expandedSnapshot = expandedTurns.toMap()
+        val rendered = remember(filtered, turnMeta, expandedSnapshot) {
+            buildRenderList(filtered, turnMeta) { key -> expandedSnapshot[key] == true }
+        }
         val itemsCount = rendered.size + if (skeletonShowing || awaitingShowing) 1 else 0
 
         // Stickiness is decided by user scroll gestures, not by snapshotting
@@ -384,6 +393,7 @@ fun TranscriptView(
                             when (item) {
                                 is RenderItem.Single -> "s:" + item.entry.id
                                 is RenderItem.ToolGroup -> "tg:" + item.calls.first().id
+                                is RenderItem.TurnSteps -> "ts:" + item.turnKey
                             }
                         }
                     ) { item ->
@@ -402,6 +412,10 @@ fun TranscriptView(
                                 is TranscriptEntry.SystemNote -> SystemNoteRow(e)
                             }
                             is RenderItem.ToolGroup -> ToolGroupBlock(item.calls, resultsByToolId)
+                            is RenderItem.TurnSteps -> TurnStepsRow(item) {
+                                expandedTurns[item.turnKey] =
+                                    !(expandedTurns[item.turnKey] ?: false)
+                            }
                         }
                     }
                     if (effectiveActivity == SessionActivity.WORKING) {
@@ -1099,6 +1113,150 @@ private fun ToolGroupBlock(
 private sealed class RenderItem {
     data class Single(val entry: TranscriptEntry) : RenderItem()
     data class ToolGroup(val calls: List<TranscriptEntry.ToolCall>) : RenderItem()
+    data class TurnSteps(
+        val turnKey: String,
+        val steps: Int,
+        val durationMs: Long?,
+        val expanded: Boolean,
+    ) : RenderItem()
+}
+
+private data class TurnMeta(val steps: Int, val durationMs: Long?)
+
+/**
+ * Work-step count + summed turn duration per user-prompt id, computed from the
+ * RAW entry list so entries hidden by display filters (thinking, system) still
+ * count. A "step" is a tool call, a thinking block, or an intermediate
+ * assistant text; the turn's final assistant answer is not a step. Durations
+ * are summed because hook-driven loops can stop a turn more than once.
+ */
+private fun computeTurnMeta(entries: List<TranscriptEntry>): Map<String, TurnMeta> {
+    val out = HashMap<String, TurnMeta>()
+    var promptId: String? = null
+    var steps = 0
+    var lastContentWasText = false
+    var duration = 0L
+    var hasDuration = false
+    fun flush() {
+        promptId?.let {
+            out[it] = TurnMeta(
+                steps = (steps - if (lastContentWasText) 1 else 0).coerceAtLeast(0),
+                durationMs = if (hasDuration) duration else null,
+            )
+        }
+    }
+    for (e in entries) {
+        when (e) {
+            is TranscriptEntry.UserPrompt, is TranscriptEntry.SlashCommand -> {
+                flush()
+                promptId = e.id
+                steps = 0
+                lastContentWasText = false
+                duration = 0L
+                hasDuration = false
+            }
+            is TranscriptEntry.ToolCall -> { steps++; lastContentWasText = false }
+            is TranscriptEntry.AssistantThinking -> { steps++; lastContentWasText = false }
+            is TranscriptEntry.AssistantText -> { steps++; lastContentWasText = true }
+            is TranscriptEntry.SystemNote -> if (e.durationMs != null) {
+                duration += e.durationMs
+                hasDuration = true
+            }
+            else -> {}
+        }
+    }
+    flush()
+    return out
+}
+
+/**
+ * Build the LazyColumn item list from display-filtered entries.
+ *
+ * Entries are segmented into turns anchored on user prompts / slash commands.
+ * Every turn but the last renders as: prompt · [▶ N steps · duration] · final
+ * answer, with the middle expanded on demand. The last (live) turn renders in
+ * full. The final answer is extracted only when it is literally the turn's
+ * last filtered entry, so display order is always preserved.
+ */
+private fun buildRenderList(
+    filtered: List<TranscriptEntry>,
+    meta: Map<String, TurnMeta>,
+    isExpanded: (String) -> Boolean,
+): List<RenderItem> {
+    val anchors = filtered.indices.filter {
+        filtered[it] is TranscriptEntry.UserPrompt || filtered[it] is TranscriptEntry.SlashCommand
+    }
+    if (anchors.isEmpty()) return groupConsecutiveTools(filtered)
+    val out = ArrayList<RenderItem>(filtered.size)
+    // Pre-anchor prefix (post-compaction summary etc.) renders as-is.
+    out += groupConsecutiveTools(filtered.subList(0, anchors.first()))
+    for ((ai, start) in anchors.withIndex()) {
+        val end = if (ai + 1 < anchors.size) anchors[ai + 1] else filtered.size
+        val prompt = filtered[start]
+        val body = filtered.subList(start + 1, end)
+        out += RenderItem.Single(prompt)
+        if (ai == anchors.size - 1) {
+            // Live turn — never collapsed.
+            out += groupConsecutiveTools(body)
+            continue
+        }
+        val final = body.lastOrNull() as? TranscriptEntry.AssistantText
+        val middle = if (final != null) body.subList(0, body.size - 1) else body
+        if (middle.isNotEmpty()) {
+            val key = prompt.id
+            val m = meta[key]
+            val expanded = isExpanded(key)
+            out += RenderItem.TurnSteps(
+                turnKey = key,
+                // Raw-entry step count when available (counts hidden thinking);
+                // fall back to the visible middle size.
+                steps = m?.steps?.takeIf { it > 0 } ?: middle.size,
+                durationMs = m?.durationMs,
+                expanded = expanded,
+            )
+            if (expanded) out += groupConsecutiveTools(middle)
+        }
+        if (final != null) out += RenderItem.Single(final)
+    }
+    return out
+}
+
+/** Collapsed-middle expander row for an old turn: `▶ 23 steps · 1m 42s`. */
+@Composable
+private fun TurnStepsRow(item: RenderItem.TurnSteps, onToggle: () -> Unit) {
+    val c = CRTheme.colors
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable { onToggle() }
+            .padding(horizontal = 4.dp, vertical = 3.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text(
+            if (item.expanded) "▼" else "▶",
+            style = CRType.monoTiny,
+            color = c.textDim,
+            modifier = Modifier.padding(end = 6.dp)
+        )
+        val label = buildString {
+            append(item.steps)
+            append(if (item.steps == 1) " step" else " steps")
+            item.durationMs?.let { append(" · ${formatDuration(it)}") }
+        }
+        Text(label, style = CRType.monoTiny, color = c.textDim)
+    }
+}
+
+private fun formatDuration(ms: Long): String {
+    val totalSec = ms / 1000
+    val h = totalSec / 3600
+    val m = (totalSec % 3600) / 60
+    val s = totalSec % 60
+    return when {
+        h > 0 -> "${h}h ${m}m"
+        m > 0 -> "${m}m ${s}s"
+        else -> "${s}s"
+    }
 }
 
 /**
