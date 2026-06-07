@@ -211,7 +211,14 @@ class MainActivity : FragmentActivity() {
             KeepAliveService.updateDescription(title)
             if ((!fg || !isActiveTab) && appSettings.notificationsEnabled) {
                 FileLogger.log("Notify", "Sending alert for '$title'")
-                AlertNotifier.post(applicationContext, sessionId, title, hint)
+                // Prefer the last assistant message (cleaned of markdown) as
+                // the body so the notification — and the watch — show what
+                // Claude actually said, not just the generic hint.
+                val body = sessionOrchestrator.lastAssistantText(sessionId)
+                    ?.let { com.clauderemote.voice.speakableFromMarkdown(it) }
+                    ?.takeIf { it.isNotBlank() }
+                    ?: hint
+                AlertNotifier.post(applicationContext, sessionId, title, body)
             }
         }
 

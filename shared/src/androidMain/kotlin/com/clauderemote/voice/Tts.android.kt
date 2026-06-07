@@ -213,6 +213,18 @@ internal fun stopAllTts() {
 }
 
 /**
+ * Public, fire-and-forget TTS entry for non-Compose callers in other modules
+ * (e.g. the notification "Přehrát" action). Reads [text] aloud through the
+ * user's selected engine via [speakRouted]; errors are swallowed.
+ */
+fun playTtsOnce(context: android.content.Context, text: String) {
+    speakRouted(context.applicationContext, text, onFinish = {}, onError = {})
+}
+
+/** Public stop for the same external callers. */
+fun stopTts() = stopAllTts()
+
+/**
  * Lists the Czech voices installed in the on-device Google TTS engine so the
  * settings UI can offer a picker. Spins up a throwaway TextToSpeech (forced
  * to Google, device-default fallback), reads `voices` filtered to `cs`, then

@@ -81,14 +81,37 @@ object AlertNotifier {
             replyIntent,
         ).addRemoteInput(remoteInput).build()
 
+        // "Přehrát" — read the message aloud on demand via the chosen TTS
+        // engine. Distinct request code from reply so the PendingIntents
+        // don't collide.
+        val playIntent = PendingIntent.getBroadcast(
+            context, sessionId.hashCode() xor 0x5AFE,
+            Intent(context, PlayReceiver::class.java).apply {
+                putExtra(PlayReceiver.EXTRA_TEXT, hint)
+            },
+            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+        )
+        val playAction = Notification.Action.Builder(
+            android.graphics.drawable.Icon.createWithResource(
+                context, android.R.drawable.ic_lock_silent_mode_off
+            ),
+            "Přehrát",
+            playIntent,
+        ).build()
+
+        // `hint` is the last assistant message (or a generic fallback). Show a
+        // one-line preview when collapsed and the full text when expanded.
+        val collapsed = hint.replace(Regex("\\s+"), " ").trim().take(140)
         val notification = Notification.Builder(context, ALERT_CHANNEL_ID)
             .setContentTitle(sessionTitle)
-            .setContentText(hint)
+            .setContentText(collapsed)
+            .setStyle(Notification.BigTextStyle().bigText(hint))
             .setSmallIcon(android.R.drawable.ic_dialog_info)
             .setContentIntent(openIntent)
             .setAutoCancel(true)
             .setCategory(Notification.CATEGORY_MESSAGE)
             .addAction(replyAction)
+            .addAction(playAction)
             .build()
 
         // notify() throws SecurityException when POST_NOTIFICATIONS was
