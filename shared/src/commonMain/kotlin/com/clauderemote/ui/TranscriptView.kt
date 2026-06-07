@@ -28,6 +28,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.draw.alpha
+import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
@@ -779,8 +780,11 @@ private fun UserPromptCard(entry: TranscriptEntry.UserPrompt) {
         Column(
             modifier = Modifier
                 .widthIn(max = 600.dp)
-                .background(c.tintAccent, RoundedCornerShape(topStart = 14.dp, topEnd = 14.dp, bottomStart = 14.dp, bottomEnd = 4.dp))
-                .border(1.dp, c.accent.copy(alpha = 0.35f), RoundedCornerShape(topStart = 14.dp, topEnd = 14.dp, bottomStart = 14.dp, bottomEnd = 4.dp))
+                // Fill only, no border — bubble shape + right alignment already
+                // say "user"; borders are reserved for needs-attention states
+                // (errors, questions). Tint slightly stronger than the bordered
+                // version so the bubble doesn't wash out on the dark bg.
+                .background(c.accent.copy(alpha = 0.22f), RoundedCornerShape(topStart = 14.dp, topEnd = 14.dp, bottomStart = 14.dp, bottomEnd = 4.dp))
                 .padding(horizontal = m.cardPadH, vertical = m.cardPadV)
         ) {
             Row(
@@ -840,7 +844,6 @@ private fun SlashCommandRow(entry: TranscriptEntry.SlashCommand) {
             modifier = Modifier
                 .widthIn(max = 600.dp)
                 .background(c.surface2, RoundedCornerShape(6.dp))
-                .border(1.dp, c.border, RoundedCornerShape(6.dp))
                 .padding(horizontal = m.cardPadH, vertical = 4.dp)
         ) {
             Text(
@@ -885,41 +888,39 @@ private fun AssistantTextCard(entry: TranscriptEntry.AssistantText) {
     }
 }
 
+/** Flat collapsed thinking row — no card chrome, it's secondary detail. */
 @Composable
 private fun ThinkingCard(entry: TranscriptEntry.AssistantThinking) {
     val c = CRTheme.colors
-    val m = CRTheme.metrics
-    var expanded by remember { mutableStateOf(false) }
-    Box(
+    var expanded by rememberSaveable(entry.id) { mutableStateOf(false) }
+    Column(
         modifier = Modifier
             .fillMaxWidth()
-            .background(c.surface, RoundedCornerShape(6.dp))
-            .border(1.dp, c.border.copy(alpha = 0.5f), RoundedCornerShape(6.dp))
             .clickable { expanded = !expanded }
+            .padding(horizontal = 4.dp, vertical = 2.dp)
     ) {
-        Column(modifier = Modifier.padding(horizontal = m.cardPadH, vertical = 6.dp)) {
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.SpaceBetween,
-                modifier = Modifier.fillMaxWidth()
-            ) {
-                Text(
-                    if (expanded) "▼ thinking" else "▶ thinking",
-                    style = CRType.monoTiny,
-                    color = c.textDim
-                )
-                if (expanded) {
-                    CopyButton(entry.text, modifier = Modifier.size(24.dp))
-                }
-            }
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween,
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Text(
+                if (expanded) "▼ thinking" else "▶ thinking",
+                style = CRType.monoTiny,
+                color = c.textDim
+            )
             if (expanded) {
-                Spacer(Modifier.height(4.dp))
-                Text(
-                    entry.text,
-                    style = CRType.mono,
-                    color = c.textDim
-                )
+                CopyButton(entry.text, modifier = Modifier.size(24.dp))
             }
+        }
+        if (expanded) {
+            Spacer(Modifier.height(4.dp))
+            Text(
+                entry.text,
+                style = CRType.mono,
+                color = c.textDim,
+                modifier = Modifier.padding(start = 12.dp)
+            )
         }
     }
 }
@@ -1430,7 +1431,8 @@ private fun TodoChecklistCard(
 }
 
 /**
- * Prominent card for a subagent launch (Task/Agent tool): the description is
+ * Subagent launch (Task/Agent tool) as a purple LEFT ACCENT BAR block — no
+ * box chrome; borders are reserved for needs-attention states. Description is
  * the headline, with a running pulse until the result lands and a short tail
  * of the agent's final report once it does. Tap for full input/result detail.
  */
@@ -1440,26 +1442,33 @@ private fun AgentCard(
     result: TranscriptEntry.ToolResult?,
 ) {
     val c = CRTheme.colors
-    val m = CRTheme.metrics
     var expanded by rememberSaveable(entry.id) { mutableStateOf(false) }
     val running = result == null
-    val accent = if (result?.isError == true) c.disconnected else c.modePlan
-    CRCard(
-        background = c.surface,
-        borderColor = accent.copy(alpha = 0.4f),
-        padding = PaddingValues(horizontal = m.cardPadH, vertical = 6.dp)
+    val isError = result?.isError == true
+    val accent = if (isError) c.disconnected else c.modePlan
+    // The bar is drawn (drawBehind), not laid out: an IntrinsicSize.Min row
+    // would query intrinsics of horizontalScroll descendants in the expanded
+    // detail — drawing sidesteps intrinsic measurement entirely and always
+    // spans the full block height.
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable { expanded = !expanded }
+            .padding(vertical = 2.dp)
+            .leftAccentBar(accent, width = 3.dp)
+            .padding(start = 11.dp)
     ) {
-        Column {
+        Column(modifier = Modifier.fillMaxWidth()) {
             Row(
-                modifier = Modifier.fillMaxWidth().clickable { expanded = !expanded },
+                modifier = Modifier.fillMaxWidth(),
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Pill(
-                    text = "AGENT",
-                    background = accent.copy(alpha = 0.18f),
-                    foreground = accent
+                Text(
+                    "⚡",
+                    style = CRType.mono,
+                    color = accent,
+                    modifier = Modifier.padding(end = 6.dp)
                 )
-                Spacer(Modifier.width(6.dp))
                 Text(
                     entry.inputSummary.ifBlank { entry.name },
                     style = CRType.cardTitle,
@@ -1467,16 +1476,16 @@ private fun AgentCard(
                     maxLines = 2,
                     modifier = Modifier.weight(1f)
                 )
-                if (running) {
-                    PendingDot(modifier = Modifier.padding(start = 4.dp))
-                } else if (result.isError) {
-                    Text("!", style = CRType.monoTiny, color = c.disconnected, modifier = Modifier.padding(start = 4.dp))
+                when {
+                    running -> PendingDot(modifier = Modifier.padding(start = 4.dp))
+                    isError -> Text("!", style = CRType.monoTiny, color = c.disconnected, modifier = Modifier.padding(start = 4.dp))
+                    else -> Text("✓", style = CRType.monoTiny, color = c.ready, modifier = Modifier.padding(start = 4.dp))
                 }
             }
             if (running) {
                 Text("running…", style = CRType.monoTiny, color = c.textDim, modifier = Modifier.padding(top = 2.dp))
             } else if (!expanded) {
-                val tail = result.text.lines().takeLast(2).joinToString("\n").trim()
+                val tail = remember(result.text) { agentResultTail(result.text) }
                 if (tail.isNotBlank()) {
                     Text(
                         tail,
@@ -1493,6 +1502,27 @@ private fun AgentCard(
         }
     }
 }
+
+/**
+ * Last meaningful lines of a subagent result for the collapsed preview.
+ * Background-agent spawn results lead with plumbing (output_file path,
+ * "Do NOT read the transcript…", agent id) — skip those, the user wants
+ * the agent's actual conclusion.
+ */
+private fun agentResultTail(text: String): String =
+    text.lines()
+        .map { it.trim() }
+        .filter { it.isNotBlank() }
+        .filterNot {
+            // Best-effort, case-insensitive: if the spawn-result wording ever
+            // drifts, the worst case is boilerplate reappearing in a preview.
+            it.startsWith("output_file:", ignoreCase = true) ||
+                it.startsWith("agentId:", ignoreCase = true) ||
+                it.startsWith("Do not ", ignoreCase = true) ||
+                it.startsWith("The agent is working", ignoreCase = true)
+        }
+        .takeLast(2)
+        .joinToString("\n")
 
 @Composable
 private fun ToolGroupBlock(
@@ -1854,25 +1884,22 @@ private fun ToolResultCard(entry: TranscriptEntry.ToolResult) {
     // error message, summary line) is at the END.
     val preview = lines.takeLast(3).joinToString("\n")
     val hasMore = lines.size > 3
-    val bg = if (entry.isError) c.disconnected.copy(alpha = 0.12f) else c.surface2
-    val borderCol = if (entry.isError) c.disconnected.copy(alpha = 0.4f) else c.border
 
-    CRCard(
-        background = bg,
-        borderColor = borderCol,
-        padding = PaddingValues(horizontal = m.cardPadH, vertical = 6.dp),
-        modifier = Modifier.padding(start = 16.dp)
-    ) {
+    val body: @Composable () -> Unit = {
         Column {
             Row(
                 modifier = Modifier.fillMaxWidth().clickable(enabled = hasMore) { expanded = !expanded },
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Pill(
-                    text = if (entry.isError) "ERROR" else "RESULT",
-                    background = if (entry.isError) c.disconnected.copy(alpha = 0.18f) else c.tintAccent,
-                    foreground = if (entry.isError) c.disconnected else c.accent
-                )
+                if (entry.isError) {
+                    Pill(
+                        text = "ERROR",
+                        background = c.disconnected.copy(alpha = 0.18f),
+                        foreground = c.disconnected
+                    )
+                } else {
+                    Text("result", style = CRType.monoTiny, color = c.textDim)
+                }
                 Spacer(Modifier.width(6.dp))
                 if (hasMore) {
                     Text(
@@ -1895,7 +1922,39 @@ private fun ToolResultCard(entry: TranscriptEntry.ToolResult) {
             MonospaceBlock(if (expanded) entry.text else preview)
         }
     }
+
+    if (entry.isError) {
+        // Errors keep the bordered card — border = needs attention.
+        CRCard(
+            background = c.disconnected.copy(alpha = 0.12f),
+            borderColor = c.disconnected.copy(alpha = 0.4f),
+            padding = PaddingValues(horizontal = m.cardPadH, vertical = 6.dp),
+            modifier = Modifier.padding(start = 16.dp)
+        ) { body() }
+    } else {
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(start = 16.dp)
+                .leftAccentBar(c.border, width = 2.dp)
+                .padding(start = 10.dp)
+        ) { body() }
+    }
 }
+
+/**
+ * Rounded vertical accent bar along the start edge, drawn rather than laid
+ * out — drawBehind needs no intrinsic measurement, so it composes safely with
+ * horizontalScroll descendants and always spans the block's full height.
+ */
+private fun Modifier.leftAccentBar(color: Color, width: androidx.compose.ui.unit.Dp): Modifier =
+    drawBehind {
+        drawRoundRect(
+            color = color,
+            size = androidx.compose.ui.geometry.Size(width.toPx(), size.height),
+            cornerRadius = androidx.compose.ui.geometry.CornerRadius(width.toPx() / 2)
+        )
+    }
 
 @Composable
 private fun SystemNoteRow(entry: TranscriptEntry.SystemNote) {
