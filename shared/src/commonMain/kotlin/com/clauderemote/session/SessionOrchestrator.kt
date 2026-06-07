@@ -880,35 +880,49 @@ else:
     private fun startNotifyWatcher(sessionId: String, tmuxName: String, sshManager: SshManager) {
         notifyWatchers[sessionId]?.cancel()
         notifyWatchers[sessionId] = reconnectScope.launch {
-            try {
-                val sshSession = sshManager.getSession() ?: return@launch
-                val ch = sshSession.openChannel("exec") as com.jcraft.jsch.ChannelExec
-                ch.setCommand("touch /tmp/claude-notify && tail -n 0 -f /tmp/claude-notify")
-                ch.inputStream = null
-                val reader = ch.inputStream.bufferedReader()
-                ch.connect(5000)
+            // Retry loop: the exec channel can die silently (mobile networks,
+            // HyperOS battery management kill the socket without dropping the
+            // main SSH channel). Previously the watcher exited permanently and
+            // hook-based detection was gone until a FULL transport reconnect —
+            // background sessions then had no detection path at all.
+            var attempt = 0
+            while (isActive) {
+                try {
+                    val sshSession = sshManager.getSession() ?: break
+                    val ch = sshSession.openChannel("exec") as com.jcraft.jsch.ChannelExec
+                    ch.setCommand("touch /tmp/claude-notify && tail -n 0 -f /tmp/claude-notify")
+                    ch.inputStream = null
+                    val reader = ch.inputStream.bufferedReader()
+                    ch.connect(5000)
 
-                setHookActive(sessionId, true)
-                FileLogger.log(TAG, "Notify watcher started for $sessionId (tmux=$tmuxName)")
+                    setHookActive(sessionId, true)
+                    attempt = 0
+                    FileLogger.log(TAG, "Notify watcher started for $sessionId (tmux=$tmuxName)")
 
-                while (isActive && ch.isConnected) {
-                    val line = kotlinx.coroutines.withContext(Dispatchers.IO) {
-                        reader.readLine()
-                    } ?: break
-                    if (!line.contains("claude-remote-notify")) continue
-                    if (!line.contains(tmuxName)) continue
-                    FileLogger.log(TAG, "Stop hook fired for $sessionId: $line")
-                    val isActive = tabManager.activeTabId.value == sessionId
-                    fireNeedsInput(sessionId, "Claude is ready for input", isActive)
-                    updateActivity(sessionId, SessionActivity.WAITING_FOR_INPUT)
+                    while (isActive && ch.isConnected) {
+                        val line = kotlinx.coroutines.withContext(Dispatchers.IO) {
+                            reader.readLine()
+                        } ?: break
+                        if (!line.contains("claude-remote-notify")) continue
+                        if (!line.contains(tmuxName)) continue
+                        FileLogger.log(TAG, "Stop hook fired for $sessionId: $line")
+                        val isActiveTab = tabManager.activeTabId.value == sessionId
+                        fireNeedsInput(sessionId, "Claude is ready for input", isActiveTab)
+                        updateActivity(sessionId, SessionActivity.WAITING_FOR_INPUT)
+                    }
+                    ch.disconnect()
+                } catch (e: Exception) {
+                    FileLogger.error(TAG, "Notify watcher failed for $sessionId: ${e.message}", e)
+                } finally {
+                    setHookActive(sessionId, false)
                 }
-                ch.disconnect()
-            } catch (e: Exception) {
-                FileLogger.error(TAG, "Notify watcher failed for $sessionId: ${e.message}", e)
-            } finally {
-                setHookActive(sessionId, false)
-                FileLogger.log(TAG, "Notify watcher stopped for $sessionId")
+                if (!isActive) break
+                attempt++
+                val backoffMs = (5_000L * attempt).coerceAtMost(30_000L)
+                FileLogger.log(TAG, "Notify watcher retrying for $sessionId in ${backoffMs}ms (attempt $attempt)")
+                kotlinx.coroutines.delay(backoffMs)
             }
+            FileLogger.log(TAG, "Notify watcher stopped for $sessionId")
         }
     }
 
@@ -1225,12 +1239,22 @@ else:
                 onTerminalOutput?.invoke(session.id, text)
             }
 
-            // Skip expensive processing during data bursts (tmux attach/scrollback)
+            // Feed output FIRST — detector handles buffering + schedules the
+            // quiescence check. This must run for EVERY chunk, including
+            // burst chunks: Claude's end-of-turn repaint often lands as
+            // sub-50ms chunks, and skipping them meant the quiescence timer
+            // never armed and the idle check silently never ran (missed
+            // notification). The call is cheap (buffer append + timer reset);
+            // reconnect false-positives are covered by suppressFor().
+            promptDetector.onOutput(session.id, text)
+
+            // Skip the remaining expensive processing during data bursts
+            // (tmux attach/scrollback).
             val now = System.currentTimeMillis()
             if (now - lastOutputTime < 50) {
                 burstMode = true
                 lastOutputTime = now
-                return // Skip prompt detection, activity tracking during burst
+                return // Skip activity tracking during burst
             }
             if (burstMode && now - lastOutputTime >= 200) {
                 burstMode = false // Burst ended, resume processing
@@ -1238,10 +1262,6 @@ else:
             lastOutputTime = now
             if (burstMode) return
 
-            // Feed output — detector handles buffering + schedules quiescence check.
-            // Detection fires asynchronously via promptDetector.onDetection callback
-            // once the rendered screen state classifies as IDLE.
-            promptDetector.onOutput(session.id, text)
             // Drive working/idle from the OMC statusline (flows in every view,
             // unlike the Stop hook which can silently fail). The screen classifier
             // now also works in Chat for the active single-pane session on Android
@@ -1251,6 +1271,11 @@ else:
             // missing for hook-active sessions in chat view.
             promptDetector.parseClaudeWorking(session.id)?.let { working ->
                 val next = if (working) SessionActivity.WORKING else SessionActivity.WAITING_FOR_INPUT
+                // Claude actively working → a new turn started; re-arm the
+                // notify latch so the next idle/approval can notify again
+                // even if the user never typed in this app (dismissed the
+                // notification, answered from another client, …).
+                if (working) promptDetector.onClaudeWorking(session.id)
                 // FIX 3: when the statusline says "not working" (→ WAITING_FOR_INPUT),
                 // do NOT overwrite APPROVAL_NEEDED — the permission dialog is still on
                 // screen and the OMC statusline shows no elapsed time while it waits.
@@ -1890,6 +1915,10 @@ else:
         }
         val session = tabManager.getTab(sessionId) ?: return
         FileLogger.log(TAG, "Reconnecting session $sessionId to ${session.server.name}")
+        // A reconnected session has a running Claude that may already be idle
+        // waiting for input — bypass the brand-new-session startup guard so
+        // the first idle after restore can notify.
+        promptDetector.markInteracted(sessionId)
 
         // Invalidate the confirmed UUID so the next transcriptFlow() call fires
         // a fresh kick-probe. If claude restarted with a new session UUID during

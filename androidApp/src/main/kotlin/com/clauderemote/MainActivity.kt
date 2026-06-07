@@ -211,7 +211,7 @@ class MainActivity : FragmentActivity() {
             KeepAliveService.updateDescription(title)
             if ((!fg || !isActiveTab) && appSettings.notificationsEnabled) {
                 FileLogger.log("Notify", "Sending alert for '$title'")
-                KeepAliveService.sendAlert(sessionId, title, hint)
+                AlertNotifier.post(applicationContext, sessionId, title, hint)
             }
         }
 
@@ -311,7 +311,7 @@ class MainActivity : FragmentActivity() {
                         onUserInput = { bytes ->
                             tabManager.activeTabId.value?.let { id ->
                                 sessionOrchestrator.sendBytes(id, bytes)
-                                KeepAliveService.clearAlert(id)
+                                AlertNotifier.clear(applicationContext, id)
                             }
                         },
                         onResize = { cols, rows ->
@@ -358,7 +358,7 @@ class MainActivity : FragmentActivity() {
         window.decorView.post { applyInvertLayer(appSettings.invertColors) }
         KeepAliveService.onAppForeground()
         sessionOrchestrator.setBackgroundMode(false)
-        tabManager.activeTabId.value?.let { KeepAliveService.clearAlert(it) }
+        tabManager.activeTabId.value?.let { AlertNotifier.clear(applicationContext, it) }
         // Reconnect dead tabs on foreground. The network callback alone is not
         // enough: it only fires on an onAvailable EDGE, and after a long
         // background stint (HyperOS battery management kills sockets silently)
@@ -383,7 +383,7 @@ class MainActivity : FragmentActivity() {
     private fun handleSessionIntent(intent: Intent?) {
         intent?.getStringExtra("switch_to_session")?.let { sessionId ->
             sessionOrchestrator.switchTab(sessionId)
-            KeepAliveService.clearAlert(sessionId)
+            AlertNotifier.clear(applicationContext, sessionId)
         }
     }
 
