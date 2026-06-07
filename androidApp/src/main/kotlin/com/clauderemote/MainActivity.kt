@@ -177,26 +177,13 @@ class MainActivity : FragmentActivity() {
             FileLogger.log("MainActivity", "Tab switched to $sessionId, buffer: ${bufferedOutput.length} chars")
             val handle = terminalHandle ?: return@tabSwitch
             handle.replay(bufferedOutput.toByteArray(Charsets.UTF_8))
-            // Force a full tmux redraw after the switch. Naive toggle
-            // resize(c, r) + resize(c, r) is coalesced — tmux reads
-            // *current* pty size, sees no change, skips redraw.
-            // Use a delay between the two resizes and make the intermediate
-            // size strictly different so SIGWINCH fires twice.
-            //
-            // IMPORTANT: shrink COLS, not ROWS. Shrinking rows by one
-            // pushes the tmux status line up by one cell during the kick;
-            // the bytes for the old status row leak into xterm.js
-            // scrollback before tmux finishes redrawing the new layout,
-            // leaving a stray status-line artifact mid-history. Column
-            // shrink still produces a SIGWINCH and a full repaint, but
-            // the status line stays anchored at the bottom row so no
-            // scrollback pollution.
+            // Force a full tmux redraw after the switch — the replayed tail
+            // is a partial frame. kickRedraw issues `tmux refresh-client`
+            // (deterministic full repaint; falls back to a SIGWINCH toggle),
+            // see SessionOrchestrator.kickRedraw for the rationale.
             handle.view.post {
                 val (cols, rows) = handle.currentSize() ?: return@post
-                if (cols <= 1 || rows <= 0) return@post
-                val conn = sessionOrchestrator.getConnection(sessionId) ?: return@post
-                conn.resize(cols - 1, rows)
-                handle.view.postDelayed({ conn.resize(cols, rows) }, 80)
+                sessionOrchestrator.kickRedraw(sessionId, cols, rows)
             }
         }
 
@@ -299,18 +286,13 @@ class MainActivity : FragmentActivity() {
                     // After the buffer is replayed, force tmux to fully repaint
                     // the pane. Coming back from the transcript view, the
                     // local emulator has the byte history but tmux hasn't
-                    // refreshed its render — without a SIGWINCH kick the user
-                    // sees a near-empty terminal with only the latest line
-                    // until they type or click the tab.
+                    // refreshed its render — without a kick the user sees a
+                    // near-empty terminal with only the latest line until
+                    // they type or click the tab.
                     val handle = terminalHandle ?: return@App
                     handle.view.post {
                         val (cols, rows) = handle.currentSize() ?: return@post
-                        if (cols <= 1 || rows <= 0) return@post
-                        val conn = sessionOrchestrator.getConnection(activeId) ?: return@post
-                        // Shrink cols rather than rows — see tabSwitch
-                        // kick above for the status-line artifact reason.
-                        conn.resize(cols - 1, rows)
-                        handle.view.postDelayed({ conn.resize(cols, rows) }, 80)
+                        sessionOrchestrator.kickRedraw(activeId, cols, rows)
                     }
                 },
                 onApplyFontSize = { size ->
@@ -374,6 +356,13 @@ class MainActivity : FragmentActivity() {
         KeepAliveService.onAppForeground()
         sessionOrchestrator.setBackgroundMode(false)
         tabManager.activeTabId.value?.let { KeepAliveService.clearAlert(it) }
+        // Reconnect dead tabs on foreground. The network callback alone is not
+        // enough: it only fires on an onAvailable EDGE, and after a long
+        // background stint (HyperOS battery management kills sockets silently)
+        // connectivity is often already up when the user returns — no edge, no
+        // reconnect, sessions look dead until an app restart. Resume is the
+        // user-visible "I'm back" moment, so sweep here too.
+        reconnectDeadTabs("onResume")
     }
 
     override fun onPause() {
@@ -395,6 +384,36 @@ class MainActivity : FragmentActivity() {
         }
     }
 
+    // Single in-flight reconnect sweep. Flapping networks fire onAvailable in
+    // bursts; without this each edge spawned a detached GlobalScope coroutine
+    // that piled stale connect attempts (5-10s timeouts each) onto the
+    // half-dead link. One sweep at a time; a newer trigger replaces the wait.
+    @Volatile private var reconnectSweepJob: kotlinx.coroutines.Job? = null
+
+    private fun reconnectDeadTabs(reason: String) {
+        // DISCONNECTED **and ERROR**: a failed reconnectSession leaves the tab
+        // in ERROR, and the old DISCONNECTED-only filter skipped those forever.
+        val dead = tabManager.tabs.value.filter {
+            it.status == com.clauderemote.model.SessionStatus.DISCONNECTED ||
+                it.status == com.clauderemote.model.SessionStatus.ERROR
+        }
+        if (dead.isEmpty()) return
+        if (reconnectSweepJob?.isActive == true) {
+            FileLogger.log("Network", "Reconnect sweep already running, skipping ($reason)")
+            return
+        }
+        FileLogger.log("Network", "Reconnect sweep ($reason): ${dead.size} dead tab(s)")
+        reconnectSweepJob = GlobalScope.launch(Dispatchers.IO) {
+            dead.forEach { session ->
+                try {
+                    sessionOrchestrator.reconnectSession(session.id)
+                } catch (_: Exception) {
+                    // reconnectSession re-arms its own persistent retry loop.
+                }
+            }
+        }
+    }
+
     private fun registerNetworkCallback() {
         try {
             val cm = getSystemService(CONNECTIVITY_SERVICE) as android.net.ConnectivityManager
@@ -403,19 +422,8 @@ class MainActivity : FragmentActivity() {
                 .build()
             cm.registerNetworkCallback(request, object : android.net.ConnectivityManager.NetworkCallback() {
                 override fun onAvailable(network: android.net.Network) {
-                    FileLogger.log("Network", "Network available, checking for disconnected sessions")
-                    val disconnected = tabManager.tabs.value.filter {
-                        it.status == com.clauderemote.model.SessionStatus.DISCONNECTED
-                    }
-                    if (disconnected.isNotEmpty()) {
-                            GlobalScope.launch(Dispatchers.IO) {
-                            disconnected.forEach { session ->
-                                try {
-                                    sessionOrchestrator.reconnectSession(session.id)
-                                } catch (_: Exception) {}
-                            }
-                        }
-                    }
+                    FileLogger.log("Network", "Network available, checking for dead sessions")
+                    reconnectDeadTabs("onAvailable")
                 }
             })
         } catch (e: Exception) {

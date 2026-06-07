@@ -169,6 +169,10 @@ fun App(
     // Remote tmux sessions discovered on servers
     var remoteSessions by remember { mutableStateOf<List<RemoteSession>>(emptyList()) }
     var remoteSessionsLoading by remember { mutableStateOf(false) }
+    // Stale-tab prune strike counter: tab.id → consecutive successful scans of
+    // its server that did NOT contain its tmux session. A tab is forgotten only
+    // at 2 strikes (see scanRemoteSessions) so one flaky scan can't delete it.
+    val stalePruneStrikes = remember { mutableMapOf<String, Int>() }
 
     // Past Claude conversations discovered from server transcripts (history browser)
     var historySessions by remember { mutableStateOf<List<ClaudeHistorySession>>(emptyList()) }
@@ -216,37 +220,64 @@ fun App(
         scope.launch {
             remoteSessionsLoading = true
             try {
-                val results = withContext(Dispatchers.IO) {
+                // Per-server results; null = the scan FAILED for that server
+                // (timeout / unreachable). The old code flattened failures into
+                // an empty list, which made "scan failed" indistinguishable from
+                // "no tmux sessions exist" — and on a flaky network the prune
+                // below then forgetSession'd every DISCONNECTED tab (removeTab
+                // + storage.remove + tmux kill-session). That is exactly the
+                // "sessions vanish until app restart" bug.
+                val perServer: Map<String, List<RemoteSession>?> = withContext(Dispatchers.IO) {
                     servers.map { server ->
                         async {
-                            try {
+                            server.id to try {
                                 com.clauderemote.connection.SshSessionHelper.withSession(server, 5000) { sess ->
                                     TmuxManager.listSessions(sess).map { RemoteSession(server, it) }
                                 }
                             } catch (_: Exception) {
-                                emptyList()
+                                null
                             }
                         }
-                    }.awaitAll().flatten()
+                    }.awaitAll().toMap()
                 }
-                remoteSessions = results
-                // Prune disconnected tabs whose tmux session no longer
-                // exists on the server — prevents stale entries in side panel
-                val remoteTmuxNames = results.map { it.tmuxSession.name }.toSet()
-                val staleTabs = tabManager.tabs.value.filter { tab ->
+                // Only overwrite the visible list when at least one server
+                // answered; blanking it on an all-failed scan flashed
+                // "No sessions" on every connectivity dip.
+                if (perServer.values.any { it != null }) {
+                    remoteSessions = perServer.values.filterNotNull().flatten()
+                }
+                // Prune disconnected tabs whose tmux session no longer exists.
+                // Flaky-network guards:
+                //  • a tab is only "confirmed absent" when ITS OWN server's
+                //    scan succeeded and the tmux name is missing from it — a
+                //    failed scan proves nothing about that server's sessions;
+                //  • two CONSECUTIVE confirmed absences (strikes) are required
+                //    before forgetting, so a single half-broken scan (server
+                //    answered but tmux hiccupped) can't delete a tab.
+                val confirmedAbsent = tabManager.tabs.value.filter { tab ->
+                    val scanned = perServer[tab.server.id]
                     tab.status != SessionStatus.ACTIVE &&
                         tab.tmuxSessionName.isNotBlank() &&
-                        tab.tmuxSessionName !in remoteTmuxNames
+                        scanned != null &&
+                        scanned.none { it.tmuxSession.name == tab.tmuxSessionName }
                 }
-                staleTabs.forEach { tab ->
-                    FileLogger.log("App", "Pruning stale tab ${tab.id} (tmux ${tab.tmuxSessionName})")
-                    // forgetSession removes from SessionStorage and re-syncs the
-                    // server-side sessions.json so the systemd restore service
-                    // doesn't try to re-materialise this tab on next reboot.
-                    scope.launch { sessionOrchestrator.forgetSession(tab.id) }
+                // Any tab NOT confirmed absent this round (present again, or
+                // its server failed to scan) loses its accumulated strikes.
+                stalePruneStrikes.keys.retainAll(confirmedAbsent.map { it.id }.toSet())
+                confirmedAbsent.forEach { tab ->
+                    val strikes = (stalePruneStrikes[tab.id] ?: 0) + 1
+                    stalePruneStrikes[tab.id] = strikes
+                    if (strikes >= 2) {
+                        FileLogger.log("App", "Pruning stale tab ${tab.id} (tmux ${tab.tmuxSessionName}, $strikes strikes)")
+                        stalePruneStrikes.remove(tab.id)
+                        // forgetSession removes from SessionStorage and re-syncs the
+                        // server-side sessions.json so the systemd restore service
+                        // doesn't try to re-materialise this tab on next reboot.
+                        scope.launch { sessionOrchestrator.forgetSession(tab.id) }
+                    }
                 }
             } catch (_: Exception) {
-                remoteSessions = emptyList()
+                // Keep the last-known remoteSessions — never blank on failure.
             }
             remoteSessionsLoading = false
         }

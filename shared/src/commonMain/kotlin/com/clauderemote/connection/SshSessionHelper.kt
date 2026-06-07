@@ -22,6 +22,12 @@ object SshSessionHelper {
         }
         sess.setConfig("StrictHostKeyChecking", "no")
         sess.timeout = timeout
+        // Keepalive (interval is MILLISECONDS in JSch): a quiet-but-alive
+        // operation longer than the socket timeout survives (the keepalive
+        // resets it), while a silently-dead link is torn down in ~20s instead
+        // of hanging the helper's exec read on a flaky network.
+        sess.setServerAliveInterval(10_000)
+        sess.setServerAliveCountMax(2)
 
         if (server.useCloudflareProxy) {
             sess.setProxy(CloudflareProxy(server.host, server.cloudflareToken))

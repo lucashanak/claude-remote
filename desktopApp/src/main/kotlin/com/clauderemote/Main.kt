@@ -246,30 +246,11 @@ fun main() = application {
                 ?: connector.lastTermSize?.rows
                 ?: return@invokeLater
             if (cols <= 1 || rows <= 0) return@invokeLater
-            // Force a full tmux redraw via SIGWINCH by toggling the PTY
-            // size. Shrink COLS rather than ROWS — row shrink moves
-            // tmux's status line up one cell during the kick and the
-            // bytes for the old status row leak into scrollback before
-            // tmux finishes redrawing, leaving stray status-line
-            // artifacts (this was the Android-side bug we already fixed
-            // in MainActivity; same fix applies on desktop).
-            sessionOrchestrator.resize(sessionId, cols - 1, rows)
-            javax.swing.Timer(80) {
-                // Re-read dimensions inside the timer: if Compose has
-                // re-laid-out the SwingPanel between the invokeLater
-                // dispatch and this firing (window resize, font change)
-                // the cols/rows captured above are stale. Reading the
-                // buffer here picks up the current geometry.
-                val w = termWidget ?: return@Timer
-                val b = w.terminalTextBuffer
-                val curCols = b?.width?.takeIf { it > 0 }
-                    ?: connector.lastTermSize?.columns ?: return@Timer
-                val curRows = b?.height?.takeIf { it > 0 }
-                    ?: connector.lastTermSize?.rows ?: return@Timer
-                sessionOrchestrator.resize(sessionId, curCols, curRows)
-                w.terminalPanel.repaint()
-                w.terminalPanel.requestFocusInWindow()
-            }.also { it.isRepeats = false }.start()
+            // Force a full tmux redraw — the replayed tail is a partial
+            // frame. kickRedraw issues `tmux refresh-client` (deterministic
+            // full repaint regardless of geometry; falls back to a SIGWINCH
+            // col-shrink toggle), see SessionOrchestrator.kickRedraw.
+            sessionOrchestrator.kickRedraw(sessionId, cols, rows)
         }
     }
 
@@ -440,6 +421,17 @@ fun main() = application {
                         // ensures the replayed content is rendered promptly
                         // even when the panel regains focus asynchronously.
                         widget.terminalPanel.repaint()
+                    }
+                    // The replayed buffer is a partial frame and reapplySize
+                    // is a no-op when the size didn't change — without an
+                    // explicit kick tmux never resends the full screen here
+                    // (same partial-paint bug as on tab switch).
+                    val kc = widget?.terminalTextBuffer?.width?.takeIf { it > 1 }
+                        ?: connector.lastTermSize?.columns
+                    val kr = widget?.terminalTextBuffer?.height?.takeIf { it > 0 }
+                        ?: connector.lastTermSize?.rows
+                    if (kc != null && kr != null) {
+                        sessionOrchestrator.kickRedraw(activeId, kc, kr)
                     }
                 }
             },

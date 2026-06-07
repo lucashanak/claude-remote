@@ -64,8 +64,14 @@ class SshManager(
             sess.setPassword(server.password)
         }
         sess.setConfig("StrictHostKeyChecking", "no")
-        sess.setConfig("ServerAliveInterval", "30")
-        sess.setConfig("ServerAliveCountMax", "3")
+        // Keepalive via the EXPLICIT API, not setConfig: JSch's interval is in
+        // MILLISECONDS and the setConfig string key isn't reliably applied —
+        // the old setConfig("ServerAliveInterval","30") was either ignored or
+        // meant a 30ms interval. 10s × 2 misses ⇒ a silently-dead link (NAT
+        // timeout, radio handoff on a flaky roaming network) is detected in
+        // ~20s instead of never/90s, which is what re-arms auto-reconnect.
+        sess.setServerAliveInterval(10_000)
+        sess.setServerAliveCountMax(2)
         sess.userInfo = TofuUserInfo(server.host, serverStorage)
         sess.timeout = connectTimeout
 
@@ -254,6 +260,10 @@ class SshManager(
         sess.setConfig("StrictHostKeyChecking", "no")
         sess.userInfo = TofuUserInfo(server.host, serverStorage)
         sess.timeout = 10_000
+        // Same keepalive as the main connect (ms!): cleanup execs must not hang
+        // forever on a silently-dead link.
+        sess.setServerAliveInterval(10_000)
+        sess.setServerAliveCountMax(2)
         if (server.useCloudflareProxy) {
             sess.setProxy(CloudflareProxy(server.host, server.cloudflareToken))
         }

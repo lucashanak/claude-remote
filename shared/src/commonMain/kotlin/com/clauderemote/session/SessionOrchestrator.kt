@@ -275,6 +275,98 @@ class SessionOrchestrator(
     private val sessionIdRefreshJobs = mutableMapOf<String, kotlinx.coroutines.Job>()
     // Per-session git-status pollers (branch + dirty/ahead/behind of the working dir).
     private val gitStatusJobs = mutableMapOf<String, kotlinx.coroutines.Job>()
+
+    // Persistent reconnect re-arm loops (one per session). Started whenever a
+    // reconnect path gives up (autoReconnect exhausted, reconnectSession threw)
+    // so that NO failure is terminal: the loop keeps calling reconnectSession
+    // with capped backoff until the tab is ACTIVE again or removed. Without
+    // this, a multi-minute outage (flaky roaming network) burned autoReconnect's
+    // 3 attempts and the session sat DISCONNECTED forever — only an app restart
+    // (which re-runs restoreAndReconnect) recovered it.
+    private val reconnectRetryJobs = java.util.concurrent.ConcurrentHashMap<String, kotlinx.coroutines.Job>()
+
+    /**
+     * Arm (idempotently) the persistent reconnect loop for [sessionId].
+     * Backoff 2s → 60s (+jitter). Exits when the tab is ACTIVE, the tab is
+     * gone (closed/forgotten), or the job is cancelled by [disconnectSession].
+     * CONNECTING rounds are skipped, not aborted — if that in-flight attempt
+     * fails it re-arms via reconnectSession's catch anyway.
+     */
+    private fun armReconnectRetry(sessionId: String) {
+        val existing = reconnectRetryJobs[sessionId]
+        if (existing?.isActive == true) return
+        reconnectRetryJobs[sessionId] = reconnectScope.launch {
+            var attempt = 1
+            while (isActive) {
+                val base = (2000L shl (attempt - 1).coerceAtMost(5)).coerceAtMost(60_000L)
+                kotlinx.coroutines.delay(base + kotlin.random.Random.nextLong(500))
+                val tab = tabManager.getTab(sessionId) ?: break // closed/forgotten
+                if (tab.status == SessionStatus.ACTIVE) break   // recovered elsewhere
+                if (tab.status != SessionStatus.CONNECTING) {
+                    FileLogger.log(TAG, "Re-arm reconnect attempt $attempt for $sessionId")
+                    try {
+                        reconnectSession(sessionId)
+                    } catch (e: Exception) {
+                        FileLogger.error(TAG, "Re-arm reconnect attempt $attempt failed for $sessionId", e)
+                    }
+                    if (tabManager.getTab(sessionId)?.status == SessionStatus.ACTIVE) break
+                }
+                attempt++
+            }
+            reconnectRetryJobs.remove(sessionId)
+        }
+    }
+
+    /**
+     * (Re)start ALL per-session background loops, idempotently (each start*
+     * cancels its predecessor). Single entry point shared by launchSession and
+     * both reconnect paths — previously the reconnect paths restarted only the
+     * notify watcher + sessionId refresh, so usage/git/latency pollers that had
+     * exited during the outage stayed dead until app restart.
+     */
+    private fun attachSessionRuntime(sessionId: String, tmuxSessionName: String) {
+        startUsagePolling(sessionId)
+        startGitStatusPolling(sessionId)
+        startLatencyPolling(sessionId)
+        connections[sessionId]?.let { conn ->
+            startNotifyWatcher(sessionId, tmuxSessionName, conn)
+            startSessionIdRefresh(sessionId, tmuxSessionName, conn)
+        }
+    }
+
+    /**
+     * One-shot exec with a hard wall-clock bound. JSch's blocking
+     * `readText()` cannot be interrupted by coroutine cancellation, so a plain
+     * withTimeout would still leave the IO thread parked on a dead channel —
+     * on a flaky network those parked threads accumulate until Dispatchers.IO
+     * is starved and even reconnects can't get a thread (the "only an app
+     * restart helps" state). The watchdog instead force-disconnects the
+     * channel at [totalMs], which closes the stream and releases the reader.
+     */
+    private suspend fun execReadWithWatchdog(
+        sshSession: com.jcraft.jsch.Session,
+        cmd: String,
+        connectMs: Int = 5000,
+        totalMs: Long = 15_000,
+    ): String = kotlinx.coroutines.coroutineScope {
+        val ch = sshSession.openChannel("exec") as com.jcraft.jsch.ChannelExec
+        ch.setCommand(cmd)
+        ch.inputStream = null
+        val input = ch.inputStream
+        val watchdog = launch {
+            kotlinx.coroutines.delay(totalMs)
+            try { ch.disconnect() } catch (_: Exception) {}
+        }
+        try {
+            kotlinx.coroutines.withContext(Dispatchers.IO) {
+                ch.connect(connectMs)
+                input.bufferedReader().readText()
+            }
+        } finally {
+            watchdog.cancel()
+            try { ch.disconnect() } catch (_: Exception) {}
+        }
+    }
     // Per-session timestamp (ms) of the last git probe, used to debounce the
     // idle-transition trigger against the 90s polling loop so they don't
     // double-fire within a few seconds.
@@ -300,22 +392,23 @@ class SessionOrchestrator(
         usagePollingJobs[sessionId] = reconnectScope.launch {
             kotlinx.coroutines.delay(5000) // initial delay
             while (isActive) {
-                // Skip poll when app is in background — user can't see usage bar anyway
+                // Skip poll when app is in background — user can't see usage bar anyway.
+                // A missing connection (mid-reconnect) just skips this round —
+                // the old `?: break` exited the loop PERMANENTLY the first time
+                // a reconnect briefly emptied the connections map, leaving the
+                // chips dead until app restart.
                 if (!isInBackground) {
                     try {
-                        val conn = connections[sessionId] ?: break
-                        val sshSession = conn.getSession() ?: break
-                        val output = kotlinx.coroutines.withContext(Dispatchers.IO) {
-                            val ch = sshSession.openChannel("exec") as com.jcraft.jsch.ChannelExec
-                            ch.setCommand("which ccusage >/dev/null 2>&1 || npm install -g ccusage >/dev/null 2>&1; ccusage blocks --active --json --offline --no-color 2>/dev/null || echo '{}'")
-                            ch.inputStream = null
-                            val input = ch.inputStream
-                            ch.connect(5000)
-                            val result = input.bufferedReader().readText()
-                            ch.disconnect()
-                            result
+                        val sshSession = connections[sessionId]?.getSession()
+                        if (sshSession != null) {
+                            // 60s budget: the first run may npm-install ccusage.
+                            val output = execReadWithWatchdog(
+                                sshSession,
+                                "which ccusage >/dev/null 2>&1 || npm install -g ccusage >/dev/null 2>&1; ccusage blocks --active --json --offline --no-color 2>/dev/null || echo '{}'",
+                                totalMs = 60_000,
+                            )
+                            parseUsageJson(output)
                         }
-                        parseUsageJson(output)
                     } catch (_: Exception) {}
                 }
                 kotlinx.coroutines.delay(120_000) // poll every 2 min (was 30s)
@@ -368,16 +461,7 @@ class SessionOrchestrator(
                 git status --porcelain 2>/dev/null | head -1
                 git rev-list --left-right --count @{u}...HEAD 2>/dev/null
             """.trimIndent()
-            val output = kotlinx.coroutines.withContext(Dispatchers.IO) {
-                val ch = sshSession.openChannel("exec") as com.jcraft.jsch.ChannelExec
-                ch.setCommand(cmd)
-                ch.inputStream = null
-                val input = ch.inputStream
-                ch.connect(5000)
-                val result = input.bufferedReader().readText()
-                ch.disconnect()
-                result
-            }
+            val output = execReadWithWatchdog(sshSession, cmd, totalMs = 20_000)
             parseGitStatus(sessionId, output)
         } catch (_: Exception) {
             _gitStatuses.update { it - sessionId }
@@ -651,20 +735,16 @@ class SessionOrchestrator(
             while (isActive) {
                 if (!isInBackground) {
                     try {
-                        val conn = connections[sessionId] ?: break
-                        val sshSession = conn.getSession() ?: break
-                        val latency = kotlinx.coroutines.withContext(Dispatchers.IO) {
+                        // Missing connection (mid-reconnect) skips the round;
+                        // the old `?: break` killed the loop permanently.
+                        val sshSession = connections[sessionId]?.getSession()
+                        if (sshSession == null) {
+                            kotlinx.coroutines.delay(15_000)
+                            continue
+                        }
+                        val latency = kotlin.run {
                             val start = System.currentTimeMillis()
-                            val ch = sshSession.openChannel("exec") as com.jcraft.jsch.ChannelExec
-                            ch.setCommand("echo pong")
-                            ch.inputStream = null
-                            val input = ch.inputStream
-                            try {
-                                ch.connect(5000)
-                                input.bufferedReader().readText()
-                            } finally {
-                                try { ch.disconnect() } catch (_: Exception) {}
-                            }
+                            execReadWithWatchdog(sshSession, "echo pong", totalMs = 10_000)
                             System.currentTimeMillis() - start
                         }
                         recentLatencies.add(latency)
@@ -881,11 +961,7 @@ else:
             FileLogger.log(TAG, "Session active: $sessionId")
             updateActivity(sessionId, SessionActivity.WAITING_FOR_INPUT)
             onSessionActive?.invoke(session)
-            startUsagePolling(sessionId)
-            startGitStatusPolling(sessionId)
-            startLatencyPolling(sessionId)
-            connections[sessionId]?.let { startNotifyWatcher(sessionId, session.tmuxSessionName, it) }
-            connections[sessionId]?.let { startSessionIdRefresh(sessionId, session.tmuxSessionName, it) }
+            attachSessionRuntime(sessionId, session.tmuxSessionName)
             // Persist session for app-restart and server-reboot recovery.
             sessionStorage?.upsert(SessionStorage.fromClaudeSession(session))
             connections[sessionId]?.let { conn ->
@@ -941,18 +1017,70 @@ else:
     }
 
     /**
-     * Kick tmux into a full-screen redraw by toggling the PTY size. The 2 KB tail
-     * we replay on tab switch is usually a partial update (statusline, cursor
-     * move) rather than a full screen dump, so without an explicit SIGWINCH tmux
-     * won't repaint the rest of the viewport. Called by the platform after it
-     * has laid out the terminal for the new session at the current dimensions.
+     * Force tmux to resend the FULL screen for [sessionId]. The 2 KB tail we
+     * replay on tab switch is usually a partial update (statusline, cursor
+     * move) rather than a full screen dump, and tmux's damage tracking has no
+     * idea the client just cleared its local screen — a geometry-toggle
+     * SIGWINCH often produces only a minimal diff (or nothing at all when the
+     * two resizes coalesce), which is why the first switch sometimes painted
+     * partially until a second click on the session. `tmux refresh-client`
+     * is the deterministic fix: it explicitly invalidates tmux's notion of
+     * what the client has and resends the whole frame, independent of
+     * geometry. The SIGWINCH toggle is kept only as a fallback for when the
+     * exec channel fails (connection mid-reconnect, tmux probe error).
+     *
+     * Called by the platform after it has laid out the terminal for the new
+     * session at the current dimensions. Safe to call from the UI thread —
+     * the SSH round-trip runs on [reconnectScope].
      */
     fun kickRedraw(sessionId: String, cols: Int, rows: Int) {
         val conn = connections[sessionId] ?: return
-        if (cols <= 0 || rows <= 1) return
-        conn.resize(cols, rows - 1)
+        if (cols <= 1 || rows <= 0) return
+        // Sync pty geometry to the current view first (no-op if unchanged) —
+        // each session's pty keeps the size from the last time *it* was
+        // active, which may be stale after switching between sessions.
         conn.resize(cols, rows)
+        val tmuxName = tabManager.getTab(sessionId)?.tmuxSessionName
+        reconnectScope.launch {
+            val refreshed = tmuxName != null && refreshTmuxClient(conn, tmuxName)
+            if (!refreshed) {
+                // Fallback: SIGWINCH toggle. Shrink COLS, not ROWS — row
+                // shrink pushes the tmux status line up a cell during the
+                // kick and its bytes leak into scrollback as a stray
+                // status-line artifact mid-history.
+                conn.resize(cols - 1, rows)
+                kotlinx.coroutines.delay(80)
+                conn.resize(cols, rows)
+            }
+        }
     }
+
+    /**
+     * Run `tmux refresh-client` for every client attached to [tmuxName] via a
+     * short-lived exec channel. Returns true only if at least one client was
+     * actually refreshed (the command echoes OK per successful refresh).
+     */
+    private suspend fun refreshTmuxClient(conn: SshManager, tmuxName: String): Boolean =
+        kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+            try {
+                val sshSession = conn.getSession() ?: return@withContext false
+                val escaped = tmuxName.replace("'", "'\\''")
+                val ch = sshSession.openChannel("exec") as com.jcraft.jsch.ChannelExec
+                ch.setCommand(
+                    "tmux list-clients -t '$escaped' -F '#{client_name}' 2>/dev/null" +
+                        " | while IFS= read -r c; do tmux refresh-client -t \"\$c\" 2>/dev/null && echo OK; done"
+                )
+                ch.inputStream = null
+                val input = ch.inputStream
+                ch.connect(1500) // keep snappy on cell links; fallback toggle covers failure
+                val out = input.bufferedReader().readText()
+                ch.disconnect()
+                out.contains("OK")
+            } catch (e: Exception) {
+                FileLogger.log(TAG, "refresh-client failed for $tmuxName: ${e.message}")
+                false
+            }
+        }
 
     private val reconnectScope = kotlinx.coroutines.CoroutineScope(
         kotlinx.coroutines.Dispatchers.IO + kotlinx.coroutines.SupervisorJob()
@@ -1435,8 +1563,9 @@ else:
                     tabManager.updateTabStatus(session.id, SessionStatus.ACTIVE)
                     updateActivity(session.id, SessionActivity.WAITING_FOR_INPUT)
                     onSessionActive?.invoke(session)
-                    startNotifyWatcher(session.id, session.tmuxSessionName, sshManager)
-                    startSessionIdRefresh(session.id, session.tmuxSessionName, sshManager)
+                    // Restart ALL per-session loops, not just watcher+refresh —
+                    // usage/git/latency pollers may have died during the outage.
+                    attachSessionRuntime(session.id, session.tmuxSessionName)
                     emit("\r\n\u001B[32mReconnected!\u001B[0m\r\n")
                     FileLogger.log(TAG, "Auto-reconnect succeeded for ${session.id}")
                     flushPendingInputs(session.id)
@@ -1448,6 +1577,14 @@ else:
 
             emit("\r\n\u001B[31mReconnect failed after $maxAttempts attempts.\u001B[0m\r\n")
             onSessionDisconnect?.invoke(session.id)
+            // NOT terminal: hand off to the persistent re-arm loop, which keeps
+            // calling reconnectSession with capped backoff (up to 60s) until the
+            // tab is ACTIVE or removed. Previously the session was stranded
+            // DISCONNECTED forever once the 3 quick attempts burned out — on a
+            // multi-minute outage (roaming, tunnel) that was every time, and
+            // only an app restart recovered the session.
+            tabManager.updateTabStatus(session.id, SessionStatus.DISCONNECTED)
+            armReconnectRetry(session.id)
         } finally {
             synchronized(reconnectingSessionIds) { reconnectingSessionIds.remove(session.id) }
         }
@@ -1759,13 +1896,18 @@ else:
             // as soon as output flows.
             updateActivity(sessionId, SessionActivity.WAITING_FOR_INPUT)
             onSessionActive?.invoke(session)
-            connections[sessionId]?.let { startNotifyWatcher(sessionId, session.tmuxSessionName, it) }
-            connections[sessionId]?.let { startSessionIdRefresh(sessionId, session.tmuxSessionName, it) }
+            // Restart ALL per-session loops (usage/git/latency pollers included
+            // — they may have died during the outage), not just watcher+refresh.
+            attachSessionRuntime(sessionId, session.tmuxSessionName)
             FileLogger.log(TAG, "Reconnected: $sessionId")
         } catch (e: Exception) {
             FileLogger.error(TAG, "Reconnect failed", e)
             tabManager.updateTabStatus(sessionId, SessionStatus.ERROR)
             updateActivity(sessionId, SessionActivity.DISCONNECTED)
+            // Re-arm: a failed manual/restore/network-callback reconnect must
+            // not strand the tab in ERROR — keep retrying with capped backoff
+            // until it connects or the user closes the tab.
+            armReconnectRetry(sessionId)
         }
     }
 
@@ -1841,6 +1983,7 @@ else:
     }
 
     suspend fun disconnectSession(sessionId: String) {
+        reconnectRetryJobs.remove(sessionId)?.cancel()
         usagePollingJobs.remove(sessionId)?.cancel()
         gitStatusJobs.remove(sessionId)?.cancel()
         latencyPollingJobs.remove(sessionId)?.cancel()
