@@ -63,8 +63,25 @@ fun ConnectScreen(
         }
     }
 
+    // Debounce the Launch button: launchSession takes several seconds (SSH
+    // connect + tmux) and this screen stays interactive the whole time, so an
+    // impatient second tap used to fire a SECOND launchSession — a duplicate
+    // tab whose tmux relaunch killed the first one's pane. The orchestrator
+    // now also dedups by tmux name; this is the UX half: show progress, block
+    // re-taps, auto-re-arm after 8s in case the launch failed and we're still
+    // on this screen.
+    var launching by remember { mutableStateOf(false) }
+    LaunchedEffect(launching) {
+        if (launching) {
+            kotlinx.coroutines.delay(8_000)
+            launching = false
+        }
+    }
     val launch: () -> Unit = {
-        onLaunch(folder, selectedMode, selectedModel, connectionType, tmuxSessionName, !useExistingTmux)
+        if (!launching) {
+            launching = true
+            onLaunch(folder, selectedMode, selectedModel, connectionType, tmuxSessionName, !useExistingTmux)
+        }
     }
     val launchKeyboardOptions = KeyboardOptions(imeAction = ImeAction.Go)
     val launchKeyboardActions = KeyboardActions(onGo = { launch() })
@@ -352,6 +369,7 @@ fun ConnectScreen(
             // ── Launch ──────────────────────────────────────────────────────
             Button(
                 onClick = launch,
+                enabled = !launching,
                 modifier = Modifier
                     .fillMaxWidth()
                     .height(m.rowHeight),
@@ -361,7 +379,7 @@ fun ConnectScreen(
                 ),
                 shape = RoundedCornerShape(m.cardRadius),
             ) {
-                Text("▶  Launch Claude", style = CRType.cardTitle)
+                Text(if (launching) "Connecting…" else "▶  Launch Claude", style = CRType.cardTitle)
             }
 
             Spacer(Modifier.height(16.dp))

@@ -926,6 +926,20 @@ else:
         // when the tmux pane is missing but a transcript exists for this UUID.
         resumeClaudeSessionId: String? = null
     ): ClaudeSession = withContext(Dispatchers.IO) {
+        // Idempotency guard: a tab for this exact tmux session already exists
+        // (typically a second tap on Create while the first launch is still
+        // connecting — the dialog stays interactive for the several seconds the
+        // SSH connect takes). Launching again would add a duplicate tab AND
+        // `kill-session; new-session` the tmux out from under the first one,
+        // leaving the older tab as a dead bare terminal. Switch to the existing
+        // tab instead.
+        tabManager.tabs.value.firstOrNull {
+            it.server.id == server.id && it.tmuxSessionName == tmuxSessionName
+        }?.let { existing ->
+            FileLogger.log(TAG, "launchSession: '$tmuxSessionName' already open as tab ${existing.id} — switching instead of relaunching")
+            switchTab(existing.id)
+            return@withContext existing
+        }
         val sessionId = generateId()
         // Pre-generate a UUID for `claude --session-id <uuid>` so we can later
         // restore the conversation deterministically via `claude --resume <uuid>`.
