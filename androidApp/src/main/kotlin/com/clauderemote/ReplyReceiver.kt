@@ -45,9 +45,9 @@ class ReplyReceiver : BroadcastReceiver() {
         Handler(Looper.getMainLooper()).postDelayed({
             OrchestratorHolder.orchestrator?.sendClaudeCommand(sessionId, "\r")
         }, 60)
-        // Re-post the (same-id) notification in its quiet form — acknowledges
-        // the alert and clears the RemoteInput progress indicator.
-        KeepAliveService.clearAlert(sessionId)
+        // Cancel the alert — acknowledges it and clears the RemoteInput
+        // progress indicator on the watch.
+        AlertNotifier.clear(context, sessionId)
     }
 
     companion object {

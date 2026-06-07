@@ -15,14 +15,12 @@ import com.clauderemote.util.FileLogger
 class KeepAliveService : Service() {
     companion object {
         private const val CHANNEL_ID = "keepalive"
-        private const val ALERT_CHANNEL_ID = "claude_alerts"
         /**
-         * Single notification id used for BOTH the quiet foreground-service
-         * notification and the "Claude needs input" alert. Switching channels
-         * on the same id gives the user ONE notification that merely
-         * upgrades to HIGH-importance alerting when needed — rather than two
-         * concurrent status-bar entries (the old "dimmed gear" + "loud alert"
-         * pair the user complained about).
+         * Id of the quiet foreground-service notification ONLY. "Claude
+         * needs input" alerts are posted as SEPARATE notifications by
+         * [AlertNotifier] — re-posting this id on a different channel never
+         * worked (a posted notification's channel can't change), kept the
+         * alert silent, and ongoing/FGS notifications don't bridge to Wear.
          */
         private const val NOTIFICATION_ID = 1
         private const val TAG = "KeepAlive"
@@ -48,14 +46,6 @@ class KeepAliveService : Service() {
             instance?.updateNotification(description)
         }
 
-        fun sendAlert(sessionId: String, sessionTitle: String, hint: String) {
-            instance?.postAlert(sessionId, sessionTitle, hint)
-        }
-
-        fun clearAlert(sessionId: String) {
-            instance?.dismissAlert(sessionId)
-        }
-
         /** Call from onResume — screen is on, CPU is awake, no wake lock needed */
         fun onAppForeground() { instance?.setWakeLockEnabled(false) }
 
@@ -68,10 +58,8 @@ class KeepAliveService : Service() {
     private var wakeLock: PowerManager.WakeLock? = null
     private var wifiLock: android.net.wifi.WifiManager.WifiLock? = null
 
-    /** Last description passed via [updateDescription] — restored when an alert is dismissed. */
+    /** Last description passed via [updateDescription]. */
     @Volatile private var currentDescription: String = "Active session"
-    /** Session id whose alert is currently rendered in our single notification, or null. */
-    @Volatile private var currentAlertSessionId: String? = null
 
     override fun onCreate() {
         super.onCreate()
@@ -112,17 +100,7 @@ class KeepAliveService : Service() {
                 setShowBadge(false)
             }
             nm.createNotificationChannel(keepaliveChannel)
-
-            val alertChannel = NotificationChannel(
-                ALERT_CHANNEL_ID,
-                "Claude Alerts",
-                NotificationManager.IMPORTANCE_HIGH
-            ).apply {
-                description = "Notifications when Claude needs your attention"
-                enableVibration(true)
-                enableLights(true)
-            }
-            nm.createNotificationChannel(alertChannel)
+            // The HIGH-importance alert channel is owned by AlertNotifier.
         }
     }
 
@@ -144,87 +122,10 @@ class KeepAliveService : Service() {
             .build()
     }
 
-    /**
-     * Quietly update the persistent notification's description. If an alert
-     * is currently showing, we keep the alert content — the user hasn't
-     * acknowledged it yet.
-     */
+    /** Quietly update the persistent notification's description. */
     fun updateNotification(description: String) {
         currentDescription = description
-        if (currentAlertSessionId != null) return
         startForeground(NOTIFICATION_ID, buildNotification(description))
-    }
-
-    /**
-     * Raise an attention-grabbing alert by upgrading the SAME foreground-service
-     * notification (same id) to the HIGH-importance `claude_alerts` channel.
-     * The user sees one notification that changes appearance, not two
-     * concurrent entries.
-     *
-     * Must stay `setOngoing(true)` and NOT `setAutoCancel(true)` — this
-     * notification is tied to a foreground service; cancelling it would
-     * violate the FGS contract.
-     */
-    fun postAlert(sessionId: String, sessionTitle: String, hint: String) {
-        val openIntent = PendingIntent.getActivity(
-            this, sessionId.hashCode(),
-            Intent(this, MainActivity::class.java).apply {
-                flags = Intent.FLAG_ACTIVITY_SINGLE_TOP
-                putExtra("switch_to_session", sessionId)
-            },
-            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
-        )
-
-        // Inline reply (RemoteInput). Wear OS bridges this action to the
-        // watch automatically and offers its built-in voice input, so the
-        // user can answer Claude from the wrist without any watch app.
-        // FLAG_MUTABLE is required for RemoteInput on Android 12+.
-        val replyIntent = PendingIntent.getBroadcast(
-            this, sessionId.hashCode(),
-            Intent(this, ReplyReceiver::class.java).apply {
-                putExtra(ReplyReceiver.EXTRA_SESSION_ID, sessionId)
-            },
-            PendingIntent.FLAG_MUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
-        )
-        val remoteInput = android.app.RemoteInput.Builder(ReplyReceiver.KEY_REPLY)
-            .setLabel("Odpověď pro Claude…")
-            .build()
-        val replyAction = Notification.Action.Builder(
-            android.graphics.drawable.Icon.createWithResource(
-                this, android.R.drawable.ic_menu_send
-            ),
-            "Odpovědět",
-            replyIntent,
-        ).addRemoteInput(remoteInput).build()
-
-        @Suppress("DEPRECATION")
-        val notification = Notification.Builder(this, ALERT_CHANNEL_ID)
-            .setContentTitle(sessionTitle)
-            .setContentText(hint)
-            .setSmallIcon(android.R.drawable.ic_dialog_info)
-            .setContentIntent(openIntent)
-            .setOngoing(true)
-            .setPriority(Notification.PRIORITY_HIGH)
-            .setCategory(Notification.CATEGORY_MESSAGE)
-            .setDefaults(Notification.DEFAULT_ALL)
-            .setFullScreenIntent(openIntent, false)
-            .addAction(replyAction)
-            .build()
-
-        currentAlertSessionId = sessionId
-        startForeground(NOTIFICATION_ID, notification)
-        FileLogger.log(TAG, "Alert sent: $sessionTitle — $hint")
-    }
-
-    /**
-     * Revert the single notification back to the quiet keep-alive appearance
-     * after the user has acknowledged the alert (tapped, switched tabs, or
-     * typed into the session).
-     */
-    fun dismissAlert(sessionId: String) {
-        if (currentAlertSessionId != sessionId) return
-        currentAlertSessionId = null
-        startForeground(NOTIFICATION_ID, buildNotification(currentDescription))
     }
 
     @Suppress("DEPRECATION")

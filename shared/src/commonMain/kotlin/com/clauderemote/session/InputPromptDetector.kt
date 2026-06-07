@@ -102,6 +102,13 @@ class InputPromptDetector(
         val snapshot = screenReader?.invoke(sessionId) ?: return
         val classified = ScreenStateClassifier.classify(snapshot)
 
+        // Claude is visibly WORKING again → a new turn started. Re-arm the
+        // notify latch so the NEXT idle/approval fires even when the user
+        // never typed in this app (dismissed the notification, answered from
+        // another client, …). Without this the latch stuck forever and the
+        // session notified exactly once ("fires once, then never again").
+        if (classified == ClaudeState.WORKING) state.waitingForInput = false
+
         // Approval-only mode for hook-active sessions: the hook + statusline own
         // WORKING/IDLE (screen-based idle is the flappy signal the hook replaced),
         // so the screen check contributes ONLY the one state they can't see — a
@@ -139,6 +146,27 @@ class InputPromptDetector(
         val state = sessionStates.getOrPut(sessionId) { SessionState() }
         state.waitingForInput = false
         state.userHasInteracted = true
+    }
+
+    /**
+     * The statusline says Claude is actively working — re-arm the notify
+     * latch (same rationale as the WORKING screen classification, but this
+     * source flows through terminal output for EVERY session, including
+     * background tabs whose screenReader returns null).
+     */
+    fun onClaudeWorking(sessionId: String) {
+        sessionStates[sessionId]?.waitingForInput = false
+    }
+
+    /**
+     * Treat the session as already-interacted. Called on session RESTORE /
+     * reconnect: Claude may already be sitting idle waiting for input, and
+     * the `userHasInteracted` startup guard (meant to silence the shell's
+     * own prompt on a brand-new session) would otherwise swallow the first —
+     * and only — notification until the user happened to type something.
+     */
+    fun markInteracted(sessionId: String) {
+        sessionStates.getOrPut(sessionId) { SessionState() }.userHasInteracted = true
     }
 
     fun removeSession(sessionId: String) {
