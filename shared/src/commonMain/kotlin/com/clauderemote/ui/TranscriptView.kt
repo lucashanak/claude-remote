@@ -517,43 +517,36 @@ private fun SlashCommandRow(entry: TranscriptEntry.SlashCommand) {
     }
 }
 
+/**
+ * Assistant text is the primary content of the chat — render it flat (no
+ * card chrome, no role pill). Metadata (model · time, copy, speaker) sits in
+ * a single quiet hairline row under the body so it's available but doesn't
+ * compete with the content.
+ */
 @Composable
 private fun AssistantTextCard(entry: TranscriptEntry.AssistantText) {
     val c = CRTheme.colors
-    val m = CRTheme.metrics
-    Column(
-        modifier = Modifier
-            .fillMaxWidth()
-            .background(c.surface2, RoundedCornerShape(m.cardRadius))
-            .border(1.dp, c.border, RoundedCornerShape(m.cardRadius))
-            .padding(horizontal = m.cardPadH, vertical = m.cardPadV)
-    ) {
+    Column(modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp)) {
+        RichBody(entry.text)
         Row(
             verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.SpaceBetween,
-            modifier = Modifier.fillMaxWidth()
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+            modifier = Modifier.fillMaxWidth().padding(top = 2.dp)
         ) {
-            Pill(text = "ASSISTANT", background = c.tintAccent, foreground = c.accent)
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(6.dp)
-            ) {
-                if (entry.model != null) {
-                    Text(entry.model, style = CRType.monoTiny, color = c.textDim)
-                }
-                if (entry.timestamp != null) {
-                    Text(formatTimestamp(entry.timestamp), style = CRType.monoTiny, color = c.textDim)
-                }
-                CopyButton(entry.text, modifier = Modifier.size(26.dp))
-                SpeakerButton(
-                    text = entry.text,
-                    modifier = Modifier.size(28.dp),
-                    tint = c.textDim,
-                )
+            val meta = listOfNotNull(
+                entry.model,
+                entry.timestamp?.let { formatTimestamp(it) }
+            ).joinToString(" · ")
+            if (meta.isNotBlank()) {
+                Text(meta, style = CRType.monoTiny, color = c.textDim.copy(alpha = 0.7f))
             }
+            CopyButton(entry.text, modifier = Modifier.size(22.dp), tint = c.textDim.copy(alpha = 0.7f))
+            SpeakerButton(
+                text = entry.text,
+                modifier = Modifier.size(24.dp),
+                tint = c.textDim.copy(alpha = 0.7f),
+            )
         }
-        Spacer(Modifier.height(6.dp))
-        RichBody(entry.text)
     }
 }
 
@@ -596,9 +589,31 @@ private fun ThinkingCard(entry: TranscriptEntry.AssistantThinking) {
     }
 }
 
+/** Pulsing dot shown while a tool call has no result yet. */
+@Composable
+private fun PendingDot(modifier: Modifier = Modifier) {
+    val t = rememberInfiniteTransition(label = "tool-pending")
+    val pulseAlpha by t.animateFloat(
+        initialValue = 0.35f,
+        targetValue = 1f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(900),
+            repeatMode = RepeatMode.Reverse
+        ),
+        label = "tool-pending-alpha"
+    )
+    Text(
+        "●",
+        style = CRType.monoTiny,
+        color = CRTheme.colors.working,
+        modifier = modifier.alpha(pulseAlpha)
+    )
+}
+
 /**
- * Compact one-line tool row: glyph · name · summary · status indicator.
- * Expanded reveals input + result indented under the row, wrapped in CRCard.
+ * Compact one-line tool row: category glyph · name · summary · status.
+ * Borderless — tool calls are secondary detail, only an error result gets
+ * card emphasis. Expanded reveals input + result indented under the row.
  */
 @Composable
 private fun ToolRow(
@@ -607,20 +622,11 @@ private fun ToolRow(
 ) {
     val c = CRTheme.colors
     val m = CRTheme.metrics
-    var expanded by remember { mutableStateOf(false) }
+    var expanded by rememberSaveable(entry.id) { mutableStateOf(false) }
     val errorTint = result?.isError == true
     val categoryTint = toolCategoryTint(entry.name, c)
-    val accent = when {
-        errorTint -> c.disconnected
-        result == null -> c.working
-        else -> categoryTint
-    }
 
-    CRCard(
-        background = c.surface,
-        borderColor = accent.copy(alpha = 0.35f),
-        padding = PaddingValues(horizontal = m.cardPadH, vertical = 4.dp)
-    ) {
+    val rowContent: @Composable () -> Unit = {
         Column {
             Row(
                 modifier = Modifier
@@ -629,16 +635,16 @@ private fun ToolRow(
                     .padding(vertical = 2.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Pill(
-                    text = "TOOL",
-                    background = categoryTint.copy(alpha = 0.18f),
-                    foreground = categoryTint
+                Text(
+                    "●",
+                    style = CRType.monoTiny,
+                    color = if (errorTint) c.disconnected else categoryTint,
+                    modifier = Modifier.padding(end = 6.dp)
                 )
-                Spacer(Modifier.width(6.dp))
                 Text(
                     entry.name,
-                    style = CRType.cardTitle,
-                    color = accent,
+                    style = CRType.mono,
+                    color = if (errorTint) c.disconnected else c.text,
                     modifier = Modifier.padding(end = 8.dp)
                 )
                 Text(
@@ -649,22 +655,7 @@ private fun ToolRow(
                     modifier = Modifier.weight(1f).horizontalScroll(rememberScrollState())
                 )
                 if (result == null) {
-                    val t = rememberInfiniteTransition(label = "tool-pending")
-                    val pulseAlpha by t.animateFloat(
-                        initialValue = 0.35f,
-                        targetValue = 1f,
-                        animationSpec = infiniteRepeatable(
-                            animation = tween(900),
-                            repeatMode = RepeatMode.Reverse
-                        ),
-                        label = "tool-pending-alpha"
-                    )
-                    Text(
-                        "●",
-                        style = CRType.monoTiny,
-                        color = c.working,
-                        modifier = Modifier.padding(start = 4.dp).alpha(pulseAlpha)
-                    )
+                    PendingDot(modifier = Modifier.padding(start = 4.dp))
                 } else if (errorTint) {
                     Text(
                         "!",
@@ -678,6 +669,16 @@ private fun ToolRow(
                 ToolExpandedDetail(entry, result)
             }
         }
+    }
+
+    if (errorTint) {
+        CRCard(
+            background = c.disconnected.copy(alpha = 0.08f),
+            borderColor = c.disconnected.copy(alpha = 0.4f),
+            padding = PaddingValues(horizontal = m.cardPadH, vertical = 2.dp)
+        ) { rowContent() }
+    } else {
+        Box(Modifier.padding(horizontal = 4.dp)) { rowContent() }
     }
 }
 
@@ -1017,16 +1018,80 @@ private fun IndentedMono(text: String, error: Boolean = false) {
     }
 }
 
+/**
+ * A run of consecutive tool calls collapsed to ONE summary row:
+ * `⚙ 14 tools · 6×Read 4×Bash 3×Edit ✓`. Errors surface as a red count,
+ * a still-running call as a pulsing dot. Tap toggles the full row list.
+ * Collapsed by default — the group is working noise, not content.
+ */
 @Composable
 private fun ToolGroupBlock(
     calls: List<TranscriptEntry.ToolCall>,
     results: Map<String, TranscriptEntry.ToolResult>
 ) {
     val c = CRTheme.colors
-    val m = CRTheme.metrics
-    Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
-        for (call in calls) {
-            ToolRow(call, results[call.toolUseId])
+    // Key on the first call id: stable while the group grows during streaming.
+    var expanded by rememberSaveable(calls.first().id) { mutableStateOf(false) }
+    val pending = calls.any { results[it.toolUseId] == null }
+    val errorCount = calls.count { results[it.toolUseId]?.isError == true }
+    val breakdown = remember(calls) {
+        val counts = calls.groupingBy { it.name }.eachCount()
+            .entries.sortedByDescending { it.value }
+        val shown = counts.take(4).joinToString(" ") { "${it.value}×${it.key}" }
+        if (counts.size > 4) "$shown …" else shown
+    }
+    Column {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clickable { expanded = !expanded }
+                .padding(horizontal = 4.dp, vertical = 3.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(
+                if (expanded) "▼" else "▶",
+                style = CRType.monoTiny,
+                color = c.textDim,
+                modifier = Modifier.padding(end = 6.dp)
+            )
+            Text(
+                "⚙ ${calls.size} tools",
+                style = CRType.mono,
+                color = c.text,
+                modifier = Modifier.padding(end = 8.dp)
+            )
+            Text(
+                breakdown,
+                style = CRType.monoTiny,
+                maxLines = 1,
+                color = c.textDim,
+                modifier = Modifier.weight(1f).horizontalScroll(rememberScrollState())
+            )
+            when {
+                pending -> PendingDot(modifier = Modifier.padding(start = 4.dp))
+                errorCount > 0 -> Text(
+                    "$errorCount!",
+                    style = CRType.monoTiny,
+                    color = c.disconnected,
+                    modifier = Modifier.padding(start = 4.dp)
+                )
+                else -> Text(
+                    "✓",
+                    style = CRType.monoTiny,
+                    color = c.ready,
+                    modifier = Modifier.padding(start = 4.dp)
+                )
+            }
+        }
+        if (expanded) {
+            Column(
+                verticalArrangement = Arrangement.spacedBy(2.dp),
+                modifier = Modifier.padding(start = 12.dp)
+            ) {
+                for (call in calls) {
+                    ToolRow(call, results[call.toolUseId])
+                }
+            }
         }
     }
 }
