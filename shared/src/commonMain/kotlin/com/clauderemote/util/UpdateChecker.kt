@@ -29,14 +29,14 @@ data class UpdateInfo(
 object UpdateChecker {
 
     private const val REPO = "lucashanak/claude-remote"
-    private const val MAX_PATCH_CHAIN = 3
+    private const val MAX_PATCH_CHAIN = 10
 
     /**
      * Check for updates. Returns null if current version is latest.
      */
     suspend fun checkUpdate(currentVersion: String): UpdateInfo? = withContext(Dispatchers.IO) {
         try {
-            val conn = (URL("https://api.github.com/repos/$REPO/releases?per_page=5")
+            val conn = (URL("https://api.github.com/repos/$REPO/releases?per_page=15")
                 .openConnection() as HttpURLConnection).apply {
                 setRequestProperty("User-Agent", "ClaudeRemote/$currentVersion")
                 setRequestProperty("Accept", "application/vnd.github+json")
@@ -90,12 +90,16 @@ object UpdateChecker {
                     val match = Regex("patch-(.*)-to-(.*)\\.bspatch").find(name) ?: continue
                     val from = match.groupValues[1]
                     val to = match.groupValues[2]
-                    patchMap[from] = PatchStep(
+                    val candidate = PatchStep(
                         url = a.optString("browser_download_url", ""),
                         size = a.optLong("size", 0),
                         from = from,
                         to = to
                     )
+                    val existing = patchMap[from]
+                    if (existing == null || isNewer(candidate.to, existing.to)) {
+                        patchMap[from] = candidate
+                    }
                 }
             }
 
