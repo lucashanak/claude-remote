@@ -1694,11 +1694,17 @@ private fun insertTimeGaps(items: List<RenderItem>): List<RenderItem> {
     if (items.size < 2) return items
     val out = ArrayList<RenderItem>(items.size + 4)
     var prev: Long? = null
-    items.forEachIndexed { i, item ->
+    for (item in items) {
         val ts = itemTimestamp(item)
         val cur = isoToEpochMinutes(ts)
-        if (prev != null && cur != null && cur - prev!! >= TIME_GAP_MINUTES) {
-            out += RenderItem.TimeGap(key = "gap:$i:$ts", label = formatTimestamp(ts!!).take(5))
+        if (prev != null && cur != null && cur - prev >= TIME_GAP_MINUTES) {
+            // Key derived from the item the gap precedes: at most one gap per
+            // item, and stable across streaming updates (a positional index
+            // would re-key every gap whenever an earlier item is inserted).
+            out += RenderItem.TimeGap(
+                key = "gap:" + itemKey(item),
+                label = formatTimestamp(ts!!).take(5)
+            )
         }
         if (cur != null) prev = cur
         out += item
