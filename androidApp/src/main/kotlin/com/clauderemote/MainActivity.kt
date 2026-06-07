@@ -161,6 +161,9 @@ class MainActivity : FragmentActivity() {
         tabManager = TabManager()
         val sessionStorage = com.clauderemote.storage.SessionStorage(prefs)
         sessionOrchestrator = SessionOrchestrator(serverStorage, tabManager, sessionStorage)
+        // Expose to non-Compose entry points (notification RemoteInput reply,
+        // future Wear data layer).
+        OrchestratorHolder.orchestrator = sessionOrchestrator
         com.clauderemote.connection.MoshManager.init(this)
         val sshKeyManager = com.clauderemote.connection.SshKeyManager(prefs)
 
