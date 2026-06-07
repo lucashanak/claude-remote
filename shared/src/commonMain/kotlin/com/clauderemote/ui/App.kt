@@ -67,6 +67,7 @@ fun App(
     onInstallUpdate: ((ByteArray, UpdateInfo) -> Unit)? = null,
     onGetCurrentApk: (() -> ByteArray)? = null,
     onShareLog: ((String) -> Unit)? = null,
+    onTestNotification: (() -> Unit)? = null,
     onTerminalScreenVisible: (() -> Unit)? = null,
     onPickKeyFile: ((callback: (String) -> Unit) -> Unit)? = null,
     onImportServers: (() -> Unit)? = null,
@@ -1084,7 +1085,8 @@ fun App(
                             onShareLog?.invoke(json)
                         },
                         onImportServers = onImportServers,
-                        onViewLog = { currentScreen = Screen.LOG_VIEWER }
+                        onViewLog = { currentScreen = Screen.LOG_VIEWER },
+                        onTestNotification = onTestNotification,
                     )
                 }
 
