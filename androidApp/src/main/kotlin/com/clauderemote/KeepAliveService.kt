@@ -175,6 +175,28 @@ class KeepAliveService : Service() {
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
         )
 
+        // Inline reply (RemoteInput). Wear OS bridges this action to the
+        // watch automatically and offers its built-in voice input, so the
+        // user can answer Claude from the wrist without any watch app.
+        // FLAG_MUTABLE is required for RemoteInput on Android 12+.
+        val replyIntent = PendingIntent.getBroadcast(
+            this, sessionId.hashCode(),
+            Intent(this, ReplyReceiver::class.java).apply {
+                putExtra(ReplyReceiver.EXTRA_SESSION_ID, sessionId)
+            },
+            PendingIntent.FLAG_MUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+        )
+        val remoteInput = android.app.RemoteInput.Builder(ReplyReceiver.KEY_REPLY)
+            .setLabel("Odpověď pro Claude…")
+            .build()
+        val replyAction = Notification.Action.Builder(
+            android.graphics.drawable.Icon.createWithResource(
+                this, android.R.drawable.ic_menu_send
+            ),
+            "Odpovědět",
+            replyIntent,
+        ).addRemoteInput(remoteInput).build()
+
         @Suppress("DEPRECATION")
         val notification = Notification.Builder(this, ALERT_CHANNEL_ID)
             .setContentTitle(sessionTitle)
@@ -186,6 +208,7 @@ class KeepAliveService : Service() {
             .setCategory(Notification.CATEGORY_MESSAGE)
             .setDefaults(Notification.DEFAULT_ALL)
             .setFullScreenIntent(openIntent, false)
+            .addAction(replyAction)
             .build()
 
         currentAlertSessionId = sessionId

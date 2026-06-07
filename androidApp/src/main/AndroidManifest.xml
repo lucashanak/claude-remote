@@ -29,6 +29,10 @@
             </intent-filter>
         </activity>
 
+        <receiver
+            android:name="com.clauderemote.ReplyReceiver"
+            android:exported="false" />
+
         <service
             android:name="com.clauderemote.KeepAliveService"
             android:exported="false"
