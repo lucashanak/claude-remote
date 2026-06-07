@@ -148,31 +148,54 @@ jobs:
         id: patch
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
         run: |
           sudo apt-get install -y -qq bsdiff
           NEW_VER="${{ needs.version.outputs.version }}"
           APK_SIZE=$(stat -c%s "ClaudeRemote.apk")
-          PATCH_FILES=""
+          export NEW_VER APK_SIZE REPO
           # Up to 10 most recent prior releases — generate a DIRECT patch from
           # each so a user up to 10 versions behind needs only ONE small patch.
-          TAGS=$(gh release list --limit 10 --json tagName -q '.[].tagName' --repo "${{ github.repository }}" 2>/dev/null || echo "")
+          # Both phases run concurrently: bsdiff is CPU/RAM-heavy, so 10 serial
+          # diffs would dominate the job; bounded parallelism keeps it under the
+          # parallel macOS build's wall-clock.
+          TAGS=$(gh release list --limit 10 --json tagName -q '.[].tagName' --repo "$REPO" 2>/dev/null || echo "")
+
+          # Phase 1 — download each prior APK into its own dir, in parallel.
           for PREV_TAG in $TAGS; do
             PREV_VER="${PREV_TAG#v}"
             [ "$PREV_VER" = "$NEW_VER" ] && continue
-            rm -rf /tmp/prev && mkdir -p /tmp/prev
-            gh release download "$PREV_TAG" --pattern "ClaudeRemote.apk" --dir /tmp/prev/ --repo "${{ github.repository }}" 2>/dev/null || continue
-            [ -f /tmp/prev/ClaudeRemote.apk ] || continue
-            PATCH_NAME="patch-${PREV_VER}-to-${NEW_VER}.bspatch"
-            bsdiff /tmp/prev/ClaudeRemote.apk ClaudeRemote.apk "$PATCH_NAME"
-            PATCH_SIZE=$(stat -c%s "$PATCH_NAME")
-            PCT=$(( PATCH_SIZE * 100 / APK_SIZE ))
-            if [ "$PATCH_SIZE" -lt "$((APK_SIZE * 80 / 100))" ]; then
-              echo "Patch $PREV_VER -> $NEW_VER: $PATCH_SIZE bytes ($PCT% of APK) — keep"
-              PATCH_FILES="$PATCH_FILES $PATCH_NAME"
+            ( mkdir -p "/tmp/prev/$PREV_VER" &&
+              gh release download "$PREV_TAG" --pattern "ClaudeRemote.apk" \
+                --dir "/tmp/prev/$PREV_VER/" --repo "$REPO" 2>/dev/null || true ) &
+          done
+          wait
+
+          # Phase 2 — bsdiff each prior APK -> new APK, max 4 concurrent.
+          make_patch() {
+            ver="$1"
+            src="/tmp/prev/$ver/ClaudeRemote.apk"
+            [ -f "$src" ] || return 0
+            name="patch-${ver}-to-${NEW_VER}.bspatch"
+            bsdiff "$src" ClaudeRemote.apk "$name" || { rm -f "$name"; return 0; }
+            size=$(stat -c%s "$name")
+            pct=$(( size * 100 / APK_SIZE ))
+            if [ "$size" -lt "$((APK_SIZE * 80 / 100))" ]; then
+              echo "keep $name ($pct% of APK)"
             else
-              echo "Patch $PREV_VER -> $NEW_VER too large ($PCT%), skipping"
-              rm "$PATCH_NAME"
+              echo "skip $name — too large ($pct%)"
+              rm -f "$name"
             fi
+          }
+          export -f make_patch
+          if [ -d /tmp/prev ]; then
+            ls /tmp/prev | xargs -r -P 4 -I {} bash -c 'make_patch "$@"' _ {}
+          fi
+
+          # Collect survivors via a literal-glob-safe loop (no `ls` under set -e).
+          PATCH_FILES=""
+          for f in patch-*-to-"${NEW_VER}".bspatch; do
+            [ -f "$f" ] && PATCH_FILES="$PATCH_FILES $f"
           done
           echo "patch_files=${PATCH_FILES# }" >> "$GITHUB_OUTPUT"
 
