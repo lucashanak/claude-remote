@@ -1511,6 +1511,9 @@ else:
             if (!reconnectingSessionIds.add(session.id)) return // already reconnecting
         }
         try {
+            // Closed/forgotten while the loss event was in flight — don't
+            // resurrect a connection for a tab that no longer exists.
+            if (tabManager.getTab(session.id) == null) return
             // Invalidate the confirmed UUID before the first reconnect attempt so
             // the transcript kick-probe fires after we come back up. If claude
             // restarted (new pid, new session UUID) during the outage, the probe
@@ -1526,6 +1529,8 @@ else:
                 val base = (2000L shl (attempt - 1).coerceAtMost(5)).coerceAtMost(30_000L)
                 val jitter = kotlin.random.Random.nextLong(500)
                 kotlinx.coroutines.delay(base + jitter)
+                // Tab closed during the backoff — stop reconnecting it.
+                if (tabManager.getTab(session.id) == null) return
 
                 try {
                     // Clean up old connection
@@ -1923,30 +1928,37 @@ else:
         // snapshot even after the tab is torn down below.
         val forgottenServerId = session?.server?.id
         val forgottenTmuxName = session?.tmuxSessionName
-        try {
-            sessionStorage?.remove(sessionId)
-            if (session != null) {
-                val conn = connections[sessionId]
-                val liveConn: SshManager? = if (conn != null && conn.isConnected) conn else null
 
-                // If there is no live connection, open a short-lived one just
-                // for cleanup — so tmux panes are always killed and sessions.json
-                // is always re-synced even when the user closes a tab while SSH
-                // is disconnected. Without this the tmux pane stays alive on the
-                // server and the systemd restore service would re-materialise the
-                // "closed" session on next reboot.
-                val cleanupConn: SshManager? = liveConn ?: run {
-                    try {
-                        val tmp = SshManager(serverStorage)
-                        tmp.connectForCleanup(session.server)
-                        tmp
-                    } catch (e: Exception) {
-                        FileLogger.log(TAG, "Cleanup SSH connect failed for $sessionId (${e.message}) — server-side cleanup skipped")
-                        null
-                    }
+        // 1. IMMEDIATE local teardown. The server-side cleanup below can take
+        //    tens of seconds on a slow network (cleanup connect timeout + tmux
+        //    kill + sessions.json push). The old order ran cleanup FIRST and
+        //    removed the tab in a finally — so a "closed" tab stayed visible
+        //    (and switchable!) until cleanup finished, then vanished from under
+        //    the user mid-use.
+        sessionStorage?.remove(sessionId)
+        disconnectSession(sessionId)
+        // Prune the UI's stale remote-tmux snapshot so the killed pane
+        // doesn't reappear as a "detached remote" row.
+        if (forgottenServerId != null && !forgottenTmuxName.isNullOrBlank()) {
+            onSessionForgotten?.invoke(forgottenServerId, forgottenTmuxName)
+        }
+
+        // 2. Server-side cleanup in the BACKGROUND, best-effort: kill the tmux
+        //    pane and re-sync sessions.json so the systemd restore service
+        //    doesn't re-materialise the "closed" session after a reboot. Opens
+        //    its own short-lived connection — the tab's live connection was
+        //    already torn down above, and reusing it would keep its read loop
+        //    (and onConnectionLost → autoReconnect) alive for a dead tab.
+        if (session != null) {
+            reconnectScope.launch {
+                val cleanupConn: SshManager? = try {
+                    val tmp = SshManager(serverStorage)
+                    tmp.connectForCleanup(session.server)
+                    tmp
+                } catch (e: Exception) {
+                    FileLogger.log(TAG, "Cleanup SSH connect failed for $sessionId (${e.message}) — server-side cleanup skipped")
+                    null
                 }
-                val ownedCleanup = cleanupConn != null && cleanupConn !== liveConn
-
                 try {
                     if (cleanupConn != null) {
                         try {
@@ -1964,20 +1976,8 @@ else:
                         }
                     }
                 } finally {
-                    if (ownedCleanup) {
-                        try { cleanupConn!!.disconnect() } catch (_: Exception) {}
-                    }
+                    try { cleanupConn?.disconnect() } catch (_: Exception) {}
                 }
-            }
-        } finally {
-            // Always tear down the in-memory connection / tab, even if the
-            // server-side cleanup above threw — otherwise the tab list and
-            // connection map drift out of sync with what the user expects.
-            disconnectSession(sessionId)
-            // Prune the UI's stale remote-tmux snapshot so the killed pane
-            // doesn't reappear as a "detached remote" row.
-            if (forgottenServerId != null && !forgottenTmuxName.isNullOrBlank()) {
-                onSessionForgotten?.invoke(forgottenServerId, forgottenTmuxName)
             }
         }
     }
