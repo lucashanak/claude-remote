@@ -13,9 +13,14 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.selection.SelectionContainer
+import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.ContentCopy
+import androidx.compose.material.icons.filled.KeyboardArrowDown
+import androidx.compose.material.icons.filled.KeyboardArrowUp
+import androidx.compose.material.icons.filled.Search
+import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -85,6 +90,9 @@ fun TranscriptView(
     var showSystem by remember { mutableStateOf(false) }
     var showThinking by remember { mutableStateOf(false) }
     var fontScale by rememberSaveable { mutableStateOf(1f) }
+    var searchOpen by remember(sessionKey) { mutableStateOf(false) }
+    var searchQuery by remember(sessionKey) { mutableStateOf("") }
+    var searchPos by remember(sessionKey) { mutableStateOf(0) }
 
     // Pair each ToolCall with its matching ToolResult so we can render them
     // in a single collapsible row. Orphan ToolResults (no preceding call,
@@ -225,6 +233,11 @@ fun TranscriptView(
             fontScale = fontScale,
             onFontScaleDelta = { delta ->
                 fontScale = (fontScale + delta).coerceIn(0.7f, 1.6f)
+            },
+            searchOpen = searchOpen,
+            onToggleSearch = {
+                searchOpen = !searchOpen
+                if (!searchOpen) searchQuery = ""
             }
         )
 
@@ -279,6 +292,37 @@ fun TranscriptView(
             buildRenderList(filtered, turnMeta) { key -> expandedSnapshot[key] == true }
         }
         val itemsCount = rendered.size + if (skeletonShowing || awaitingShowing) 1 else 0
+
+        // ── Search & navigation lookups ──────────────────────────────────
+        // Matches are computed over filtered ENTRIES (not render items) so a
+        // hit inside a collapsed turn can be navigated to by first expanding
+        // that turn. keyByEntryId maps an entry to the LazyColumn item that
+        // hosts it (a grouped tool call maps to its group row).
+        val searchMatches = remember(filtered, searchQuery) {
+            if (searchQuery.length < 2) emptyList()
+            else filtered.filter { entryMatchesQuery(it, searchQuery) }.map { it.id }
+        }
+        val keyByEntryId = remember(rendered) {
+            buildMap {
+                for (item in rendered) when (item) {
+                    is RenderItem.Single -> put(item.entry.id, itemKey(item))
+                    is RenderItem.ToolGroup -> {
+                        val k = itemKey(item)
+                        for (call in item.calls) put(call.id, k)
+                    }
+                    is RenderItem.TurnSteps -> {}
+                }
+            }
+        }
+        val turnKeyByEntryId = remember(filtered) { mapEntryToTurn(filtered) }
+        val promptIndices = remember(rendered) {
+            rendered.indices.filter {
+                val item = rendered[it]
+                item is RenderItem.Single &&
+                    (item.entry is TranscriptEntry.UserPrompt || item.entry is TranscriptEntry.SlashCommand)
+            }
+        }
+        var pendingScrollEntryId by remember(sessionKey) { mutableStateOf<String?>(null) }
 
         // Stickiness is decided by user scroll gestures, not by snapshotting
         // layoutInfo at the moment a content effect fires. Previous logic
@@ -371,67 +415,309 @@ fun TranscriptView(
                 programmaticDepth--
             }
         }
+
+        // ── Navigation actions ───────────────────────────────────────────
+        fun scrollGuarded(block: suspend () -> Unit) {
+            scope.launch {
+                programmaticDepth++
+                try {
+                    block()
+                    // Hold the guard one settle frame (same reason as the
+                    // auto-scroll effect above).
+                    kotlinx.coroutines.delay(120)
+                } finally {
+                    programmaticDepth--
+                }
+            }
+        }
+        fun jumpToPrompt(direction: Int) {
+            val cur = listState.firstVisibleItemIndex
+            val target = if (direction < 0) promptIndices.lastOrNull { it < cur }
+            else promptIndices.firstOrNull { it > cur }
+            if (target != null) {
+                stickToBottom = false
+                scrollGuarded { listState.animateScrollToItem(target) }
+            }
+        }
+        fun jumpToBottom() {
+            stickToBottom = true
+            scrollGuarded {
+                listState.scrollToItem((itemsCount - 1).coerceAtLeast(0))
+                listState.scrollBy(Float.MAX_VALUE)
+            }
+        }
+        fun gotoMatch(pos: Int) {
+            if (searchMatches.isEmpty()) return
+            val p = ((pos % searchMatches.size) + searchMatches.size) % searchMatches.size
+            searchPos = p
+            val id = searchMatches[p]
+            // Hit inside a collapsed turn: expand it first; the pending-scroll
+            // effect below resolves the item once the new render list exists.
+            if (keyByEntryId[id] == null) turnKeyByEntryId[id]?.let { expandedTurns[it] = true }
+            pendingScrollEntryId = id
+        }
+        // Resolve a pending search target once (re)composition produced an
+        // item hosting it — needed because expanding a turn changes `rendered`
+        // a frame after gotoMatch runs.
+        LaunchedEffect(pendingScrollEntryId, rendered) {
+            val id = pendingScrollEntryId ?: return@LaunchedEffect
+            val key = keyByEntryId[id] ?: return@LaunchedEffect
+            val idx = rendered.indexOfFirst { itemKey(it) == key }
+            if (idx < 0) return@LaunchedEffect
+            pendingScrollEntryId = null
+            stickToBottom = false
+            programmaticDepth++
+            try {
+                kotlinx.coroutines.yield()
+                listState.scrollToItem(idx)
+                kotlinx.coroutines.delay(120)
+            } finally {
+                programmaticDepth--
+            }
+        }
+        // New query → navigate to its most recent (bottom-most) hit. Keyed on
+        // the query, not the match list, so streaming entries don't yank the
+        // viewport while the search bar is open.
+        var lastNavQuery by remember(sessionKey) { mutableStateOf("") }
+        LaunchedEffect(searchMatches, searchQuery) {
+            if (searchQuery != lastNavQuery) {
+                lastNavQuery = searchQuery
+                if (searchMatches.isNotEmpty()) gotoMatch(searchMatches.size - 1)
+            }
+        }
+        val currentMatchKey =
+            if (searchOpen && searchMatches.isNotEmpty())
+                keyByEntryId[searchMatches.getOrNull(searchPos)]
+            else null
+
+        if (searchOpen) {
+            TranscriptSearchBar(
+                query = searchQuery,
+                onQueryChange = { searchQuery = it },
+                matchCount = searchMatches.size,
+                matchPos = searchPos,
+                onPrev = { gotoMatch(searchPos - 1) },
+                onNext = { gotoMatch(searchPos + 1) },
+                onClose = {
+                    searchOpen = false
+                    searchQuery = ""
+                },
+            )
+        }
         CompositionLocalProvider(
             LocalDensity provides Density(
                 density = baseDensity.density,
                 fontScale = baseDensity.fontScale * fontScale
             )
         ) {
-            SelectionContainer {
-                LazyColumn(
-                    state = listState,
-                    modifier = Modifier.fillMaxSize().padding(horizontal = 8.dp),
-                    verticalArrangement = Arrangement.spacedBy(cardGap),
-                    contentPadding = PaddingValues(vertical = 8.dp)
-                ) {
-                    items(
-                        items = rendered,
-                        key = { item ->
-                            // Namespace per render type so a Single entry id can
-                            // never collide with a ToolGroup key — a duplicate
-                            // LazyColumn key is a hard crash, not a glitch.
-                            when (item) {
-                                is RenderItem.Single -> "s:" + item.entry.id
-                                is RenderItem.ToolGroup -> "tg:" + item.calls.first().id
-                                is RenderItem.TurnSteps -> "ts:" + item.turnKey
+            Box(Modifier.fillMaxSize()) {
+                SelectionContainer {
+                    LazyColumn(
+                        state = listState,
+                        modifier = Modifier.fillMaxSize().padding(horizontal = 8.dp),
+                        verticalArrangement = Arrangement.spacedBy(cardGap),
+                        contentPadding = PaddingValues(vertical = 8.dp)
+                    ) {
+                        items(
+                            items = rendered,
+                            // Keys are namespaced per render type (see itemKey) so a
+                            // Single entry id can never collide with a ToolGroup key —
+                            // a duplicate LazyColumn key is a hard crash, not a glitch.
+                            key = { itemKey(it) }
+                        ) { item ->
+                            val highlighted = currentMatchKey != null && itemKey(item) == currentMatchKey
+                            Box(
+                                modifier = if (highlighted)
+                                    Modifier.background(
+                                        CRTheme.colors.tintYellow,
+                                        RoundedCornerShape(6.dp)
+                                    )
+                                else Modifier
+                            ) {
+                                when (item) {
+                                    is RenderItem.Single -> when (val e = item.entry) {
+                                        is TranscriptEntry.UserPrompt -> UserPromptCard(e)
+                                        is TranscriptEntry.SlashCommand -> SlashCommandRow(e)
+                                        is TranscriptEntry.AssistantText -> AssistantTextCard(e)
+                                        is TranscriptEntry.AssistantThinking -> ThinkingCard(e)
+                                        is TranscriptEntry.ToolCall ->
+                                            if (e.name == "AskUserQuestion")
+                                                AskUserQuestionCard(e, resultsByToolId[e.toolUseId])
+                                            else
+                                                ToolRow(e, resultsByToolId[e.toolUseId])
+                                        is TranscriptEntry.ToolResult -> ToolResultCard(e)
+                                        is TranscriptEntry.SystemNote -> SystemNoteRow(e)
+                                    }
+                                    is RenderItem.ToolGroup -> ToolGroupBlock(item.calls, resultsByToolId)
+                                    is RenderItem.TurnSteps -> TurnStepsRow(item) {
+                                        expandedTurns[item.turnKey] =
+                                            !(expandedTurns[item.turnKey] ?: false)
+                                    }
+                                }
                             }
                         }
-                    ) { item ->
-                        when (item) {
-                            is RenderItem.Single -> when (val e = item.entry) {
-                                is TranscriptEntry.UserPrompt -> UserPromptCard(e)
-                                is TranscriptEntry.SlashCommand -> SlashCommandRow(e)
-                                is TranscriptEntry.AssistantText -> AssistantTextCard(e)
-                                is TranscriptEntry.AssistantThinking -> ThinkingCard(e)
-                                is TranscriptEntry.ToolCall ->
-                                    if (e.name == "AskUserQuestion")
-                                        AskUserQuestionCard(e, resultsByToolId[e.toolUseId])
-                                    else
-                                        ToolRow(e, resultsByToolId[e.toolUseId])
-                                is TranscriptEntry.ToolResult -> ToolResultCard(e)
-                                is TranscriptEntry.SystemNote -> SystemNoteRow(e)
-                            }
-                            is RenderItem.ToolGroup -> ToolGroupBlock(item.calls, resultsByToolId)
-                            is RenderItem.TurnSteps -> TurnStepsRow(item) {
-                                expandedTurns[item.turnKey] =
-                                    !(expandedTurns[item.turnKey] ?: false)
-                            }
+                        if (effectiveActivity == SessionActivity.WORKING) {
+                            item(key = "__working_skeleton__") { WorkingSkeletonCard() }
+                        } else if (effectiveActivity == SessionActivity.APPROVAL_NEEDED) {
+                            // Claude is showing a permission / AskUserQuestion selector
+                            // on the live screen. The tool_use isn't flushed to the
+                            // transcript until it's answered, so we can't render the
+                            // real question card yet — surface a banner instead of
+                            // leaving the chat looking idle (or stuck "working…").
+                            item(key = "__awaiting_answer__") { AwaitingAnswerCard() }
                         }
                     }
-                    if (effectiveActivity == SessionActivity.WORKING) {
-                        item(key = "__working_skeleton__") { WorkingSkeletonCard() }
-                    } else if (effectiveActivity == SessionActivity.APPROVAL_NEEDED) {
-                        // Claude is showing a permission / AskUserQuestion selector
-                        // on the live screen. The tool_use isn't flushed to the
-                        // transcript until it's answered, so we can't render the
-                        // real question card yet — surface a banner instead of
-                        // leaving the chat looking idle (or stuck "working…").
-                        item(key = "__awaiting_answer__") { AwaitingAnswerCard() }
+                }
+                // Prev/next user-prompt jumps — only useful with 2+ prompts.
+                if (promptIndices.size > 1) {
+                    Column(
+                        modifier = Modifier
+                            .align(Alignment.CenterEnd)
+                            .padding(end = 6.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        OverlayCircleButton(
+                            icon = Icons.Default.KeyboardArrowUp,
+                            contentDescription = "Previous prompt",
+                            onClick = { jumpToPrompt(-1) }
+                        )
+                        OverlayCircleButton(
+                            icon = Icons.Default.KeyboardArrowDown,
+                            contentDescription = "Next prompt",
+                            onClick = { jumpToPrompt(1) }
+                        )
                     }
+                }
+                if (!stickToBottom) {
+                    OverlayCircleButton(
+                        icon = Icons.Default.KeyboardArrowDown,
+                        contentDescription = "Jump to bottom",
+                        accent = true,
+                        onClick = { jumpToBottom() },
+                        modifier = Modifier
+                            .align(Alignment.BottomEnd)
+                            .padding(12.dp)
+                    )
                 }
             }
         }
     }
+}
+
+/** Small semi-transparent circular overlay button used by chat navigation. */
+@Composable
+private fun OverlayCircleButton(
+    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    contentDescription: String,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+    accent: Boolean = false,
+) {
+    val c = CRTheme.colors
+    Box(
+        modifier = modifier
+            .size(36.dp)
+            .background(
+                if (accent) c.accent.copy(alpha = 0.9f) else c.surface2.copy(alpha = 0.85f),
+                CircleShape
+            )
+            .border(1.dp, if (accent) c.accent else c.border, CircleShape)
+            .clickable { onClick() },
+        contentAlignment = Alignment.Center
+    ) {
+        Icon(
+            icon,
+            contentDescription = contentDescription,
+            tint = if (accent) c.accentInk else c.textDim,
+            modifier = Modifier.size(20.dp)
+        )
+    }
+}
+
+/** Inline search bar: query field · match position · prev/next · close. */
+@Composable
+private fun TranscriptSearchBar(
+    query: String,
+    onQueryChange: (String) -> Unit,
+    matchCount: Int,
+    matchPos: Int,
+    onPrev: () -> Unit,
+    onNext: () -> Unit,
+    onClose: () -> Unit,
+) {
+    val c = CRTheme.colors
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(c.surface)
+            .padding(horizontal = 8.dp, vertical = 4.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(4.dp)
+    ) {
+        BasicTextField(
+            value = query,
+            onValueChange = onQueryChange,
+            singleLine = true,
+            textStyle = CRType.mono.copy(color = c.text),
+            cursorBrush = SolidColor(c.accent),
+            modifier = Modifier
+                .weight(1f)
+                .background(c.surface2, RoundedCornerShape(6.dp))
+                .padding(horizontal = 8.dp, vertical = 6.dp),
+            decorationBox = { inner ->
+                Box {
+                    if (query.isEmpty()) {
+                        Text("Search transcript…", style = CRType.mono, color = c.textDim)
+                    }
+                    inner()
+                }
+            }
+        )
+        Text(
+            if (matchCount > 0) "${matchPos + 1}/$matchCount" else "0/0",
+            style = CRType.monoTiny,
+            color = if (matchCount > 0) c.text else c.textDim
+        )
+        IconButton(onClick = onPrev, modifier = Modifier.size(28.dp), enabled = matchCount > 0) {
+            Icon(Icons.Default.KeyboardArrowUp, "Previous match", tint = c.textDim, modifier = Modifier.size(18.dp))
+        }
+        IconButton(onClick = onNext, modifier = Modifier.size(28.dp), enabled = matchCount > 0) {
+            Icon(Icons.Default.KeyboardArrowDown, "Next match", tint = c.textDim, modifier = Modifier.size(18.dp))
+        }
+        IconButton(onClick = onClose, modifier = Modifier.size(28.dp)) {
+            Text("✕", style = CRType.mono, color = c.textDim)
+        }
+    }
+}
+
+private fun itemKey(item: RenderItem): String = when (item) {
+    is RenderItem.Single -> "s:" + item.entry.id
+    is RenderItem.ToolGroup -> "tg:" + item.calls.first().id
+    is RenderItem.TurnSteps -> "ts:" + item.turnKey
+}
+
+private fun entryMatchesQuery(e: TranscriptEntry, q: String): Boolean = when (e) {
+    is TranscriptEntry.UserPrompt -> e.text.contains(q, ignoreCase = true)
+    is TranscriptEntry.SlashCommand -> "/${e.name} ${e.args}".contains(q, ignoreCase = true)
+    is TranscriptEntry.AssistantText -> e.text.contains(q, ignoreCase = true)
+    is TranscriptEntry.AssistantThinking -> e.text.contains(q, ignoreCase = true)
+    is TranscriptEntry.ToolCall ->
+        e.name.contains(q, ignoreCase = true) ||
+            e.inputSummary.contains(q, ignoreCase = true) ||
+            e.fullInput.contains(q, ignoreCase = true)
+    is TranscriptEntry.ToolResult -> e.text.contains(q, ignoreCase = true)
+    is TranscriptEntry.SystemNote -> e.text.contains(q, ignoreCase = true)
+}
+
+/** Map every non-anchor entry id to the id of the user prompt anchoring its turn. */
+private fun mapEntryToTurn(filtered: List<TranscriptEntry>): Map<String, String> {
+    val out = HashMap<String, String>()
+    var turn: String? = null
+    for (e in filtered) {
+        if (e is TranscriptEntry.UserPrompt || e is TranscriptEntry.SlashCommand) turn = e.id
+        else turn?.let { out[e.id] = it }
+    }
+    return out
 }
 
 /** Small per-message button that copies [text] to the clipboard, with a brief
@@ -1467,7 +1753,9 @@ private fun StatusBar(
     onToggleThinking: () -> Unit,
     onToggleSystem: () -> Unit,
     fontScale: Float,
-    onFontScaleDelta: (Float) -> Unit
+    onFontScaleDelta: (Float) -> Unit,
+    searchOpen: Boolean,
+    onToggleSearch: () -> Unit
 ) {
     val c = CRTheme.colors
     var filterMenu by remember { mutableStateOf(false) }
@@ -1497,6 +1785,17 @@ private fun StatusBar(
                 if (activeSubagents > 0) StatusChip("⚡ $activeSubagents")
                 if (!activeSkill.isNullOrBlank()) StatusChip("skill: $activeSkill")
                 if (latencyMs != null) StatusChip("${latencyMs}ms")
+            }
+            IconButton(
+                onClick = onToggleSearch,
+                modifier = Modifier.size(28.dp)
+            ) {
+                Icon(
+                    Icons.Default.Search,
+                    contentDescription = "Search transcript",
+                    tint = if (searchOpen) c.accent else c.textDim,
+                    modifier = Modifier.size(16.dp)
+                )
             }
             Box {
                 IconButton(
