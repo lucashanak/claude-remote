@@ -347,7 +347,8 @@ object TranscriptParser {
             id = uuid,
             timestamp = ts,
             subtype = subtype,
-            text = text
+            text = text,
+            durationMs = durationMs
         )
     }
 

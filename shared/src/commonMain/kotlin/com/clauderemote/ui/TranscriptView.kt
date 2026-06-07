@@ -476,14 +476,23 @@ fun TranscriptView(
                 programmaticDepth--
             }
         }
+        // Keep the match cursor valid when streaming shrinks the match list —
+        // otherwise the counter can read "6/3" and the highlight vanishes.
+        LaunchedEffect(searchMatches.size) {
+            if (searchPos >= searchMatches.size) {
+                searchPos = (searchMatches.size - 1).coerceAtLeast(0)
+            }
+        }
         // New query → navigate to its most recent (bottom-most) hit. Keyed on
         // the query, not the match list, so streaming entries don't yank the
-        // viewport while the search bar is open.
+        // viewport while the search bar is open. lastNavQuery is only advanced
+        // once a hit exists: a match that arrives a moment after typing still
+        // gets focused.
         var lastNavQuery by remember(sessionKey) { mutableStateOf("") }
         LaunchedEffect(searchMatches, searchQuery) {
-            if (searchQuery != lastNavQuery) {
+            if (searchQuery != lastNavQuery && searchMatches.isNotEmpty()) {
                 lastNavQuery = searchQuery
-                if (searchMatches.isNotEmpty()) gotoMatch(searchMatches.size - 1)
+                gotoMatch(searchMatches.size - 1)
             }
         }
         val currentMatchKey =
@@ -1992,9 +2001,10 @@ private fun MonospaceBlock(text: String) {
 }
 
 private fun formatTimestamp(iso: String): String {
-    // 2026-05-15T15:24:02.384Z → 15:24:02
-    val t = iso.substringAfter('T').substringBefore('.').substringBefore('Z')
-    return t.take(8)
+    // Local wall-clock time; raw UTC clock substring only if parsing fails
+    // (2026-05-15T15:24:02.384Z → 15:24:02).
+    return com.clauderemote.util.isoToLocalTime(iso)
+        ?: iso.substringAfter('T').substringBefore('.').substringBefore('Z').take(8)
 }
 
 @Composable
