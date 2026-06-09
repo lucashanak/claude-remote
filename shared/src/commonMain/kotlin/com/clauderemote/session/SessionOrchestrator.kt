@@ -341,6 +341,10 @@ class SessionOrchestrator(
             startNotifyWatcher(sessionId, tmuxSessionName, conn)
             startSessionIdRefresh(sessionId, tmuxSessionName, conn)
         }
+        // Keep a transcript stream running for every connected session so the
+        // notification body (last assistant message) is available even in Raw
+        // view, not only after the Chat view has subscribed.
+        ensureTranscriptStream(sessionId)
     }
 
     /**
@@ -1145,6 +1149,27 @@ else:
             .lastOrNull { it is TranscriptEntry.AssistantText }
             ?.let { (it as TranscriptEntry.AssistantText).text }
             ?.takeIf { it.isNotBlank() }
+    }
+
+    /**
+     * Ensure a transcript stream is running for a connected session,
+     * regardless of UI view. Idempotent (getOrPut + start()'s own guard +
+     * idempotent collector). Called from [attachSessionRuntime] so the last
+     * assistant message is available for notifications even when the user
+     * only ever uses the Raw terminal view (previously the stream was started
+     * lazily by the Chat-view transcriptFlow subscription, so Raw-view
+     * notifications had no body).
+     */
+    private fun ensureTranscriptStream(sessionId: String) {
+        val tab = tabManager.getTab(sessionId) ?: return
+        val stream = synchronized(transcriptLock) {
+            val s = transcriptStreams.getOrPut(sessionId) {
+                TranscriptStream(tab.server, tab.folder, reconnectScope) { connections[sessionId]?.getSession() }
+            }
+            startContextTokenCollector(sessionId, s)
+            s
+        }
+        tab.claudeSessionId?.let { stream.start(it) }
     }
 
     fun transcriptFlow(sessionId: String): kotlinx.coroutines.flow.StateFlow<List<TranscriptEntry>> {
