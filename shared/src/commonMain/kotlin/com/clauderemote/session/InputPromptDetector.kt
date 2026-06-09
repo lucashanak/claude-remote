@@ -154,11 +154,14 @@ class InputPromptDetector(
                 // visible and the dark-red "working" indicator hasn't repainted
                 // yet — which fired "Claude is ready" notifications WHILE Claude
                 // was still working. The OMC statusline is the reliable mid-turn
-                // signal (it carries a state segment while active); if it says
-                // Claude is still working, treat this IDLE as transient and
-                // don't notify. APPROVAL is unaffected (a selector genuinely
-                // needs the user even mid-turn).
-                if (parseClaudeWorking(sessionId) == true) return
+                // signal (it carries a state segment while active). Be
+                // CONSERVATIVE: notify only when the statusline POSITIVELY
+                // reports not-working (false). null — buffer stale, statusline
+                // wrapped, or no OMC at all — means "can't confirm idle", so
+                // suppress rather than risk a mid-turn false positive; the
+                // Stop-hook path still delivers the real end-of-turn alert.
+                // APPROVAL is unaffected (a selector genuinely needs the user).
+                if (parseClaudeWorking(sessionId) != false) return
                 PromptType.INPUT_PROMPT
             }
             ClaudeState.APPROVAL -> PromptType.APPROVAL_NEEDED
