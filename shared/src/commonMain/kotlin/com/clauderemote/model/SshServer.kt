@@ -12,6 +12,19 @@ data class PortForward(
     fun toSshArg(): String = "-$type $localPort:$remoteHost:$remotePort"
 }
 
+/**
+ * Which network path to reach the server on.
+ *  - CLOUDFLARE: the configured host over the Cloudflare WebSocket tunnel
+ *    (or plain SSH if useCloudflareProxy is false) — the existing behavior.
+ *  - TAILSCALE: plain SSH to [SshServer.tailscaleHost] (the 100.x / MagicDNS
+ *    address), routed by the system Tailscale VPN. WireGuard roaming survives
+ *    the egress-IP changes that kill the CF tunnel on Starlink.
+ *  - AUTO: prefer TAILSCALE when tailscaleHost is set AND reachable, else fall
+ *    back to CLOUDFLARE (probed per connect).
+ */
+@Serializable
+enum class ServerTransport { CLOUDFLARE, TAILSCALE, AUTO }
+
 @Serializable
 data class SshServer(
     val id: String,
@@ -32,9 +45,30 @@ data class SshServer(
     val startupCommand: String = "",
     val snippets: List<String> = emptyList(),
     val useCloudflareProxy: Boolean = false,
-    val cloudflareToken: String = ""
+    val cloudflareToken: String = "",
+    // Tailscale (100.x / MagicDNS) address of the SAME server, reached by plain
+    // SSH over the system Tailscale VPN. Empty = not configured.
+    val tailscaleHost: String = "",
+    val transport: ServerTransport = ServerTransport.CLOUDFLARE
 ) {
     val displayAddress: String get() = "$username@$host${if (port != 22) ":$port" else ""}"
+
+    /** True when a Tailscale path is configured and selectable. */
+    val hasTailscale: Boolean get() = tailscaleHost.isNotBlank()
+
+    /**
+     * Return a copy reconfigured for [t] — the EFFECTIVE server handed to the
+     * connection layer. TAILSCALE swaps in [tailscaleHost] over plain SSH (no CF
+     * proxy); CLOUDFLARE keeps the server as configured. AUTO is resolved to a
+     * concrete transport by the orchestrator (reachability probe) before calling
+     * this, so it's treated as CLOUDFLARE here as a safe fallback.
+     */
+    fun forTransport(t: ServerTransport): SshServer = when (t) {
+        ServerTransport.TAILSCALE ->
+            if (hasTailscale) copy(host = tailscaleHost, useCloudflareProxy = false, cloudflareToken = "")
+            else this
+        else -> this
+    }
 
     fun withRecentFolder(folder: String): SshServer {
         val updated = (listOf(folder) + recentFolders.filter { it != folder }).take(10)

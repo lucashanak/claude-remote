@@ -54,6 +54,15 @@ fun ServerEditDialog(
     var newPfRemote by remember { mutableStateOf("") }
     var useCloudflareProxy by remember { mutableStateOf(server?.useCloudflareProxy ?: false) }
     var cloudflareToken by remember { mutableStateOf(server?.cloudflareToken ?: "") }
+    var tailscaleHost by remember { mutableStateOf(server?.tailscaleHost ?: "") }
+    var transport by remember {
+        mutableStateOf(
+            server?.transport
+                ?: if (server?.tailscaleHost?.isNotBlank() == true)
+                    com.clauderemote.model.ServerTransport.AUTO
+                else com.clauderemote.model.ServerTransport.CLOUDFLARE
+        )
+    }
     var showAdvanced by remember { mutableStateOf(false) }
 
     val isNew = server == null
@@ -271,6 +280,51 @@ fun ServerEditDialog(
                             )
                         }
 
+                        // Tailscale — a second path to the SAME server, reached by
+                        // plain SSH over the system Tailscale VPN. WireGuard roaming
+                        // survives the egress-IP changes that drop the CF tunnel on
+                        // Starlink. Requires the Tailscale app on this device + the
+                        // server on the same tailnet.
+                        OutlinedTextField(
+                            value = tailscaleHost,
+                            onValueChange = {
+                                tailscaleHost = it
+                                if (it.isNotBlank() && transport == com.clauderemote.model.ServerTransport.CLOUDFLARE) {
+                                    transport = com.clauderemote.model.ServerTransport.AUTO
+                                }
+                            },
+                            label = { Text("Tailscale host (optional)") },
+                            placeholder = { Text("100.x.y.z or magicdns-name") },
+                            modifier = Modifier.fillMaxWidth(),
+                            singleLine = true,
+                            colors = crDialogTextFieldColors(),
+                        )
+                        if (tailscaleHost.isNotBlank()) {
+                            Text("Transport", style = CRType.bodyDim, color = c.textDim)
+                            Segmented(
+                                options = listOf(
+                                    com.clauderemote.model.ServerTransport.CLOUDFLARE,
+                                    com.clauderemote.model.ServerTransport.AUTO,
+                                    com.clauderemote.model.ServerTransport.TAILSCALE,
+                                ),
+                                selected = transport,
+                                onSelect = { transport = it },
+                                modifier = Modifier.fillMaxWidth(),
+                                label = {
+                                    when (it) {
+                                        com.clauderemote.model.ServerTransport.CLOUDFLARE -> "Cloudflare"
+                                        com.clauderemote.model.ServerTransport.AUTO -> "Auto"
+                                        com.clauderemote.model.ServerTransport.TAILSCALE -> "Tailscale"
+                                    }
+                                }
+                            )
+                            Text(
+                                "Auto prefers Tailscale when reachable (survives Starlink IP changes), else falls back to Cloudflare.",
+                                style = CRType.bodyDim,
+                                color = c.textDim,
+                            )
+                        }
+
                         // Snippets
                         Text("Snippets", style = CRType.sectionH, color = c.textDim)
                         snippets.forEachIndexed { idx, snip ->
@@ -400,7 +454,9 @@ fun ServerEditDialog(
                         startupCommand = startupCommand.trim(),
                         snippets = snippets,
                         useCloudflareProxy = useCloudflareProxy,
-                        cloudflareToken = cloudflareToken.trim()
+                        cloudflareToken = cloudflareToken.trim(),
+                        tailscaleHost = tailscaleHost.trim(),
+                        transport = transport
                     )
                     onSave(saved)
                 },

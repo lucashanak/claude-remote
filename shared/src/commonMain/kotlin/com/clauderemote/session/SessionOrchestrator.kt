@@ -1272,6 +1272,43 @@ else:
         if (newUuid != null) stream.start(newUuid)
     }
 
+    /**
+     * Resolve a server's configured [ServerTransport] into the EFFECTIVE server
+     * actually handed to the connection layer. AUTO prefers Tailscale when its
+     * host is set and reachable (a quick TCP probe over the system VPN), else
+     * falls back to the Cloudflare path — so a Starlink user with the Tailscale
+     * VPN up gets the roaming-resilient path automatically, and anyone without
+     * it still connects over CF. Resolved fresh on every (re)connect so the best
+     * path is re-picked after a drop.
+     */
+    private suspend fun resolveTransport(server: com.clauderemote.model.SshServer): com.clauderemote.model.SshServer {
+        val chosen = when (server.transport) {
+            com.clauderemote.model.ServerTransport.AUTO ->
+                if (server.hasTailscale && tailscaleReachable(server))
+                    com.clauderemote.model.ServerTransport.TAILSCALE
+                else com.clauderemote.model.ServerTransport.CLOUDFLARE
+            else -> server.transport
+        }
+        val eff = server.forTransport(chosen)
+        if (eff.host != server.host || eff.useCloudflareProxy != server.useCloudflareProxy) {
+            FileLogger.log(TAG, "Transport for ${server.name}: $chosen -> ${eff.host} (cf=${eff.useCloudflareProxy})")
+        }
+        return eff
+    }
+
+    /** Fast TCP reachability probe of the Tailscale endpoint (system VPN route). */
+    private suspend fun tailscaleReachable(server: com.clauderemote.model.SshServer): Boolean =
+        withContext(Dispatchers.IO) {
+            try {
+                java.net.Socket().use {
+                    it.connect(java.net.InetSocketAddress(server.tailscaleHost, server.port), 2000)
+                    true
+                }
+            } catch (_: Exception) {
+                false
+            }
+        }
+
     private suspend fun connectSsh(session: ClaudeSession, isNewTmuxSession: Boolean) {
         val sshManager = SshManager(serverStorage)
         connections[session.id] = sshManager
@@ -1391,7 +1428,7 @@ else:
         }
 
         sshManager.connect(
-            session.server,
+            resolveTransport(session.server),
             onOutput = { data -> emit(data) },
             onConnectionLost = {
                 // Auto-reconnect with tmux reattach
@@ -1643,7 +1680,7 @@ else:
                     connections[session.id] = sshManager
 
                     sshManager.connect(
-                        session.server,
+                        resolveTransport(session.server),
                         onOutput = { data -> emit(data) },
                         onConnectionLost = {
                             tabManager.updateTabStatus(session.id, SessionStatus.DISCONNECTED)
