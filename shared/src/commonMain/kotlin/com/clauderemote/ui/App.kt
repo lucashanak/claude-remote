@@ -599,7 +599,11 @@ fun App(
                                         folder = server.defaultFolder,
                                         mode = server.defaultClaudeMode,
                                         model = server.defaultClaudeModel,
-                                        connectionType = ConnectionType.SSH,
+                                        // Honor the server's Mosh preference when a direct-UDP
+                                        // path exists (plain SSH or Tailscale); the orchestrator
+                                        // still falls back to SSH if mosh can't run.
+                                        connectionType = if (server.preferMosh && (!server.useCloudflareProxy || server.hasTailscale))
+                                            ConnectionType.MOSH else ConnectionType.SSH,
                                         tmuxSessionName = TmuxNameParser.build(server.name, server.defaultFolder, server.defaultClaudeMode == ClaudeMode.YOLO),
                                         isNewTmuxSession = true
                                     )

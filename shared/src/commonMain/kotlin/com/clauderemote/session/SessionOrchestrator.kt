@@ -1735,9 +1735,14 @@ else:
     }
 
     private suspend fun connectMosh(session: ClaudeSession, isNewTmuxSession: Boolean) {
-        // Mosh requires direct UDP — can't work over Cloudflare tunnel
-        if (session.server.useCloudflareProxy) {
-            FileLogger.log(TAG, "Mosh not compatible with Cloudflare tunnel, using SSH")
+        // Mosh needs DIRECT UDP. Over the Tailscale path (effective host=100.x,
+        // no CF proxy) the UDP rides the WireGuard tunnel and mosh's roaming
+        // survives Starlink egress-IP changes outright — the ideal path. Over
+        // the CF tunnel UDP is impossible → fall back to SSH (connectSsh picks
+        // the best available path itself).
+        val effectiveServer = resolveTransport(session.server)
+        if (effectiveServer.useCloudflareProxy) {
+            FileLogger.log(TAG, "Mosh needs direct UDP — no reachable Tailscale path, falling back to SSH")
             val warning = "\r\n\u001B[33mMosh requires direct UDP — falling back to SSH (Cloudflare tunnel)\u001B[0m\r\n"
             appendToBuffer(session.id, warning)
             onTerminalOutput?.invoke(session.id, warning)
@@ -1745,7 +1750,7 @@ else:
             return
         }
 
-        FileLogger.log(TAG, "Connecting via Mosh to ${session.server.name}")
+        FileLogger.log(TAG, "Connecting via Mosh to ${session.server.name} (${effectiveServer.host})")
         val moshManager = com.clauderemote.connection.MoshManager()
 
         // Build tmux command as mosh startup command
@@ -1771,7 +1776,7 @@ else:
         }
 
         val success = moshManager.connect(
-            session.server,
+            effectiveServer,
             startupCommand = tmuxCmd,
             onOutput = { data -> emit(data) },
             onDisconnect = {

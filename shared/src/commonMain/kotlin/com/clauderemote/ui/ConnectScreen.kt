@@ -45,7 +45,15 @@ fun ConnectScreen(
     var folder by remember { mutableStateOf(server.defaultFolder) }
     var selectedMode by remember { mutableStateOf(appSettings.defaultClaudeMode) }
     var selectedModel by remember { mutableStateOf(appSettings.defaultClaudeModel) }
-    var connectionType by remember { mutableStateOf(ConnectionType.SSH) }
+    // Default to Mosh when the server prefers it AND a direct-UDP path exists
+    // (plain SSH or Tailscale) — over Tailscale, mosh roams across Starlink's
+    // IP changes without dropping the session.
+    var connectionType by remember {
+        mutableStateOf(
+            if (server.preferMosh && (!server.useCloudflareProxy || server.hasTailscale))
+                ConnectionType.MOSH else ConnectionType.SSH
+        )
+    }
     var sessionAlias by remember { mutableStateOf("") }
     var tmuxSessionName by remember {
         mutableStateOf(TmuxNameParser.build(server.name, server.defaultFolder, appSettings.defaultClaudeMode == ClaudeMode.YOLO))
@@ -298,7 +306,10 @@ fun ConnectScreen(
                     }
                     LabeledRow("Connection") {
                         Segmented(
-                            options = if (server.useCloudflareProxy)
+                            // Mosh needs direct UDP: available on a plain-SSH
+                            // server OR when a Tailscale path is configured (UDP
+                            // rides the WireGuard tunnel). A CF-only server can't.
+                            options = if (server.useCloudflareProxy && !server.hasTailscale)
                                 listOf(ConnectionType.SSH)
                             else
                                 listOf(ConnectionType.SSH, ConnectionType.MOSH),
