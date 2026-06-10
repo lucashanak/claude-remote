@@ -63,10 +63,13 @@ class CloudflareProxy(
             // ping (a healthy-but-quiet tunnel still gets a pong every 20s, which
             // counts as a read and resets the deadline), so it never kills a
             // live link — it only releases a truly dead one.
-            .readTimeout(75, TimeUnit.SECONDS)
+            .readTimeout(60, TimeUnit.SECONDS)
             .connectTimeout(timeout.toLong().coerceAtLeast(10000), TimeUnit.MILLISECONDS)
-            // 20s (was 30s): faster dead-link detection on flaky mobile networks.
-            .pingInterval(20, TimeUnit.SECONDS)
+            // 15s ping: on Starlink the public IP changes on satellite handovers
+            // and silently kills the underlying TCP (no RST reaches us), so the
+            // pong-timeout is our fastest dead-link signal — a tighter interval
+            // means the auto-reconnect fires sooner after a handover drop.
+            .pingInterval(15, TimeUnit.SECONDS)
             .build()
         client = okClient
 

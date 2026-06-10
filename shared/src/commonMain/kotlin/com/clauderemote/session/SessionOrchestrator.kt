@@ -1620,12 +1620,17 @@ else:
             for (attempt in 1..maxAttempts) {
                 emit("\r\n\u001B[33mConnection lost. Reconnecting ($attempt/$maxAttempts)...\u001B[0m\r\n")
                 FileLogger.log(TAG, "Auto-reconnect attempt $attempt/$maxAttempts for ${session.id}")
-                // Exponential backoff (2s, 4s, 8s, …) capped at 30s, plus 0–500ms
-                // jitter to avoid synchronized retry storms across multiple sessions
-                // when the network flaps on a phone.
-                val base = (2000L shl (attempt - 1).coerceAtMost(5)).coerceAtMost(30_000L)
+                // Attempt 1 fires IMMEDIATELY (no backoff): the dominant drop
+                // cause on Starlink is a satellite-handover public-IP change that
+                // kills the old TCP while the new path is already up — so an
+                // instant reconnect almost always succeeds and turns a freeze
+                // into a sub-second blip (tmux preserves the session). Backoff
+                // (2s, 4s, 8s …, capped 30s) only kicks in from attempt 2 for a
+                // genuine outage, plus 0–500ms jitter against retry storms.
+                val base = if (attempt == 1) 0L
+                           else (2000L shl (attempt - 2).coerceAtMost(5)).coerceAtMost(30_000L)
                 val jitter = kotlin.random.Random.nextLong(500)
-                kotlinx.coroutines.delay(base + jitter)
+                if (base + jitter > 0) kotlinx.coroutines.delay(base + jitter)
                 // Tab closed during the backoff — stop reconnecting it.
                 if (tabManager.getTab(session.id) == null) return
 
