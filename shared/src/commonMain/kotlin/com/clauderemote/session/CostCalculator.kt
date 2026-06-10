@@ -45,6 +45,7 @@ object CostCalculator {
 
     fun modelFromClaudeModel(model: ClaudeModel): String = when (model) {
         ClaudeModel.OPUS -> "opus"
+        ClaudeModel.FABLE -> "fable"
         ClaudeModel.SONNET -> "sonnet"
         ClaudeModel.HAIKU -> "haiku"
         ClaudeModel.DEFAULT -> "sonnet"

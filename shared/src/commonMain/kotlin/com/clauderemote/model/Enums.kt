@@ -14,6 +14,7 @@ enum class ClaudeMode(val displayName: String, val cliFlag: String?) {
 enum class ClaudeModel(val displayName: String, val cliValue: String?) {
     DEFAULT("Default", null),
     OPUS("Opus", "opus"),
+    FABLE("Fable", "fable"),
     SONNET("Sonnet", "sonnet"),
     HAIKU("Haiku", "haiku");
 }

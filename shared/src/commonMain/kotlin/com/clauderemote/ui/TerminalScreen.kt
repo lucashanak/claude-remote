@@ -8,6 +8,7 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.gestures.Orientation
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.draggable
 import androidx.compose.foundation.gestures.rememberDraggableState
 import androidx.compose.foundation.horizontalScroll
@@ -946,18 +947,20 @@ fun TerminalScreen(
                         }
                         if (isTranscript) {
                             // Chat overlay — opaque so the hidden terminal doesn't bleed
-                            // through; pointer events consumed so taps don't reach the
-                            // focusable TerminalView underneath (keyboard / keystroke leak).
+                            // through. We only need to swallow TAPS so they don't reach
+                            // the focusable TerminalView underneath (keyboard / keystroke
+                            // leak). The previous version consumed EVERY pointer change in
+                            // a raw awaitPointerEvent loop, which also ate vertical DRAGS —
+                            // so the child LazyColumn often couldn't scroll. detectTapGestures
+                            // claims taps/long-press only and leaves drag deltas for the
+                            // transcript list, fixing scroll-by-drag while still blocking
+                            // tap-through.
                             Box(
                                 modifier = Modifier
                                     .fillMaxSize()
                                     .background(c.bg)
                                     .pointerInput(Unit) {
-                                        awaitPointerEventScope {
-                                            while (true) {
-                                                awaitPointerEvent().changes.forEach { it.consume() }
-                                            }
-                                        }
+                                        detectTapGestures(onLongPress = {}, onTap = {})
                                     }
                             ) {
                                 TranscriptView(

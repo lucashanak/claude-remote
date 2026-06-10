@@ -2273,6 +2273,7 @@ if [ "${'$'}HAVE_JQ" = "1" ]; then
         ARGS=("claude")
         case "${'$'}MODEL" in
             OPUS) ARGS+=(--model opus);;
+            FABLE) ARGS+=(--model fable);;
             SONNET) ARGS+=(--model sonnet);;
             HAIKU) ARGS+=(--model haiku);;
         esac
