@@ -590,6 +590,12 @@ private fun ServerLauncherCard(
                         foreground = c.ready,
                     )
                 }
+                // Edit (server settings) — the dense layout previously had no
+                // way to reach it, so long-press (quick connect) was the only
+                // gesture and editing was impossible.
+                IconButton(onClick = onEdit, modifier = Modifier.size(28.dp)) {
+                    Icon(Icons.Default.Edit, contentDescription = "Edit", tint = c.textDim, modifier = Modifier.size(15.dp))
+                }
                 OutlinedButton(
                     onClick = onConnect,
                     modifier = Modifier.height(28.dp),
