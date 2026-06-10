@@ -53,9 +53,20 @@ class CloudflareProxy(
         // HTTP/2 strips Connection: Upgrade hop-by-hop headers -> PROTOCOL_ERROR
         val okClient = OkHttpClient.Builder()
             .protocols(listOf(Protocol.HTTP_1_1))
-            .readTimeout(0, TimeUnit.MILLISECONDS)
+            // Finite read timeout as a BACKSTOP. The primary liveness signal is
+            // pingInterval below (OkHttp fails the WS if a pong is missed), but
+            // on a silently half-open socket — especially when Android Doze /
+            // aggressive OEM battery management pauses OkHttp's ping scheduler —
+            // the ping may never fire and a 0 (infinite) readTimeout left the
+            // JSch read blocked FOREVER: onConnectionLost never fired and the
+            // session froze "until app restart". 75s sits well above the 20s
+            // ping (a healthy-but-quiet tunnel still gets a pong every 20s, which
+            // counts as a read and resets the deadline), so it never kills a
+            // live link — it only releases a truly dead one.
+            .readTimeout(75, TimeUnit.SECONDS)
             .connectTimeout(timeout.toLong().coerceAtLeast(10000), TimeUnit.MILLISECONDS)
-            .pingInterval(30, TimeUnit.SECONDS)
+            // 20s (was 30s): faster dead-link detection on flaky mobile networks.
+            .pingInterval(20, TimeUnit.SECONDS)
             .build()
         client = okClient
 
