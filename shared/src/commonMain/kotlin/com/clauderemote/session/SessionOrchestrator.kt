@@ -205,12 +205,27 @@ class SessionOrchestrator(
      *  and from the screen-state fallback firing on transient quiescence. */
     private fun fireNeedsInput(sessionId: String, hint: String, isActive: Boolean) {
         val now = System.currentTimeMillis()
+        // Dedup the "ready for input" alert by the last assistant message: on
+        // reconnect the tmux buffer is replayed and the screen looks idle
+        // again, which re-fired notifications for messages the user had
+        // already seen. Only the IDLE hint is deduped — APPROVAL/PERMISSION
+        // can legitimately repeat on the same last message.
+        if (hint == PromptType.INPUT_PROMPT.displayHint) {
+            val lastId = lastAssistantId(sessionId)
+            if (lastId != null && lastNotifiedAssistantId[sessionId] == lastId) {
+                FileLogger.log(TAG, "Suppressed needs-input for $sessionId (same assistant message)")
+                return
+            }
+        }
         val last = lastNeedsInputAt[sessionId] ?: 0L
         if (now - last < notifyDebounceMs) {
             FileLogger.log(TAG, "Suppressed needs-input for $sessionId (debounce)")
             return
         }
         lastNeedsInputAt[sessionId] = now
+        if (hint == PromptType.INPUT_PROMPT.displayHint) {
+            lastAssistantId(sessionId)?.let { lastNotifiedAssistantId[sessionId] = it }
+        }
         onClaudeNeedsInput?.invoke(sessionId, hint, isActive)
     }
 
@@ -274,6 +289,9 @@ class SessionOrchestrator(
      *  succession (model handoff, tool retries) and we don't want to vibrate
      *  the phone for each one. */
     private val lastNeedsInputAt = mutableMapOf<String, Long>()
+    /** Last assistant-message id we fired a "ready" notification for, per
+     *  session — dedups reconnect replays re-notifying an already-seen turn. */
+    private val lastNotifiedAssistantId = mutableMapOf<String, String>()
     private val notifyDebounceMs = 5_000L
     // Per-session pollers that read ~/.claude/sessions/<pid>.json on the
     // server to capture the *real* claude session_id — which can drift from
@@ -1143,12 +1161,17 @@ else:
      * already exists (one is running once the session has been opened); null
      * if none yet, in which case the caller keeps the generic hint.
      */
-    fun lastAssistantText(sessionId: String): String? {
+    fun lastAssistantText(sessionId: String): String? =
+        lastAssistantEntry(sessionId)?.text?.takeIf { it.isNotBlank() }
+
+    /** Id of the most recent assistant message — used to dedup notifications. */
+    private fun lastAssistantId(sessionId: String): String? =
+        lastAssistantEntry(sessionId)?.id
+
+    private fun lastAssistantEntry(sessionId: String): TranscriptEntry.AssistantText? {
         val stream = synchronized(transcriptLock) { transcriptStreams[sessionId] } ?: return null
-        return stream.entries.value
-            .lastOrNull { it is TranscriptEntry.AssistantText }
-            ?.let { (it as TranscriptEntry.AssistantText).text }
-            ?.takeIf { it.isNotBlank() }
+        return stream.entries.value.lastOrNull { it is TranscriptEntry.AssistantText }
+            as? TranscriptEntry.AssistantText
     }
 
     /**
@@ -2137,6 +2160,8 @@ else:
         latencyPollingJobs.remove(sessionId)?.cancel()
         notifyWatchers.remove(sessionId)?.cancel()
         sessionIdRefreshJobs.remove(sessionId)?.cancel()
+        lastNeedsInputAt.remove(sessionId)
+        lastNotifiedAssistantId.remove(sessionId)
         setHookActive(sessionId, false)
         connections[sessionId]?.disconnect()
         connections.remove(sessionId)
