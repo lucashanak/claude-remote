@@ -1326,12 +1326,43 @@ else:
      * it still connects over CF. Resolved fresh on every (re)connect so the best
      * path is re-picked after a drop.
      */
+    // AUTO transport: after a failed connect over Tailscale we prefer Cloudflare
+    // for this long, so a flaky / unreachable tailnet path can't trap sessions in
+    // a reconnect storm. It self-heals back to Tailscale once the cooldown lapses
+    // and a connect succeeds. Keyed by server id.
+    private val tailscaleCooldownUntil = java.util.concurrent.ConcurrentHashMap<String, Long>()
+    private val TS_COOLDOWN_MS = 60_000L
+
+    private fun isTailscaleEffective(
+        server: com.clauderemote.model.SshServer,
+        eff: com.clauderemote.model.SshServer,
+    ): Boolean = server.hasTailscale && !eff.useCloudflareProxy && eff.host == server.tailscaleHost
+
+    /** Record a connect outcome so AUTO can avoid a dead Tailscale path. */
+    private fun noteConnectResult(
+        server: com.clauderemote.model.SshServer,
+        eff: com.clauderemote.model.SshServer,
+        ok: Boolean,
+    ) {
+        if (!isTailscaleEffective(server, eff)) return
+        if (ok) {
+            tailscaleCooldownUntil.remove(server.id)
+        } else {
+            tailscaleCooldownUntil[server.id] = System.currentTimeMillis() + TS_COOLDOWN_MS
+            FileLogger.log(TAG, "Tailscale connect failed for ${server.name} — using Cloudflare for ${TS_COOLDOWN_MS / 1000}s")
+        }
+    }
+
     private suspend fun resolveTransport(server: com.clauderemote.model.SshServer): com.clauderemote.model.SshServer {
         val chosen = when (server.transport) {
-            com.clauderemote.model.ServerTransport.AUTO ->
-                if (server.hasTailscale && tailscaleReachable(server))
+            com.clauderemote.model.ServerTransport.AUTO -> {
+                // Skip Tailscale entirely while cooling down from a recent
+                // failure — no probe, straight to Cloudflare.
+                val cooling = System.currentTimeMillis() < (tailscaleCooldownUntil[server.id] ?: 0L)
+                if (!cooling && server.hasTailscale && tailscaleReachable(server))
                     com.clauderemote.model.ServerTransport.TAILSCALE
                 else com.clauderemote.model.ServerTransport.CLOUDFLARE
+            }
             else -> server.transport
         }
         val eff = server.forTransport(chosen)
@@ -1474,18 +1505,24 @@ else:
 
         val sshEffective = resolveTransport(session.server)
         setConnectionLabel(session.id, sshEffective, session.server, "SSH")
-        sshManager.connect(
-            sshEffective,
-            onOutput = { data -> emit(data) },
-            onConnectionLost = {
-                // Auto-reconnect with tmux reattach
-                tabManager.updateTabStatus(session.id, SessionStatus.DISCONNECTED)
-                updateActivity(session.id, SessionActivity.DISCONNECTED)
-                reconnectScope.launch {
-                    autoReconnect(session, ::emit)
+        try {
+            sshManager.connect(
+                sshEffective,
+                onOutput = { data -> emit(data) },
+                onConnectionLost = {
+                    // Auto-reconnect with tmux reattach
+                    tabManager.updateTabStatus(session.id, SessionStatus.DISCONNECTED)
+                    updateActivity(session.id, SessionActivity.DISCONNECTED)
+                    reconnectScope.launch {
+                        autoReconnect(session, ::emit)
+                    }
                 }
-            }
-        )
+            )
+        } catch (e: Exception) {
+            noteConnectResult(session.server, sshEffective, ok = false)
+            throw e
+        }
+        noteConnectResult(session.server, sshEffective, ok = true)
 
         // Wait for shell prompt (detect $ or # or >, max 3s)
         waitForShellPrompt(session.id, 3000)
@@ -1728,14 +1765,20 @@ else:
 
                     val reEffective = resolveTransport(session.server)
                     setConnectionLabel(session.id, reEffective, session.server, "SSH")
-                    sshManager.connect(
-                        reEffective,
-                        onOutput = { data -> emit(data) },
-                        onConnectionLost = {
-                            tabManager.updateTabStatus(session.id, SessionStatus.DISCONNECTED)
-                            reconnectScope.launch { autoReconnect(session, emit) }
-                        }
-                    )
+                    try {
+                        sshManager.connect(
+                            reEffective,
+                            onOutput = { data -> emit(data) },
+                            onConnectionLost = {
+                                tabManager.updateTabStatus(session.id, SessionStatus.DISCONNECTED)
+                                reconnectScope.launch { autoReconnect(session, emit) }
+                            }
+                        )
+                    } catch (e: Exception) {
+                        noteConnectResult(session.server, reEffective, ok = false)
+                        throw e
+                    }
+                    noteConnectResult(session.server, reEffective, ok = true)
 
                     // Wait for shell prompt, clear garbage, then attach tmux
                     waitForShellPrompt(session.id, 3000)
