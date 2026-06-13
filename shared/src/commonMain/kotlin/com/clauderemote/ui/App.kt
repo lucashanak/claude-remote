@@ -101,6 +101,8 @@ fun App(
     var tabCloseConfirmId by remember { mutableStateOf<String?>(null) }
     // Long-press session context menu (mobile): which session it's open for.
     var sessionMenuId by remember { mutableStateOf<String?>(null) }
+    // Long-press server context menu (mobile): which server it's open for.
+    var serverMenuServer by remember { mutableStateOf<SshServer?>(null) }
     // Rename dialog: which session is being renamed.
     var renameSessionId by remember { mutableStateOf<String?>(null) }
     var invertColors by remember { mutableStateOf(appSettings.invertColors) }
@@ -637,6 +639,7 @@ fun App(
                             editingServer = server
                             showServerDialog = true
                         },
+                        onServerLongPress = { server -> serverMenuServer = server },
                         onDuplicateServer = { server ->
                             val copy = server.copy(
                                 id = kotlin.random.Random.nextBytes(16).joinToString("") { "%02x".format(it) },
@@ -1266,6 +1269,48 @@ fun App(
                 },
                 onClose = { sessionMenuId = null; tabCloseConfirmId = id },
                 onDismiss = { sessionMenuId = null },
+            )
+        }
+
+        // Server long-press context menu (mobile): the discoverable path to Edit
+        // (server settings, e.g. Tailscale host), Quick connect, and Delete.
+        serverMenuServer?.let { srv ->
+            ServerContextSheet(
+                name = srv.name,
+                address = srv.displayAddress,
+                onEdit = {
+                    serverMenuServer = null
+                    editingServer = srv
+                    showServerDialog = true
+                },
+                onQuickConnect = {
+                    serverMenuServer = null
+                    scope.launch {
+                        try {
+                            connectionError = null
+                            sessionOrchestrator.launchSession(
+                                server = srv,
+                                folder = srv.defaultFolder,
+                                mode = srv.defaultClaudeMode,
+                                model = srv.defaultClaudeModel,
+                                connectionType = if (srv.preferMosh && (!srv.useCloudflareProxy || srv.hasTailscale))
+                                    ConnectionType.MOSH else ConnectionType.SSH,
+                                tmuxSessionName = TmuxNameParser.build(srv.name, srv.defaultFolder, srv.defaultClaudeMode == ClaudeMode.YOLO),
+                                isNewTmuxSession = true
+                            )
+                            currentScreen = Screen.TERMINAL
+                        } catch (e: Exception) {
+                            connectionError = e.message
+                        }
+                    }
+                },
+                onDelete = {
+                    serverMenuServer = null
+                    serverStorage.deleteServer(srv.id)
+                    refreshServers()
+                    sessionOrchestrator.pruneServerHealth(srv.id)
+                },
+                onDismiss = { serverMenuServer = null },
             )
         }
 

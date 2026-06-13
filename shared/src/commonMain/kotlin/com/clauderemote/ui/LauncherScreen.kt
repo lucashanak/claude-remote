@@ -64,6 +64,7 @@ fun LauncherScreen(
     onToggleFavorite: ((SshServer) -> Unit)? = null,
     onResumeSession: (ClaudeSession) -> Unit,
     onSessionLongPress: ((ClaudeSession) -> Unit)? = null,
+    onServerLongPress: ((SshServer) -> Unit)? = null,
     onSettings: () -> Unit,
     onViewLog: () -> Unit = {},
     onHistory: (() -> Unit)? = null,
@@ -328,6 +329,10 @@ fun LauncherScreen(
                             health = serverHealth[server.id] ?: ServerHealth.UNKNOWN,
                             onConnect = { onConnectServer(server) },
                             onQuickConnect = onQuickConnect?.let { qc -> { qc(server) } },
+                            // Mobile: long-press opens the server context menu
+                            // (Edit / Quick connect / Delete) instead of firing
+                            // Quick Connect directly — so Edit is reachable.
+                            onLongPress = if (isMobile) onServerLongPress?.let { lp -> { lp(server) } } else null,
                             onEdit = { onEditServer(server) },
                             onDuplicate = onDuplicateServer?.let { dup -> { dup(server) } },
                             onDelete = { onDeleteServer(server) },
@@ -543,6 +548,7 @@ private fun ServerLauncherCard(
     health: ServerHealth = ServerHealth.UNKNOWN,
     onConnect: () -> Unit,
     onQuickConnect: (() -> Unit)? = null,
+    onLongPress: (() -> Unit)? = null,
     onEdit: () -> Unit,
     onDuplicate: (() -> Unit)? = null,
     onDelete: () -> Unit,
@@ -552,8 +558,11 @@ private fun ServerLauncherCard(
     val m = CRTheme.metrics
     var showDeleteConfirm by remember { mutableStateOf(false) }
 
-    val clickModifier = if (onQuickConnect != null) {
-        Modifier.combinedClickable(onClick = onConnect, onLongClick = onQuickConnect)
+    // Long-press opens the context menu when provided (mobile); otherwise it
+    // falls back to Quick Connect (desktop keeps the old gesture / its buttons).
+    val longClick = onLongPress ?: onQuickConnect
+    val clickModifier = if (longClick != null) {
+        Modifier.combinedClickable(onClick = onConnect, onLongClick = longClick)
     } else {
         Modifier.clickable(onClick = onConnect)
     }

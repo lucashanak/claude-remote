@@ -16,7 +16,9 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
@@ -102,6 +104,63 @@ fun SessionContextSheet(
                 MenuRow(Icons.Default.Refresh, "Reconnect", c.text, onReconnect)
                 MenuRow(Icons.Default.Close, "Close session", c.disconnected, onClose)
 
+                HorizontalDivider(color = c.border, thickness = 1.dp)
+                Row(
+                    Modifier.fillMaxWidth().clickable(onClick = onDismiss)
+                        .padding(horizontal = 16.dp, vertical = 11.dp),
+                    horizontalArrangement = Arrangement.Center,
+                ) {
+                    Text("Cancel", style = CRType.bodyDim, color = c.textDim)
+                }
+            }
+        }
+    }
+}
+
+/**
+ * Long-press action sheet for a saved server. Long-press used to fire Quick
+ * Connect directly (a new session) with no way to reach Edit on the dense card —
+ * so server settings (e.g. the Tailscale host) were unreachable. This surfaces
+ * Edit, Quick connect and Delete in one discoverable menu, matching the session
+ * sheet.
+ */
+@Composable
+fun ServerContextSheet(
+    name: String,
+    address: String,
+    onEdit: () -> Unit,
+    onQuickConnect: () -> Unit,
+    onDelete: () -> Unit,
+    onDismiss: () -> Unit,
+) {
+    val c = CRTheme.colors
+    Dialog(
+        onDismissRequest = onDismiss,
+        properties = DialogProperties(usePlatformDefaultWidth = false),
+    ) {
+        CRCard(
+            modifier = Modifier
+                .fillMaxWidth(0.66f)
+                .widthIn(min = 220.dp, max = 280.dp),
+            padding = androidx.compose.foundation.layout.PaddingValues(0.dp),
+        ) {
+            Column(Modifier.fillMaxWidth()) {
+                Row(
+                    Modifier.fillMaxWidth().padding(start = 14.dp, end = 14.dp, top = 12.dp, bottom = 10.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Column(Modifier.weight(1f)) {
+                        Text(name, style = CRType.cardTitle, color = c.text, maxLines = 1)
+                        if (address.isNotBlank()) {
+                            Spacer(Modifier.height(1.dp))
+                            Text(address, style = CRType.monoTiny, color = c.textDim, maxLines = 1)
+                        }
+                    }
+                }
+                HorizontalDivider(color = c.border, thickness = 1.dp)
+                MenuRow(Icons.Default.Edit, "Edit settings", c.text, onEdit)
+                MenuRow(Icons.Default.PlayArrow, "Quick connect", c.text, onQuickConnect)
+                MenuRow(Icons.Default.Delete, "Delete server", c.disconnected, onDelete)
                 HorizontalDivider(color = c.border, thickness = 1.dp)
                 Row(
                     Modifier.fillMaxWidth().clickable(onClick = onDismiss)
