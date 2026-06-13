@@ -85,6 +85,28 @@ class SessionOrchestrator(
     private val _sessionActivities = kotlinx.coroutines.flow.MutableStateFlow<Map<String, SessionActivity>>(emptyMap())
     val sessionActivities: kotlinx.coroutines.flow.StateFlow<Map<String, SessionActivity>> = _sessionActivities
 
+    // Human-readable "how am I connected" label per session, e.g. "Tailscale · Mosh"
+    // or "Cloudflare · SSH". Surfaced as a chip in the chat status bar so the
+    // active transport + protocol is glanceable (the choice is otherwise only in
+    // the device log). Set on each (re)connect, cleared on disconnect.
+    private val _connectionLabels = kotlinx.coroutines.flow.MutableStateFlow<Map<String, String>>(emptyMap())
+    val connectionLabels: kotlinx.coroutines.flow.StateFlow<Map<String, String>> = _connectionLabels
+
+    /** Compute + publish the connection label from the resolved endpoint. */
+    private fun setConnectionLabel(
+        sessionId: String,
+        effective: com.clauderemote.model.SshServer,
+        original: com.clauderemote.model.SshServer,
+        proto: String,
+    ) {
+        val transport = when {
+            effective.useCloudflareProxy -> "Cloudflare"
+            original.hasTailscale && effective.host == original.tailscaleHost -> "Tailscale"
+            else -> "Direct"
+        }
+        _connectionLabels.update { it + (sessionId to "$transport · $proto") }
+    }
+
     // Sessions whose idle/working state is driven by the Claude Code Stop hook
     // (authoritative: flips to WAITING the instant Claude finishes, regardless
     // of which screen the user is on). The UI uses this to know it can trust
@@ -1450,8 +1472,10 @@ else:
             }
         }
 
+        val sshEffective = resolveTransport(session.server)
+        setConnectionLabel(session.id, sshEffective, session.server, "SSH")
         sshManager.connect(
-            resolveTransport(session.server),
+            sshEffective,
             onOutput = { data -> emit(data) },
             onConnectionLost = {
                 // Auto-reconnect with tmux reattach
@@ -1702,8 +1726,10 @@ else:
                     val sshManager = SshManager(serverStorage)
                     connections[session.id] = sshManager
 
+                    val reEffective = resolveTransport(session.server)
+                    setConnectionLabel(session.id, reEffective, session.server, "SSH")
                     sshManager.connect(
-                        resolveTransport(session.server),
+                        reEffective,
                         onOutput = { data -> emit(data) },
                         onConnectionLost = {
                             tabManager.updateTabStatus(session.id, SessionStatus.DISCONNECTED)
@@ -1818,6 +1844,7 @@ else:
         // Store mosh as connection (wrap in a pseudo SshManager interface won't work,
         // so store separately and handle sendInput/sendBytes via mosh)
         moshConnections[session.id] = moshManager
+        setConnectionLabel(session.id, effectiveServer, session.server, "Mosh")
         FileLogger.log(TAG, "Mosh connected for ${session.id}")
     }
 
@@ -2188,6 +2215,7 @@ else:
         terminalSizes.remove(sessionId)
         confirmedUuids.remove(sessionId)
         _sessionActivities.update { it - sessionId }
+        _connectionLabels.update { it - sessionId }
         _contextPercents.update { it - sessionId }
         // Usage maps are keyed by server (account-wide), so don't clear them on
         // a single session's disconnect — other sessions on that server still

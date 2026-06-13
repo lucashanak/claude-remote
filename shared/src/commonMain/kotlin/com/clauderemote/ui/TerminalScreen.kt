@@ -182,6 +182,7 @@ fun TerminalScreen(
     // keeps the old swap behaviour (false) because AWT SwingPanel bleeds through
     // a Compose overlay and cannot be reliably occluded by a lightweight layer.
     composeTerminalUnderTranscript: Boolean = false,
+    connectionLabel: String? = null,
 ) {
     val c = CRTheme.colors
     val m = CRTheme.metrics
@@ -977,6 +978,7 @@ fun TerminalScreen(
                                     hookActive = activeTabId?.let { it in hookActiveSessions } ?: false,
                                     claudeSessionId = activeClaudeSessionId,
                                     streamStatus = transcriptStatus,
+                                    connectionLabel = connectionLabel,
                                 )
                             }
                         } else {

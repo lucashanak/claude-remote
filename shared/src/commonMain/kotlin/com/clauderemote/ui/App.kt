@@ -109,6 +109,7 @@ fun App(
 
     // Collect new StateFlows from orchestrator
     val sessionActivities by sessionOrchestrator.sessionActivities.collectAsState()
+    val connectionLabels by sessionOrchestrator.connectionLabels.collectAsState()
     val hookActiveSessions by sessionOrchestrator.hookActiveSessions.collectAsState()
     val contextPercents by sessionOrchestrator.contextPercents.collectAsState()
     val sessionUsagePercents by sessionOrchestrator.sessionUsagePercents.collectAsState()
@@ -1072,6 +1073,7 @@ fun App(
                             }
                         },
                         composeTerminalUnderTranscript = composeTerminalUnderTranscript,
+                        connectionLabel = activeTabId?.let { connectionLabels[it] },
                     )
                 }
 

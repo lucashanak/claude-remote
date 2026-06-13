@@ -80,6 +80,7 @@ fun TranscriptView(
     hookActive: Boolean = false,
     claudeSessionId: String? = null,
     streamStatus: String? = null,
+    connectionLabel: String? = null,
 ) {
     // Key list+scroll state on the session uuid so switching tabs resets
     // scroll position and stickiness — otherwise the new session inherits
@@ -227,6 +228,7 @@ fun TranscriptView(
             activeSkill = remoteStatus?.activeSkill,
             activeSubagents = remoteStatus?.activeSubagents ?: 0,
             activity = effectiveActivity,
+            connectionLabel = connectionLabel,
             showThinking = showThinking,
             showSystem = showSystem,
             onToggleThinking = { showThinking = !showThinking },
@@ -2115,6 +2117,7 @@ private fun StatusBar(
     activeSkill: String?,
     activeSubagents: Int,
     activity: SessionActivity?,
+    connectionLabel: String?,
     showThinking: Boolean,
     showSystem: Boolean,
     onToggleThinking: () -> Unit,
@@ -2144,6 +2147,7 @@ private fun StatusBar(
                 horizontalArrangement = Arrangement.spacedBy(10.dp)
             ) {
                 ActivityIndicator(activity)
+                if (!connectionLabel.isNullOrBlank()) StatusChip(connectionLabel)
                 StatusChip("$entryCount entries")
                 StatusChip("ctx ${contextPercent?.let { "$it%" } ?: "—"}")
                 StatusChip(buildUsageLabel("5h", sessionUsagePercent, sessionResetMin))
