@@ -2327,13 +2327,13 @@ else:
         DUNIT="${'$'}HOME/.config/systemd/user/claude-remote-drift.service"
         DTIMER="${'$'}HOME/.config/systemd/user/claude-remote-drift.timer"
         LOCK="${'$'}HOME/.claude-remote/sessions.lock"
-        MARKER="claude-remote-restore-v3"
+        MARKER="claude-remote-restore-v4"
         touch "${'$'}LOCK"
         echo "[${'$'}(date -u +%FT%TZ)] install: invoked by client" >> "${'$'}HOME/.claude-remote/install.log"
         if ! grep -q "${'$'}MARKER" "${'$'}SCRIPT" 2>/dev/null; then
             cat > "${'$'}SCRIPT" <<'RESTORE_EOF'
 #!/usr/bin/env bash
-# claude-remote-restore-v3 — recreates tmux+claude sessions from sessions.json (snapshot under flock)
+# claude-remote-restore-v4 — recreates tmux+claude sessions from sessions.json (snapshot under flock)
 set -u
 LOG="${'$'}HOME/.claude-remote/restore.log"
 exec >> "${'$'}LOG" 2>&1
@@ -2392,8 +2392,13 @@ if [ "${'$'}HAVE_JQ" = "1" ]; then
             fi
         fi
         CMD="${'$'}{ARGS[*]}"
+        # `exec bash -l` keepalive: when claude exits (crash, usage limit, OOM,
+        # /exit, network blip) the pane drops to a login shell instead of the
+        # whole tmux session vanishing — matches app-created sessions, which
+        # run claude via `send-keys` into a shell. Without this, a restored
+        # session is fragile: it disappears the moment claude stops.
         if tmux new-session -d -s "${'$'}TMUX_NAME" -c "${'$'}FOLDER_EXP" \
-            "tmux set-option -g mouse on; tmux set-option -g history-limit 100000; ${'$'}CMD"; then
+            "tmux set-option -g mouse on; tmux set-option -g history-limit 100000; ${'$'}CMD; exec bash -l"; then
             echo "Restored ${'$'}TMUX_NAME (${'$'}FOLDER_EXP) [uuid=${'$'}UUID]"
         else
             echo "FAILED to restore ${'$'}TMUX_NAME (${'$'}FOLDER_EXP) — tmux exit ${'$'}?"
@@ -2416,7 +2421,7 @@ else
                             CMD="claude --allow-dangerously-skip-permissions"
                             [ -n "${'$'}{UUID:-}" ] && CMD="${'$'}CMD --resume ${'$'}UUID"
                             tmux new-session -d -s "${'$'}TMUX_NAME" -c "${'$'}FOLDER_EXP" \
-                                "tmux set-option -g mouse on; tmux set-option -g history-limit 100000; ${'$'}CMD"
+                                "tmux set-option -g mouse on; tmux set-option -g history-limit 100000; ${'$'}CMD; exec bash -l"
                             echo "Restored ${'$'}TMUX_NAME"
                         }
                     fi
@@ -2435,7 +2440,7 @@ RESTORE_EOF
         if ! grep -q "${'$'}MARKER" "${'$'}DRIFT" 2>/dev/null; then
             cat > "${'$'}DRIFT" <<'DRIFT_EOF'
 #!/usr/bin/env bash
-# claude-remote-restore-v3 — drift daemon: pulls real claude session_ids
+# claude-remote-restore-v4 — drift daemon: pulls real claude session_ids
 # from per-pid state files into sessions.json so the client doesn't have
 # to. Runs every minute via systemd-user timer.
 set -u
@@ -2607,13 +2612,41 @@ DTIMER_EOF
             withContext(Dispatchers.IO) {
                 val sshSession = sshManager.getSession() ?: return@withContext
                 val ch = sshSession.openChannel("exec") as com.jcraft.jsch.ChannelExec
-                // Atomic write + append-only push log so server-side debugging
-                // can confirm whether/when the client actually synced.
+                // MERGE, not overwrite. The previous `cat > tmp && mv` clobbered
+                // the shared sessions.json with only THIS client's sessions, so
+                // whichever client (Android vs desktop) synced last silently
+                // dropped the others' sessions — and the next reboot's restore
+                // service then only rebuilt that truncated subset.
+                //
+                // New semantics (under the same flock the drift daemon + restore
+                // use): keep the incoming list (this client wins for its own
+                // sessions) PLUS any existing entry whose tmux session is still
+                // LIVE on the server and isn't already in the incoming list.
+                // Killed/forgotten sessions (kill-session runs before this push)
+                // are no longer live and aren't in incoming, so they correctly
+                // drop out — no resurrection on reboot. Falls back to a plain
+                // overwrite when jq is unavailable (matches old behaviour).
+                val safeServerId = serverId.replace("\"", "")
                 ch.setCommand(
-                    "mkdir -p \"\$HOME/.claude-remote\" && " +
-                    "cat > \"\$HOME/.claude-remote/sessions.json.tmp\" && " +
-                    "mv \"\$HOME/.claude-remote/sessions.json.tmp\" \"\$HOME/.claude-remote/sessions.json\" && " +
-                    "echo \"[\$(date -u +%FT%TZ)] push: ${payload.length} bytes for ${serverId.replace("\"", "")}\" >> \"\$HOME/.claude-remote/push.log\""
+                    "set -u; D=\"\$HOME/.claude-remote\"; mkdir -p \"\$D\"; " +
+                    "LOCK=\"\$D/sessions.lock\"; touch \"\$LOCK\"; " +
+                    "SF=\"\$D/sessions.json\"; INC=\"\$D/sessions.json.incoming\"; " +
+                    "cat > \"\$INC\"; " +
+                    "if command -v jq >/dev/null 2>&1; then " +
+                      "LIVE=\$(tmux list-sessions -F '#{session_name}' 2>/dev/null | jq -R . | jq -s . 2>/dev/null); " +
+                      "[ -n \"\$LIVE\" ] || LIVE='[]'; " +
+                      "( flock -x 9; " +
+                        "OLD='[]'; [ -f \"\$SF\" ] && OLD=\$(cat \"\$SF\"); " +
+                        "MERGED=\$(jq -n --slurpfile inc \"\$INC\" --argjson old \"\$OLD\" --argjson live \"\$LIVE\" '" +
+                          "(\$inc[0] // []) as \$incoming " +
+                          "| (\$incoming | map(.tmuxSessionName)) as \$names " +
+                          "| \$incoming + (\$old | map(. as \$e | select(((\$names | index(\$e.tmuxSessionName)) | not) and (\$live | index(\$e.tmuxSessionName)))))" +
+                        "' 2>/dev/null); " +
+                        "if [ -n \"\$MERGED\" ]; then printf '%s' \"\$MERGED\" > \"\$SF.tmp\" && mv \"\$SF.tmp\" \"\$SF\"; else mv \"\$INC\" \"\$SF\"; fi " +
+                      ") 9<>\"\$LOCK\"; " +
+                    "else mv \"\$INC\" \"\$SF\"; fi; " +
+                    "rm -f \"\$INC\"; " +
+                    "echo \"[\$(date -u +%FT%TZ)] push(merge): ${payload.length} bytes for $safeServerId\" >> \"\$D/push.log\""
                 )
                 ch.inputStream = null
                 val os = ch.outputStream
