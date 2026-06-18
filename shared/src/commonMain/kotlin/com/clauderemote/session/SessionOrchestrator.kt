@@ -2327,13 +2327,13 @@ else:
         DUNIT="${'$'}HOME/.config/systemd/user/claude-remote-drift.service"
         DTIMER="${'$'}HOME/.config/systemd/user/claude-remote-drift.timer"
         LOCK="${'$'}HOME/.claude-remote/sessions.lock"
-        MARKER="claude-remote-restore-v4"
+        MARKER="claude-remote-restore-v5"
         touch "${'$'}LOCK"
         echo "[${'$'}(date -u +%FT%TZ)] install: invoked by client" >> "${'$'}HOME/.claude-remote/install.log"
         if ! grep -q "${'$'}MARKER" "${'$'}SCRIPT" 2>/dev/null; then
             cat > "${'$'}SCRIPT" <<'RESTORE_EOF'
 #!/usr/bin/env bash
-# claude-remote-restore-v4 — recreates tmux+claude sessions from sessions.json (snapshot under flock)
+# claude-remote-restore-v5 — recreates tmux+claude sessions from sessions.json (snapshot under flock)
 set -u
 LOG="${'$'}HOME/.claude-remote/restore.log"
 exec >> "${'$'}LOG" 2>&1
@@ -2440,64 +2440,83 @@ RESTORE_EOF
         if ! grep -q "${'$'}MARKER" "${'$'}DRIFT" 2>/dev/null; then
             cat > "${'$'}DRIFT" <<'DRIFT_EOF'
 #!/usr/bin/env bash
-# claude-remote-restore-v4 — drift daemon: pulls real claude session_ids
-# from per-pid state files into sessions.json so the client doesn't have
-# to. Runs every minute via systemd-user timer.
+# claude-remote-restore-v5 — drift daemon: reconciles sessions.json to mirror
+# the LIVE claude-server-* tmux sessions every minute. Self-healing: re-adds
+# live sessions a misbehaving/old client truncated away, refreshes
+# claudeSessionId from claude's per-pid state files, preserves client-set
+# metadata (serverId/alias) for known sessions, and drops entries whose tmux
+# session is gone. A single buggy `cat > sessions.json` overwrite from any
+# client is non-fatal — within 60s the snapshot is rebuilt from ground truth,
+# so the next reboot's restore service still rebuilds every live session.
 set -u
 LOG="${'$'}HOME/.claude-remote/drift.log"
 exec >> "${'$'}LOG" 2>&1
 echo "----- ${'$'}(date -u +%FT%TZ) drift start -----"
 SF="${'$'}HOME/.claude-remote/sessions.json"
 LOCK="${'$'}HOME/.claude-remote/sessions.lock"
-[ -f "${'$'}SF" ] || { echo "no sessions.json"; exit 0; }
 command -v tmux >/dev/null 2>&1 || { echo "no tmux"; exit 0; }
 command -v jq >/dev/null 2>&1 || { echo "no jq"; exit 0; }
 touch "${'$'}LOCK"
 
-# Walk the tmux pane's process tree to find the claude process — pane_pid
-# is sometimes bash (when claude was launched by a shell command), and
-# claude is a grandchild. Recursive descent finds the right pid.
+# Walk the tmux pane's process tree to find the claude process — pane_pid is
+# often bash (claude launched via a shell command / keepalive), so claude is a
+# descendant. Recursive descent finds the right pid.
 find_claude_descendant() {
     local p=${'$'}1
-    if [ "${'$'}(ps -o comm= -p "${'$'}p" 2>/dev/null)" = "claude" ]; then
-        echo "${'$'}p"; return 0
-    fi
+    if [ "${'$'}(ps -o comm= -p "${'$'}p" 2>/dev/null)" = "claude" ]; then echo "${'$'}p"; return 0; fi
     local c r
     for c in ${'$'}(pgrep -P "${'$'}p" 2>/dev/null); do
-        r=${'$'}(find_claude_descendant "${'$'}c")
-        if [ -n "${'$'}r" ]; then echo "${'$'}r"; return 0; fi
+        r=${'$'}(find_claude_descendant "${'$'}c"); [ -n "${'$'}r" ] && { echo "${'$'}r"; return 0; }
     done
 }
 
-# Build {tmuxName: realSessionId} from claude's per-pid state files.
-MAP="{}"
+# Ground-truth entry list from the live tmux sessions.
+LIVE="[]"
 for s in ${'$'}(tmux list-sessions -F '#{session_name}' 2>/dev/null); do
+    case "${'$'}s" in claude-server-*) ;; *) continue;; esac
     pane_pid=${'$'}(tmux list-panes -t "${'$'}s" -F '#{pane_pid}' 2>/dev/null | head -1)
     [ -n "${'$'}pane_pid" ] || continue
+    folder=${'$'}(tmux display-message -p -t "${'$'}s" '#{pane_current_path}' 2>/dev/null)
     pid=${'$'}(find_claude_descendant "${'$'}pane_pid")
-    [ -n "${'$'}pid" ] || { echo "skip ${'$'}s: no claude descendant of pid ${'$'}pane_pid"; continue; }
-    sf="${'$'}HOME/.claude/sessions/${'$'}pid.json"
-    [ -f "${'$'}sf" ] || { echo "skip ${'$'}s: no ${'$'}sf"; continue; }
-    sid=${'$'}(jq -r .sessionId "${'$'}sf" 2>/dev/null)
-    if [ -n "${'$'}sid" ] && [ "${'$'}sid" != "null" ]; then
-        MAP=${'$'}(echo "${'$'}MAP" | jq --arg n "${'$'}s" --arg sid "${'$'}sid" '. + {(${'$'}n): ${'$'}sid}')
+    sid=""; model="DEFAULT"; mode="YOLO"
+    if [ -n "${'$'}pid" ]; then
+        args=${'$'}(tr '\0' ' ' < "/proc/${'$'}pid/cmdline" 2>/dev/null)
+        case "${'$'}args" in
+            *"--model opus"*)   model=OPUS;;
+            *"--model sonnet"*) model=SONNET;;
+            *"--model haiku"*)  model=HAIKU;;
+            *"--model fable"*)  model=FABLE;;
+        esac
+        case "${'$'}args" in *"--allow-dangerously-skip-permissions"*) mode=DEFAULT;; esac
+        sid=${'$'}(echo "${'$'}args" | sed -n 's/.*--\(resume\|session-id\) \([0-9a-f-]*\).*/\2/p' | head -1)
+        psf="${'$'}HOME/.claude/sessions/${'$'}pid.json"
+        if [ -f "${'$'}psf" ]; then
+            v=${'$'}(jq -r .sessionId "${'$'}psf" 2>/dev/null)
+            [ -n "${'$'}v" ] && [ "${'$'}v" != "null" ] && sid="${'$'}v"
+        fi
     fi
+    case "${'$'}s" in *--*) alias="${'$'}{s##*--}";; *) alias="";; esac
+    LIVE=${'$'}(echo "${'$'}LIVE" | jq \
+        --arg n "${'$'}s" --arg f "${'$'}folder" --arg m "${'$'}mode" --arg md "${'$'}model" --arg a "${'$'}alias" --arg sid "${'$'}sid" \
+        '. + [{id:${'$'}n, serverId:"", folder:${'$'}f, mode:${'$'}m, model:${'$'}md, tmuxSessionName:${'$'}n, connectionType:"SSH", alias:${'$'}a, claudeSessionId:(if ${'$'}sid=="" then null else ${'$'}sid end), createdAt:0}]')
 done
-echo "MAP=${'$'}MAP"
+echo "LIVE=${'$'}(echo "${'$'}LIVE" | jq -c 'map(.tmuxSessionName)')"
 (
     flock -x 9
-    OLD=${'$'}(cat "${'$'}SF")
-    NEW=${'$'}(echo "${'$'}OLD" | jq --argjson map "${'$'}MAP" '
-        map(. as ${'$'}e |
-            if (${'$'}map[${'$'}e.tmuxSessionName] // null) != null
-               and ${'$'}map[${'$'}e.tmuxSessionName] != ${'$'}e.claudeSessionId
-            then . + {claudeSessionId: ${'$'}map[${'$'}e.tmuxSessionName]}
-            else .
-            end)
-    ')
-    if [ "${'$'}NEW" != "${'$'}OLD" ]; then
-        echo "${'$'}NEW" > "${'$'}SF.tmp" && mv "${'$'}SF.tmp" "${'$'}SF"
-        echo "[${'$'}(date -u +%FT%TZ)] drift: updated UUIDs"
+    OLD="[]"; [ -f "${'$'}SF" ] && OLD=${'$'}(cat "${'$'}SF")
+    # Keep client metadata for sessions already in OLD (refresh only the live
+    # claudeSessionId); add live sessions missing from OLD; drop OLD entries
+    # whose tmux session is no longer live.
+    NEW=${'$'}(jq -n --argjson old "${'$'}OLD" --argjson live "${'$'}LIVE" '
+        (${'$'}old | map({key:.tmuxSessionName, value:.}) | from_entries) as ${'$'}om
+        | ${'$'}live | map(
+            . as ${'$'}l
+            | (${'$'}om[${'$'}l.tmuxSessionName]) as ${'$'}o
+            | if ${'$'}o then ${'$'}o + (if ${'$'}l.claudeSessionId != null then {claudeSessionId:${'$'}l.claudeSessionId} else {} end)
+              else ${'$'}l end)' 2>/dev/null)
+    if [ -n "${'$'}NEW" ] && [ "${'$'}NEW" != "${'$'}OLD" ]; then
+        echo "${'$'}NEW" > "${'$'}SF.tmp.${'$'}${'$'}" && mv "${'$'}SF.tmp.${'$'}${'$'}" "${'$'}SF"
+        echo "[${'$'}(date -u +%FT%TZ)] drift: reconciled ${'$'}(echo "${'$'}NEW" | jq length) live (was ${'$'}(echo "${'$'}OLD" | jq 'length // 0'))"
     fi
 ) 9<>"${'$'}LOCK"
 DRIFT_EOF
@@ -2626,11 +2645,18 @@ DTIMER_EOF
                 // are no longer live and aren't in incoming, so they correctly
                 // drop out — no resurrection on reboot. Falls back to a plain
                 // overwrite when jq is unavailable (matches old behaviour).
+                //
+                // The incoming + scratch temp files are suffixed with the remote
+                // shell's PID ($$) so a burst of near-simultaneous pushes (the
+                // app fires several on a multi-tab reconnect) can't race on a
+                // shared path — without per-PID names an earlier push would
+                // `rm` the incoming file out from under a later one, which then
+                // merged against an empty incoming and collapsed sessions.json.
                 val safeServerId = serverId.replace("\"", "")
                 ch.setCommand(
                     "set -u; D=\"\$HOME/.claude-remote\"; mkdir -p \"\$D\"; " +
                     "LOCK=\"\$D/sessions.lock\"; touch \"\$LOCK\"; " +
-                    "SF=\"\$D/sessions.json\"; INC=\"\$D/sessions.json.incoming\"; " +
+                    "SF=\"\$D/sessions.json\"; INC=\"\$D/.sessions.incoming.\$\$\"; " +
                     "cat > \"\$INC\"; " +
                     "if command -v jq >/dev/null 2>&1; then " +
                       "LIVE=\$(tmux list-sessions -F '#{session_name}' 2>/dev/null | jq -R . | jq -s . 2>/dev/null); " +
@@ -2642,9 +2668,9 @@ DTIMER_EOF
                           "| (\$incoming | map(.tmuxSessionName)) as \$names " +
                           "| \$incoming + (\$old | map(. as \$e | select(((\$names | index(\$e.tmuxSessionName)) | not) and (\$live | index(\$e.tmuxSessionName)))))" +
                         "' 2>/dev/null); " +
-                        "if [ -n \"\$MERGED\" ]; then printf '%s' \"\$MERGED\" > \"\$SF.tmp\" && mv \"\$SF.tmp\" \"\$SF\"; else mv \"\$INC\" \"\$SF\"; fi " +
+                        "if [ -n \"\$MERGED\" ]; then printf '%s' \"\$MERGED\" > \"\$SF.tmp.\$\$\" && mv \"\$SF.tmp.\$\$\" \"\$SF\"; else cp \"\$INC\" \"\$SF\"; fi " +
                       ") 9<>\"\$LOCK\"; " +
-                    "else mv \"\$INC\" \"\$SF\"; fi; " +
+                    "else cp \"\$INC\" \"\$SF\"; fi; " +
                     "rm -f \"\$INC\"; " +
                     "echo \"[\$(date -u +%FT%TZ)] push(merge): ${payload.length} bytes for $safeServerId\" >> \"\$D/push.log\""
                 )
