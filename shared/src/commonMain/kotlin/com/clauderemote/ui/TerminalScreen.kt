@@ -1707,14 +1707,16 @@ private fun CRControlBar(
             // Mode chip
             val modeColor = when (session.mode) {
                 ClaudeMode.YOLO -> c.modeYolo
+                ClaudeMode.AUTO -> c.modeAuto
                 ClaudeMode.PLAN -> c.modePlan
                 ClaudeMode.AUTO_ACCEPT -> c.modeAuto
                 ClaudeMode.NORMAL -> c.modeNormal
             }
             val modeShort = when (session.mode) {
                 ClaudeMode.YOLO -> "YOLO"
+                ClaudeMode.AUTO -> "AUTO"
                 ClaudeMode.PLAN -> "PLAN"
-                ClaudeMode.AUTO_ACCEPT -> "AUTO"
+                ClaudeMode.AUTO_ACCEPT -> "EDIT"
                 ClaudeMode.NORMAL -> "NORM"
             }
             Surface(
@@ -2148,8 +2150,9 @@ private fun SidePanelModePill(mode: ClaudeMode) {
     val c = CRTheme.colors
     val (bg, fg, label) = when (mode) {
         ClaudeMode.YOLO        -> Triple(c.tintRed,    c.modeYolo,   "YOLO")
+        ClaudeMode.AUTO        -> Triple(c.tintAccent, c.modeAuto,   "AUTO")
         ClaudeMode.PLAN        -> Triple(c.tintPurple, c.modePlan,   "PLAN")
-        ClaudeMode.AUTO_ACCEPT -> Triple(c.tintGreen,  c.modeAuto,   "AUTO")
+        ClaudeMode.AUTO_ACCEPT -> Triple(c.tintGreen,  c.modeAuto,   "EDIT")
         ClaudeMode.NORMAL      -> Triple(c.surface2,   c.modeNormal, "NORM")
     }
     Pill(text = label, background = bg, foreground = fg)

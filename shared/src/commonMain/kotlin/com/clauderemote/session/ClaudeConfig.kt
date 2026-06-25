@@ -41,7 +41,8 @@ object ClaudeConfig {
         }
 
         when (mode) {
-            ClaudeMode.AUTO_ACCEPT -> claudeArgs.add("--auto-accept")
+            ClaudeMode.AUTO_ACCEPT -> { claudeArgs.add("--permission-mode"); claudeArgs.add("acceptEdits") }
+            ClaudeMode.AUTO -> { claudeArgs.add("--permission-mode"); claudeArgs.add("auto") }
             ClaudeMode.PLAN, ClaudeMode.NORMAL -> {}
             ClaudeMode.YOLO -> {}
         }

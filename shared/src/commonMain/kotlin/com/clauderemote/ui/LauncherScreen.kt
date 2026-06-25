@@ -531,8 +531,9 @@ private fun ModePillSmall(mode: ClaudeMode) {
     val c = CRTheme.colors
     val (bg, fg, label) = when (mode) {
         ClaudeMode.YOLO        -> Triple(c.tintRed,    c.modeYolo,   "YOLO")
+        ClaudeMode.AUTO        -> Triple(c.tintAccent, c.modeAuto,   "AUTO")
         ClaudeMode.PLAN        -> Triple(c.tintPurple, c.modePlan,   "PLAN")
-        ClaudeMode.AUTO_ACCEPT -> Triple(c.tintGreen,  c.modeAuto,   "AUTO")
+        ClaudeMode.AUTO_ACCEPT -> Triple(c.tintGreen,  c.modeAuto,   "EDIT")
         ClaudeMode.NORMAL      -> Triple(c.surface2,   c.modeNormal, "NORM")
     }
     Pill(text = label, background = bg, foreground = fg)

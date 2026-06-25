@@ -6,7 +6,8 @@ import kotlinx.serialization.Serializable
 enum class ClaudeMode(val displayName: String, val cliFlag: String?) {
     NORMAL("Normal", null),
     PLAN("Plan", null),
-    AUTO_ACCEPT("Auto-accept", "--auto-accept"),
+    AUTO_ACCEPT("Auto-accept", "--permission-mode acceptEdits"),
+    AUTO("Auto", "--permission-mode auto"),
     YOLO("YOLO", "--dangerously-skip-permissions");
 }
 

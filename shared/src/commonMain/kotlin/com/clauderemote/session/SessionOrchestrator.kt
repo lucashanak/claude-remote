@@ -2375,6 +2375,8 @@ if [ "${'$'}HAVE_JQ" = "1" ]; then
         esac
         case "${'$'}MODE" in
             YOLO) ARGS+=(--dangerously-skip-permissions);;
+            AUTO) ARGS+=(--permission-mode auto --allow-dangerously-skip-permissions);;
+            AUTO_ACCEPT) ARGS+=(--permission-mode acceptEdits --allow-dangerously-skip-permissions);;
             *) ARGS+=(--allow-dangerously-skip-permissions);;
         esac
         # Resume only if a transcript actually exists for this UUID — claude
@@ -2487,7 +2489,11 @@ for s in ${'$'}(tmux list-sessions -F '#{session_name}' 2>/dev/null); do
             *"--model haiku"*)  model=HAIKU;;
             *"--model fable"*)  model=FABLE;;
         esac
-        case "${'$'}args" in *"--allow-dangerously-skip-permissions"*) mode=DEFAULT;; esac
+        case "${'$'}args" in
+            *"--permission-mode auto"*) mode=AUTO;;
+            *"--permission-mode acceptEdits"*) mode=AUTO_ACCEPT;;
+            *"--allow-dangerously-skip-permissions"*) mode=DEFAULT;;
+        esac
         sid=${'$'}(echo "${'$'}args" | sed -n 's/.*--\(resume\|session-id\) \([0-9a-f-]*\).*/\2/p' | head -1)
         psf="${'$'}HOME/.claude/sessions/${'$'}pid.json"
         if [ -f "${'$'}psf" ]; then
