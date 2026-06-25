@@ -191,9 +191,10 @@ class SshTtyConnector(
 // Global terminal state
 private var termWidget: JediTermWidget? = null
 private var sshConnector: SshTtyConnector? = null
-// macOS-only: live "invert colors" flag read by the JediTerm settings provider
-// on every paint. Mutated from DesktopTerminalView so the toggle takes effect
-// without recreating the widget. Always false off macOS (gated at the write site).
+// macOS-only: last-applied "invert colors" state, used ONLY to detect a change in
+// DesktopTerminalView's `update` lambda and trigger an immediate repaint. The actual
+// color decision is read LIVE from appSettings in the settings provider, so this is
+// not the source of truth (a stale value here can't strand the terminal inverted).
 @Volatile private var terminalInvertColors: Boolean = false
 
 fun main() = application {
@@ -737,13 +738,21 @@ private fun DesktopTerminalView(
 
                         override fun useAntialiasing(): Boolean = true
 
+                        // Read the setting LIVE on every paint (props.getProperty is an
+                        // in-memory lookup) instead of trusting a cached flag — so the
+                        // terminal can never get stuck inverted: even if the
+                        // recomposition-driven repaint in `update` is missed when the
+                        // toggle flips, the next natural paint self-corrects. macOS-only.
+                        private val invertActive: Boolean
+                            get() = IS_MAC && appSettings.invertColors
+
                         override fun getDefaultForeground(): com.jediterm.terminal.TerminalColor =
-                            if (terminalInvertColors) invFg else darkFg
+                            if (invertActive) invFg else darkFg
                         override fun getDefaultBackground(): com.jediterm.terminal.TerminalColor =
-                            if (terminalInvertColors) invBg else darkBg
+                            if (invertActive) invBg else darkBg
 
                         override fun getTerminalColorPalette(): com.jediterm.terminal.emulator.ColorPalette =
-                            if (terminalInvertColors) invertedPalette else basePalette
+                            if (invertActive) invertedPalette else basePalette
 
                         // Compose SwingPanel on macOS doesn't forward Cmd+C reliably to
                         // the embedded Swing component, so auto-copy during drag gives the
