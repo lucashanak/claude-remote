@@ -1,7 +1,25 @@
 # Linux Packaging — Claude Remote
 
-This document covers building a portable Linux app-image on the dev box and
-installing it on Manjaro (or any Arch-based system) via a PKGBUILD.
+## Easiest path: install the prebuilt Manjaro package from Releases
+
+Every push to `main` makes GitHub Actions build a ready-to-install pacman
+package. On your Manjaro box just grab it from the latest release and install:
+
+```bash
+# from the GitHub Releases page, download claude-remote-<version>-1-x86_64.pkg.tar.zst
+sudo pacman -U claude-remote-*-x86_64.pkg.tar.zst
+claude-remote   # or launch "Claude Remote" from the app menu
+```
+
+The release also ships `claude-remote-linux.deb` (Debian/Ubuntu) and
+`claude-remote-linux-x64.tar.gz` (portable app-image). The pacman package is
+built by the `package-manjaro` CI job (`makepkg` inside an Arch container) from
+the PKGBUILD below — so the local flow here is only needed for offline builds.
+
+---
+
+The rest of this document covers building a portable Linux app-image on the dev
+box and installing it on Manjaro (or any Arch-based system) via the PKGBUILD.
 
 ## Prerequisites (dev box — Debian/Ubuntu/Proxmox)
 
