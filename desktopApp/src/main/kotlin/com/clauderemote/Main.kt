@@ -191,6 +191,10 @@ class SshTtyConnector(
 // Global terminal state
 private var termWidget: JediTermWidget? = null
 private var sshConnector: SshTtyConnector? = null
+// macOS-only: live "invert colors" flag read by the JediTerm settings provider
+// on every paint. Mutated from DesktopTerminalView so the toggle takes effect
+// without recreating the widget. Always false off macOS (gated at the write site).
+@Volatile private var terminalInvertColors: Boolean = false
 
 fun main() = application {
     // Init logging
@@ -632,30 +636,53 @@ fun main() = application {
                 DesktopTerminalView(
                     modifier = modifier,
                     connector = connector,
-                    appSettings = appSettings
+                    appSettings = appSettings,
+                    // Read here so the SwingPanel recomposes when the toggle flips.
+                    invertColors = appSettings.invertColors
                 )
             }
         )
     }
 }
 
+/**
+ * macOS only. The JediTerm terminal is a heavyweight Swing/AWT component embedded
+ * via SwingPanel; on macOS it renders over the Compose layer, so the Compose
+ * color-matrix "invert colors" filter in App.kt never touches it. We therefore
+ * invert at the source here. Strictly macOS-gated: on Linux/Windows the Compose
+ * filter already inverts the terminal, and source-inverting there too would
+ * double-invert (cancel out).
+ */
+private val IS_MAC: Boolean =
+    System.getProperty("os.name").orEmpty().lowercase().contains("mac")
+
+/** 255-complement of a JediTerm core color (alpha preserved). */
+private fun invertCoreColor(c: com.jediterm.core.Color): com.jediterm.core.Color =
+    com.jediterm.core.Color(255 - c.red, 255 - c.green, 255 - c.blue, c.alpha)
+
 @Composable
 private fun DesktopTerminalView(
     modifier: Modifier,
     connector: SshTtyConnector,
-    appSettings: AppSettings
+    appSettings: AppSettings,
+    invertColors: Boolean
 ) {
     SwingPanel(
         modifier = modifier,
         factory = {
             JPanel(BorderLayout()).also { panel ->
                 panel.background = java.awt.Color(0x1E, 0x1E, 0x1E)
+                // Live invert flag read by the settings provider on every paint.
+                // Updated from the SwingPanel `update` lambda on recomposition.
+                terminalInvertColors = IS_MAC && invertColors
 
                 // Reuse existing widget if already created
                 val existing = termWidget
                 if (existing != null) {
                     existing.parent?.remove(existing)
                     panel.add(existing, BorderLayout.CENTER)
+                    // Re-apply invert state to the reused widget.
+                    existing.terminalPanel.repaint()
                     // Delayed resize — panel size not available yet
                     panel.addComponentListener(object : java.awt.event.ComponentAdapter() {
                         override fun componentResized(e: java.awt.event.ComponentEvent?) {
@@ -673,9 +700,35 @@ private fun DesktopTerminalView(
                 }
 
                 try {
-                    val darkFg = com.jediterm.terminal.TerminalColor(com.jediterm.core.Color(0xCC, 0xCC, 0xCC))
-                    val darkBg = com.jediterm.terminal.TerminalColor(com.jediterm.core.Color(0x1E, 0x1E, 0x1E))
+                    val darkFgColor = com.jediterm.core.Color(0xCC, 0xCC, 0xCC)
+                    val darkBgColor = com.jediterm.core.Color(0x1E, 0x1E, 0x1E)
+                    val darkFg = com.jediterm.terminal.TerminalColor(darkFgColor)
+                    val darkBg = com.jediterm.terminal.TerminalColor(darkBgColor)
+                    // Inverted defaults (precomputed, since fg/bg are constant).
+                    val invFg = com.jediterm.terminal.TerminalColor(invertCoreColor(darkFgColor))
+                    val invBg = com.jediterm.terminal.TerminalColor(invertCoreColor(darkBgColor))
                     val settings = object : DefaultSettingsProvider() {
+                        // Palette that 255-inverts every color the default XTerm palette
+                        // produces (16 ANSI colors + 256-index lookups), so reverse-video
+                        // and colored text invert correctly. macOS-only via terminalInvertColors.
+                        private val basePalette = super.getTerminalColorPalette()
+                        private val invertedPalette =
+                            object : com.jediterm.terminal.emulator.ColorPalette() {
+                                override fun getForegroundByColorIndex(colorIndex: Int): com.jediterm.core.Color =
+                                    invertCoreColor(
+                                        basePalette.getForeground(
+                                            com.jediterm.terminal.emulator.ColorPalette.getIndexedTerminalColor(colorIndex)!!
+                                        )
+                                    )
+
+                                override fun getBackgroundByColorIndex(colorIndex: Int): com.jediterm.core.Color =
+                                    invertCoreColor(
+                                        basePalette.getBackground(
+                                            com.jediterm.terminal.emulator.ColorPalette.getIndexedTerminalColor(colorIndex)!!
+                                        )
+                                    )
+                            }
+
                         override fun getTerminalFontSize(): Float =
                             appSettings.terminalFontSize.toFloat()
 
@@ -684,8 +737,13 @@ private fun DesktopTerminalView(
 
                         override fun useAntialiasing(): Boolean = true
 
-                        override fun getDefaultForeground(): com.jediterm.terminal.TerminalColor = darkFg
-                        override fun getDefaultBackground(): com.jediterm.terminal.TerminalColor = darkBg
+                        override fun getDefaultForeground(): com.jediterm.terminal.TerminalColor =
+                            if (terminalInvertColors) invFg else darkFg
+                        override fun getDefaultBackground(): com.jediterm.terminal.TerminalColor =
+                            if (terminalInvertColors) invBg else darkBg
+
+                        override fun getTerminalColorPalette(): com.jediterm.terminal.emulator.ColorPalette =
+                            if (terminalInvertColors) invertedPalette else basePalette
 
                         // Compose SwingPanel on macOS doesn't forward Cmd+C reliably to
                         // the embedded Swing component, so auto-copy during drag gives the
@@ -745,6 +803,14 @@ private fun DesktopTerminalView(
         update = { panel ->
             // Called on recomposition — panel now has correct size from Compose layout
             val widget = termWidget ?: return@SwingPanel
+            // Live "invert colors" toggle (macOS only). The settings provider reads
+            // terminalInvertColors on every paint, so flipping it + repainting
+            // re-renders inverted/normal without recreating the widget.
+            val nextInvert = IS_MAC && invertColors
+            if (nextInvert != terminalInvertColors) {
+                terminalInvertColors = nextInvert
+                widget.terminalPanel.repaint()
+            }
             if (panel.width > 0 && panel.height > 0) {
                 widget.size = panel.size
                 widget.revalidate()

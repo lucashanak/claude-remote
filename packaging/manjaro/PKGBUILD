@@ -1,0 +1,50 @@
+# Maintainer: Claude Remote <clauderemote@example.com>
+pkgname=claude-remote
+pkgver=1.0.0
+pkgrel=1
+pkgdesc="Claude Code Remote Controller"
+arch=('x86_64')
+url="https://github.com/your-org/claude-remote"
+license=('MIT')
+
+# Runtime dependencies for a Compose/Skiko desktop app on Arch/Manjaro:
+#   fontconfig, freetype2 — text rendering (Skiko/Skia requires these)
+#   libgl / mesa         — OpenGL used by Skia renderer
+#   libx11, libxext, libxrender — X11 windowing
+#   hicolor-icon-theme   — icon theme integration
+depends=(
+    'fontconfig'
+    'freetype2'
+    'mesa'
+    'libx11'
+    'libxext'
+    'libxrender'
+    'hicolor-icon-theme'
+)
+
+# The tarball is produced by scripts/build-linux.sh on the dev box and must be
+# placed in the same directory as this PKGBUILD before running makepkg.
+source=("claude-remote-linux-x64.tar.gz")
+# Update this sha256sum after each build:
+#   sha256sum claude-remote-linux-x64.tar.gz
+sha256sums=('SKIP')
+
+package() {
+    # Install app-image tree to /opt/claude-remote
+    install -dm755 "${pkgdir}/opt/${pkgname}"
+    cp -a "${srcdir}/." "${pkgdir}/opt/${pkgname}/"
+
+    # Symlink launcher to /usr/bin
+    install -dm755 "${pkgdir}/usr/bin"
+    ln -s "/opt/${pkgname}/bin/Claude Remote" "${pkgdir}/usr/bin/${pkgname}"
+
+    # .desktop file
+    install -Dm644 "${startdir}/claude-remote.desktop" \
+        "${pkgdir}/usr/share/applications/${pkgname}.desktop"
+
+    # Icon — ship alongside PKGBUILD (copy from repo: desktopApp/src/main/resources/icon.png)
+    if [[ -f "${startdir}/icon.png" ]]; then
+        install -Dm644 "${startdir}/icon.png" \
+            "${pkgdir}/usr/share/icons/hicolor/512x512/apps/${pkgname}.png"
+    fi
+}

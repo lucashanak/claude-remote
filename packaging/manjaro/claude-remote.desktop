@@ -1,0 +1,10 @@
+[Desktop Entry]
+Name=Claude Remote
+Comment=Claude Code Remote Controller
+Exec=/usr/bin/claude-remote
+Icon=claude-remote
+Type=Application
+Categories=Development;Utility;
+Terminal=false
+StartupNotify=true
+StartupWMClass=claude-remote

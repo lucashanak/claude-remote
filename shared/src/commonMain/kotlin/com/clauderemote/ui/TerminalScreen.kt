@@ -319,10 +319,14 @@ fun TerminalScreen(
 
     BoxWithConstraints(modifier = Modifier.fillMaxSize().onPreviewKeyEvent { handleShortcut(it) }) {
         val hasMultiple = tabs.size > 1 || remoteSessions.any { r -> tabs.none { it.tmuxSessionName == r.tmuxSession.name } }
-        val wideMode = maxWidth > 700.dp && hasMultiple
+        // Split view is a desktop-class feature: on desktop (incl. macOS, where the
+        // reported window width can come back below the old hard 700.dp gate — which
+        // is why the Layout 1/2/4 picker never appeared there) always offer it when
+        // there is more than one session. Phones stay single-pane unless genuinely wide.
+        val wideMode = (!isMobile || maxWidth > 700.dp) && hasMultiple
         // Captured once: the more-menu picker runs inside an AlertDialog lambda
         // that no longer has the BoxWithConstraintsScope receiver in scope.
-        val allowQuadLayout = maxWidth > 1000.dp
+        val allowQuadLayout = !isMobile || maxWidth > 1000.dp
 
         var sidePanelWidth by remember { mutableStateOf(sidePanelWidthDp.dp) }
         val density = LocalDensity.current

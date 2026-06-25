@@ -12,7 +12,11 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.KeyboardArrowDown
+import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material3.*
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.material3.MenuAnchorType
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -146,6 +150,21 @@ fun ConnectScreen(
                     val visibleSubdirs = remember(browseFolders) {
                         browseFolders.filterNot { it.substringAfterLast('/').startsWith(".") }
                     }
+                    // Navigate to a folder: update the path and refresh subdirs.
+                    val navigateTo: (String) -> Unit = { target ->
+                        folder = target
+                        browseLoading = true
+                        scope.launch {
+                            browseFolders = onBrowseFolders?.invoke(target) ?: emptyList()
+                            browseLoading = false
+                        }
+                    }
+                    // Parent of the current folder; "~" / "/" have no parent.
+                    val parentFolder = remember(folder) {
+                        folder.trimEnd('/').substringBeforeLast('/', "~").ifBlank { "~" }
+                    }
+                    val atRoot = folder.trimEnd('/').let { it == "~" || it == "" || it == "/" }
+
                     Box {
                         OutlinedTextField(
                             value = folder,
@@ -176,10 +195,11 @@ fun ConnectScreen(
                                             color = c.accent
                                         )
                                     } else {
-                                        Text(
-                                            if (browseOpen) "▾" else "▸",
-                                            color = c.textDim,
-                                            style = CRType.cardTitle
+                                        Icon(
+                                            if (browseOpen) Icons.Filled.KeyboardArrowUp
+                                            else Icons.Filled.KeyboardArrowDown,
+                                            contentDescription = if (browseOpen) "Collapse" else "Browse folders",
+                                            tint = c.textDim
                                         )
                                     }
                                 }
@@ -190,70 +210,118 @@ fun ConnectScreen(
                                 expanded = browseOpen,
                                 onDismissRequest = { browseOpen = false },
                                 modifier = Modifier
+                                    .clip(RoundedCornerShape(m.cardRadius))
                                     .background(c.surface2)
-                                    .heightIn(max = 340.dp)
-                                    .widthIn(min = 220.dp)
+                                    .border(1.dp, c.border, RoundedCornerShape(m.cardRadius))
+                                    .heightIn(max = 380.dp)
+                                    .widthIn(min = 280.dp, max = 360.dp)
                             ) {
-                                DropdownMenuItem(
-                                    enabled = false,
-                                    text = {
-                                        Row(
-                                            modifier = Modifier.fillMaxWidth(),
-                                            horizontalArrangement = Arrangement.SpaceBetween,
-                                            verticalAlignment = Alignment.CenterVertically
-                                        ) {
-                                            Text(
-                                                folder.ifBlank { "~" },
-                                                style = CRType.sectionH,
-                                                color = c.textDim,
-                                                modifier = Modifier.weight(1f)
-                                            )
-                                            TextButton(
-                                                onClick = {
-                                                    browseLoading = true
-                                                    scope.launch {
-                                                        browseFolders = onBrowseFolders.invoke(folder)
-                                                        browseLoading = false
-                                                    }
-                                                }
-                                            ) {
-                                                Text("↻", color = c.accent, style = CRType.pill)
+                                // Sticky header: current path + refresh.
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(start = 14.dp, end = 6.dp, top = 6.dp, bottom = 6.dp),
+                                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Column(modifier = Modifier.weight(1f)) {
+                                        Text(
+                                            "CURRENT FOLDER",
+                                            style = CRType.sectionH,
+                                            color = c.textDim
+                                        )
+                                        Text(
+                                            folder.ifBlank { "~" },
+                                            style = CRType.mono,
+                                            color = c.text,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis
+                                        )
+                                    }
+                                    IconButton(
+                                        onClick = {
+                                            browseLoading = true
+                                            scope.launch {
+                                                browseFolders = onBrowseFolders.invoke(folder)
+                                                browseLoading = false
                                             }
+                                        },
+                                        modifier = Modifier.size(36.dp)
+                                    ) {
+                                        if (browseLoading) {
+                                            CircularProgressIndicator(
+                                                modifier = Modifier.size(16.dp),
+                                                strokeWidth = 2.dp,
+                                                color = c.accent
+                                            )
+                                        } else {
+                                            Text("↻", color = c.accent, style = CRType.cardTitle)
                                         }
-                                    },
-                                    onClick = {}
-                                )
-                                HorizontalDivider(color = c.border.copy(alpha = 0.4f))
+                                    }
+                                }
+                                HorizontalDivider(color = c.border.copy(alpha = 0.5f))
+
+                                // Up one level — hidden at "~" / "/".
+                                if (!atRoot) {
+                                    DropdownMenuItem(
+                                        contentPadding = PaddingValues(horizontal = 14.dp, vertical = 10.dp),
+                                        text = {
+                                            Row(
+                                                verticalAlignment = Alignment.CenterVertically,
+                                                horizontalArrangement = Arrangement.spacedBy(10.dp)
+                                            ) {
+                                                Text("⬆", style = CRType.cardTitle, color = c.accent)
+                                                Text(
+                                                    ".. (up one level)",
+                                                    style = CRType.cardTitle,
+                                                    color = c.textDim
+                                                )
+                                            }
+                                        },
+                                        onClick = { navigateTo(parentFolder) }
+                                    )
+                                    HorizontalDivider(color = c.border.copy(alpha = 0.3f))
+                                }
+
                                 if (browseLoading && visibleSubdirs.isEmpty()) {
                                     DropdownMenuItem(
                                         enabled = false,
-                                        text = { Text("Loading…", style = CRType.pill, color = c.textDim) },
+                                        contentPadding = PaddingValues(horizontal = 14.dp, vertical = 10.dp),
+                                        text = { Text("Loading…", style = CRType.bodyDim, color = c.textDim) },
                                         onClick = {}
                                     )
                                 } else if (visibleSubdirs.isEmpty()) {
                                     DropdownMenuItem(
                                         enabled = false,
-                                        text = { Text("(no visible subdirs)", style = CRType.pill, color = c.textDim) },
+                                        contentPadding = PaddingValues(horizontal = 14.dp, vertical = 10.dp),
+                                        text = { Text("No visible subfolders", style = CRType.bodyDim, color = c.textDim) },
                                         onClick = {}
                                     )
                                 } else {
                                     visibleSubdirs.forEach { sub ->
                                         DropdownMenuItem(
+                                            contentPadding = PaddingValues(horizontal = 14.dp, vertical = 11.dp),
                                             text = {
-                                                Text(
-                                                    sub.substringAfterLast('/').ifBlank { sub },
-                                                    style = CRType.pill,
-                                                    color = c.text
-                                                )
+                                                Row(
+                                                    modifier = Modifier.fillMaxWidth(),
+                                                    verticalAlignment = Alignment.CenterVertically,
+                                                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                                                ) {
+                                                    Text("🗀", style = CRType.cardTitle, color = c.accent)
+                                                    Text(
+                                                        sub.substringAfterLast('/').ifBlank { sub },
+                                                        style = CRType.cardTitle,
+                                                        color = c.text,
+                                                        maxLines = 1,
+                                                        overflow = TextOverflow.Ellipsis,
+                                                        modifier = Modifier.weight(1f)
+                                                    )
+                                                    Text("▸", style = CRType.pill, color = c.textDim)
+                                                }
                                             },
                                             onClick = {
-                                                folder = sub
-                                                browseOpen = false
-                                                browseLoading = true
-                                                scope.launch {
-                                                    browseFolders = onBrowseFolders.invoke(sub)
-                                                    browseLoading = false
-                                                }
+                                                browseOpen = true
+                                                navigateTo(sub)
                                             }
                                         )
                                     }
@@ -265,7 +333,7 @@ fun ConnectScreen(
                     // Recent folders as quick-jump chips under the field.
                     val recents = server.recentFolders.take(6)
                     if (recents.isNotEmpty()) {
-                        Text("Recent", style = CRType.sectionH, color = c.textDim)
+                        Text("RECENT", style = CRType.sectionH, color = c.textDim)
                         FlowRow(
                             horizontalArrangement = Arrangement.spacedBy(6.dp),
                             verticalArrangement = Arrangement.spacedBy(6.dp),

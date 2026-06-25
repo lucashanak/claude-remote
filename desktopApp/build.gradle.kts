@@ -34,7 +34,7 @@ compose.desktop {
         jvmArgs += listOf("-Dapple.awt.application.appearance=NSAppearanceNameDarkAqua")
 
         nativeDistributions {
-            targetFormats(TargetFormat.Dmg, TargetFormat.Deb, TargetFormat.Msi)
+            targetFormats(TargetFormat.Dmg, TargetFormat.Deb, TargetFormat.Msi, TargetFormat.AppImage, TargetFormat.Rpm)
             packageName = "Claude Remote"
             packageVersion = "1.0.0"
             description = "Claude Code Remote Controller"

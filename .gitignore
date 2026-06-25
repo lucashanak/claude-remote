@@ -25,3 +25,9 @@ androidApp/src/main/jniLibs/
 ## KCEF cache
 .claude-remote/kcef/
 .kotlin/
+
+## Local desktop build artifacts (CI on GHA is authoritative)
+dist/
+
+## Serena tooling
+.serena/
