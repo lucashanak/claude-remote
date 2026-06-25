@@ -400,6 +400,7 @@ jobs:
           # Pacman package name carries version + arch, so resolve it via glob.
           PKG=""
           for f in claude-remote-*-x86_64.pkg.tar.zst; do
+            case "$f" in *-debug-*) continue;; esac   # never ship the debug-symbols split
             [ -f "$f" ] && PKG="$f"
           done
           ASSETS="ClaudeRemote.apk ClaudeRemote-macOS.dmg claude-remote-linux-x64.tar.gz claude-remote-linux.deb $PKG$PATCHES"

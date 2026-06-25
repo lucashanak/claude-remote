@@ -7,6 +7,11 @@ arch=('x86_64')
 url="https://github.com/lucashanak/claude-remote"
 license=('MIT')
 
+# The payload is a prebuilt bundled-JVM app-image — there are no source symbols
+# to split out. Without '!debug' makepkg emits a useless claude-remote-debug
+# package alongside the real one (and our release glob would grab the wrong one).
+options=('!debug' '!strip')
+
 # Runtime dependencies for a Compose/Skiko desktop app on Arch/Manjaro:
 #   fontconfig, freetype2 — text rendering (Skiko/Skia requires these)
 #   mesa                 — OpenGL used by the Skia renderer
