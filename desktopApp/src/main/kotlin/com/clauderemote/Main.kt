@@ -773,6 +773,7 @@ private fun DesktopTerminalView(
                     widget.start()
                     termWidget = widget
 
+                    installNativeSelectionCopy(widget.terminalPanel)
                     installSelectionGuard(widget.terminalPanel)
                     installDragScroller(widget.terminalPanel)
 
@@ -913,6 +914,39 @@ private fun installSelectionGuard(termPanel: com.jediterm.terminal.ui.TerminalPa
                         termPanel.repaint()
                     }
                 }.also { it.isRepeats = false }.start()
+            }
+        }
+    })
+}
+
+/**
+ * Primary clipboard path for terminal text selection on macOS. JediTerm fires
+ * selectionChanged() from its OWN internal selection updates (the same ones that
+ * draw the highlight), so it works even when raw AWT mouse events don't reach our
+ * listeners through the Compose SwingPanel interop — which is exactly what breaks
+ * copyOnSelect and the mouse-based [installSelectionGuard]. Copy the current
+ * selection to the system clipboard whenever it changes to a non-empty value.
+ */
+private fun installNativeSelectionCopy(termPanel: com.jediterm.terminal.ui.TerminalPanel) {
+    termPanel.addSelectionListener(object : com.jediterm.terminal.model.TerminalSelectionChangesListener {
+        override fun selectionChanged(selection: com.jediterm.terminal.model.TerminalSelection?) {
+            if (selection == null) return
+            try {
+                val buffer = termPanel.terminalTextBuffer
+                val text: String
+                buffer.lock()
+                try {
+                    text = com.jediterm.terminal.model.SelectionUtil.getSelectionText(selection, buffer)
+                } finally {
+                    buffer.unlock()
+                }
+                if (text.isNotEmpty()) {
+                    java.awt.Toolkit.getDefaultToolkit().systemClipboard.setContents(
+                        java.awt.datatransfer.StringSelection(text), null
+                    )
+                }
+            } catch (t: Throwable) {
+                FileLogger.error("Desktop", "native selection copy failed", t)
             }
         }
     })
