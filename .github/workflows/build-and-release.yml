@@ -99,9 +99,6 @@ jobs:
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v4
 
-      - name: Generate Gradle wrapper
-        run: gradle wrapper --gradle-version=8.11.1
-
       - name: Setup Android SDK
         uses: android-actions/setup-android@v3
 
@@ -229,9 +226,6 @@ jobs:
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v4
 
-      - name: Generate Gradle wrapper
-        run: gradle wrapper --gradle-version=8.11.1
-
       - name: Download xterm.js assets
         run: |
           chmod +x setup-assets.sh
@@ -291,9 +285,6 @@ jobs:
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v4
 
-      - name: Generate Gradle wrapper
-        run: gradle wrapper --gradle-version=8.11.1
-
       - name: Download xterm.js assets
         run: |
           chmod +x setup-assets.sh
@@ -351,7 +342,7 @@ jobs:
             cp desktopApp/src/main/resources/icon.png pkgbuild/
             sed -i "s/^pkgver=.*/pkgver=${VER}/" pkgbuild/PKGBUILD
             chown -R builder:builder pkgbuild
-            cd pkgbuild && sudo -u builder makepkg -f --noconfirm --skipinteg
+            cd pkgbuild && sudo -u builder makepkg -f --noconfirm --skipinteg --nodeps
             ls -lh *.pkg.tar.zst
           '
           cp pkgbuild/*.pkg.tar.zst .
