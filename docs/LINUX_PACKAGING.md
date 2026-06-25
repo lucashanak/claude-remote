@@ -79,8 +79,7 @@ Or launch *Claude Remote* from your application menu (Development category).
 | Task | Output | Use |
 |------|--------|-----|
 | `:desktopApp:createDistributable` | `desktopApp/build/compose/binaries/main/app/` | Portable app-image (used by build-linux.sh) |
-| `:desktopApp:packageReleaseDeb` | `.deb` | Debian/Ubuntu installer |
-| `:desktopApp:packageReleaseRpm` | `.rpm` | Fedora/RHEL installer |
+| `:desktopApp:packageDeb` | `.deb` | Debian/Ubuntu installer |
 
 ## Notes
 

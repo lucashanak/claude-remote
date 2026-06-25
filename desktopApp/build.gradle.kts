@@ -34,7 +34,13 @@ compose.desktop {
         jvmArgs += listOf("-Dapple.awt.application.appearance=NSAppearanceNameDarkAqua")
 
         nativeDistributions {
-            targetFormats(TargetFormat.Dmg, TargetFormat.Deb, TargetFormat.Msi, TargetFormat.AppImage, TargetFormat.Rpm)
+            // Per-OS packaged formats. AppImage/Rpm are intentionally NOT listed:
+            // Compose validates the whole targetFormats list against the host OS,
+            // and TargetFormat.AppImage makes the macOS packageDmg configuration
+            // fail ("Unexpected target format for MacOS: AppImage"). The Linux
+            // build uses :createDistributable (a format-less app-image, also the
+            // source for the Manjaro PKGBUILD) plus packageDeb, so Deb is enough.
+            targetFormats(TargetFormat.Dmg, TargetFormat.Deb, TargetFormat.Msi)
             packageName = "Claude Remote"
             packageVersion = "1.0.0"
             description = "Claude Code Remote Controller"
