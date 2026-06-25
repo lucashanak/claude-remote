@@ -398,7 +398,14 @@ fun TerminalScreen(
                     onToggleCompact = { compactMode = !compactMode },
                     onToggleControlBar = { showControlBar = !showControlBar },
                     onMoreMenu = {
-                        if (onShowNativeMenu != null) onShowNativeMenu.invoke()
+                        // Desktop's native popup anchors to the JediTerm SwingPanel, which
+                        // is absent in Chat/transcript view (so the popup can't show) and
+                        // never carries the Layout (split-view) picker. Use the in-app
+                        // Compose dialog whenever the SwingPanel isn't the active surface —
+                        // this makes the menu openable in Chat and the Layout picker
+                        // reachable on desktop. Raw view keeps the native popup (a Compose
+                        // dialog can render behind the heavyweight SwingPanel there).
+                        if (onShowNativeMenu != null && terminalView == CRTerminalView.Raw) onShowNativeMenu.invoke()
                         else moreMenu = true
                     },
                     onOpenDrawer = { showSessionDrawer = true },

@@ -668,6 +668,14 @@ private fun DesktopTerminalView(
     appSettings: AppSettings,
     invertColors: Boolean
 ) {
+    // Force an immediate repaint when the invert toggle flips. The settings
+    // provider reads the flag live on the next paint, but when the terminal is
+    // idle the next natural paint (cursor blink / output) can be seconds away —
+    // this makes the toggle apply at once. Keyed on invertColors so it re-fires
+    // on every change.
+    androidx.compose.runtime.LaunchedEffect(invertColors) {
+        termWidget?.let { it.terminalPanel.repaint(); it.repaint() }
+    }
     SwingPanel(
         modifier = modifier,
         factory = {
