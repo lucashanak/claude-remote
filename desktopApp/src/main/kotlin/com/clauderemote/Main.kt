@@ -525,6 +525,34 @@ fun main() = application {
             },
             onShowNativeMenu = {
                 javax.swing.SwingUtilities.invokeLater {
+                    // Dark CR-themed styling so the native popup matches the app instead
+                    // of the default (out-of-place, "ugly") Swing look. styleTree() walks
+                    // the finished popup so we don't have to touch each item's builder.
+                    val menuBg = java.awt.Color(0x1E, 0x29, 0x3B)
+                    val menuHover = java.awt.Color(0x28, 0x35, 0x48)
+                    val menuFg = java.awt.Color(0xE2, 0xE8, 0xF0)
+                    val menuBorder = java.awt.Color(0x33, 0x41, 0x55)
+                    fun styleItem(item: javax.swing.JMenuItem) {
+                        item.background = menuBg; item.foreground = menuFg; item.isOpaque = true
+                        item.font = item.font.deriveFont(13f)
+                        item.border = javax.swing.BorderFactory.createEmptyBorder(6, 16, 6, 22)
+                        item.model.addChangeListener {
+                            item.background = if (item.model.isArmed || item.model.isSelected) menuHover else menuBg
+                        }
+                    }
+                    fun styleTree(container: javax.swing.JComponent) {
+                        container.background = menuBg
+                        container.isOpaque = true
+                        if (container is javax.swing.JPopupMenu)
+                            container.border = javax.swing.BorderFactory.createLineBorder(menuBorder, 1)
+                        for (comp in container.components) {
+                            when (comp) {
+                                is javax.swing.JMenu -> { styleItem(comp); styleTree(comp.popupMenu) }
+                                is javax.swing.JMenuItem -> styleItem(comp)
+                                is javax.swing.JSeparator -> { comp.foreground = menuBorder; comp.background = menuBg }
+                            }
+                        }
+                    }
                     val popup = javax.swing.JPopupMenu()
                     popup.add(javax.swing.JMenuItem("Reset terminal").apply {
                         addActionListener {
@@ -588,7 +616,8 @@ fun main() = application {
                             }
                         }
                     })
-                    // Show popup at mouse position
+                    // Apply the dark CR theme to the whole popup tree, then show at mouse.
+                    styleTree(popup)
                     val mousePos = java.awt.MouseInfo.getPointerInfo().location
                     val frame = javax.swing.SwingUtilities.getWindowAncestor(termWidget) ?: return@invokeLater
                     val framePos = frame.locationOnScreen
