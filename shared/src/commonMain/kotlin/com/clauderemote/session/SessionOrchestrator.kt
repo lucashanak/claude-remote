@@ -227,17 +227,19 @@ class SessionOrchestrator(
      *  and from the screen-state fallback firing on transient quiescence. */
     private fun fireNeedsInput(sessionId: String, hint: String, isActive: Boolean) {
         val now = System.currentTimeMillis()
-        // Dedup the "ready for input" alert by the last assistant message: on
-        // reconnect the tmux buffer is replayed and the screen looks idle
-        // again, which re-fired notifications for messages the user had
-        // already seen. Only the IDLE hint is deduped — APPROVAL/PERMISSION
-        // can legitimately repeat on the same last message.
-        if (hint == PromptType.INPUT_PROMPT.displayHint) {
-            val lastId = lastAssistantId(sessionId)
-            if (lastId != null && lastNotifiedAssistantId[sessionId] == lastId) {
-                FileLogger.log(TAG, "Suppressed needs-input for $sessionId (same assistant message)")
-                return
-            }
+        // Dedup by (hint + last assistant message). On reconnect the tmux buffer
+        // is replayed and the screen looks idle/approval again, and a flapping
+        // OMC statusline (WORKING→idle→WORKING around a prompt) re-raises the
+        // SAME alert — both re-fired a notification for an event the user already
+        // saw. Keying on the hint TOO lets a genuine APPROVAL after an
+        // INPUT_PROMPT on the same message still get through, while the same
+        // (hint, message) repeat is suppressed. Previously only INPUT_PROMPT was
+        // deduped, so APPROVAL/PERMISSION spammed on every flap.
+        val lastId = lastAssistantId(sessionId)
+        val key = if (lastId != null) "$hint#$lastId" else null
+        if (key != null && lastNotifiedKey[sessionId] == key) {
+            FileLogger.log(TAG, "Suppressed needs-input for $sessionId (same event)")
+            return
         }
         val last = lastNeedsInputAt[sessionId] ?: 0L
         if (now - last < notifyDebounceMs) {
@@ -245,9 +247,7 @@ class SessionOrchestrator(
             return
         }
         lastNeedsInputAt[sessionId] = now
-        if (hint == PromptType.INPUT_PROMPT.displayHint) {
-            lastAssistantId(sessionId)?.let { lastNotifiedAssistantId[sessionId] = it }
-        }
+        if (key != null) lastNotifiedKey[sessionId] = key
         onClaudeNeedsInput?.invoke(sessionId, hint, isActive)
     }
 
@@ -311,9 +311,10 @@ class SessionOrchestrator(
      *  succession (model handoff, tool retries) and we don't want to vibrate
      *  the phone for each one. */
     private val lastNeedsInputAt = mutableMapOf<String, Long>()
-    /** Last assistant-message id we fired a "ready" notification for, per
-     *  session — dedups reconnect replays re-notifying an already-seen turn. */
-    private val lastNotifiedAssistantId = mutableMapOf<String, String>()
+    /** Last "(hint)#(assistant-message-id)" we fired a notification for, per
+     *  session — dedups reconnect replays / statusline flaps re-notifying an
+     *  already-seen event (per prompt type). */
+    private val lastNotifiedKey = mutableMapOf<String, String>()
     private val notifyDebounceMs = 5_000L
     // Per-session pollers that read ~/.claude/sessions/<pid>.json on the
     // server to capture the *real* claude session_id — which can drift from
@@ -438,6 +439,12 @@ class SessionOrchestrator(
     /** Call from onPause/onResume to pause heavy background work and save battery. */
     fun setBackgroundMode(background: Boolean) {
         isInBackground = background
+        // Back the SSH keepalive off in the background (10s → 60s). At ~13
+        // sessions the 10s keepalive was ~78 radio wakeups/min just to detect
+        // dead links; 60s cuts that to ~13/min. Foreground restores 10s for fast
+        // Starlink-handover detection. JSch applies the new interval live.
+        val keepAlive = if (background) 60_000 else 10_000
+        connections.values.forEach { it.setKeepAliveInterval(keepAlive) }
     }
 
     private fun startUsagePolling(sessionId: String) {
@@ -638,6 +645,10 @@ class SessionOrchestrator(
         sessionIdRefreshJobs[sessionId] = reconnectScope.launch {
             kotlinx.coroutines.delay(1000)
             while (isActive) {
+                // Skip in background: this is 2 SSH execs every 15s per session
+                // (~104 radio wakeups/min at 13 sessions) and only matters for
+                // UUID/restore correctness, which onResume refreshes anyway.
+                if (isInBackground) { kotlinx.coroutines.delay(15_000); continue }
                 try {
                     val remote = fetchSessionsFromServer(sshManager)
                     val entry = remote?.firstOrNull { it.tmuxSessionName == tmuxName }
@@ -956,8 +967,14 @@ else:
                         val line = kotlinx.coroutines.withContext(Dispatchers.IO) {
                             reader.readLine()
                         } ?: break
-                        if (!line.contains("claude-remote-notify")) continue
-                        if (!line.contains(tmuxName)) continue
+                        if (!line.startsWith("claude-remote-notify")) continue
+                        // EXACT tmux-session match. The marker line is
+                        // "claude-remote-notify <#S> <epoch>" and ALL sessions
+                        // share /tmp/claude-notify, so a substring match cross-
+                        // fired between sessions whose names are prefixes of each
+                        // other (e.g. "cashy" matched "cashy-test"). Compare the
+                        // second whitespace token exactly.
+                        if (line.trim().split(Regex("\\s+")).getOrNull(1) != tmuxName) continue
                         FileLogger.log(TAG, "Stop hook fired for $sessionId: $line")
                         val isActiveTab = tabManager.activeTabId.value == sessionId
                         fireNeedsInput(sessionId, "Claude is ready for input", isActiveTab)
@@ -1209,7 +1226,7 @@ else:
         val tab = tabManager.getTab(sessionId) ?: return
         val stream = synchronized(transcriptLock) {
             val s = transcriptStreams.getOrPut(sessionId) {
-                TranscriptStream(tab.server, tab.folder, reconnectScope) { connections[sessionId]?.getSession() }
+                TranscriptStream(tab.server, tab.folder, reconnectScope, liveSession = { connections[sessionId]?.getSession() }, isBackground = { isInBackground })
             }
             startContextTokenCollector(sessionId, s)
             s
@@ -1222,7 +1239,7 @@ else:
             ?: return kotlinx.coroutines.flow.MutableStateFlow(emptyList())
         val stream = synchronized(transcriptLock) {
             val s = transcriptStreams.getOrPut(sessionId) {
-                TranscriptStream(tab.server, tab.folder, reconnectScope) { connections[sessionId]?.getSession() }
+                TranscriptStream(tab.server, tab.folder, reconnectScope, liveSession = { connections[sessionId]?.getSession() }, isBackground = { isInBackground })
             }
             // Derive the ctx-window % from this stream's token usage. Inside the
             // lock so it binds to the exact stream instance and stays atomic with
@@ -1279,7 +1296,7 @@ else:
             ?: return kotlinx.coroutines.flow.MutableStateFlow(null)
         val stream = synchronized(transcriptLock) {
             transcriptStreams.getOrPut(sessionId) {
-                TranscriptStream(tab.server, tab.folder, reconnectScope) { connections[sessionId]?.getSession() }
+                TranscriptStream(tab.server, tab.folder, reconnectScope, liveSession = { connections[sessionId]?.getSession() }, isBackground = { isInBackground })
             }
         }
         return stream.status
@@ -2231,7 +2248,7 @@ else:
         notifyWatchers.remove(sessionId)?.cancel()
         sessionIdRefreshJobs.remove(sessionId)?.cancel()
         lastNeedsInputAt.remove(sessionId)
-        lastNotifiedAssistantId.remove(sessionId)
+        lastNotifiedKey.remove(sessionId)
         setHookActive(sessionId, false)
         connections[sessionId]?.disconnect()
         connections.remove(sessionId)

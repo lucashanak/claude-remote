@@ -43,6 +43,13 @@ class TranscriptStream(
      * connection, so we fall back to a short-lived dedicated session per poll.
      */
     private val liveSession: () -> com.jcraft.jsch.Session? = { null },
+    /**
+     * True when the app is backgrounded. While backgrounded the poll cadence
+     * drops from [POLL_MS] (3s) to [BG_POLL_MS] (30s): a backgrounded session
+     * the user isn't looking at doesn't need a 3s SSH exec per session, and at
+     * ~13 sessions that 3s poll was the single biggest battery/radio drain.
+     */
+    private val isBackground: () -> Boolean = { false },
 ) {
     private val _entries = MutableStateFlow<List<TranscriptEntry>>(emptyList())
     val entries: StateFlow<List<TranscriptEntry>> = _entries.asStateFlow()
@@ -158,8 +165,12 @@ class TranscriptStream(
             }
             if (!scope.isActive) break
             // Steady poll cadence; back off only after errors.
-            val wait = if (attempt > 1) (1_000L * attempt).coerceAtMost(10_000L)
-                       else if (_entries.value.isEmpty()) 1_500L else POLL_MS
+            val wait = when {
+                attempt > 1 -> (1_000L * attempt).coerceAtMost(10_000L)
+                isBackground() -> BG_POLL_MS
+                _entries.value.isEmpty() -> 1_500L
+                else -> POLL_MS
+            }
             delay(wait)
         }
     }
@@ -258,5 +269,7 @@ class TranscriptStream(
         // Steady-state poll interval once the backlog has loaded. New content
         // only sends the bytes appended since the last poll, so this is cheap.
         private const val POLL_MS = 3_000L
+        // Background poll cadence — much slower; the user isn't looking.
+        private const val BG_POLL_MS = 30_000L
     }
 }

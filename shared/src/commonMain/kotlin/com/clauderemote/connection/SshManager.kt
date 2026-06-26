@@ -242,6 +242,16 @@ class SshManager(
     fun getSession(): Session? = session
 
     /**
+     * Adjust the SSH keepalive interval on the LIVE session (JSch reads it in
+     * its keepalive loop, so it takes effect without reconnecting). Used to back
+     * the radio off in the background (10s → 60s) and tighten it in the
+     * foreground for fast dead-link detection. No-op if not connected.
+     */
+    fun setKeepAliveInterval(ms: Int) {
+        try { session?.setServerAliveInterval(ms) } catch (_: Throwable) {}
+    }
+
+    /**
      * Open a minimal SSH session for exec-only use (no shell channel, no
      * read loop). Used by [SessionOrchestrator.forgetSession] to kill tmux
      * and push sessions.json even when the normal shell connection is absent.

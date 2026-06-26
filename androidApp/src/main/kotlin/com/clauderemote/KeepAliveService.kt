@@ -145,12 +145,14 @@ class KeepAliveService : Service() {
 
     @Suppress("DEPRECATION")
     private fun acquireWifiLock() {
-        val wm = applicationContext.getSystemService(Context.WIFI_SERVICE) as android.net.wifi.WifiManager
-        if (wifiLock == null) {
-            wifiLock = wm.createWifiLock(android.net.wifi.WifiManager.WIFI_MODE_FULL_HIGH_PERF, "clauderemote:wifi")
-        }
-        wifiLock?.let { if (!it.isHeld) it.acquire() }
-        FileLogger.log(TAG, "WifiLock acquired")
+        // WIFI_MODE_FULL_HIGH_PERF pins the WiFi radio out of power-save for the
+        // app's entire background lifetime — by this service's own measurement
+        // the single biggest battery cost here, for little benefit: the SSH
+        // keepalive + partial wakelock already keep the link warm, and on
+        // cellular it does nothing at all. Dropped. A normal WIFI_MODE_FULL_LOW_LATENCY
+        // is still overkill; we simply rely on the keepalive to wake the radio
+        // when there's actually traffic.
+        FileLogger.log(TAG, "WifiLock skipped (high-perf lock removed to save battery)")
     }
 
     private fun releaseWifiLock() {

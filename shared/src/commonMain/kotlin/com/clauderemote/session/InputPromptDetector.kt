@@ -143,27 +143,17 @@ class InputPromptDetector(
 
         onStateChange?.invoke(sessionId, classified)
 
-        // Both IDLE (ready for input) and APPROVAL (blocked on a choice) are
-        // notify-worthy "needs the user" states. They SHARE one latch so a new
-        // prompt of either kind notifies once until the user types — no spam,
-        // no double-fire when a permission dialog resolves into the input box.
+        // Screen-state IDLE no longer raises a "ready for input" notification.
+        // The rendered screen routinely LOOKS idle mid-turn — between a message
+        // and the next tool call the input box is visible and the dark-red
+        // working indicator hasn't repainted — which spammed false "Claude is
+        // ready" alerts WHILE Claude was still working. The Claude Code Stop
+        // hook (startNotifyWatcher) is now the SOLE authority for end-of-turn
+        // "ready": it fires only when the turn genuinely ends. Screen-state
+        // still drives the activity dot (onStateChange above) and still raises
+        // APPROVAL — a selector genuinely needs the user, and the Stop hook
+        // can't see a mid-turn AskUserQuestion / permission prompt.
         val promptType = when (classified) {
-            ClaudeState.IDLE -> {
-                // The rendered screen can momentarily look IDLE mid-turn: after
-                // a message and before the next tool call, the input box is
-                // visible and the dark-red "working" indicator hasn't repainted
-                // yet — which fired "Claude is ready" notifications WHILE Claude
-                // was still working. The OMC statusline is the reliable mid-turn
-                // signal (it carries a state segment while active). Be
-                // CONSERVATIVE: notify only when the statusline POSITIVELY
-                // reports not-working (false). null — buffer stale, statusline
-                // wrapped, or no OMC at all — means "can't confirm idle", so
-                // suppress rather than risk a mid-turn false positive; the
-                // Stop-hook path still delivers the real end-of-turn alert.
-                // APPROVAL is unaffected (a selector genuinely needs the user).
-                if (parseClaudeWorking(sessionId) != false) return
-                PromptType.INPUT_PROMPT
-            }
             ClaudeState.APPROVAL -> PromptType.APPROVAL_NEEDED
             else -> return
         }
