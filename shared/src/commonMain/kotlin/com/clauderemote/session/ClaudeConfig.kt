@@ -33,7 +33,9 @@ object ClaudeConfig {
         val parts = mutableListOf<String>()
         parts.add("cd ${shellEscape(folder)}")
 
-        val claudeArgs = mutableListOf("claude")
+        // Local models launch the `claude-local` wrapper (which sets the
+        // gateway env server-side); everything else launches plain `claude`.
+        val claudeArgs = mutableListOf(if (model.isLocal) "claude-local" else "claude")
 
         if (model.cliValue != null) {
             claudeArgs.add("--model")

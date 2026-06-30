@@ -12,12 +12,18 @@ enum class ClaudeMode(val displayName: String, val cliFlag: String?) {
 }
 
 @Serializable
-enum class ClaudeModel(val displayName: String, val cliValue: String?) {
+enum class ClaudeModel(val displayName: String, val cliValue: String?, val isLocal: Boolean = false) {
     DEFAULT("Default", null),
     OPUS("Opus", "opus"),
     FABLE("Fable", "fable"),
     SONNET("Sonnet", "sonnet"),
-    HAIKU("Haiku", "haiku");
+    HAIKU("Haiku", "haiku"),
+    // Local models: launched via the `claude-local` wrapper on the server,
+    // which already holds the gateway env (ANTHROPIC_BASE_URL/token). The app
+    // just swaps the launch binary + passes the model id — no gateway config
+    // lives in the app.
+    LOCAL_ORNITH("Ornith (local)", "ornith-fast", isLocal = true),
+    LOCAL_QWEN("Qwen3-Coder (local)", "qwen3-coder", isLocal = true);
 }
 
 @Serializable

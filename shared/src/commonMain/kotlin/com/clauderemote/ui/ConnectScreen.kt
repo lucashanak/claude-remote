@@ -102,7 +102,7 @@ fun ConnectScreen(
     val willRunPreview = buildString {
         val attachFlag = if (useExistingTmux) "-t" else "new -A -s"
         append("$ tmux $attachFlag '${tmuxSessionName}'\n")
-        append("$ cd $folder && claude")
+        append("$ cd $folder && ${if (selectedModel.isLocal) "claude-local" else "claude"}")
         if (selectedModel != ClaudeModel.DEFAULT) append(" --model ${selectedModel.cliValue}")
         selectedMode.cliFlag?.let { append(" $it") }
     }
