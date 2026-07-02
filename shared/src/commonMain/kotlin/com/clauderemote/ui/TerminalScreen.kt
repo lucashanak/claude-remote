@@ -83,7 +83,6 @@ enum class SpecialKey(val bytes: ByteArray) {
     Down(  byteArrayOf(0x1B, '['.code.toByte(), 'B'.code.toByte())),
     Right( byteArrayOf(0x1B, '['.code.toByte(), 'C'.code.toByte())),
     Left(  byteArrayOf(0x1B, '['.code.toByte(), 'D'.code.toByte())),
-    Slash( byteArrayOf('/'.code.toByte())),
     CtrlC( byteArrayOf(0x03)),
     CtrlD( byteArrayOf(0x04)),
 }
@@ -1542,10 +1541,13 @@ private fun SpecialKeysRow(
         SpecialKeyBtn("Tab",  Modifier.weight(1f)) { onKey(SpecialKey.Tab)   }
         SpecialKeyBtn("↑",    Modifier.weight(1f)) { onKey(SpecialKey.Up)    }
         SpecialKeyBtn("↓",    Modifier.weight(1f)) { onKey(SpecialKey.Down)  }
-        SpecialKeyBtn("/",    Modifier.weight(1f)) { onKey(SpecialKey.Slash) }
         SpecialKeyBtn("⌃C",   Modifier.weight(1f)) { onKey(SpecialKey.CtrlC) }
         SpecialKeyBtn("⌃D",   Modifier.weight(1f)) { onKey(SpecialKey.CtrlD) }
-        SpecialKeyBtn("···",  Modifier.weight(1f)) { onMore()                }
+        // The old "/" key typed a slash into the PTY (Claude's own in-terminal
+        // slash menu, navigated + confirmed with Enter). It duplicated this
+        // command menu, which sends the picked command immediately — so the
+        // single "/" button now opens that menu.
+        SpecialKeyBtn("/",    Modifier.weight(1f)) { onMore()                }
     }
 }
 
