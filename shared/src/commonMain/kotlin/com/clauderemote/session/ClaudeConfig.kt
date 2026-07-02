@@ -29,10 +29,19 @@ object ClaudeConfig {
         model: ClaudeModel,
         claudeSessionId: String? = null,
         resume: Boolean = false
-    ): String {
-        val parts = mutableListOf<String>()
-        parts.add("cd ${shellEscape(folder)}")
+    ): String = "cd ${shellEscape(folder)} && ${claudeInvocation(mode, model, claudeSessionId, resume)}"
 
+    /**
+     * Just the `claude …` invocation (no `cd`), space-joined. All tokens are
+     * plain (flags, model alias, uuid) — no shell metacharacters — so this is
+     * safe to single-quote-wrap for `send-keys`/`bash -lc` without escaping.
+     */
+    private fun claudeInvocation(
+        mode: ClaudeMode,
+        model: ClaudeModel,
+        claudeSessionId: String?,
+        resume: Boolean,
+    ): String {
         // Local models launch the `claude-local` wrapper (which sets the
         // gateway env server-side); everything else launches plain `claude`.
         val claudeArgs = mutableListOf(if (model.isLocal) "claude-local" else "claude")
@@ -67,8 +76,7 @@ object ClaudeConfig {
             }
         }
 
-        parts.add(claudeArgs.joinToString(" "))
-        return parts.joinToString(" && ")
+        return claudeArgs.joinToString(" ")
     }
 
     fun buildTmuxLaunchCommand(
@@ -111,16 +119,24 @@ object ClaudeConfig {
      */
     fun buildRestartCommand(
         tmuxSessionName: String,
-        folder: String,
         mode: ClaudeMode,
         model: ClaudeModel,
         claudeSessionId: String,
     ): String {
-        val claudeCmd = buildLaunchCommand(folder, mode, model, claudeSessionId, resume = true)
+        // Run claude via a LOGIN shell (bash -lc): the shell that respawn-pane
+        // spawns does NOT have ~/.local/bin (where claude lives) on PATH, so a
+        // bare `claude` was "command not found". A login shell sources ~/.profile
+        // which adds it. NO `cd`: respawn-pane keeps the pane's cwd (the project
+        // dir where claude was already running), so a relative `cd <folder>`
+        // (folder is relative-to-$HOME) would fail from inside that dir — which
+        // was the second half of the bug. claudeInvocation has no quotes, so the
+        // nesting is a single, clean level of '\'' escaping for send-keys.
+        val claudeCmd = claudeInvocation(mode, model, claudeSessionId, resume = true)
         fun sq(s: String) = "'" + s.replace("'", "'\\''") + "'"
+        val loginRun = "bash -lc ${sq(claudeCmd)}"
         return "tmux respawn-pane -k -t ${sq(tmuxSessionName)} 2>/dev/null; " +
                 "sleep 0.4; " +
-                "tmux send-keys -t ${sq(tmuxSessionName)} ${sq(claudeCmd)} Enter"
+                "tmux send-keys -t ${sq(tmuxSessionName)} ${sq(loginRun)} Enter"
     }
 
     // ======================== RUNTIME CONTROLS ========================

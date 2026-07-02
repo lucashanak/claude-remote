@@ -2322,7 +2322,7 @@ else:
             FileLogger.log(TAG, "restartClaude: no live connection for $sessionId")
             return
         }
-        val cmd = ClaudeConfig.buildRestartCommand(tab.tmuxSessionName, tab.folder, tab.mode, tab.model, uuid)
+        val cmd = ClaudeConfig.buildRestartCommand(tab.tmuxSessionName, tab.mode, tab.model, uuid)
         FileLogger.log(TAG, "Restarting Claude Code for $sessionId (resume $uuid) in tmux ${tab.tmuxSessionName}")
         // The respawn kills+redraws the pane; suppress the prompt detector so it
         // doesn't misfire on the transient screen. UUID is unchanged, so the
