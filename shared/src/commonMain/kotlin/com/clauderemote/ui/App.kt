@@ -825,6 +825,9 @@ fun App(
                         onReconnect = { id ->
                             scope.launch { sessionOrchestrator.reconnectSession(id) }
                         },
+                        onRestartClaude = { id ->
+                            scope.launch { sessionOrchestrator.restartClaude(id) }
+                        },
                         onTabClose = { id ->
                             // Always confirm — closing forgets the persisted
                             // session and kills the remote tmux pane, which

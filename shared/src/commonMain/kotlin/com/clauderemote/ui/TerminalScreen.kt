@@ -118,6 +118,7 @@ fun TerminalScreen(
     onPageUp: () -> Unit = {},
     onPageDown: () -> Unit = {},
     onReconnect: ((String) -> Unit)? = null,
+    onRestartClaude: ((String) -> Unit)? = null,
     onRenameSession: ((sessionId: String, newAlias: String) -> Unit)? = null,
     onAttachFile: (suspend () -> String?)? = null,
     onDownloadFile: (suspend (path: String) -> ByteArray?)? = null,
@@ -207,6 +208,7 @@ fun TerminalScreen(
     var showRenameDialog by remember { mutableStateOf(false) }
     var renameText by remember { mutableStateOf("") }
     var moreMenu by remember { mutableStateOf(false) }
+    var showRestartConfirm by remember { mutableStateOf(false) }
     // File download / image preview state
     var showDownloadDialog by remember { mutableStateOf(false) }
     var downloadBusy by remember { mutableStateOf(false) }
@@ -538,12 +540,41 @@ fun TerminalScreen(
                                         TextButton(onClick = { moreMenu = false; onReconnect?.invoke(activeSession.id) },
                                             modifier = Modifier.fillMaxWidth()) { Text("Reconnect", color = c.text) }
                                     }
+                                    if (onRestartClaude != null && activeSession.status == SessionStatus.ACTIVE) {
+                                        TextButton(onClick = { moreMenu = false; showRestartConfirm = true },
+                                            modifier = Modifier.fillMaxWidth()) {
+                                            Text("Restart Claude Code", color = c.text)
+                                        }
+                                    }
                                     TextButton(onClick = { moreMenu = false; onTabClose(activeSession.id) },
                                         modifier = Modifier.fillMaxWidth()) {
                                         Text("Close session", color = c.disconnected)
                                     }
                                 }
                             }
+                        }
+                    )
+                }
+
+                if (showRestartConfirm && activeSession != null) {
+                    AlertDialog(
+                        onDismissRequest = { showRestartConfirm = false },
+                        containerColor = c.surface,
+                        title = { Text("Restart Claude Code", color = c.text) },
+                        text = {
+                            Text(
+                                "Restarts the claude process in this session (e.g. to pick up an update) and resumes the SAME conversation. Any in-progress task is interrupted.",
+                                color = c.textDim,
+                            )
+                        },
+                        confirmButton = {
+                            TextButton(onClick = {
+                                showRestartConfirm = false
+                                onRestartClaude?.invoke(activeSession.id)
+                            }) { Text("Restart", color = c.accent) }
+                        },
+                        dismissButton = {
+                            TextButton(onClick = { showRestartConfirm = false }) { Text("Cancel", color = c.textDim) }
                         }
                     )
                 }

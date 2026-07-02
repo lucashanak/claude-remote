@@ -2302,6 +2302,39 @@ else:
 
     fun getConnection(sessionId: String): SshManager? = connections[sessionId]
 
+    /**
+     * Restart the Claude Code process for [sessionId] while KEEPING the
+     * conversation. Runs `tmux respawn-pane -k` + `send-keys 'claude --resume
+     * <uuid>'` over a one-shot exec on the live SSH session, so the tmux session
+     * (and the app's attach to it) survives — only the claude process is
+     * replaced, resuming the same transcript. Used to pick up a Claude Code
+     * update without losing the session.
+     */
+    suspend fun restartClaude(sessionId: String) {
+        val tab = tabManager.getTab(sessionId) ?: return
+        val uuid = tab.claudeSessionId
+        if (uuid.isNullOrBlank()) {
+            FileLogger.log(TAG, "restartClaude: no claudeSessionId for $sessionId — cannot resume")
+            return
+        }
+        val sshSession = connections[sessionId]?.getSession()
+        if (sshSession == null) {
+            FileLogger.log(TAG, "restartClaude: no live connection for $sessionId")
+            return
+        }
+        val cmd = ClaudeConfig.buildRestartCommand(tab.tmuxSessionName, tab.folder, tab.mode, tab.model, uuid)
+        FileLogger.log(TAG, "Restarting Claude Code for $sessionId (resume $uuid) in tmux ${tab.tmuxSessionName}")
+        // The respawn kills+redraws the pane; suppress the prompt detector so it
+        // doesn't misfire on the transient screen. UUID is unchanged, so the
+        // transcript stream keeps tailing the same file across the restart.
+        promptDetector.suppressFor(5000)
+        try {
+            execReadWithWatchdog(sshSession, cmd, totalMs = 15_000)
+        } catch (e: Exception) {
+            FileLogger.error(TAG, "restartClaude failed for $sessionId", e)
+        }
+    }
+
     suspend fun renameTmuxSession(sessionId: String, oldName: String, newName: String) {
         withContext(Dispatchers.IO) {
             try {

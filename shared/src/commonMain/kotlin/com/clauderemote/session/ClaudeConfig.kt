@@ -96,6 +96,33 @@ object ClaudeConfig {
                 "\\; send-keys ${sq(claudeCmd)} Enter"
     }
 
+    /**
+     * Restart the Claude Code process IN PLACE while keeping the conversation.
+     *
+     * `tmux respawn-pane -k` kills whatever is running in the pane (the current
+     * `claude`, whether idle or mid-task) and restarts the pane's shell — WITHOUT
+     * killing the tmux session, so any attached client (the app's terminal) stays
+     * attached and simply sees the pane redraw. We then `send-keys` a fresh
+     * `claude --resume <uuid>` into that shell, which reloads the SAME conversation
+     * from its transcript (picking up e.g. a newly-installed Claude Code version).
+     *
+     * This is deliberately NOT `kill-session; new-session` (buildTmuxLaunchCommand):
+     * that would detach the client and break the live terminal.
+     */
+    fun buildRestartCommand(
+        tmuxSessionName: String,
+        folder: String,
+        mode: ClaudeMode,
+        model: ClaudeModel,
+        claudeSessionId: String,
+    ): String {
+        val claudeCmd = buildLaunchCommand(folder, mode, model, claudeSessionId, resume = true)
+        fun sq(s: String) = "'" + s.replace("'", "'\\''") + "'"
+        return "tmux respawn-pane -k -t ${sq(tmuxSessionName)} 2>/dev/null; " +
+                "sleep 0.4; " +
+                "tmux send-keys -t ${sq(tmuxSessionName)} ${sq(claudeCmd)} Enter"
+    }
+
     // ======================== RUNTIME CONTROLS ========================
 
     /** Shift+Tab — toggles between modes (normal → plan → auto-accept) */
