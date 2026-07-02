@@ -4,6 +4,8 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
@@ -22,6 +24,7 @@ import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.key.*
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.unit.dp
 import com.clauderemote.model.ClaudeModel
 import com.clauderemote.model.ClaudeSession
@@ -145,6 +148,15 @@ fun CommandPaletteDialog(
 
     LaunchedEffect(filter) { selectedIndex = 0 }
 
+    // Run the currently highlighted result (top match after typing). Shared by
+    // the hardware Key.Enter path and the soft-keyboard IME action below.
+    fun runSelected() {
+        if (filtered.isNotEmpty() && selectedIndex in filtered.indices) {
+            filtered[selectedIndex].onExecute()
+            onDismiss()
+        }
+    }
+
     Box(
         modifier = Modifier
             .fillMaxSize()
@@ -193,19 +205,18 @@ fun CommandPaletteDialog(
                                             selectedIndex = (selectedIndex - 1).coerceAtLeast(0)
                                             true
                                         }
-                                        Key.Enter -> {
-                                            if (filtered.isNotEmpty() && selectedIndex in filtered.indices) {
-                                                filtered[selectedIndex].onExecute()
-                                                onDismiss()
-                                            }
-                                            true
-                                        }
+                                        Key.Enter -> { runSelected(); true }
                                         Key.Escape -> { onDismiss(); true }
                                         else -> false
                                     }
                                 } else false
                             },
                         singleLine = true,
+                        // Soft keyboards deliver Enter as an IME action, not a
+                        // Key.Enter event — wire "Go" to run the top result so
+                        // type-then-Enter works on Android too.
+                        keyboardOptions = KeyboardOptions(imeAction = ImeAction.Go),
+                        keyboardActions = KeyboardActions(onGo = { runSelected() }),
                         textStyle = CRType.cardTitle,
                         colors = OutlinedTextFieldDefaults.colors(
                             unfocusedBorderColor = c.border,
