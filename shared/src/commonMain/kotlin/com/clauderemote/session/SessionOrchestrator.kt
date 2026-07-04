@@ -316,6 +316,10 @@ class SessionOrchestrator(
      *  already-seen event (per prompt type). */
     private val lastNotifiedKey = mutableMapOf<String, String>()
     private val notifyDebounceMs = 5_000L
+    /** A Stop-hook marker older than this (skew-corrected) is dropped as stale —
+     *  it's a buffered replay from a network/HyperOS freeze, not a fresh
+     *  completion the user is waiting on. */
+    private val notifyStaleMs = 120_000L
     // Per-session pollers that read ~/.claude/sessions/<pid>.json on the
     // server to capture the *real* claude session_id — which can drift from
     // the UUID we passed via --session-id when the user invokes /resume,
@@ -954,19 +958,34 @@ else:
                 try {
                     val sshSession = sshManager.getSession() ?: break
                     val ch = sshSession.openChannel("exec") as com.jcraft.jsch.ChannelExec
-                    ch.setCommand("touch /tmp/claude-notify && tail -n 0 -f /tmp/claude-notify")
+                    // Emit the server clock first so we can learn the phone↔server
+                    // skew, then tail only NEW markers.
+                    ch.setCommand("echo claude-remote-clock \$(date +%s); touch /tmp/claude-notify && tail -n 0 -f /tmp/claude-notify")
                     ch.inputStream = null
                     val reader = ch.inputStream.bufferedReader()
                     ch.connect(5000)
 
                     setHookActive(sessionId, true)
                     attempt = 0
+                    // Offset (ms) between this device's clock and the server's,
+                    // learned from the "claude-remote-clock <epoch>" line the
+                    // channel emits first. Lets us reject stale markers by AGE
+                    // despite clock skew. Null until learned ⇒ age check is
+                    // skipped (fail-open, never suppress a real notification).
+                    var clockSkewMs: Long? = null
                     FileLogger.log(TAG, "Notify watcher started for $sessionId (tmux=$tmuxName)")
 
                     while (isActive && ch.isConnected) {
                         val line = kotlinx.coroutines.withContext(Dispatchers.IO) {
                             reader.readLine()
                         } ?: break
+                        // Server clock probe (emitted once, first): learn skew.
+                        if (line.startsWith("claude-remote-clock")) {
+                            line.trim().split(Regex("\\s+")).getOrNull(1)?.toLongOrNull()?.let { serverEpochSec ->
+                                clockSkewMs = System.currentTimeMillis() - serverEpochSec * 1000L
+                            }
+                            continue
+                        }
                         if (!line.startsWith("claude-remote-notify")) continue
                         // EXACT tmux-session match. The marker line is
                         // "claude-remote-notify <#S> <epoch>" and ALL sessions
@@ -974,8 +993,41 @@ else:
                         // fired between sessions whose names are prefixes of each
                         // other (e.g. "cashy" matched "cashy-test"). Compare the
                         // second whitespace token exactly.
-                        if (line.trim().split(Regex("\\s+")).getOrNull(1) != tmuxName) continue
+                        val parts = line.trim().split(Regex("\\s+"))
+                        if (parts.getOrNull(1) != tmuxName) continue
+                        // Reject STALE completions. All sessions share the
+                        // append-only /tmp/claude-notify; on a mobile / HyperOS
+                        // socket freeze the tail's buffered bytes flush all at
+                        // once when the phone wakes, replaying markers for
+                        // completions that happened minutes ago and vibrating the
+                        // phone for events the user already saw. The marker
+                        // carries the Stop hook's epoch — drop anything older
+                        // than notifyStaleMs (skew-corrected).
+                        val markerEpochSec = parts.getOrNull(2)?.toLongOrNull()
+                        val skew = clockSkewMs
+                        if (markerEpochSec != null && skew != null) {
+                            val ageMs = System.currentTimeMillis() - (markerEpochSec * 1000L + skew)
+                            if (ageMs > notifyStaleMs) {
+                                FileLogger.log(TAG, "Skipping stale Stop hook for $sessionId (age ${ageMs}ms): $line")
+                                continue
+                            }
+                        }
                         FileLogger.log(TAG, "Stop hook fired for $sessionId: $line")
+                        // Pull the transcript up to the just-finished turn BEFORE
+                        // firing, so the notification body + dedup key come from
+                        // the final assistant message rather than the last
+                        // periodic poll (up to 30 s stale in background — it would
+                        // show the previous turn or a mid-turn preamble). BOUND
+                        // the wait: pollOnce's blocking read has no timeout, so on
+                        // a frozen socket an unbounded refresh could stall or
+                        // suppress the notification itself. Run it detached and
+                        // wait at most 2 s, then fire regardless — a slightly
+                        // stale body beats a missed "Claude is ready".
+                        val stream = synchronized(transcriptLock) { transcriptStreams[sessionId] }
+                        if (stream != null) {
+                            val refresh = reconnectScope.launch { stream.pollNow() }
+                            kotlinx.coroutines.withTimeoutOrNull(2_000) { refresh.join() }
+                        }
                         val isActiveTab = tabManager.activeTabId.value == sessionId
                         fireNeedsInput(sessionId, "Claude is ready for input", isActiveTab)
                         updateActivity(sessionId, SessionActivity.WAITING_FOR_INPUT)

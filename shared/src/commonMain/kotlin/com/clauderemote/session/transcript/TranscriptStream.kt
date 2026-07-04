@@ -15,6 +15,8 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 
 /**
@@ -75,6 +77,15 @@ class TranscriptStream(
     // active tail coroutine touches it, and start() cancel-and-joins the
     // previous tail before the next one runs, so no locking is needed.
     private val seenIds = HashSet<String>()
+    // How many bytes of the .jsonl we've already consumed. Shared between the
+    // steady tail loop and pollNow(); both read/advance it under [pollMutex] so
+    // a forced poll never double-reads or races the offset with the loop.
+    private var byteOffset = 0L
+    // Serializes pollOnce() + byteOffset updates between the steady loop and
+    // pollNow(). Without it a Stop-hook-triggered pollNow() could run a second
+    // pollOnce concurrently with the loop, both advancing byteOffset and losing
+    // appended bytes.
+    private val pollMutex = Mutex()
     // Set once stop() has been called. start() is invoked outside transcriptLock
     // by the orchestrator, so it can race a concurrent disconnectSession() that
     // stops + removes this stream. Without this flag a late start() would
@@ -120,38 +131,17 @@ class TranscriptStream(
     private suspend fun runTail(uuid: String) {
         val safeFolder = cwd.replace("'", "'\\''")
         val safeUuid = uuid.replace("'", "'\\''")
-        // byteOffset = how many bytes of the .jsonl we've already consumed.
-        // The poll command echoes the file's current size as `__OFFSET__<n>`
-        // so we resume from exactly there next time — only NEW bytes are sent
-        // over the wire after the initial backlog (keeps idle traffic tiny).
-        var byteOffset = 0L
+        // Fresh tail (new start()) resumes from the top of the file; the poll
+        // command echoes the file's current size as `__OFFSET__<n>` so we
+        // resume from exactly there next time — only NEW bytes are sent over
+        // the wire after the initial backlog (keeps idle traffic tiny).
+        pollMutex.withLock { byteOffset = 0L }
         var attempt = 0
         while (scope.isActive) {
             attempt++
             try {
                 _status.value = if (_entries.value.isEmpty()) "connecting…" else null
-                // Prefer the main connection (no extra SSH connection, no
-                // handshake per poll); fall back to a short-lived dedicated
-                // session only when the tab has no live main connection.
-                val shared = liveSession()?.takeIf { it.isConnected }
-                val (lines, newOffset) = if (shared != null) {
-                    pollOnce(shared, safeFolder, safeUuid, byteOffset)
-                } else {
-                    SshSessionHelper.withSession(server, timeout = 15_000) { sess ->
-                        pollOnce(sess, safeFolder, safeUuid, byteOffset)
-                    }
-                }
-                if (newOffset >= 0) byteOffset = newOffset
-                if (lines.isNotEmpty()) {
-                    val newEntries = TranscriptParser.parseLines(lines.asSequence())
-                    if (newEntries.isNotEmpty()) {
-                        _status.value = null
-                        appendEntries(newEntries)
-                    }
-                    TranscriptParser.latestContextTokens(lines.asSequence())?.let {
-                        _contextTokens.value = it
-                    }
-                }
+                doPoll(safeFolder, safeUuid)
                 attempt = 0
                 if (_entries.value.isEmpty()) {
                     // Connected & polled fine, but nothing parseable yet (no
@@ -172,6 +162,56 @@ class TranscriptStream(
                 else -> POLL_MS
             }
             delay(wait)
+        }
+    }
+
+    /**
+     * Run one incremental poll under [pollMutex] (advancing the shared
+     * [byteOffset]), parse the new lines and append them. Shared by the steady
+     * [runTail] loop and [pollNow] so the two never issue overlapping reads.
+     */
+    private suspend fun doPoll(safeFolder: String, safeUuid: String) = pollMutex.withLock {
+        // Prefer the main connection (no extra SSH connection, no handshake per
+        // poll); fall back to a short-lived dedicated session only when the tab
+        // has no live main connection.
+        val shared = liveSession()?.takeIf { it.isConnected }
+        val (lines, newOffset) = if (shared != null) {
+            pollOnce(shared, safeFolder, safeUuid, byteOffset)
+        } else {
+            SshSessionHelper.withSession(server, timeout = 15_000) { sess ->
+                pollOnce(sess, safeFolder, safeUuid, byteOffset)
+            }
+        }
+        if (newOffset >= 0) byteOffset = newOffset
+        if (lines.isNotEmpty()) {
+            val newEntries = TranscriptParser.parseLines(lines.asSequence())
+            if (newEntries.isNotEmpty()) {
+                _status.value = null
+                appendEntries(newEntries)
+            }
+            TranscriptParser.latestContextTokens(lines.asSequence())?.let {
+                _contextTokens.value = it
+            }
+        }
+    }
+
+    /**
+     * Force one immediate incremental poll right now, bypassing the steady
+     * cadence, and suspend until it finishes. The Stop-hook notification path
+     * calls this so the notification body + dedup key reflect the just-finished
+     * turn instead of the last periodic poll — which can be up to [BG_POLL_MS]
+     * (30 s) stale in background and would surface the previous turn's text or
+     * a mid-turn preamble. No-op if stopped or the Claude UUID isn't known yet.
+     */
+    suspend fun pollNow() {
+        if (closed) return
+        val uuid = currentUuid ?: return
+        val safeFolder = cwd.replace("'", "'\\''")
+        val safeUuid = uuid.replace("'", "'\\''")
+        try {
+            doPoll(safeFolder, safeUuid)
+        } catch (t: Throwable) {
+            FileLogger.log(TAG, "pollNow error: ${t.message}")
         }
     }
 
