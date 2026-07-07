@@ -96,6 +96,22 @@ class ServerTransportPool(private val serverStorage: ServerStorage) {
         transports.forEach { if (it.session === session) it.reportedDead = true }
     }
 
+    /**
+     * Kill every transport NOW. For the Android network-lost event: the
+     * interface our TCP rode is gone, but keepalive wouldn't notice for up to
+     * 20 s (fg) / 2 min (bg) — frozen tabs the whole time. Disconnecting
+     * unblocks the parked channel reads immediately, so every manager's read
+     * loop EOFs and per-session autoReconnect (gated + pooled) re-establishes
+     * on the new network the moment it's up. Structural removal from the list
+     * happens on the next lease()'s prune.
+     */
+    fun teardownAll() {
+        transports.forEach {
+            it.reportedDead = true
+            try { it.session.disconnect() } catch (_: Exception) {}
+        }
+    }
+
     /** Drop unusable transports. Caller holds [mutex]. */
     private fun prune() {
         val dead = transports.filter { !it.usable }
@@ -121,6 +137,13 @@ class ServerTransportPool(private val serverStorage: ServerStorage) {
                 sess.setPassword(server.password)
             }
             sess.setConfig("StrictHostKeyChecking", "no")
+            // Compression: transcript JSONL + terminal output compress 5-10×,
+            // and on weak/metered links the payload IS the cost. mwiede jsch
+            // ships a java.util.zip implementation (no jzlib needed); "none"
+            // stays in the list so a server with Compression=no still
+            // negotiates cleanly.
+            sess.setConfig("compression.s2c", "zlib@openssh.com,zlib,none")
+            sess.setConfig("compression.c2s", "zlib@openssh.com,zlib,none")
             // Keepalive via the EXPLICIT API (milliseconds!) — see SshManager.
             sess.setServerAliveInterval(10_000)
             sess.setServerAliveCountMax(2)

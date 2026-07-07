@@ -519,6 +519,20 @@ class SessionOrchestrator(
     // the user toggled to the Transcript view while the server was slow to respond.
     private val confirmedUuids = java.util.concurrent.ConcurrentHashMap<String, String>()
 
+    /**
+     * Proactive teardown on a platform network-lost event (Android
+     * ConnectivityManager). The interface our TCP connections rode is gone —
+     * they cannot survive — but keepalive wouldn't flag them for up to 20 s
+     * (fg) / 2 min (bg), leaving every tab frozen through a Wi-Fi→LTE
+     * handover. Kill the pooled transports now; the read loops EOF, each
+     * session's autoReconnect arms, and the sweep on onAvailable/onResume
+     * reconnects on the new network within ~1 s instead of ~20.
+     */
+    fun onNetworkLost() {
+        FileLogger.log(TAG, "Network lost — tearing down ${transportPools.size} transport pool(s)")
+        transportPools.values.forEach { it.teardownAll() }
+    }
+
     /** Call from onPause/onResume to pause heavy background work and save battery. */
     fun setBackgroundMode(background: Boolean) {
         isInBackground = background
@@ -1465,7 +1479,7 @@ else:
         val tab = tabManager.getTab(sessionId) ?: return
         val stream = synchronized(transcriptLock) {
             val s = transcriptStreams.getOrPut(sessionId) {
-                TranscriptStream(tab.server, tab.folder, reconnectScope, liveSession = { connections[sessionId]?.getSession() }, isBackground = { isInBackground })
+                TranscriptStream(tab.server, tab.folder, reconnectScope, liveSession = { connections[sessionId]?.getSession() }, isBackground = { isInBackground }, isActiveTab = { tabManager.activeTabId.value == sessionId })
             }
             startContextTokenCollector(sessionId, s)
             s
@@ -1478,7 +1492,7 @@ else:
             ?: return kotlinx.coroutines.flow.MutableStateFlow(emptyList())
         val stream = synchronized(transcriptLock) {
             val s = transcriptStreams.getOrPut(sessionId) {
-                TranscriptStream(tab.server, tab.folder, reconnectScope, liveSession = { connections[sessionId]?.getSession() }, isBackground = { isInBackground })
+                TranscriptStream(tab.server, tab.folder, reconnectScope, liveSession = { connections[sessionId]?.getSession() }, isBackground = { isInBackground }, isActiveTab = { tabManager.activeTabId.value == sessionId })
             }
             // Derive the ctx-window % from this stream's token usage. Inside the
             // lock so it binds to the exact stream instance and stays atomic with
@@ -1488,6 +1502,11 @@ else:
         }
         val uuid = tab.claudeSessionId
         if (uuid != null) stream.start(uuid)
+        // Freshness nudge: a tab that just became active may be up to
+        // INACTIVE_POLL_MS (15 s) behind — pull the delta right away instead
+        // of waiting out the current sleep. pollNow is mutex-serialized and
+        // incremental, so repeated calls (recompositions) are cheap no-ops.
+        reconnectScope.launch { stream.pollNow() }
         // One-shot pid-probe to correct the client-generated UUID before the
         // 15 s reconcile loop fires. Only runs until the UUID is confirmed by
         // at least one server-side probe — after that, repeated calls to
@@ -1535,7 +1554,7 @@ else:
             ?: return kotlinx.coroutines.flow.MutableStateFlow(null)
         val stream = synchronized(transcriptLock) {
             transcriptStreams.getOrPut(sessionId) {
-                TranscriptStream(tab.server, tab.folder, reconnectScope, liveSession = { connections[sessionId]?.getSession() }, isBackground = { isInBackground })
+                TranscriptStream(tab.server, tab.folder, reconnectScope, liveSession = { connections[sessionId]?.getSession() }, isBackground = { isInBackground }, isActiveTab = { tabManager.activeTabId.value == sessionId })
             }
         }
         return stream.status

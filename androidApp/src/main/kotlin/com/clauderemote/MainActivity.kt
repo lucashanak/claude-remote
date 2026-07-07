@@ -442,9 +442,25 @@ class MainActivity : FragmentActivity() {
                 .addCapability(android.net.NetworkCapabilities.NET_CAPABILITY_INTERNET)
                 .build()
             cm.registerNetworkCallback(request, object : android.net.ConnectivityManager.NetworkCallback() {
+                // The network our sockets most recently rode. onLost fires for
+                // ANY registered network — losing an idle secondary (Wi-Fi off
+                // while we're on LTE) must not tear down healthy transports.
+                @Volatile private var lastAvailable: android.net.Network? = null
+
                 override fun onAvailable(network: android.net.Network) {
+                    lastAvailable = network
                     FileLogger.log("Network", "Network available, checking for dead sessions")
                     reconnectDeadTabs("onAvailable")
+                }
+
+                override fun onLost(network: android.net.Network) {
+                    if (network != lastAvailable) return
+                    // The interface our TCP rode is gone: proactively kill the
+                    // pooled transports instead of waiting ~20 s for keepalive
+                    // to notice — turns a Wi-Fi→LTE handover freeze into a
+                    // ~1 s blip (reconnect fires on the next onAvailable).
+                    FileLogger.log("Network", "Active network lost — tearing down transports")
+                    sessionOrchestrator.onNetworkLost()
                 }
             })
         } catch (e: Exception) {

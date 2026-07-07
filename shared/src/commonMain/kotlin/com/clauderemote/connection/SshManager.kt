@@ -78,6 +78,9 @@ class SshManager(
                 own.setPassword(server.password)
             }
             own.setConfig("StrictHostKeyChecking", "no")
+            // Compression — same rationale as ServerTransportPool.connectTransport.
+            own.setConfig("compression.s2c", "zlib@openssh.com,zlib,none")
+            own.setConfig("compression.c2s", "zlib@openssh.com,zlib,none")
             // Keepalive via the EXPLICIT API, not setConfig: JSch's interval is in
             // MILLISECONDS and the setConfig string key isn't reliably applied —
             // the old setConfig("ServerAliveInterval","30") was either ignored or

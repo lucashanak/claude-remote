@@ -52,6 +52,15 @@ class TranscriptStream(
      * ~13 sessions that 3s poll was the single biggest battery/radio drain.
      */
     private val isBackground: () -> Boolean = { false },
+    /**
+     * True when this session is the ACTIVE tab. Only the visible transcript
+     * needs the 3 s cadence; the other N−1 sessions drop to
+     * [INACTIVE_POLL_MS] (15 s) even in the foreground — at 21 sessions that
+     * cuts ~420 exec opens/min to ~100. Safe for notifications: the Stop-hook
+     * path forces an immediate [pollNow] before firing, so the body never
+     * depends on the periodic cadence.
+     */
+    private val isActiveTab: () -> Boolean = { true },
 ) {
     private val _entries = MutableStateFlow<List<TranscriptEntry>>(emptyList())
     val entries: StateFlow<List<TranscriptEntry>> = _entries.asStateFlow()
@@ -159,6 +168,7 @@ class TranscriptStream(
                 attempt > 1 -> (1_000L * attempt).coerceAtMost(10_000L)
                 isBackground() -> BG_POLL_MS
                 _entries.value.isEmpty() -> 1_500L
+                !isActiveTab() -> INACTIVE_POLL_MS
                 else -> POLL_MS
             }
             delay(wait)
@@ -309,6 +319,9 @@ class TranscriptStream(
         // Steady-state poll interval once the backlog has loaded. New content
         // only sends the bytes appended since the last poll, so this is cheap.
         private const val POLL_MS = 3_000L
+        // Foreground cadence for NON-active tabs — nobody is looking at their
+        // transcript, and pollNow() covers the notification path.
+        private const val INACTIVE_POLL_MS = 15_000L
         // Background poll cadence — much slower; the user isn't looking.
         private const val BG_POLL_MS = 30_000L
     }
