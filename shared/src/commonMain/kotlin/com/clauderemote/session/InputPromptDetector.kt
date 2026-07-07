@@ -234,7 +234,9 @@ class InputPromptDetector(
             val total = parseTokenCount(match.groupValues[2])
             if (total > 0) return ((used / total) * 100).toInt().coerceIn(0, 100)
         }
-        CONTEXT_PERCENT_REGEX.find(stripped)?.let { match ->
+        // LAST match — the rolling buffer can hold several statusline renders;
+        // the bottom-most is the current one.
+        CONTEXT_PERCENT_REGEX.findAll(stripped).lastOrNull()?.let { match ->
             return (match.groupValues.getOrNull(1)?.toIntOrNull()
                 ?: match.groupValues.getOrNull(2)?.toIntOrNull()
                 ?: match.groupValues.getOrNull(3)?.toIntOrNull())
@@ -258,23 +260,26 @@ class InputPromptDetector(
     fun parseUsage(sessionId: String, text: String): Map<String, Int>? {
         val stripped = recentOutput[sessionId]?.toString() ?: stripAnsi(text)
         val result = mutableMapOf<String, Int>()
-        SESSION_USAGE_REGEX.find(stripped)?.let { m ->
+        // LAST match, not first: recentOutput is a rolling buffer holding many
+        // concatenated statusline renders (and possibly stale old-format
+        // scrollback) — the bottom-most render is the current truth.
+        SESSION_USAGE_REGEX.findAll(stripped).lastOrNull()?.let { m ->
             // Either capture group 1 (legacy '/usage' output) or 2 (OMC '5h:NN%').
             (m.groupValues.getOrNull(1)?.toIntOrNull()
                 ?: m.groupValues.getOrNull(2)?.toIntOrNull())
                 ?.let { pct -> result["session"] = pct }
         }
-        WEEK_USAGE_REGEX.find(stripped)?.let { m ->
+        WEEK_USAGE_REGEX.findAll(stripped).lastOrNull()?.let { m ->
             (m.groupValues.getOrNull(1)?.toIntOrNull()
                 ?: m.groupValues.getOrNull(2)?.toIntOrNull())
                 ?.let { pct -> result["week"] = pct }
         }
         // Reset times in total minutes — only captured when paired with the
         // OMC short-form, since /usage doesn't print them in this layout.
-        SESSION_RESET_REGEX.find(stripped)?.let { m ->
+        SESSION_RESET_REGEX.findAll(stripped).lastOrNull()?.let { m ->
             resetToMinutes(m)?.let { result["session_reset_min"] = it }
         }
-        WEEK_RESET_REGEX.find(stripped)?.let { m ->
+        WEEK_RESET_REGEX.findAll(stripped).lastOrNull()?.let { m ->
             resetToMinutes(m)?.let { result["week_reset_min"] = it }
         }
         return result.ifEmpty { null }
@@ -347,9 +352,14 @@ class InputPromptDetector(
         private val ANSI_REGEX = Regex("\u001B(?:\\[\\??[0-9;]*[a-zA-Z]|\\][^\u0007]*\u0007)")
         private val CONTEXT_RATIO_REGEX = Regex("([\\d,.]+[km]?)\\s*/\\s*([\\d,.]+[km]?)\\s*tokens", RegexOption.IGNORE_CASE)
         // Match Claude Code /usage output ("33% context", "context: 33%")
-        // OR the OMC statusline at the bottom of every turn ("ctx:20%").
+        // OR the OMC statusline at the bottom of every turn. OMC ≥4.15 renders
+        // a progress bar between the label and the number — "ctx:[###----]26%"
+        // — so the `\[[^\]]*\]` bar is OPTIONAL in every statusline pattern
+        // below. Without it none of the scrapes matched after the plugin
+        // update: the usage chips froze on old-format scrollback values and
+        // the working/idle statusline detection went silent.
         private val CONTEXT_PERCENT_REGEX = Regex(
-            "(\\d{1,3})%\\s*context|context[:\\s]+(\\d{1,3})%|ctx[:\\s]+(\\d{1,3})%",
+            "(\\d{1,3})%\\s*context|context[:\\s]+(\\d{1,3})%|ctx[:\\s]+(?:\\[[^\\]]*\\]\\s*)?(\\d{1,3})%",
             RegexOption.IGNORE_CASE
         )
         private val TOKENS_REMAINING_REGEX = Regex("([\\d,.]+[km]?)\\s*tokens?\\s*remaining", RegexOption.IGNORE_CASE)
@@ -358,11 +368,11 @@ class InputPromptDetector(
         // on every turn — without this fallback the chip stays at '—' forever
         // unless the user explicitly runs /usage.
         private val SESSION_USAGE_REGEX = Regex(
-            "Current session[\\s\\S]{0,50}?(\\d{1,3})%\\s*used|5h[:\\s]+(\\d{1,3})%",
+            "Current session[\\s\\S]{0,50}?(\\d{1,3})%\\s*used|5h[:\\s]+(?:\\[[^\\]]*\\]\\s*)?(\\d{1,3})%",
             RegexOption.IGNORE_CASE
         )
         private val WEEK_USAGE_REGEX = Regex(
-            "Current week[\\s\\S]{0,60}?(\\d{1,3})%\\s*used|wk[:\\s]+(\\d{1,3})%",
+            "Current week[\\s\\S]{0,60}?(\\d{1,3})%\\s*used|wk[:\\s]+(?:\\[[^\\]]*\\]\\s*)?(\\d{1,3})%",
             RegexOption.IGNORE_CASE
         )
         // OMC also prints time-to-reset right after the percentage as
@@ -374,18 +384,18 @@ class InputPromptDetector(
         // The old pattern required a trailing `m`, so "5d10h" never matched and
         // the week-reset chip stayed blank.
         private val SESSION_RESET_REGEX = Regex(
-            "5h[:\\s]+\\d{1,3}%\\s*\\((?:(\\d+)d)?(?:(\\d+)h)?(?:(\\d+)m)?\\)",
+            "5h[:\\s]+(?:\\[[^\\]]*\\]\\s*)?\\d{1,3}%\\s*\\((?:(\\d+)d)?(?:(\\d+)h)?(?:(\\d+)m)?\\)",
             RegexOption.IGNORE_CASE
         )
         private val WEEK_RESET_REGEX = Regex(
-            "wk[:\\s]+\\d{1,3}%\\s*\\((?:(\\d+)d)?(?:(\\d+)h)?(?:(\\d+)m)?\\)",
+            "wk[:\\s]+(?:\\[[^\\]]*\\]\\s*)?\\d{1,3}%\\s*\\((?:(\\d+)d)?(?:(\\d+)h)?(?:(\\d+)m)?\\)",
             RegexOption.IGNORE_CASE
         )
         // Captures the OMC statusline segment between the weekly-usage block and
         // `session:`. Non-empty → Claude is active. Single-line (no
         // DOT_MATCHES_ALL) so a wrapped statusline simply yields no match.
         private val OMC_STATE_REGEX = Regex(
-            "wk:\\d{1,3}%\\([^)]*\\)\\s*\\|(.*?)session:",
+            "wk:(?:\\[[^\\]]*\\]\\s*)?\\d{1,3}%\\([^)]*\\)\\s*\\|(.*?)session:",
             RegexOption.IGNORE_CASE
         )
 
