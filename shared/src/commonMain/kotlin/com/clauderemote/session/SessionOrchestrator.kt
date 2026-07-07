@@ -353,6 +353,13 @@ class SessionOrchestrator(
     private fun connectGate(serverId: String): Semaphore =
         connectGates.getOrPut(serverId) { Semaphore(3) }
 
+    // Shared SSH transports per server: tabs lease shell channels on pooled
+    // jsch Sessions (≤5 shells each) instead of each owning a TCP/WebSocket +
+    // KEX + auth + keepalive. 21 sessions on one box: 21 transports → ~5.
+    private val transportPools = java.util.concurrent.ConcurrentHashMap<String, com.clauderemote.connection.ServerTransportPool>()
+    private fun transportPool(serverId: String): com.clauderemote.connection.ServerTransportPool =
+        transportPools.getOrPut(serverId) { com.clauderemote.connection.ServerTransportPool(serverStorage) }
+
     /** Server id of a session's tab, or null if the tab is gone. */
     private fun serverIdOf(sessionId: String): String? =
         tabManager.getTab(sessionId)?.server?.id
@@ -1643,7 +1650,7 @@ else:
         }
 
     private suspend fun connectSsh(session: ClaudeSession, isNewTmuxSession: Boolean) {
-        val sshManager = SshManager(serverStorage)
+        val sshManager = SshManager(serverStorage, transportPool = transportPool(session.server.id))
         connections[session.id] = sshManager
 
         // Track last output time for burst detection
@@ -2020,7 +2027,7 @@ else:
                     connections[session.id]?.disconnect()
                     connections.remove(session.id)
 
-                    val sshManager = SshManager(serverStorage)
+                    val sshManager = SshManager(serverStorage, transportPool = transportPool(session.server.id))
                     connections[session.id] = sshManager
 
                     val reEffective = resolveTransport(session.server)

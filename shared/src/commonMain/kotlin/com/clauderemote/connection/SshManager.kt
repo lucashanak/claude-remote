@@ -23,7 +23,15 @@ import java.io.OutputStream
 
 class SshManager(
     private val serverStorage: ServerStorage,
-    private val connectTimeout: Int = 15000
+    private val connectTimeout: Int = 15000,
+    /**
+     * When set, [connect] LEASES a shared transport from this pool instead of
+     * opening its own TCP/WebSocket + KEX + auth — this manager then owns only
+     * its shell channel on the shared jsch Session. [disconnect] releases the
+     * lease (never disconnects the shared session; sibling tabs ride it).
+     * Null ⇒ legacy standalone transport (cleanup connections, tests).
+     */
+    private val transportPool: ServerTransportPool? = null,
 ) {
     private var session: Session? = null
     private var channel: ChannelShell? = null
@@ -32,6 +40,8 @@ class SshManager(
     private var ioScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
     private var onConnectionLost: (() -> Unit)? = null
     private val writeMutex = Mutex()
+    /** True while [session] is a pool lease rather than our own transport. */
+    @Volatile private var leased = false
 
     @Volatile private var disconnected = false
 
@@ -54,36 +64,41 @@ class SshManager(
         // Note: xterm reset sequences removed — they caused DA response
         // (0;276;0c) to leak into SSH shell as text input
 
-        val jsch = JSch()
-        if (server.authMethod == AuthMethod.KEY && server.privateKey != null) {
-            jsch.addIdentity("key", server.privateKey.toByteArray(), null, null)
-        }
+        val sess = if (transportPool != null) {
+            // Shared transport: one handshake serves up to 5 tabs.
+            leased = true
+            transportPool.lease(server, connectTimeout, this@SshManager)
+        } else {
+            val jsch = JSch()
+            if (server.authMethod == AuthMethod.KEY && server.privateKey != null) {
+                jsch.addIdentity("key", server.privateKey.toByteArray(), null, null)
+            }
+            val own = jsch.getSession(server.username, server.host, server.port)
+            if (server.authMethod == AuthMethod.PASSWORD && server.password != null) {
+                own.setPassword(server.password)
+            }
+            own.setConfig("StrictHostKeyChecking", "no")
+            // Keepalive via the EXPLICIT API, not setConfig: JSch's interval is in
+            // MILLISECONDS and the setConfig string key isn't reliably applied —
+            // the old setConfig("ServerAliveInterval","30") was either ignored or
+            // meant a 30ms interval. 10s × 2 misses ⇒ a silently-dead link (NAT
+            // timeout, radio handoff on a flaky roaming network) is detected in
+            // ~20s instead of never/90s, which is what re-arms auto-reconnect.
+            own.setServerAliveInterval(10_000)
+            own.setServerAliveCountMax(2)
+            own.userInfo = TofuUserInfo(server.host, serverStorage)
+            own.timeout = connectTimeout
 
-        val sess = jsch.getSession(server.username, server.host, server.port)
-        if (server.authMethod == AuthMethod.PASSWORD && server.password != null) {
-            sess.setPassword(server.password)
+            // Cloudflare Tunnel: route SSH over WebSocket instead of direct TCP
+            if (server.useCloudflareProxy) {
+                FileLogger.log(TAG, "Using Cloudflare tunnel proxy for ${server.host}")
+                own.setProxy(CloudflareProxy(server.host, server.cloudflareToken))
+            }
+            own.connect(connectTimeout)
+            own
         }
-        sess.setConfig("StrictHostKeyChecking", "no")
-        // Keepalive via the EXPLICIT API, not setConfig: JSch's interval is in
-        // MILLISECONDS and the setConfig string key isn't reliably applied —
-        // the old setConfig("ServerAliveInterval","30") was either ignored or
-        // meant a 30ms interval. 10s × 2 misses ⇒ a silently-dead link (NAT
-        // timeout, radio handoff on a flaky roaming network) is detected in
-        // ~20s instead of never/90s, which is what re-arms auto-reconnect.
-        sess.setServerAliveInterval(10_000)
-        sess.setServerAliveCountMax(2)
-        sess.userInfo = TofuUserInfo(server.host, serverStorage)
-        sess.timeout = connectTimeout
-
-        // Cloudflare Tunnel: route SSH over WebSocket instead of direct TCP
-        if (server.useCloudflareProxy) {
-            FileLogger.log(TAG, "Using Cloudflare tunnel proxy for ${server.host}")
-            sess.setProxy(CloudflareProxy(server.host, server.cloudflareToken))
-        }
-
-        sess.connect(connectTimeout)
         session = sess
-        FileLogger.log(TAG, "SSH session connected")
+        FileLogger.log(TAG, "SSH session ready (leased=$leased)")
 
         // Port forwarding
         for (pf in server.portForwards) {
@@ -99,15 +114,35 @@ class SshManager(
                     }
                 }
             } catch (e: Exception) {
-                onOutput("\u001B[31mPort forward failed: ${e.message}\u001B[0m\r\n")
+                // On a shared (leased) transport the first tab already
+                // registered the forward — the rebind failure is expected
+                // noise for every later tab, not an error worth printing.
+                if (leased) FileLogger.log(TAG, "Port forward on shared transport: ${e.message}")
+                else onOutput("\u001B[31mPort forward failed: ${e.message}\u001B[0m\r\n")
             }
         }
 
-        val ch = sess.openChannel("shell") as ChannelShell
-        ch.setPtyType("xterm-256color")
-        val inputStream = ch.inputStream
-        outputStream = ch.outputStream
-        ch.connect(connectTimeout)
+        // Streams MUST be obtained before connect() (jsch wires the pipe into
+        // the channel's IO at that point; data arriving pre-getInputStream is
+        // lost). The whole open sequence releases the pool lease on failure —
+        // otherwise a dead manager holds a shell slot until the next
+        // reconnect attempt/teardown gets around to disconnect().
+        val ch: ChannelShell
+        val inputStream: java.io.InputStream
+        try {
+            ch = sess.openChannel("shell") as ChannelShell
+            ch.setPtyType("xterm-256color")
+            inputStream = ch.inputStream
+            outputStream = ch.outputStream
+            ch.connect(connectTimeout)
+        } catch (e: Exception) {
+            if (leased) {
+                transportPool?.release(this@SshManager)
+                leased = false
+                session = null
+            }
+            throw e
+        }
         channel = ch
         FileLogger.log(TAG, "Shell channel opened")
 
@@ -167,6 +202,12 @@ class SshManager(
             if (!disconnected) {
                 disconnected = true
                 FileLogger.error(TAG, "SSH write failed/timeout", e)
+                // A write timeout is the one ZOMBIE signal: the TCP is dead but
+                // jsch still reports isConnected (keepalive needs ~20 s). Tell
+                // the pool so reconnecting siblings don't get the corpse
+                // re-leased. (A read-EOF must NOT report — a channel-only EOF
+                // would falsely kill the healthy shared transport.)
+                if (leased) session?.let { transportPool?.reportDead(it) }
                 onConnectionLost?.invoke()
             }
         }
@@ -188,7 +229,15 @@ class SshManager(
         readJob = null
         ioScope.coroutineContext[Job]?.cancelAndJoin()
         try { channel?.disconnect() } catch (_: Exception) {}
-        try { session?.disconnect() } catch (_: Exception) {}
+        if (leased) {
+            // Shared transport: NEVER disconnect the session — sibling tabs
+            // ride it. Release the lease; the pool disconnects it when the
+            // last lessee is gone.
+            transportPool?.release(this)
+            leased = false
+        } else {
+            try { session?.disconnect() } catch (_: Exception) {}
+        }
         channel = null
         session = null
         outputStream = null
@@ -287,7 +336,7 @@ class SshManager(
     }
 }
 
-private class TofuUserInfo(
+internal class TofuUserInfo(
     private val host: String,
     private val serverStorage: ServerStorage
 ) : com.jcraft.jsch.UserInfo {
