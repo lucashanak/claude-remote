@@ -209,6 +209,9 @@ fun main() = application {
     val tabManager = TabManager()
     val sessionStorage = com.clauderemote.storage.SessionStorage(prefs)
     val sessionOrchestrator = SessionOrchestrator(serverStorage, tabManager, sessionStorage)
+    // Mirror FileLogger to the server (per-install file) — same remote
+    // diagnostics as the Android app.
+    sessionOrchestrator.startLogShipping(appSettings.installId)
     val sshKeyManager = com.clauderemote.connection.SshKeyManager(prefs)
 
     // Create connector and wire SSH output → JediTerm

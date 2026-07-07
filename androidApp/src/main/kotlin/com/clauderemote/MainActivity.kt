@@ -161,6 +161,9 @@ class MainActivity : FragmentActivity() {
         tabManager = TabManager()
         val sessionStorage = com.clauderemote.storage.SessionStorage(prefs)
         sessionOrchestrator = SessionOrchestrator(serverStorage, tabManager, sessionStorage)
+        // Mirror FileLogger to the server (per-install file) — makes phone
+        // logs readable from the dev box without adb.
+        sessionOrchestrator.startLogShipping(appSettings.installId)
         // Expose to non-Compose entry points (notification RemoteInput reply,
         // future Wear data layer).
         OrchestratorHolder.orchestrator = sessionOrchestrator

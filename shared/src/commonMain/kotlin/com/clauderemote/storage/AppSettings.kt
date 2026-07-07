@@ -13,6 +13,22 @@ import com.clauderemote.ui.theme.CRVariant
 
 class AppSettings(private val prefs: PlatformPreferences) {
 
+    /**
+     * Stable per-installation id — names this device's remote log file on the
+     * server (`~/.claude-remote/logs/<installId>.log`). Platform-prefixed so
+     * you can tell the phone from the desktop at a glance; generated once and
+     * persisted.
+     */
+    val installId: String
+        get() {
+            prefs.getString("install_id", "").takeIf { it.isNotBlank() }?.let { return it }
+            val platform = if (System.getProperty("java.vm.name")?.contains("dalvik", ignoreCase = true) == true)
+                "android" else "desktop"
+            val id = "$platform-" + java.util.UUID.randomUUID().toString().take(8)
+            prefs.putString("install_id", id)
+            return id
+        }
+
     // Terminal
     var terminalFontSize: Int
         get() = prefs.getInt("terminal_font_size", 14)

@@ -542,6 +542,23 @@ class SessionOrchestrator(
         resolvedTransportCache.clear()
     }
 
+    private var logShipper: com.clauderemote.util.LogShipper? = null
+
+    /**
+     * Start shipping FileLogger output to the server (one remote file per
+     * install id, `~/.claude-remote/logs/<appId>.log`). Rides whatever live
+     * pooled connection exists; buffers while offline. Called once from
+     * platform init after AppSettings is available.
+     */
+    fun startLogShipping(appId: String) {
+        if (logShipper != null) return
+        logShipper = com.clauderemote.util.LogShipper(
+            appId = appId,
+            scope = reconnectScope,
+            liveSession = { connections.values.firstOrNull { it.isConnected }?.getSession() },
+        ).also { it.start() }
+    }
+
     /** Call from onPause/onResume to pause heavy background work and save battery. */
     fun setBackgroundMode(background: Boolean) {
         isInBackground = background

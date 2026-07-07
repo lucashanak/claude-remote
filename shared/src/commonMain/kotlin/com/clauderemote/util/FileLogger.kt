@@ -18,6 +18,11 @@ object FileLogger {
     // Platform-specific logcat bridge (set by Android Application class)
     var platformLog: ((level: String, tag: String, message: String, throwable: Throwable?) -> Unit)? = null
 
+    // Remote log sink (set by the orchestrator's LogShipper). Receives every
+    // formatted line; the implementation MUST only buffer — no logging and no
+    // IO on the caller's thread, it is invoked from within log() itself.
+    var remoteSink: ((line: String) -> Unit)? = null
+
     fun init(filesDir: File, appVersion: String = "") {
         logFile = File(filesDir, FILE_NAME)
         log("FileLogger", "=== App started${if (appVersion.isNotBlank()) ", version=$appVersion" else ""} ===")
@@ -62,6 +67,9 @@ object FileLogger {
                 }
                 append("\n")
             }
+
+            // Fan out to the remote shipper (buffer-only, never throws out).
+            try { remoteSink?.invoke(line) } catch (_: Exception) {}
 
             // Truncate if too large
             if (file.exists() && file.length() > MAX_SIZE) {
