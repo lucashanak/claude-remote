@@ -531,6 +531,9 @@ class SessionOrchestrator(
     fun onNetworkLost() {
         FileLogger.log(TAG, "Network lost — tearing down ${transportPools.size} transport pool(s)")
         transportPools.values.forEach { it.teardownAll() }
+        // The AUTO decision was made on the old network — a Wi-Fi→LTE switch
+        // changes Tailscale reachability, so re-probe on the next resolve.
+        resolvedTransportCache.clear()
     }
 
     /** Call from onPause/onResume to pause heavy background work and save battery. */
@@ -1614,7 +1617,21 @@ else:
     // a reconnect storm. It self-heals back to Tailscale once the cooldown lapses
     // and a connect succeeds. Keyed by server id.
     private val tailscaleCooldownUntil = java.util.concurrent.ConcurrentHashMap<String, Long>()
-    private val TS_COOLDOWN_MS = 60_000L
+    // 20 s, armed only after TWO consecutive failures. The old one-strike 60 s
+    // ban meant a single slow KEX during a network blip downgraded the whole
+    // server to Cloudflare for a minute — every minute, on a flaky link. Two
+    // strikes tolerate the transient; 20 s still breaks probe/fail loops.
+    private val TS_COOLDOWN_MS = 20_000L
+    private val tailscaleFailStreak = java.util.concurrent.ConcurrentHashMap<String, Int>()
+
+    // AUTO resolution cached per server for a short TTL: a reconnect wave used
+    // to run the TS probe independently per session, straddling the cooldown
+    // window — half the tabs landed on 100.x, half on CF (split-brain, two
+    // transport pools to one box, extra KEX churn). One decision per wave.
+    private class ResolvedTransport(val at: Long, val eff: com.clauderemote.model.SshServer)
+    private val resolvedTransportCache = java.util.concurrent.ConcurrentHashMap<String, ResolvedTransport>()
+    private val resolveMutex = Mutex()
+    private val RESOLVE_TTL_MS = 10_000L
 
     private fun isTailscaleEffective(
         server: com.clauderemote.model.SshServer,
@@ -1630,42 +1647,76 @@ else:
         if (!isTailscaleEffective(server, eff)) return
         if (ok) {
             tailscaleCooldownUntil.remove(server.id)
+            tailscaleFailStreak.remove(server.id)
         } else {
-            tailscaleCooldownUntil[server.id] = System.currentTimeMillis() + TS_COOLDOWN_MS
-            FileLogger.log(TAG, "Tailscale connect failed for ${server.name} — using Cloudflare for ${TS_COOLDOWN_MS / 1000}s")
+            // A TS failure means the cached AUTO decision is wrong — drop it so
+            // the next resolve re-decides instead of re-serving TS from cache.
+            resolvedTransportCache.remove(server.id)
+            val streak = (tailscaleFailStreak[server.id] ?: 0) + 1
+            tailscaleFailStreak[server.id] = streak
+            if (streak >= 2) {
+                tailscaleCooldownUntil[server.id] = System.currentTimeMillis() + TS_COOLDOWN_MS
+                FileLogger.log(TAG, "Tailscale failed ${streak}× for ${server.name} — using Cloudflare for ${TS_COOLDOWN_MS / 1000}s")
+            } else {
+                FileLogger.log(TAG, "Tailscale connect failed for ${server.name} (strike $streak/2)")
+            }
         }
     }
 
     private suspend fun resolveTransport(server: com.clauderemote.model.SshServer): com.clauderemote.model.SshServer {
-        val chosen = when (server.transport) {
-            com.clauderemote.model.ServerTransport.AUTO -> {
-                // Skip Tailscale entirely while cooling down from a recent
-                // failure — no probe, straight to Cloudflare.
-                val cooling = System.currentTimeMillis() < (tailscaleCooldownUntil[server.id] ?: 0L)
-                if (!cooling && server.hasTailscale && tailscaleReachable(server))
-                    com.clauderemote.model.ServerTransport.TAILSCALE
-                else com.clauderemote.model.ServerTransport.CLOUDFLARE
+        // Fixed transports are deterministic — no probe, no cache.
+        if (server.transport != com.clauderemote.model.ServerTransport.AUTO) {
+            return server.forTransport(server.transport)
+        }
+        // AUTO: one probe + one decision per server per RESOLVE_TTL_MS window,
+        // shared by every session reconnecting in the same wave. The mutex
+        // collapses concurrent resolvers onto a single probe.
+        resolvedTransportCache[server.id]?.let {
+            if (System.currentTimeMillis() - it.at < RESOLVE_TTL_MS) return it.eff
+        }
+        return resolveMutex.withLock {
+            resolvedTransportCache[server.id]?.let {
+                if (System.currentTimeMillis() - it.at < RESOLVE_TTL_MS) return@withLock it.eff
             }
-            else -> server.transport
+            // Skip Tailscale entirely while cooling down from recent failures
+            // — no probe, straight to Cloudflare.
+            val cooling = System.currentTimeMillis() < (tailscaleCooldownUntil[server.id] ?: 0L)
+            val chosen = if (!cooling && server.hasTailscale && tailscaleReachable(server))
+                com.clauderemote.model.ServerTransport.TAILSCALE
+            else com.clauderemote.model.ServerTransport.CLOUDFLARE
+            val eff = server.forTransport(chosen)
+            if (eff.host != server.host || eff.useCloudflareProxy != server.useCloudflareProxy) {
+                FileLogger.log(TAG, "Transport for ${server.name}: $chosen -> ${eff.host} (cf=${eff.useCloudflareProxy})")
+            }
+            resolvedTransportCache[server.id] = ResolvedTransport(System.currentTimeMillis(), eff)
+            eff
         }
-        val eff = server.forTransport(chosen)
-        if (eff.host != server.host || eff.useCloudflareProxy != server.useCloudflareProxy) {
-            FileLogger.log(TAG, "Transport for ${server.name}: $chosen -> ${eff.host} (cf=${eff.useCloudflareProxy})")
-        }
-        return eff
     }
 
-    /** Fast TCP reachability probe of the Tailscale endpoint (system VPN route). */
+    /**
+     * Reachability probe of the Tailscale endpoint (system VPN route),
+     * validated by READING THE SSH BANNER — a bare TCP SYN/ACK used to pass
+     * even when sshd/KEX would stall, flapping AUTO between TS and CF.
+     * Two attempts with a settle pause: on HyperOS the WireGuard tunnel is
+     * routinely still re-handshaking at onResume, and the old single 2 s
+     * probe fired exactly then — AUTO practically never picked Tailscale on
+     * a phone that had just woken up.
+     */
     private suspend fun tailscaleReachable(server: com.clauderemote.model.SshServer): Boolean =
         withContext(Dispatchers.IO) {
-            try {
-                java.net.Socket().use {
-                    it.connect(java.net.InetSocketAddress(server.tailscaleHost, server.port), 2000)
-                    true
-                }
-            } catch (_: Exception) {
-                false
+            repeat(2) { attempt ->
+                try {
+                    java.net.Socket().use { s ->
+                        s.connect(java.net.InetSocketAddress(server.tailscaleHost, server.port), 3_500)
+                        s.soTimeout = 3_000
+                        // sshd sends "SSH-2.0-…" immediately; any byte proves a
+                        // live, responsive daemon behind the route.
+                        if (s.getInputStream().read() > 0) return@withContext true
+                    }
+                } catch (_: Exception) {}
+                if (attempt == 0) kotlinx.coroutines.delay(1_500) // let WG finish its handshake
             }
+            false
         }
 
     private suspend fun connectSsh(session: ClaudeSession, isNewTmuxSession: Boolean) {
@@ -2424,7 +2475,16 @@ else:
         tabManager.updateTabStatus(sessionId, SessionStatus.CONNECTING)
 
         try {
-            connectSsh(session, false) // attach to existing tmux
+            // Keep the session's chosen connection type. reconnectSession used
+            // to hardcode SSH, so a MOSH session silently degraded to plain
+            // SSH after its first drop and never got its roaming resilience
+            // back — the exact scenario mosh exists for. connectMosh still
+            // falls back to SSH internally when no direct-UDP path exists.
+            if (session.connectionType == ConnectionType.MOSH) {
+                connectMosh(session, false)
+            } else {
+                connectSsh(session, false) // attach to existing tmux
+            }
             tabManager.updateTabStatus(sessionId, SessionStatus.ACTIVE)
             // Clear the DISCONNECTED activity left over from restore/disconnect —
             // otherwise the session shows "Offline" (badge + status + empty
