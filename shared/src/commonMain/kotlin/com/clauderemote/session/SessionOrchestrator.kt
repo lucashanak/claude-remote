@@ -23,6 +23,10 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.sync.withPermit
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.longOrNull
 import kotlinx.coroutines.withContext
 import kotlin.random.Random
 
@@ -469,6 +473,8 @@ class SessionOrchestrator(
         // notification body (last assistant message) is available even in Raw
         // view, not only after the Chat view has subscribed.
         ensureTranscriptStream(sessionId)
+        // …and feed it from the shared per-server stream daemon.
+        registerStreamWatch(sessionId)
     }
 
     /**
@@ -1252,6 +1258,288 @@ else:
         FileLogger.log(TAG, "Notify watcher stopped for server ${w.serverId}")
     }
 
+    // ---- Per-server transcript stream daemon (streamd) ----
+    //
+    // One long-lived exec channel per server replaces N sessions × 20 polls/min
+    // of transcript execs: a tiny python script on the server watches the JSONL
+    // files locally (cheap — no network) and pushes only NEW COMPLETE LINES as
+    // NDJSON events. Idle traffic drops to a 20 s heartbeat; updates arrive in
+    // ~1 s instead of 3–30 s, background included. Every TranscriptStream keeps
+    // its own poll loop as a 60 s safety backstop and as the full fallback when
+    // python3 is missing or the channel dies.
+
+    /** Marker doubles as the version gate — bump vN to force reinstall. */
+    private val STREAMD_MARKER = "claude-remote-streamd v1"
+
+    private val STREAMD_SCRIPT = """
+        #!/usr/bin/env python3
+        # claude-remote-streamd v1 — single-channel transcript delta streamer.
+        # stdin : {"op":"watch","id":..,"cwd":..,"uuid":..,"off":N}  (off<0 = from EOF)
+        #         {"op":"unwatch","id":..}
+        # stdout: {"t":"hello","v":1} | {"t":"hb"} | {"t":"d","id":..,"u":..,"o":N,"b":b64}
+        import sys, os, json, time, base64, threading
+
+        watches = {}
+        lock = threading.Lock()
+        TAIL = 200000  # initial backlog bytes when off==0 (~2000 lines)
+
+        def resolve(cwd, uuid):
+            p = os.path.expanduser(cwd)
+            if not os.path.isabs(p):
+                p = os.path.join(os.path.expanduser('~'), p)
+            enc = os.path.realpath(p).replace('/', '-')
+            return os.path.join(os.path.expanduser('~/.claude/projects'), enc, uuid + '.jsonl')
+
+        def emit(o):
+            sys.stdout.write(json.dumps(o, separators=(',', ':')) + '\n')
+            sys.stdout.flush()
+
+        def reader():
+            for line in sys.stdin:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    c = json.loads(line)
+                except Exception:
+                    continue
+                op = c.get('op')
+                if op == 'watch' and c.get('id') and c.get('uuid'):
+                    with lock:
+                        watches[c['id']] = {
+                            'path': resolve(c.get('cwd') or '~', c['uuid']),
+                            'uuid': c['uuid'],
+                            'off': int(c.get('off') or 0),
+                        }
+                elif op == 'unwatch':
+                    with lock:
+                        watches.pop(c.get('id'), None)
+            os._exit(0)  # stdin closed -> client gone
+
+        threading.Thread(target=reader, daemon=True).start()
+        emit({'t': 'hello', 'v': 1})
+        last_hb = time.time()
+        while True:
+            now = time.time()
+            if now - last_hb >= 20:
+                emit({'t': 'hb'})
+                last_hb = now
+            with lock:
+                items = list(watches.items())
+            for wid, w in items:
+                try:
+                    sz = os.path.getsize(w['path'])
+                except OSError:
+                    continue
+                off = w['off']
+                if off < 0:          # "from EOF": client loads its own backlog
+                    w['off'] = sz
+                    continue
+                adjusted = False
+                if sz < off or (off == 0 and sz > TAIL):
+                    off = max(0, sz - TAIL)   # rotation / first sight of a big file
+                    adjusted = True
+                if sz <= off:
+                    continue
+                try:
+                    with open(w['path'], 'rb') as f:
+                        f.seek(off)
+                        data = f.read(sz - off)
+                except OSError:
+                    continue
+                nl = data.rfind(b'\n')
+                if nl < 0:
+                    continue          # no complete line yet
+                chunk = data[:nl + 1]
+                new_off = off + nl + 1
+                if adjusted and off > 0:
+                    first = chunk.find(b'\n')
+                    chunk = chunk[first + 1:]   # drop the partial first line
+                w['off'] = new_off
+                if chunk:
+                    emit({'t': 'd', 'id': wid, 'u': w['uuid'], 'o': new_off,
+                          'b': base64.b64encode(chunk).decode()})
+            time.sleep(1.0)
+    """.trimIndent()
+
+    private val ENSURE_STREAMD_COMMAND = buildString {
+        append("F=\"${'$'}HOME/.claude-remote/streamd.py\"; ")
+        append("if head -c 200 \"${'$'}F\" 2>/dev/null | grep -q '").append(STREAMD_MARKER).append("'; ")
+        append("then echo STREAMD_OK; else mkdir -p \"${'$'}HOME/.claude-remote\" && ")
+        append("cat > \"${'$'}F\" <<'CRSD_EOF'\n")
+        append(STREAMD_SCRIPT)
+        append("\nCRSD_EOF\n")
+        append("echo STREAMD_INSTALLED; fi")
+    }
+
+    /** Install/refresh streamd.py on the server. Idempotent, non-fatal. */
+    private suspend fun ensureStreamd(sshManager: SshManager) {
+        try {
+            val sshSession = sshManager.getSession() ?: return
+            val out = execReadWithWatchdog(sshSession, ENSURE_STREAMD_COMMAND, totalMs = 15_000)
+            FileLogger.log(TAG, "streamd setup: ${out.trim().lineSequence().lastOrNull()}")
+        } catch (e: Exception) {
+            FileLogger.error(TAG, "streamd setup failed: ${e.message}", e)
+        }
+    }
+
+    private inner class ServerStreamDaemon(val serverId: String) {
+        /** sessionId → cwd; the uuid/offset come from the live stream at send time. */
+        val specs = java.util.concurrent.ConcurrentHashMap<String, String>()
+        @Volatile var live = false
+        @Volatile var stdin: java.io.OutputStream? = null
+        @Volatile var lastEventAt = 0L
+        /** Serializes control-line writes: jsch's channel OutputStream is not
+         *  thread-safe, and the hello fan-out fires N watches at once —
+         *  concurrent write() calls corrupt the SSH packet framing. */
+        val writeMutex = Mutex()
+        var job: kotlinx.coroutines.Job? = null
+    }
+    private val serverStreamDaemons = java.util.concurrent.ConcurrentHashMap<String, ServerStreamDaemon>()
+
+    /** Register [sessionId]'s transcript with its server's stream daemon
+     *  (starting the daemon if needed) — same TOCTOU discipline as the
+     *  notify watcher. Re-invoked on attach and on UUID rotation. */
+    private fun registerStreamWatch(sessionId: String) {
+        val tab = tabManager.getTab(sessionId) ?: return
+        while (true) {
+            val d = serverStreamDaemons.getOrPut(tab.server.id) { ServerStreamDaemon(tab.server.id) }
+            val registered = synchronized(d) {
+                if (serverStreamDaemons[tab.server.id] !== d) return@synchronized false
+                d.specs[sessionId] = tab.folder
+                if (d.job?.isActive != true) {
+                    d.job = reconnectScope.launch { runServerStreamDaemon(d) }
+                }
+                if (d.live) sendWatch(d, sessionId)
+                true
+            }
+            if (registered) return
+        }
+    }
+
+    private fun sendWatch(d: ServerStreamDaemon, sessionId: String) {
+        val cwd = d.specs[sessionId] ?: return
+        val stream = synchronized(transcriptLock) { transcriptStreams[sessionId] } ?: return
+        val uuid = stream.currentUuid() ?: return
+        // offsetFor(uuid) is 0 when the stream hasn't loaded this uuid's
+        // backlog yet (startup OR mid-rotation, where the raw offset still
+        // belongs to the OLD file — sending that made the daemon skip the new
+        // file's head). 0 → ask the daemon to stream from EOF (-1); the
+        // client's own poll fetches the backlog and pushLines drops anything
+        // that would race it.
+        val off = stream.offsetFor(uuid).let { if (it == 0L) -1L else it }
+        val cmd = kotlinx.serialization.json.JsonObject(mapOf(
+            "op" to JsonPrimitive("watch"),
+            "id" to JsonPrimitive(sessionId),
+            "cwd" to JsonPrimitive(cwd),
+            "uuid" to JsonPrimitive(uuid),
+            "off" to JsonPrimitive(off),
+        )).toString()
+        sendStreamCmd(d, cmd)
+    }
+
+    private fun sendStreamCmd(d: ServerStreamDaemon, line: String) {
+        val os = d.stdin ?: return
+        reconnectScope.launch(Dispatchers.IO) {
+            d.writeMutex.withLock {
+                try {
+                    os.write((line + "\n").toByteArray())
+                    os.flush()
+                } catch (e: Exception) {
+                    FileLogger.log(TAG, "streamd write failed for server ${d.serverId}: ${e.message}")
+                }
+            }
+        }
+    }
+
+    private suspend fun runServerStreamDaemon(d: ServerStreamDaemon) = kotlinx.coroutines.coroutineScope {
+        var attempt = 0
+        while (isActive && d.specs.isNotEmpty()) {
+            var ch: com.jcraft.jsch.ChannelExec? = null
+            var watchdog: kotlinx.coroutines.Job? = null
+            try {
+                val sshSession = liveServerSession(d.serverId)
+                if (sshSession == null) {
+                    kotlinx.coroutines.delay(5_000)
+                    continue
+                }
+                ch = sshSession.openChannel("exec") as com.jcraft.jsch.ChannelExec
+                ch.setCommand("python3 \"${'$'}HOME/.claude-remote/streamd.py\" 2>/dev/null")
+                val stdin = ch.outputStream
+                val reader = ch.inputStream.bufferedReader()
+                ch.connect(5000)
+                d.stdin = stdin
+                d.lastEventAt = System.currentTimeMillis()
+                // Heartbeats come every 20 s; 60 s of silence = dead channel
+                // even while isConnected still lies — force-close so readLine
+                // unblocks and the retry loop reconnects.
+                val chRef = ch
+                watchdog = launch {
+                    while (isActive) {
+                        kotlinx.coroutines.delay(20_000)
+                        if (System.currentTimeMillis() - d.lastEventAt > 60_000) {
+                            FileLogger.log(TAG, "streamd watchdog fired for server ${d.serverId}")
+                            try { chRef.disconnect() } catch (_: Exception) {}
+                            break
+                        }
+                    }
+                }
+                while (isActive && ch.isConnected) {
+                    val line = kotlinx.coroutines.withContext(Dispatchers.IO) {
+                        reader.readLine()
+                    } ?: break
+                    d.lastEventAt = System.currentTimeMillis()
+                    val obj = try {
+                        fetchJson.parseToJsonElement(line) as? kotlinx.serialization.json.JsonObject
+                    } catch (_: Exception) { null } ?: continue
+                    when (obj["t"]?.jsonPrimitive?.contentOrNull) {
+                        "hello" -> {
+                            d.live = true
+                            attempt = 0
+                            FileLogger.log(TAG, "streamd live for server ${d.serverId} (${d.specs.size} watches)")
+                            d.specs.keys.forEach { sendWatch(d, it) }
+                        }
+                        "hb" -> {}
+                        "d" -> {
+                            val sid = obj["id"]?.jsonPrimitive?.contentOrNull ?: continue
+                            val uuid = obj["u"]?.jsonPrimitive?.contentOrNull ?: continue
+                            val off = obj["o"]?.jsonPrimitive?.longOrNull ?: continue
+                            val b64 = obj["b"]?.jsonPrimitive?.contentOrNull ?: continue
+                            val stream = synchronized(transcriptLock) { transcriptStreams[sid] } ?: continue
+                            val text = try {
+                                String(java.util.Base64.getDecoder().decode(b64), Charsets.UTF_8)
+                            } catch (_: Exception) { continue }
+                            // Sequential dispatch on this reader keeps per-
+                            // session line order; dedup absorbs any overlap
+                            // with the safety poll. BOUNDED: pushLines waits on
+                            // the stream's pollMutex, which a slow safety poll
+                            // can hold across a timeout-less SSH read — an
+                            // unbounded wait would head-of-line-block deltas
+                            // for EVERY session on this server and starve the
+                            // heartbeat into a false watchdog kill. A dropped
+                            // push is backfilled by that same safety poll.
+                            kotlinx.coroutines.withTimeoutOrNull(5_000) {
+                                stream.pushLines(uuid, text.lineSequence().filter { it.isNotBlank() }.toList(), off)
+                            } ?: FileLogger.log(TAG, "streamd push timed out for $sid (safety poll will backfill)")
+                        }
+                        else -> {}
+                    }
+                }
+            } catch (e: Exception) {
+                FileLogger.error(TAG, "streamd failed for server ${d.serverId}: ${e.message}", e)
+            } finally {
+                watchdog?.cancel()
+                d.live = false
+                d.stdin = null
+                try { ch?.disconnect() } catch (_: Exception) {}
+            }
+            if (!isActive || d.specs.isEmpty()) break
+            attempt++
+            kotlinx.coroutines.delay((5_000L * attempt).coerceAtMost(60_000L))
+        }
+        FileLogger.log(TAG, "streamd stopped for server ${d.serverId}")
+    }
+
     suspend fun launchSession(
         server: SshServer,
         folder: String,
@@ -1482,7 +1770,7 @@ else:
         val tab = tabManager.getTab(sessionId) ?: return
         val stream = synchronized(transcriptLock) {
             val s = transcriptStreams.getOrPut(sessionId) {
-                TranscriptStream(tab.server, tab.folder, reconnectScope, liveSession = { connections[sessionId]?.getSession() }, isBackground = { isInBackground }, isActiveTab = { tabManager.activeTabId.value == sessionId })
+                TranscriptStream(tab.server, tab.folder, reconnectScope, liveSession = { connections[sessionId]?.getSession() }, isBackground = { isInBackground }, isActiveTab = { tabManager.activeTabId.value == sessionId }, daemonActive = { serverStreamDaemons[tab.server.id]?.live == true })
             }
             startContextTokenCollector(sessionId, s)
             s
@@ -1495,7 +1783,7 @@ else:
             ?: return kotlinx.coroutines.flow.MutableStateFlow(emptyList())
         val stream = synchronized(transcriptLock) {
             val s = transcriptStreams.getOrPut(sessionId) {
-                TranscriptStream(tab.server, tab.folder, reconnectScope, liveSession = { connections[sessionId]?.getSession() }, isBackground = { isInBackground }, isActiveTab = { tabManager.activeTabId.value == sessionId })
+                TranscriptStream(tab.server, tab.folder, reconnectScope, liveSession = { connections[sessionId]?.getSession() }, isBackground = { isInBackground }, isActiveTab = { tabManager.activeTabId.value == sessionId }, daemonActive = { serverStreamDaemons[tab.server.id]?.live == true })
             }
             // Derive the ctx-window % from this stream's token usage. Inside the
             // lock so it binds to the exact stream instance and stays atomic with
@@ -1557,7 +1845,7 @@ else:
             ?: return kotlinx.coroutines.flow.MutableStateFlow(null)
         val stream = synchronized(transcriptLock) {
             transcriptStreams.getOrPut(sessionId) {
-                TranscriptStream(tab.server, tab.folder, reconnectScope, liveSession = { connections[sessionId]?.getSession() }, isBackground = { isInBackground }, isActiveTab = { tabManager.activeTabId.value == sessionId })
+                TranscriptStream(tab.server, tab.folder, reconnectScope, liveSession = { connections[sessionId]?.getSession() }, isBackground = { isInBackground }, isActiveTab = { tabManager.activeTabId.value == sessionId }, daemonActive = { serverStreamDaemons[tab.server.id]?.live == true })
             }
         }
         return stream.status
@@ -1600,7 +1888,13 @@ else:
      */
     private fun notifyClaudeSessionIdChanged(sessionId: String, newUuid: String?) {
         val stream = synchronized(transcriptLock) { transcriptStreams[sessionId] } ?: return
-        if (newUuid != null) stream.start(newUuid)
+        if (newUuid != null) {
+            stream.start(newUuid)
+            // Re-point the daemon watch at the new JSONL (start() set
+            // currentUuid synchronously; the wiped stream reports offset 0 →
+            // watch from EOF while the client reloads its own backlog).
+            registerStreamWatch(sessionId)
+        }
     }
 
     /**
@@ -1873,6 +2167,9 @@ else:
         // Ensure Claude Code's Stop hook is configured → enables hook-based
         // idle detection (fast, reliable) instead of screen-state polling.
         ensureStopHook(sshManager)
+        // Install/refresh the transcript stream daemon script (one shared
+        // delta channel per server instead of per-session polling).
+        ensureStreamd(sshManager)
 
         // Tmux
         sendTmuxCommand(sshManager, session, isNewTmuxSession)
@@ -2584,6 +2881,20 @@ else:
         // registry entry for this session goes away either way.
         val serverId = tabManager.getTab(sessionId)?.server?.id
         if (serverId != null) {
+            serverStreamDaemons[serverId]?.let { d ->
+                synchronized(d) {
+                    d.specs.remove(sessionId)
+                    if (d.live) {
+                        sendStreamCmd(d, kotlinx.serialization.json.JsonObject(mapOf(
+                            "op" to JsonPrimitive("unwatch"),
+                            "id" to JsonPrimitive(sessionId),
+                        )).toString())
+                    }
+                    if (d.specs.isEmpty() && serverStreamDaemons.remove(serverId, d)) {
+                        d.job?.cancel()
+                    }
+                }
+            }
             serverNotifyWatchers[serverId]?.let { w ->
                 synchronized(w) {
                     w.tmuxToSession.entries.removeAll { it.value == sessionId }

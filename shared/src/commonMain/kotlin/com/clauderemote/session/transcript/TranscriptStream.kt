@@ -61,6 +61,13 @@ class TranscriptStream(
      * depends on the periodic cadence.
      */
     private val isActiveTab: () -> Boolean = { true },
+    /**
+     * True while the per-server stream daemon is pushing this transcript's
+     * deltas over its single channel (see SessionOrchestrator's streamd).
+     * The poll loop then stretches to [DAEMON_SAFETY_POLL_MS] — a pure
+     * offset-integrity backstop — instead of doing the transport work itself.
+     */
+    private val daemonActive: () -> Boolean = { false },
 ) {
     private val _entries = MutableStateFlow<List<TranscriptEntry>>(emptyList())
     val entries: StateFlow<List<TranscriptEntry>> = _entries.asStateFlow()
@@ -80,16 +87,25 @@ class TranscriptStream(
     private val supervisor = SupervisorJob(parentScope.coroutineContext[Job])
     private val scope = CoroutineScope(parentScope.coroutineContext + supervisor)
     private var streamJob: Job? = null
-    private var currentUuid: String? = null
+    // @Volatile: read by pushLines (daemon reader coroutine) and
+    // currentOffset() outside the start()/stop() monitor.
+    @Volatile private var currentUuid: String? = null
     // Persistent dedup set so appending a line is O(1) instead of rebuilding a
     // HashSet of every retained entry on each line. Single-writer: only the
     // active tail coroutine touches it, and start() cancel-and-joins the
     // previous tail before the next one runs, so no locking is needed.
     private val seenIds = HashSet<String>()
     // How many bytes of the .jsonl we've already consumed. Shared between the
-    // steady tail loop and pollNow(); both read/advance it under [pollMutex] so
-    // a forced poll never double-reads or races the offset with the loop.
-    private var byteOffset = 0L
+    // steady tail loop, pollNow() and pushLines(); all advance it under
+    // [pollMutex] so no path double-reads or races the offset. @Volatile only
+    // for the approximate read in [currentOffset].
+    @Volatile private var byteOffset = 0L
+    // Which UUID [byteOffset] belongs to. During a rotation (/clear, /resume)
+    // currentUuid is already the NEW uuid while byteOffset still counts the
+    // OLD file until runTail's reset runs — handing that stale offset to the
+    // stream daemon made it skip the new file's head (permanent gap on
+    // /resume into a larger conversation). Seeded together with the reset.
+    @Volatile private var offsetUuid: String? = null
     // Serializes pollOnce() + byteOffset updates between the steady loop and
     // pollNow(). Without it a Stop-hook-triggered pollNow() could run a second
     // pollOnce concurrently with the loop, both advancing byteOffset and losing
@@ -120,11 +136,16 @@ class TranscriptStream(
             // lambda already prevents duplicates, and blanking the list here
             // would cause a visible "flash to empty" every time the SSH
             // channel drops and reconnects.
+            // Under pollMutex: pushLines (daemon reader) appends concurrently
+            // with this coroutine — the wipe must not interleave with an
+            // in-flight append or seenIds and _entries drift apart.
             if (uuidChanged) {
-                _entries.value = emptyList()
-                seenIds.clear()
-                _contextTokens.value = null
-                _status.value = null
+                pollMutex.withLock {
+                    _entries.value = emptyList()
+                    seenIds.clear()
+                    _contextTokens.value = null
+                    _status.value = null
+                }
             }
             runTail(claudeSessionUuid)
         }
@@ -144,7 +165,10 @@ class TranscriptStream(
         // command echoes the file's current size as `__OFFSET__<n>` so we
         // resume from exactly there next time — only NEW bytes are sent over
         // the wire after the initial backlog (keeps idle traffic tiny).
-        pollMutex.withLock { byteOffset = 0L }
+        pollMutex.withLock {
+            byteOffset = 0L
+            offsetUuid = uuid
+        }
         var attempt = 0
         while (scope.isActive) {
             attempt++
@@ -163,11 +187,14 @@ class TranscriptStream(
                 if (_entries.value.isEmpty()) _status.value = "retry $attempt — $msg"
             }
             if (!scope.isActive) break
-            // Steady poll cadence; back off only after errors.
+            // Steady poll cadence; back off only after errors. With a live
+            // stream daemon the poll is only an offset-integrity backstop —
+            // deltas arrive pushed, in background too.
             val wait = when {
                 attempt > 1 -> (1_000L * attempt).coerceAtMost(10_000L)
-                isBackground() -> BG_POLL_MS
                 _entries.value.isEmpty() -> 1_500L
+                daemonActive() -> DAEMON_SAFETY_POLL_MS
+                isBackground() -> BG_POLL_MS
                 !isActiveTab() -> INACTIVE_POLL_MS
                 else -> POLL_MS
             }
@@ -222,6 +249,53 @@ class TranscriptStream(
             doPoll(safeFolder, safeUuid)
         } catch (t: Throwable) {
             FileLogger.log(TAG, "pollNow error: ${t.message}")
+        }
+    }
+
+    /**
+     * Consumed-bytes offset FOR [uuid] — the daemon registers its watch from
+     * here so it only streams bytes the client doesn't have. Returns 0 when
+     * the offset belongs to a different (pre-rotation) uuid, which the caller
+     * translates to a from-EOF watch. Overlap is harmless (id dedup); a gap
+     * is not, so both fields are volatile-fresh.
+     */
+    fun offsetFor(uuid: String): Long = if (uuid == offsetUuid) byteOffset else 0L
+
+    /** The Claude session UUID this stream currently tails, or null. */
+    fun currentUuid(): String? = currentUuid
+
+    /**
+     * Push a batch of transcript lines delivered by the per-server stream
+     * daemon (single shared channel) instead of this stream's own poll.
+     * Serialized with the poll path under [pollMutex]; a batch for a stale
+     * UUID (the tab /clear'd or /resume'd since the daemon read it) is
+     * dropped. [newOffset] moves the poll offset forward so the safety poll
+     * doesn't re-fetch what the daemon already delivered.
+     */
+    suspend fun pushLines(uuid: String, lines: List<String>, newOffset: Long) {
+        if (closed || uuid != currentUuid) return
+        pollMutex.withLock {
+            if (closed || uuid != currentUuid) return
+            // Poll pipeline hasn't re-seeded for this uuid yet (rotation wipe
+            // pending) — applying a push would append into the old convo's
+            // entries and poison the old offset. The re-seeded tail + backlog
+            // poll will cover these bytes.
+            if (uuid != offsetUuid) return
+            // Backlog not loaded yet (offset 0): applying a push here would
+            // jump byteOffset past the initial tail read and leave a GAP the
+            // poll can never backfill. Drop the push — the ≤1.5 s startup poll
+            // fetches those bytes itself because our offset stays behind them.
+            if (byteOffset == 0L) return
+            if (newOffset > byteOffset) byteOffset = newOffset
+            if (lines.isEmpty()) return
+            val newEntries = TranscriptParser.parseLines(lines.asSequence())
+            if (newEntries.isNotEmpty()) {
+                _status.value = null
+                appendEntries(newEntries)
+            }
+            TranscriptParser.latestContextTokens(lines.asSequence())?.let {
+                _contextTokens.value = it
+            }
         }
     }
 
@@ -322,6 +396,8 @@ class TranscriptStream(
         // Foreground cadence for NON-active tabs — nobody is looking at their
         // transcript, and pollNow() covers the notification path.
         private const val INACTIVE_POLL_MS = 15_000L
+        // Backstop cadence while the stream daemon pushes deltas for us.
+        private const val DAEMON_SAFETY_POLL_MS = 60_000L
         // Background poll cadence — much slower; the user isn't looking.
         private const val BG_POLL_MS = 30_000L
     }
