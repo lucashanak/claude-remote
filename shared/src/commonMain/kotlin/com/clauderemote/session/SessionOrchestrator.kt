@@ -20,7 +20,9 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
 import kotlin.random.Random
 
@@ -225,18 +227,26 @@ class SessionOrchestrator(
     /** Dispatch [onClaudeNeedsInput] no more than once per [notifyDebounceMs] per
      *  session — protects against rapid duplicate fires from the Stop-hook stream
      *  and from the screen-state fallback firing on transient quiescence. */
-    private fun fireNeedsInput(sessionId: String, hint: String, isActive: Boolean) {
+    private fun fireNeedsInput(
+        sessionId: String,
+        hint: String,
+        isActive: Boolean,
+        // Precise identity of the triggering event when the caller has one —
+        // the Stop-hook path passes "stop#<tmux>#<epoch>" so one completion
+        // maps to exactly one key regardless of transcript freshness.
+        eventKey: String? = null,
+    ) {
         val now = System.currentTimeMillis()
-        // Dedup by (hint + last assistant message). On reconnect the tmux buffer
-        // is replayed and the screen looks idle/approval again, and a flapping
+        // Dedup by the explicit event key when given, else by (hint + last
+        // assistant message). On reconnect the tmux buffer is replayed and the
+        // screen looks idle/approval again, and a flapping
         // OMC statusline (WORKING→idle→WORKING around a prompt) re-raises the
         // SAME alert — both re-fired a notification for an event the user already
         // saw. Keying on the hint TOO lets a genuine APPROVAL after an
         // INPUT_PROMPT on the same message still get through, while the same
         // (hint, message) repeat is suppressed. Previously only INPUT_PROMPT was
         // deduped, so APPROVAL/PERMISSION spammed on every flap.
-        val lastId = lastAssistantId(sessionId)
-        val key = if (lastId != null) "$hint#$lastId" else null
+        val key = eventKey ?: lastAssistantId(sessionId)?.let { "$hint#$it" }
         if (key != null && lastNotifiedKey[sessionId] == key) {
             FileLogger.log(TAG, "Suppressed needs-input for $sessionId (same event)")
             return
@@ -301,11 +311,69 @@ class SessionOrchestrator(
     private val _weekResetMin = kotlinx.coroutines.flow.MutableStateFlow<Map<String, Int>>(emptyMap())
     val weekResetMin: kotlinx.coroutines.flow.StateFlow<Map<String, Int>> = _weekResetMin
 
-    // Per-session periodic polling jobs
-    private val usagePollingJobs = mutableMapOf<String, kotlinx.coroutines.Job>()
-    private val latencyPollingJobs = mutableMapOf<String, kotlinx.coroutines.Job>()
-    // Per-session Claude Code Stop-hook watchers (tail -f on notify file)
-    private val notifyWatchers = mutableMapOf<String, kotlinx.coroutines.Job>()
+    // Per-SERVER periodic polling jobs (keyed by server id). Usage (ccusage is
+    // account-wide) and latency (all sessions share the physical link) are
+    // identical for every session on a server — at 21 sessions on one box the
+    // old per-session polls did 21× the SSH work to fetch one value.
+    // ConcurrentHashMap + compute(): every session's attach/reconnect touches
+    // its server's entry, overlapping with disconnects during a reconnect storm.
+    private val usagePollingJobs = java.util.concurrent.ConcurrentHashMap<String, kotlinx.coroutines.Job>()
+    private val latencyPollingJobs = java.util.concurrent.ConcurrentHashMap<String, kotlinx.coroutines.Job>()
+
+    /**
+     * SHARED per-server Stop-hook watcher. All sessions on a server tail the
+     * SAME /tmp/claude-notify, so one watcher per server replaces N identical
+     * long-lived tail -f channels (20 fewer at 21 sessions) and dispatches each
+     * marker to its owning session by the exact tmux-name token in the line.
+     */
+    private inner class ServerNotifyWatcher(val serverId: String) {
+        /** tmux session name → app session id, updated on attach/detach. */
+        val tmuxToSession = java.util.concurrent.ConcurrentHashMap<String, String>()
+        /** True while the tail channel is connected (hook-based detection active). */
+        @Volatile var live = false
+        var job: kotlinx.coroutines.Job? = null
+    }
+    private val serverNotifyWatchers = java.util.concurrent.ConcurrentHashMap<String, ServerNotifyWatcher>()
+
+    // sessions.json is one file per SERVER; with N sessions each running the
+    // 15 s reconcile loop, N−1 of the flock+cat fetches were redundant. Cache
+    // the parsed snapshot per server with a TTL just under the loop period so
+    // only the first session to tick pays the exec.
+    private class SessionsSnapshot(val at: Long, val list: List<PersistedSession>)
+    private val sessionsJsonCache = java.util.concurrent.ConcurrentHashMap<String, SessionsSnapshot>()
+    private val sessionsJsonMutex = Mutex()
+
+    // Per-server gate on SIMULTANEOUS connect handshakes. A network blip drops
+    // every session at once and each SshManager independently fires an
+    // attempt-1 reconnect with zero backoff — at 21 sessions that was 21
+    // concurrent KEX/auth handshakes (21 WebSocket upgrades over CF) hammering
+    // a link that just came back. 3 at a time keeps the instant-reconnect feel
+    // for the single-drop Starlink case while serializing the herd.
+    private val connectGates = java.util.concurrent.ConcurrentHashMap<String, Semaphore>()
+    private fun connectGate(serverId: String): Semaphore =
+        connectGates.getOrPut(serverId) { Semaphore(3) }
+
+    /** Server id of a session's tab, or null if the tab is gone. */
+    private fun serverIdOf(sessionId: String): String? =
+        tabManager.getTab(sessionId)?.server?.id
+
+    /** All session ids currently on [serverId]. */
+    private fun sessionIdsOnServer(serverId: String): List<String> =
+        tabManager.tabs.value.filter { it.server.id == serverId }.map { it.id }
+
+    /**
+     * Any CONNECTED session's live jsch Session on [serverId] — used by the
+     * per-server loops (usage, latency, notify watcher) so they survive any
+     * single tab's reconnect by simply picking another live connection.
+     */
+    private fun liveServerSession(serverId: String): Session? {
+        for ((sid, mgr) in connections) {
+            if (tabManager.getTab(sid)?.server?.id == serverId && mgr.isConnected) {
+                mgr.getSession()?.let { return it }
+            }
+        }
+        return null
+    }
     /** Per-session timestamp of the last "needs input" dispatch, used to debounce
      *  the Stop-hook fire stream — claude can emit several markers in quick
      *  succession (model handoff, tool retries) and we don't want to vibrate
@@ -379,11 +447,15 @@ class SessionOrchestrator(
      * exited during the outage stayed dead until app restart.
      */
     private fun attachSessionRuntime(sessionId: String, tmuxSessionName: String) {
-        startUsagePolling(sessionId)
+        serverIdOf(sessionId)?.let { serverId ->
+            // Per-server loops: idempotent, first session on the server starts
+            // them, later sessions just register/reuse.
+            startServerUsagePolling(serverId)
+            startServerLatencyPolling(serverId)
+            startNotifyWatcher(sessionId, tmuxSessionName, serverId)
+        }
         startGitStatusPolling(sessionId)
-        startLatencyPolling(sessionId)
         connections[sessionId]?.let { conn ->
-            startNotifyWatcher(sessionId, tmuxSessionName, conn)
             startSessionIdRefresh(sessionId, tmuxSessionName, conn)
         }
         // Keep a transcript stream running for every connected session so the
@@ -451,31 +523,38 @@ class SessionOrchestrator(
         connections.values.forEach { it.setKeepAliveInterval(keepAlive) }
     }
 
-    private fun startUsagePolling(sessionId: String) {
-        usagePollingJobs[sessionId]?.cancel()
-        usagePollingJobs[sessionId] = reconnectScope.launch {
-            kotlinx.coroutines.delay(5000) // initial delay
-            while (isActive) {
-                // Skip poll when app is in background — user can't see usage bar anyway.
-                // A missing connection (mid-reconnect) just skips this round —
-                // the old `?: break` exited the loop PERMANENTLY the first time
-                // a reconnect briefly emptied the connections map, leaving the
-                // chips dead until app restart.
-                if (!isInBackground) {
-                    try {
-                        val sshSession = connections[sessionId]?.getSession()
-                        if (sshSession != null) {
-                            // 60s budget: the first run may npm-install ccusage.
-                            val output = execReadWithWatchdog(
-                                sshSession,
-                                "which ccusage >/dev/null 2>&1 || npm install -g ccusage >/dev/null 2>&1; ccusage blocks --active --json --offline --no-color 2>/dev/null || echo '{}'",
-                                totalMs = 60_000,
-                            )
-                            parseUsageJson(output)
-                        }
-                    } catch (_: Exception) {}
+    private fun startServerUsagePolling(serverId: String) {
+        // Idempotent: ccusage data is account-wide, one loop per server serves
+        // every session on it. Don't restart on reattach — the loop resolves a
+        // live connection fresh each tick, so it self-heals across reconnects.
+        // compute() makes check-and-launch atomic per key against a concurrent
+        // last-session teardown's remove()+cancel().
+        usagePollingJobs.compute(serverId) { _, existing ->
+            if (existing?.isActive == true) return@compute existing
+            reconnectScope.launch {
+                kotlinx.coroutines.delay(5000) // initial delay
+                while (isActive) {
+                    // Skip poll when app is in background — user can't see usage bar anyway.
+                    // A missing connection (mid-reconnect) just skips this round —
+                    // the old `?: break` exited the loop PERMANENTLY the first time
+                    // a reconnect briefly emptied the connections map, leaving the
+                    // chips dead until app restart.
+                    if (!isInBackground) {
+                        try {
+                            val sshSession = liveServerSession(serverId)
+                            if (sshSession != null) {
+                                // 60s budget: the first run may npm-install ccusage.
+                                val output = execReadWithWatchdog(
+                                    sshSession,
+                                    "which ccusage >/dev/null 2>&1 || npm install -g ccusage >/dev/null 2>&1; ccusage blocks --active --json --offline --no-color 2>/dev/null || echo '{}'",
+                                    totalMs = 60_000,
+                                )
+                                parseUsageJson(output)
+                            }
+                        } catch (_: Exception) {}
+                    }
+                    kotlinx.coroutines.delay(120_000) // poll every 2 min (was 30s)
                 }
-                kotlinx.coroutines.delay(120_000) // poll every 2 min (was 30s)
             }
         }
     }
@@ -483,7 +562,7 @@ class SessionOrchestrator(
     /**
      * Periodically probe the git status of the session's working directory
      * (branch + dirty/ahead/behind) and publish it to [gitStatuses]. Mirrors
-     * [startUsagePolling]: runs the exec off the UI thread, respects
+     * [startServerUsagePolling]: runs the exec off the UI thread, respects
      * [isInBackground], and never blocks. A non-git directory (or any failure)
      * clears the entry so the UI shows no chip. Cancelled in [disconnectSession].
      */
@@ -654,7 +733,7 @@ class SessionOrchestrator(
                 // UUID/restore correctness, which onResume refreshes anyway.
                 if (isInBackground) { kotlinx.coroutines.delay(15_000); continue }
                 try {
-                    val remote = fetchSessionsFromServer(sshManager)
+                    val remote = fetchSessionsCached(serverIdOf(sessionId), sshManager)
                     val entry = remote?.firstOrNull { it.tmuxSessionName == tmuxName }
                     // Prefer the LIVE pane's running Claude pid over the server's
                     // sessions.json record. The server entry is seeded with the
@@ -735,6 +814,35 @@ class SessionOrchestrator(
     private val fetchJson = kotlinx.serialization.json.Json { ignoreUnknownKeys = true }
 
     /**
+     * [fetchSessionsFromServer] with a per-server TTL cache. All sessions on a
+     * server reconcile against the SAME sessions.json every 15 s — only the
+     * first one inside the TTL pays the exec, the rest reuse the snapshot.
+     * Transport failures (null) are never cached, so a fresh session retries.
+     */
+    private suspend fun fetchSessionsCached(
+        serverId: String?,
+        sshManager: SshManager,
+    ): List<PersistedSession>? {
+        if (serverId == null) return fetchSessionsFromServer(sshManager)
+        val ttl = 12_000L // just under the 15 s loop period
+        sessionsJsonCache[serverId]?.let {
+            if (System.currentTimeMillis() - it.at < ttl) return it.list
+        }
+        return sessionsJsonMutex.withLock {
+            // Re-check under the lock — another session's tick may have just
+            // refreshed it while we waited.
+            sessionsJsonCache[serverId]?.let {
+                if (System.currentTimeMillis() - it.at < ttl) return@withLock it.list
+            }
+            val fresh = fetchSessionsFromServer(sshManager)
+            if (fresh != null) {
+                sessionsJsonCache[serverId] = SessionsSnapshot(System.currentTimeMillis(), fresh)
+            }
+            fresh
+        }
+    }
+
+    /**
      * Resolve the real claude session_id for a tmux session by reading
      * `~/.claude/sessions/<pane_pid>.json`. Claude *does* keep this file
      * in sync with its current session_id even after /resume — the prior
@@ -795,33 +903,44 @@ class SessionOrchestrator(
         }
     }
 
-    private fun startLatencyPolling(sessionId: String) {
-        latencyPollingJobs[sessionId]?.cancel()
-        latencyPollingJobs[sessionId] = reconnectScope.launch {
-            kotlinx.coroutines.delay(3000)
-            val recentLatencies = mutableListOf<Long>()
-            while (isActive) {
-                if (!isInBackground) {
-                    try {
-                        // Missing connection (mid-reconnect) skips the round;
-                        // the old `?: break` killed the loop permanently.
-                        val sshSession = connections[sessionId]?.getSession()
-                        if (sshSession == null) {
-                            kotlinx.coroutines.delay(15_000)
-                            continue
-                        }
-                        val latency = kotlin.run {
-                            val start = System.currentTimeMillis()
-                            execReadWithWatchdog(sshSession, "echo pong", totalMs = 10_000)
-                            System.currentTimeMillis() - start
-                        }
-                        recentLatencies.add(latency)
-                        if (recentLatencies.size > 5) recentLatencies.removeAt(0)
-                        val avg = recentLatencies.average().toLong()
-                        _latencies.update { it + (sessionId to avg) }
-                    } catch (_: Exception) {}
+    private fun startServerLatencyPolling(serverId: String) {
+        // Idempotent per server: every session on a server shares the physical
+        // link, so 21 per-session `echo pong`s measured the same RTT 21×. One
+        // probe per server, fanned out to all its sessions for display.
+        // compute() = atomic check-and-launch (see startServerUsagePolling).
+        latencyPollingJobs.compute(serverId) { _, existing ->
+            if (existing?.isActive == true) return@compute existing
+            reconnectScope.launch {
+                kotlinx.coroutines.delay(3000)
+                val recentLatencies = mutableListOf<Long>()
+                while (isActive) {
+                    if (!isInBackground) {
+                        try {
+                            // Missing connection (mid-reconnect) skips the round;
+                            // the old `?: break` killed the loop permanently.
+                            val sshSession = liveServerSession(serverId)
+                            if (sshSession == null) {
+                                kotlinx.coroutines.delay(15_000)
+                                continue
+                            }
+                            val latency = kotlin.run {
+                                val start = System.currentTimeMillis()
+                                execReadWithWatchdog(sshSession, "echo pong", totalMs = 10_000)
+                                System.currentTimeMillis() - start
+                            }
+                            recentLatencies.add(latency)
+                            if (recentLatencies.size > 5) recentLatencies.removeAt(0)
+                            val avg = recentLatencies.average().toLong()
+                            // Fan out only to sessions with a live connection —
+                            // a tab mid-teardown (entry already cleared by
+                            // disconnectSession, tab not yet removed) must not
+                            // be re-added as a permanent stale map entry.
+                            val ids = sessionIdsOnServer(serverId).filter { connections.containsKey(it) }
+                            _latencies.update { it + ids.associateWith { avg } }
+                        } catch (_: Exception) {}
+                    }
+                    kotlinx.coroutines.delay(15_000) // every 15s
                 }
-                kotlinx.coroutines.delay(15_000) // every 15s
             }
         }
     }
@@ -937,115 +1056,176 @@ else:
     }
 
     /**
-     * Start a background SSH exec channel that `tail -f /tmp/claude-notify` and
-     * fires [onClaudeNeedsInput] whenever our Stop-hook marker appears for the
-     * given tmux session. Marks the session as hook-active in the detector so
-     * screen-state polling is skipped.
+     * Register [sessionId] with the SHARED per-server Stop-hook watcher and
+     * make sure that watcher is running. The watcher holds ONE `tail -f
+     * /tmp/claude-notify` exec channel per server (all sessions share the
+     * file) and dispatches each marker to the owning session by tmux name,
+     * firing [onClaudeNeedsInput]. Registered sessions are marked hook-active
+     * in the detector so screen-state polling is skipped.
      *
      * If the watcher channel drops (SSH reconnect), screen-state fallback
-     * resumes automatically via [markHookInactive].
+     * resumes automatically via [markHookInactive]; on reconnect the last 25
+     * marker lines are replayed (stale-filtered + deduped) so completions
+     * that happened during the gap still notify.
      */
-    private fun startNotifyWatcher(sessionId: String, tmuxName: String, sshManager: SshManager) {
-        notifyWatchers[sessionId]?.cancel()
-        notifyWatchers[sessionId] = reconnectScope.launch {
-            // Retry loop: the exec channel can die silently (mobile networks,
-            // HyperOS battery management kill the socket without dropping the
-            // main SSH channel). Previously the watcher exited permanently and
-            // hook-based detection was gone until a FULL transport reconnect —
-            // background sessions then had no detection path at all.
-            var attempt = 0
-            while (isActive) {
-                try {
-                    val sshSession = sshManager.getSession() ?: break
-                    val ch = sshSession.openChannel("exec") as com.jcraft.jsch.ChannelExec
-                    // Emit the server clock first so we can learn the phone↔server
-                    // skew, then tail only NEW markers.
-                    ch.setCommand("echo claude-remote-clock \$(date +%s); touch /tmp/claude-notify && tail -n 0 -f /tmp/claude-notify")
-                    ch.inputStream = null
-                    val reader = ch.inputStream.bufferedReader()
-                    ch.connect(5000)
+    private fun startNotifyWatcher(sessionId: String, tmuxName: String, serverId: String) {
+        while (true) {
+            val w = serverNotifyWatchers.getOrPut(serverId) { ServerNotifyWatcher(serverId) }
+            val registered = synchronized(w) {
+                // Whole register sequence under the watcher's monitor, and
+                // re-checked against the map: a concurrent last-session
+                // disconnect may have just emptied + removed this instance —
+                // registering into the removed orphan would leave the session
+                // served by a watcher nobody can ever cancel (and a later
+                // attach would mint a SECOND tail on the same file).
+                if (serverNotifyWatchers[serverId] !== w) return@synchronized false
+                // Re-point this session's registration (a relaunched tab may
+                // have a new tmux name — drop the stale mapping first).
+                w.tmuxToSession.entries.removeAll { it.value == sessionId && it.key != tmuxName }
+                w.tmuxToSession[tmuxName] = sessionId
+                // Watcher already tailing → hook detection is live for this
+                // session now. Under the monitor so it can't interleave with
+                // the connect fan-out and miss the one-shot activation.
+                if (w.live) setHookActive(sessionId, true)
+                if (w.job?.isActive != true) {
+                    w.job = reconnectScope.launch { runServerNotifyWatcher(w) }
+                }
+                true
+            }
+            if (registered) return
+        }
+    }
 
-                    setHookActive(sessionId, true)
-                    attempt = 0
-                    // Offset (ms) between this device's clock and the server's,
-                    // learned from the "claude-remote-clock <epoch>" line the
-                    // channel emits first. Lets us reject stale markers by AGE
-                    // despite clock skew. Null until learned ⇒ age check is
-                    // skipped (fail-open, never suppress a real notification).
-                    var clockSkewMs: Long? = null
-                    FileLogger.log(TAG, "Notify watcher started for $sessionId (tmux=$tmuxName)")
+    private suspend fun runServerNotifyWatcher(w: ServerNotifyWatcher) = kotlinx.coroutines.coroutineScope {
+        // Retry loop: the exec channel can die silently (mobile networks,
+        // HyperOS battery management kill the socket without dropping the
+        // main SSH channel). Previously the watcher exited permanently and
+        // hook-based detection was gone until a FULL transport reconnect —
+        // background sessions then had no detection path at all.
+        var attempt = 0
+        while (isActive && w.tmuxToSession.isNotEmpty()) {
+            // Hoisted so the finally can ALWAYS disconnect it — if connect() or
+            // readLine() throws, a channel declared inside the try would leak
+            // on the shared long-lived session, one per retry.
+            var ch: com.jcraft.jsch.ChannelExec? = null
+            try {
+                val sshSession = liveServerSession(w.serverId)
+                if (sshSession == null) {
+                    // No live connection right now (mid-reconnect). Keep probing
+                    // — the shared watcher rides ANY session's connection, so it
+                    // resumes as soon as the first tab on this server is back.
+                    kotlinx.coroutines.delay(5_000)
+                    continue
+                }
+                ch = sshSession.openChannel("exec") as com.jcraft.jsch.ChannelExec
+                // Emit the server clock first (learns phone↔server skew), then
+                // tail INCLUDING the last 25 lines: markers appended while the
+                // watcher was down (channel drop + retry backoff) used to be
+                // lost forever — a completion during a reconnect window never
+                // notified. The stale filter + marker-epoch dedup below make
+                // replaying the recent backlog safe.
+                ch.setCommand("echo claude-remote-clock \$(date +%s); touch /tmp/claude-notify && tail -n 25 -f /tmp/claude-notify")
+                ch.inputStream = null
+                val reader = ch.inputStream.bufferedReader()
+                ch.connect(5000)
 
-                    while (isActive && ch.isConnected) {
-                        val line = kotlinx.coroutines.withContext(Dispatchers.IO) {
-                            reader.readLine()
-                        } ?: break
-                        // Server clock probe (emitted once, first): learn skew.
-                        if (line.startsWith("claude-remote-clock")) {
-                            line.trim().split(Regex("\\s+")).getOrNull(1)?.toLongOrNull()?.let { serverEpochSec ->
-                                clockSkewMs = System.currentTimeMillis() - serverEpochSec * 1000L
-                            }
+                // Under the monitor so a session registering right now can't
+                // slip between `live = true` and the fan-out and miss both.
+                synchronized(w) {
+                    w.live = true
+                    w.tmuxToSession.values.forEach { setHookActive(it, true) }
+                }
+                attempt = 0
+                // Offset (ms) between this device's clock and the server's,
+                // learned from the "claude-remote-clock <epoch>" line the
+                // channel emits first (echo runs before tail, so it always
+                // precedes any marker). Lets us reject stale markers by AGE
+                // despite clock skew.
+                var clockSkewMs: Long? = null
+                FileLogger.log(TAG, "Notify watcher started for server ${w.serverId} (${w.tmuxToSession.size} sessions)")
+
+                while (isActive && ch.isConnected) {
+                    val line = kotlinx.coroutines.withContext(Dispatchers.IO) {
+                        reader.readLine()
+                    } ?: break
+                    // Server clock probe (emitted once, first): learn skew.
+                    if (line.startsWith("claude-remote-clock")) {
+                        line.trim().split(Regex("\\s+")).getOrNull(1)?.toLongOrNull()?.let { serverEpochSec ->
+                            clockSkewMs = System.currentTimeMillis() - serverEpochSec * 1000L
+                        }
+                        continue
+                    }
+                    if (!line.startsWith("claude-remote-notify")) continue
+                    // EXACT tmux-session match. The marker line is
+                    // "claude-remote-notify <#S> <epoch>" and ALL sessions
+                    // share /tmp/claude-notify, so a substring match cross-
+                    // fired between sessions whose names are prefixes of each
+                    // other (e.g. "cashy" matched "cashy-test"). Dispatch on the
+                    // second whitespace token exactly.
+                    val parts = line.trim().split(Regex("\\s+"))
+                    val markerTmux = parts.getOrNull(1) ?: continue
+                    val sessionId = w.tmuxToSession[markerTmux] ?: continue
+                    // Reject STALE completions. /tmp/claude-notify is append-only
+                    // and we now REPLAY the last 25 lines on every (re)connect;
+                    // plus on a mobile / HyperOS socket freeze the tail's
+                    // buffered bytes flush all at once when the phone wakes.
+                    // The marker carries the Stop hook's epoch — drop anything
+                    // older than notifyStaleMs (skew-corrected). Skew defaults to
+                    // 0 (NTP assumption) if the clock line was somehow lost:
+                    // fail-open would re-fire the whole replayed backlog.
+                    val markerEpochSec = parts.getOrNull(2)?.toLongOrNull()
+                    if (markerEpochSec != null) {
+                        val skew = clockSkewMs ?: 0L
+                        val ageMs = System.currentTimeMillis() - (markerEpochSec * 1000L + skew)
+                        if (ageMs > notifyStaleMs) {
+                            FileLogger.log(TAG, "Skipping stale Stop hook for $sessionId (age ${ageMs}ms): $line")
                             continue
                         }
-                        if (!line.startsWith("claude-remote-notify")) continue
-                        // EXACT tmux-session match. The marker line is
-                        // "claude-remote-notify <#S> <epoch>" and ALL sessions
-                        // share /tmp/claude-notify, so a substring match cross-
-                        // fired between sessions whose names are prefixes of each
-                        // other (e.g. "cashy" matched "cashy-test"). Compare the
-                        // second whitespace token exactly.
-                        val parts = line.trim().split(Regex("\\s+"))
-                        if (parts.getOrNull(1) != tmuxName) continue
-                        // Reject STALE completions. All sessions share the
-                        // append-only /tmp/claude-notify; on a mobile / HyperOS
-                        // socket freeze the tail's buffered bytes flush all at
-                        // once when the phone wakes, replaying markers for
-                        // completions that happened minutes ago and vibrating the
-                        // phone for events the user already saw. The marker
-                        // carries the Stop hook's epoch — drop anything older
-                        // than notifyStaleMs (skew-corrected).
-                        val markerEpochSec = parts.getOrNull(2)?.toLongOrNull()
-                        val skew = clockSkewMs
-                        if (markerEpochSec != null && skew != null) {
-                            val ageMs = System.currentTimeMillis() - (markerEpochSec * 1000L + skew)
-                            if (ageMs > notifyStaleMs) {
-                                FileLogger.log(TAG, "Skipping stale Stop hook for $sessionId (age ${ageMs}ms): $line")
-                                continue
-                            }
-                        }
-                        FileLogger.log(TAG, "Stop hook fired for $sessionId: $line")
-                        // Pull the transcript up to the just-finished turn BEFORE
-                        // firing, so the notification body + dedup key come from
-                        // the final assistant message rather than the last
-                        // periodic poll (up to 30 s stale in background — it would
-                        // show the previous turn or a mid-turn preamble). BOUND
-                        // the wait: pollOnce's blocking read has no timeout, so on
-                        // a frozen socket an unbounded refresh could stall or
-                        // suppress the notification itself. Run it detached and
-                        // wait at most 2 s, then fire regardless — a slightly
-                        // stale body beats a missed "Claude is ready".
-                        val stream = synchronized(transcriptLock) { transcriptStreams[sessionId] }
-                        if (stream != null) {
-                            val refresh = reconnectScope.launch { stream.pollNow() }
-                            kotlinx.coroutines.withTimeoutOrNull(2_000) { refresh.join() }
-                        }
-                        val isActiveTab = tabManager.activeTabId.value == sessionId
-                        fireNeedsInput(sessionId, "Claude is ready for input", isActiveTab)
-                        updateActivity(sessionId, SessionActivity.WAITING_FOR_INPUT)
                     }
-                    ch.disconnect()
-                } catch (e: Exception) {
-                    FileLogger.error(TAG, "Notify watcher failed for $sessionId: ${e.message}", e)
-                } finally {
-                    setHookActive(sessionId, false)
+                    FileLogger.log(TAG, "Stop hook fired for $sessionId: $line")
+                    // Pull the transcript up to the just-finished turn BEFORE
+                    // firing, so the notification body comes from the final
+                    // assistant message rather than the last periodic poll (up
+                    // to 30 s stale in background — it would show the previous
+                    // turn or a mid-turn preamble). BOUND the wait: pollOnce's
+                    // blocking read has no timeout, so on a frozen socket an
+                    // unbounded refresh could stall or suppress the notification
+                    // itself. Run it detached and wait at most 2 s, then fire
+                    // regardless — a slightly stale body beats a missed alert.
+                    val stream = synchronized(transcriptLock) { transcriptStreams[sessionId] }
+                    if (stream != null) {
+                        val refresh = reconnectScope.launch { stream.pollNow() }
+                        kotlinx.coroutines.withTimeoutOrNull(2_000) { refresh.join() }
+                    }
+                    val isActiveTab = tabManager.activeTabId.value == sessionId
+                    // Dedup on the MARKER itself — (tmux, epoch) identifies one
+                    // completion. Replays of an already-notified marker are
+                    // suppressed exactly, and a NEW completion can never be
+                    // swallowed because the transcript hadn't caught up (the
+                    // old lastAssistantId-based key was stale precisely when
+                    // the network was slow).
+                    fireNeedsInput(
+                        sessionId, "Claude is ready for input", isActiveTab,
+                        eventKey = markerEpochSec?.let { "stop#$markerTmux#$it" },
+                    )
+                    updateActivity(sessionId, SessionActivity.WAITING_FOR_INPUT)
                 }
-                if (!isActive) break
-                attempt++
-                val backoffMs = (5_000L * attempt).coerceAtMost(30_000L)
-                FileLogger.log(TAG, "Notify watcher retrying for $sessionId in ${backoffMs}ms (attempt $attempt)")
-                kotlinx.coroutines.delay(backoffMs)
+            } catch (e: Exception) {
+                FileLogger.error(TAG, "Notify watcher failed for server ${w.serverId}: ${e.message}", e)
+            } finally {
+                try { ch?.disconnect() } catch (_: Exception) {}
+                synchronized(w) {
+                    w.live = false
+                    w.tmuxToSession.values.forEach { setHookActive(it, false) }
+                }
             }
-            FileLogger.log(TAG, "Notify watcher stopped for $sessionId")
+            if (!isActive || w.tmuxToSession.isEmpty()) break
+            attempt++
+            val backoffMs = (5_000L * attempt).coerceAtMost(30_000L)
+            FileLogger.log(TAG, "Notify watcher retrying for server ${w.serverId} in ${backoffMs}ms (attempt $attempt)")
+            kotlinx.coroutines.delay(backoffMs)
         }
+        FileLogger.log(TAG, "Notify watcher stopped for server ${w.serverId}")
     }
 
     suspend fun launchSession(
@@ -1363,12 +1543,20 @@ else:
         val tab = tabManager.getTab(sessionId)
             ?: return kotlinx.coroutines.flow.MutableStateFlow(RemoteSessionStatus())
         val poller = synchronized(statusLock) {
+            // Only ONE tab's status is rendered at a time (the active Chat
+            // view). Stop the others here instead of leaking them: visiting all
+            // 21 tabs used to leave 21 pollers alive — each opening SSH execs
+            // every 5 s, in the background too. A stopped poller restarts
+            // lazily the next time its tab becomes active.
+            statusPollers.forEach { (id, p) -> if (id != sessionId) p.stop() }
             statusPollers.getOrPut(sessionId) {
                 SessionStatusPoller(
                     server = tab.server,
                     cwd = tab.folder,
                     claudeSessionIdProvider = { tabManager.getTab(sessionId)?.claudeSessionId },
-                    scope = reconnectScope
+                    scope = reconnectScope,
+                    liveSession = { connections[sessionId]?.getSession() },
+                    isBackground = { isInBackground },
                 )
             }
         }
@@ -1575,18 +1763,21 @@ else:
         val sshEffective = resolveTransport(session.server)
         setConnectionLabel(session.id, sshEffective, session.server, "SSH")
         try {
-            sshManager.connect(
-                sshEffective,
-                onOutput = { data -> emit(data) },
-                onConnectionLost = {
-                    // Auto-reconnect with tmux reattach
-                    tabManager.updateTabStatus(session.id, SessionStatus.DISCONNECTED)
-                    updateActivity(session.id, SessionActivity.DISCONNECTED)
-                    reconnectScope.launch {
-                        autoReconnect(session, ::emit)
+            // Gate the handshake per server — see connectGates.
+            connectGate(session.server.id).withPermit {
+                sshManager.connect(
+                    sshEffective,
+                    onOutput = { data -> emit(data) },
+                    onConnectionLost = {
+                        // Auto-reconnect with tmux reattach
+                        tabManager.updateTabStatus(session.id, SessionStatus.DISCONNECTED)
+                        updateActivity(session.id, SessionActivity.DISCONNECTED)
+                        reconnectScope.launch {
+                            autoReconnect(session, ::emit)
+                        }
                     }
-                }
-            )
+                )
+            }
         } catch (e: Exception) {
             noteConnectResult(session.server, sshEffective, ok = false)
             throw e
@@ -1835,14 +2026,20 @@ else:
                     val reEffective = resolveTransport(session.server)
                     setConnectionLabel(session.id, reEffective, session.server, "SSH")
                     try {
-                        sshManager.connect(
-                            reEffective,
-                            onOutput = { data -> emit(data) },
-                            onConnectionLost = {
-                                tabManager.updateTabStatus(session.id, SessionStatus.DISCONNECTED)
-                                reconnectScope.launch { autoReconnect(session, emit) }
-                            }
-                        )
+                        // Gate the handshake per server: a blip drops all
+                        // sessions at once and each fires attempt-1 with zero
+                        // backoff — without the gate that's a 21-way concurrent
+                        // KEX storm on a just-recovered weak link.
+                        connectGate(session.server.id).withPermit {
+                            sshManager.connect(
+                                reEffective,
+                                onOutput = { data -> emit(data) },
+                                onConnectionLost = {
+                                    tabManager.updateTabStatus(session.id, SessionStatus.DISCONNECTED)
+                                    reconnectScope.launch { autoReconnect(session, emit) }
+                                }
+                            )
+                        }
                     } catch (e: Exception) {
                         noteConnectResult(session.server, reEffective, ok = false)
                         throw e
@@ -2294,11 +2491,33 @@ else:
 
     suspend fun disconnectSession(sessionId: String) {
         reconnectRetryJobs.remove(sessionId)?.cancel()
-        usagePollingJobs.remove(sessionId)?.cancel()
         gitStatusJobs.remove(sessionId)?.cancel()
-        latencyPollingJobs.remove(sessionId)?.cancel()
-        notifyWatchers.remove(sessionId)?.cancel()
         sessionIdRefreshJobs.remove(sessionId)?.cancel()
+        // Per-SERVER loops (usage, latency, notify watcher) serve every session
+        // on the server — tear them down only with the LAST one. The notify
+        // registry entry for this session goes away either way.
+        val serverId = tabManager.getTab(sessionId)?.server?.id
+        if (serverId != null) {
+            serverNotifyWatchers[serverId]?.let { w ->
+                synchronized(w) {
+                    w.tmuxToSession.entries.removeAll { it.value == sessionId }
+                    // Conditional remove(key, value): only cancel if this exact
+                    // instance is still the registered watcher AND nobody
+                    // re-registered between the removeAll and here (both are
+                    // under w's monitor, matching startNotifyWatcher).
+                    if (w.tmuxToSession.isEmpty() && serverNotifyWatchers.remove(serverId, w)) {
+                        w.job?.cancel()
+                    }
+                }
+            }
+            val lastOnServer = tabManager.tabs.value.none {
+                it.id != sessionId && it.server.id == serverId
+            }
+            if (lastOnServer) {
+                usagePollingJobs.remove(serverId)?.cancel()
+                latencyPollingJobs.remove(serverId)?.cancel()
+            }
+        }
         lastNeedsInputAt.remove(sessionId)
         lastNotifiedKey.remove(sessionId)
         setHookActive(sessionId, false)

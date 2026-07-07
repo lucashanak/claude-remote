@@ -40,7 +40,18 @@ class SessionStatusPoller(
     private val server: SshServer,
     private val cwd: String,
     private val claudeSessionIdProvider: () -> String?,
-    private val scope: CoroutineScope
+    private val scope: CoroutineScope,
+    /**
+     * The tab's live MAIN SSH session, if connected. Polls run as a cheap exec
+     * channel on it instead of a brand-new SSH connection (full KEX + auth
+     * every 5 s — brutal on weak/roaming links, and over Cloudflare a whole
+     * WebSocket upgrade per tick). Null ⇒ fall back to a short-lived dedicated
+     * session, same as before.
+     */
+    private val liveSession: () -> com.jcraft.jsch.Session? = { null },
+    /** True while the app is backgrounded — polls are skipped entirely
+     *  (nothing renders this status when the UI isn't visible). */
+    private val isBackground: () -> Boolean = { false },
 ) {
     private val _status = MutableStateFlow(RemoteSessionStatus())
     val status: StateFlow<RemoteSessionStatus> = _status.asStateFlow()
@@ -87,19 +98,22 @@ class SessionStatusPoller(
         var lastSubagentMtime = -1L
         var attempt = 0
         while (scope.isActive) {
+            if (isBackground()) {
+                delay(POLL_INTERVAL_MS)
+                continue
+            }
             attempt++
             try {
                 val statCmd = buildCmd(claudeSessionIdProvider())
-                val raw = SshSessionHelper.withSession(server, timeout = 10_000) { sess ->
-                    val ch = sess.openChannel("exec") as com.jcraft.jsch.ChannelExec
-                    ch.setCommand(statCmd)
-                    ch.inputStream = null
-                    val input = ch.inputStream
-                    withContext(Dispatchers.IO) { ch.connect(8_000) }
-                    try {
-                        withContext(Dispatchers.IO) { input.bufferedReader().readText() }
-                    } finally {
-                        try { ch.disconnect() } catch (_: Throwable) {}
+                // Prefer the tab's live main connection (exec channel only, no
+                // handshake); a dedicated short-lived session is the exception,
+                // not the steady state.
+                val shared = liveSession()?.takeIf { it.isConnected }
+                val raw = if (shared != null) {
+                    execStat(shared, statCmd)
+                } else {
+                    SshSessionHelper.withSession(server, timeout = 10_000) { sess ->
+                        execStat(sess, statCmd)
                     }
                 }
                 attempt = 0
@@ -121,6 +135,26 @@ class SessionStatusPoller(
                 FileLogger.log(TAG, "status poll error (attempt $attempt): ${t.message}")
             }
             delay(if (attempt == 0) POLL_INTERVAL_MS else (POLL_INTERVAL_MS * attempt).coerceAtMost(30_000L))
+        }
+    }
+
+    /** One stat+cat exec on [sess]; the channel is always disconnected. */
+    private suspend fun execStat(sess: com.jcraft.jsch.Session, cmd: String): String {
+        val ch = sess.openChannel("exec") as com.jcraft.jsch.ChannelExec
+        ch.setCommand(cmd)
+        ch.inputStream = null
+        val input = ch.inputStream
+        // connect() INSIDE the try: a connect timeout must still disconnect the
+        // channel, or every failed 5 s tick leaks a half-open channel on the
+        // shared long-lived main session (the exact link-degrading buildup this
+        // poller rework is meant to avoid).
+        return try {
+            withContext(Dispatchers.IO) {
+                ch.connect(8_000)
+                input.bufferedReader().readText()
+            }
+        } finally {
+            try { ch.disconnect() } catch (_: Throwable) {}
         }
     }
 
