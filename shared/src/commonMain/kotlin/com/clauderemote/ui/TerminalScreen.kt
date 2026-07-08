@@ -1579,6 +1579,10 @@ private fun SpecialKeysRow(
         // command menu, which sends the picked command immediately — so the
         // single "/" button now opens that menu.
         SpecialKeyBtn("/",    Modifier.weight(1f)) { onMore()                }
+        // Left/right arrows live at the end — occasionally handy (editing a
+        // line, moving through a TUI menu) but not part of the common set.
+        SpecialKeyBtn("←",    Modifier.weight(1f)) { onKey(SpecialKey.Left)  }
+        SpecialKeyBtn("→",    Modifier.weight(1f)) { onKey(SpecialKey.Right) }
     }
 }
 
