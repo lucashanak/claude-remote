@@ -19,6 +19,7 @@ import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.SwapHoriz
+import androidx.compose.material.icons.filled.Speed
 import androidx.compose.material3.*
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.runtime.*
@@ -29,6 +30,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.clauderemote.model.ClaudeEffort
 import com.clauderemote.model.ClaudeMode
 import com.clauderemote.model.ClaudeModel
 import com.clauderemote.model.ClaudeSession
@@ -57,6 +59,7 @@ fun LauncherScreen(
     onRefreshRemote: (() -> Unit)? = null,
     onConnectAll: (() -> Unit)? = null,
     onSwitchModelAll: ((ClaudeModel) -> Unit)? = null,
+    onSwitchEffortAll: ((ClaudeEffort) -> Unit)? = null,
     onAttachRemote: ((RemoteSession) -> Unit)? = null,
     onConnectServer: (SshServer) -> Unit,
     onQuickConnect: ((SshServer) -> Unit)? = null,
@@ -120,6 +123,29 @@ fun LauncherScreen(
                                         onClick = {
                                             showModelMenu = false
                                             onSwitchModelAll(model)
+                                        },
+                                    )
+                                }
+                            }
+                        }
+                    }
+                    if (onSwitchEffortAll != null) {
+                        var showEffortMenu by remember { mutableStateOf(false) }
+                        Box {
+                            IconButton(onClick = { showEffortMenu = true }) {
+                                Icon(
+                                    Icons.Default.Speed,
+                                    contentDescription = "Switch effort for all sessions",
+                                    tint = c.textDim,
+                                )
+                            }
+                            DropdownMenu(expanded = showEffortMenu, onDismissRequest = { showEffortMenu = false }) {
+                                ClaudeEffort.entries.forEach { effort ->
+                                    DropdownMenuItem(
+                                        text = { Text("Switch all to ${effort.displayName}") },
+                                        onClick = {
+                                            showEffortMenu = false
+                                            onSwitchEffortAll(effort)
                                         },
                                     )
                                 }

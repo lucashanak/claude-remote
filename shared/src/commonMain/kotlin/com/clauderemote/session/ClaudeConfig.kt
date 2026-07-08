@@ -1,5 +1,6 @@
 package com.clauderemote.session
 
+import com.clauderemote.model.ClaudeEffort
 import com.clauderemote.model.ClaudeMode
 import com.clauderemote.model.ClaudeModel
 
@@ -188,6 +189,9 @@ object ClaudeConfig {
 
     // Model switch: `/model <alias>` selects immediately, no interactive picker
     fun modelSwitchCommand(model: ClaudeModel): String = "/model ${model.cliValue ?: "default"}\n"
+
+    // Effort switch: `/effort <level>` selects immediately, no interactive picker
+    fun effortSwitchCommand(effort: ClaudeEffort): String = "/effort ${effort.cliValue}\n"
 
     fun escapeSequence(): String = ESCAPE
 

@@ -27,6 +27,15 @@ enum class ClaudeModel(val displayName: String, val cliValue: String?, val isLoc
 }
 
 @Serializable
+enum class ClaudeEffort(val displayName: String, val cliValue: String) {
+    LOW("Low", "low"),
+    MEDIUM("Medium", "medium"),
+    HIGH("High", "high"),
+    XHIGH("XHigh", "xhigh"),
+    MAX("Max", "max");
+}
+
+@Serializable
 enum class ConnectionType(val displayName: String) {
     SSH("SSH"),
     MOSH("Mosh");

@@ -581,6 +581,9 @@ fun App(
                         onSwitchModelAll = { model ->
                             sessionOrchestrator.switchModelForAllSessions(model)
                         },
+                        onSwitchEffortAll = { effort ->
+                            sessionOrchestrator.switchEffortForAllSessions(effort)
+                        },
                         onAttachRemote = { remote ->
                             scope.launch {
                                 try {

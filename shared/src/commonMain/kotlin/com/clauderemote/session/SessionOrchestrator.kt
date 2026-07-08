@@ -2788,6 +2788,14 @@ else:
         tabManager.tabs.value.forEach { switchModel(it.id, model) }
     }
 
+    fun switchEffort(sessionId: String, effort: ClaudeEffort) {
+        sendInput(sessionId, ClaudeConfig.effortSwitchCommand(effort))
+    }
+
+    fun switchEffortForAllSessions(effort: ClaudeEffort) {
+        tabManager.tabs.value.forEach { switchEffort(it.id, effort) }
+    }
+
     fun sendEscape(sessionId: String) {
         sendInput(sessionId, ClaudeConfig.escapeSequence())
     }
