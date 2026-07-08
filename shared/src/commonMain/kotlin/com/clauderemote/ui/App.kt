@@ -103,6 +103,12 @@ fun App(
     var sessionMenuId by remember { mutableStateOf<String?>(null) }
     // Long-press server context menu (mobile): which server it's open for.
     var serverMenuServer by remember { mutableStateOf<SshServer?>(null) }
+    // Delete-server confirmation: which server is pending deletion. Both the
+    // edit-dialog "Delete server" button and the long-press context menu's
+    // "Delete" route here instead of calling deleteServer directly — losing a
+    // saved server (host, key, tailscale config) with one accidental tap had
+    // no undo.
+    var serverDeleteConfirm by remember { mutableStateOf<SshServer?>(null) }
     // Rename dialog: which session is being renamed.
     var renameSessionId by remember { mutableStateOf<String?>(null) }
     var invertColors by remember { mutableStateOf(appSettings.invertColors) }
@@ -1224,10 +1230,7 @@ fun App(
                 },
                 onPickKeyFile = onPickKeyFile,
                 onDelete = { server ->
-                    serverStorage.deleteServer(server.id)
-                    refreshServers()
-                    sessionOrchestrator.pruneServerHealth(server.id)
-                    showServerDialog = false
+                    serverDeleteConfirm = server
                 }
             )
         }
@@ -1311,11 +1314,31 @@ fun App(
                 },
                 onDelete = {
                     serverMenuServer = null
-                    serverStorage.deleteServer(srv.id)
-                    refreshServers()
-                    sessionOrchestrator.pruneServerHealth(srv.id)
+                    serverDeleteConfirm = srv
                 },
                 onDismiss = { serverMenuServer = null },
+            )
+        }
+
+        // Delete-server confirmation — shared by the edit dialog's "Delete
+        // server" button and the long-press context menu's "Delete".
+        serverDeleteConfirm?.let { srv ->
+            AlertDialog(
+                onDismissRequest = { serverDeleteConfirm = null },
+                title = { Text("Delete Server") },
+                text = { Text("Permanently delete \"${srv.name}\"? Saved connection details (host, key, Tailscale config) will be lost. This does not affect any tmux sessions already running on the server.") },
+                confirmButton = {
+                    TextButton(onClick = {
+                        serverDeleteConfirm = null
+                        showServerDialog = false
+                        serverStorage.deleteServer(srv.id)
+                        refreshServers()
+                        sessionOrchestrator.pruneServerHealth(srv.id)
+                    }) { Text("Delete") }
+                },
+                dismissButton = {
+                    TextButton(onClick = { serverDeleteConfirm = null }) { Text("Cancel") }
+                }
             )
         }
 

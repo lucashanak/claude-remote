@@ -1964,12 +1964,15 @@ else:
         ok: Boolean,
     ) {
         if (!isTailscaleEffective(server, eff)) return
-        if (ok) {
-            tailscaleCooldownUntil.remove(server.id)
-            tailscaleFailStreak.remove(server.id)
-        } else {
-            recordTailscaleFailure(server)
-        }
+        // ok=true is NOT "healthy" — clearing the streak here let every
+        // connect-then-instant-death cycle wipe the previous strike before
+        // the death could be recorded, so the 2-strike cooldown could only
+        // ever arm by the accident of two sessions dying in the same instant
+        // (observed in the field: "strike 1/2" logged seven times in a row).
+        // The streak is only cleared once a connection PROVES it survives
+        // past the early-death window — see recordConnectSuccess's delayed
+        // confirm. A connect failure still counts immediately.
+        if (!ok) recordTailscaleFailure(server)
     }
 
     /** One TS strike; two consecutive strikes arm the cooldown. Fed by both
@@ -2002,9 +2005,24 @@ else:
 
     /** Record a successful connect for early-death attribution. */
     private fun recordConnectSuccess(sessionId: String, server: com.clauderemote.model.SshServer, eff: com.clauderemote.model.SshServer) {
-        lastConnectAt[sessionId] = System.currentTimeMillis()
+        val connectEpoch = System.currentTimeMillis()
+        lastConnectAt[sessionId] = connectEpoch
         val tsEffective = isTailscaleEffective(server, eff)
         lastConnectTsEffective[sessionId] = tsEffective
+        if (tsEffective) {
+            // Clear the TS strike streak only once THIS connection proves it
+            // survives past the early-death window — not at connect time (see
+            // noteConnectResult). Superseded by a newer connect (lastConnectAt
+            // moved on) or already dead (isConnected false) ⇒ no-op; the death
+            // was already counted by maybeCountTsEarlyDeath.
+            reconnectScope.launch {
+                kotlinx.coroutines.delay(TS_EARLY_DEATH_MS)
+                if (lastConnectAt[sessionId] == connectEpoch && connections[sessionId]?.isConnected == true) {
+                    tailscaleCooldownUntil.remove(server.id)
+                    tailscaleFailStreak.remove(server.id)
+                }
+            }
+        }
         // Fire-and-forget RTT sample the instant a TS connect succeeds, BEFORE
         // the tmux-attach burst that's been killing the transport — the
         // regular 15 s latency loop never gets a turn when a session is dying
@@ -2040,9 +2058,24 @@ else:
     }
 
     private suspend fun resolveTransport(server: com.clauderemote.model.SshServer): com.clauderemote.model.SshServer {
-        // Fixed transports are deterministic — no probe, no cache.
-        if (server.transport != com.clauderemote.model.ServerTransport.AUTO) {
+        // Fixed CLOUDFLARE is deterministic — no probe, no cooldown to check.
+        if (server.transport == com.clauderemote.model.ServerTransport.CLOUDFLARE) {
             return server.forTransport(server.transport)
+        }
+        // Fixed TAILSCALE still respects the cooldown. Pinning the transport
+        // is "prefer Tailscale", not "Tailscale no matter what" — without this
+        // a bad tunnel path (DERP relay dying on bursty traffic, e.g.) looped
+        // the app on zero-backoff reconnects forever, because only AUTO's
+        // branch ever consulted tailscaleCooldownUntil. Same safety net AUTO
+        // gets: fall back to whatever the base server config represents
+        // (normally Cloudflare) for the cooldown window, then retry TS.
+        if (server.transport == com.clauderemote.model.ServerTransport.TAILSCALE) {
+            val cooling = System.currentTimeMillis() < (tailscaleCooldownUntil[server.id] ?: 0L)
+            if (cooling) {
+                FileLogger.log(TAG, "Tailscale (pinned) cooling down for ${server.name} — using Cloudflare")
+                return server.forTransport(com.clauderemote.model.ServerTransport.CLOUDFLARE)
+            }
+            return server.forTransport(com.clauderemote.model.ServerTransport.TAILSCALE)
         }
         // AUTO: one probe + one decision per server per RESOLVE_TTL_MS window,
         // shared by every session reconnecting in the same wave. The mutex
