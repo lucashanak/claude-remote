@@ -578,6 +578,9 @@ fun App(
                                     }
                             }
                         },
+                        onSwitchModelAll = { model ->
+                            sessionOrchestrator.switchModelForAllSessions(model)
+                        },
                         onAttachRemote = { remote ->
                             scope.launch {
                                 try {

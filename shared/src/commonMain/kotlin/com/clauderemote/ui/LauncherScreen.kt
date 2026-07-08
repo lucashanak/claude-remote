@@ -18,6 +18,7 @@ import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.SwapHoriz
 import androidx.compose.material3.*
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.runtime.*
@@ -29,6 +30,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.clauderemote.model.ClaudeMode
+import com.clauderemote.model.ClaudeModel
 import com.clauderemote.model.ClaudeSession
 import com.clauderemote.model.RemoteSession
 import com.clauderemote.model.ServerHealth
@@ -54,6 +56,7 @@ fun LauncherScreen(
     remoteSessionsLoading: Boolean = false,
     onRefreshRemote: (() -> Unit)? = null,
     onConnectAll: (() -> Unit)? = null,
+    onSwitchModelAll: ((ClaudeModel) -> Unit)? = null,
     onAttachRemote: ((RemoteSession) -> Unit)? = null,
     onConnectServer: (SshServer) -> Unit,
     onQuickConnect: ((SshServer) -> Unit)? = null,
@@ -98,6 +101,29 @@ fun LauncherScreen(
                                 contentDescription = "Connect all sessions",
                                 tint = c.accent,
                             )
+                        }
+                    }
+                    if (onSwitchModelAll != null) {
+                        var showModelMenu by remember { mutableStateOf(false) }
+                        Box {
+                            IconButton(onClick = { showModelMenu = true }) {
+                                Icon(
+                                    Icons.Default.SwapHoriz,
+                                    contentDescription = "Switch model for all sessions",
+                                    tint = c.textDim,
+                                )
+                            }
+                            DropdownMenu(expanded = showModelMenu, onDismissRequest = { showModelMenu = false }) {
+                                ClaudeModel.entries.filter { it != ClaudeModel.DEFAULT }.forEach { model ->
+                                    DropdownMenuItem(
+                                        text = { Text("Switch all to ${model.displayName}") },
+                                        onClick = {
+                                            showModelMenu = false
+                                            onSwitchModelAll(model)
+                                        },
+                                    )
+                                }
+                            }
                         }
                     }
                     if (onUsageDashboard != null) {

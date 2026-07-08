@@ -2784,6 +2784,10 @@ else:
         sendInput(sessionId, ClaudeConfig.modelSwitchCommand(model))
     }
 
+    fun switchModelForAllSessions(model: ClaudeModel) {
+        tabManager.tabs.value.forEach { switchModel(it.id, model) }
+    }
+
     fun sendEscape(sessionId: String) {
         sendInput(sessionId, ClaudeConfig.escapeSequence())
     }

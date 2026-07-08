@@ -8,7 +8,7 @@ import com.clauderemote.model.ClaudeModel
  *
  * Runtime mode switching:
  * - Shift+Tab (\x1b[Z) toggles between normal/plan/auto-accept modes
- * - /model opens interactive model picker
+ * - /model <alias> switches model immediately; /model alone opens interactive picker
  * - /plan [desc] enters plan mode
  * - /clear clears context
  * - /compact compacts context
@@ -186,8 +186,8 @@ object ClaudeConfig {
     /** Enter */
     const val ENTER = "\r"
 
-    // Model switch: /model opens picker, then type number or name
-    fun modelSwitchCommand(model: ClaudeModel): String = "/model\n"
+    // Model switch: `/model <alias>` selects immediately, no interactive picker
+    fun modelSwitchCommand(model: ClaudeModel): String = "/model ${model.cliValue ?: "default"}\n"
 
     fun escapeSequence(): String = ESCAPE
 
