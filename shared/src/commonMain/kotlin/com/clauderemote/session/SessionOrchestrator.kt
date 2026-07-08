@@ -980,6 +980,12 @@ class SessionOrchestrator(
                             recentLatencies.add(latency)
                             if (recentLatencies.size > 5) recentLatencies.removeAt(0)
                             val avg = recentLatencies.average().toLong()
+                            // Logged (not just published to the UI StateFlow) so
+                            // remote-shipped logs carry an RTT trail — the
+                            // signal that tells direct-LAN (~ms) apart from a
+                            // DERP relay hop (tens-hundreds of ms) without
+                            // needing tailscale CLI access on either end.
+                            FileLogger.log(TAG, "Latency for server $serverId: ${latency}ms (avg ${avg}ms)")
                             // Fan out only to sessions with a live connection —
                             // a tab mid-teardown (entry already cleared by
                             // disconnectSession, tab not yet removed) must not
@@ -1997,7 +2003,28 @@ else:
     /** Record a successful connect for early-death attribution. */
     private fun recordConnectSuccess(sessionId: String, server: com.clauderemote.model.SshServer, eff: com.clauderemote.model.SshServer) {
         lastConnectAt[sessionId] = System.currentTimeMillis()
-        lastConnectTsEffective[sessionId] = isTailscaleEffective(server, eff)
+        val tsEffective = isTailscaleEffective(server, eff)
+        lastConnectTsEffective[sessionId] = tsEffective
+        // Fire-and-forget RTT sample the instant a TS connect succeeds, BEFORE
+        // the tmux-attach burst that's been killing the transport — the
+        // regular 15 s latency loop never gets a turn when a session is dying
+        // every ~2 s. A round-trip of tens-hundreds of ms points at a DERP
+        // relay hop (e.g. double-CGNAT hole-punch failure); low single-digit
+        // ms points at a direct LAN path (rule out relay, look at MTU/offload
+        // on the gateway instead). Bounded 3 s so a hung probe can't delay the
+        // real tmux attach that follows.
+        if (tsEffective) {
+            reconnectScope.launch {
+                try {
+                    val sshSession = connections[sessionId]?.getSession() ?: return@launch
+                    val start = System.currentTimeMillis()
+                    execReadWithWatchdog(sshSession, "echo pong", totalMs = 3_000)
+                    FileLogger.log(TAG, "TS pre-attach RTT for $sessionId: ${System.currentTimeMillis() - start}ms")
+                } catch (e: Exception) {
+                    FileLogger.log(TAG, "TS pre-attach RTT probe failed for $sessionId: ${e.message}")
+                }
+            }
+        }
     }
 
     /** From onConnectionLost: count a fresh-connection death on the TS path
