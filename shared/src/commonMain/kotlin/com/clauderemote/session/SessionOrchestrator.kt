@@ -536,6 +536,8 @@ class SessionOrchestrator(
      */
     fun onNetworkLost() {
         FileLogger.log(TAG, "Network lost — tearing down ${transportPools.size} transport pool(s)")
+        // Our own teardown must not count as Tailscale early-death strikes.
+        lastNetworkTeardownAt = System.currentTimeMillis()
         transportPools.values.forEach { it.teardownAll() }
         // The AUTO decision was made on the old network — a Wi-Fi→LTE switch
         // changes Tailscale reachability, so re-probe on the next resolve.
@@ -1960,18 +1962,54 @@ else:
             tailscaleCooldownUntil.remove(server.id)
             tailscaleFailStreak.remove(server.id)
         } else {
-            // A TS failure means the cached AUTO decision is wrong — drop it so
-            // the next resolve re-decides instead of re-serving TS from cache.
-            resolvedTransportCache.remove(server.id)
-            val streak = (tailscaleFailStreak[server.id] ?: 0) + 1
-            tailscaleFailStreak[server.id] = streak
-            if (streak >= 2) {
-                tailscaleCooldownUntil[server.id] = System.currentTimeMillis() + TS_COOLDOWN_MS
-                FileLogger.log(TAG, "Tailscale failed ${streak}× for ${server.name} — using Cloudflare for ${TS_COOLDOWN_MS / 1000}s")
-            } else {
-                FileLogger.log(TAG, "Tailscale connect failed for ${server.name} (strike $streak/2)")
-            }
+            recordTailscaleFailure(server)
         }
+    }
+
+    /** One TS strike; two consecutive strikes arm the cooldown. Fed by both
+     *  CONNECT failures and post-connect EARLY DEATHS (see below). */
+    private fun recordTailscaleFailure(server: com.clauderemote.model.SshServer) {
+        // A TS failure means the cached AUTO decision is wrong — drop it so
+        // the next resolve re-decides instead of re-serving TS from cache.
+        resolvedTransportCache.remove(server.id)
+        val streak = (tailscaleFailStreak[server.id] ?: 0) + 1
+        tailscaleFailStreak[server.id] = streak
+        if (streak >= 2) {
+            tailscaleCooldownUntil[server.id] = System.currentTimeMillis() + TS_COOLDOWN_MS
+            FileLogger.log(TAG, "Tailscale failed ${streak}× for ${server.name} — using Cloudflare for ${TS_COOLDOWN_MS / 1000}s")
+        } else {
+            FileLogger.log(TAG, "Tailscale failed for ${server.name} (strike $streak/2)")
+        }
+    }
+
+    // A Tailscale transport that CONNECTS fine but dies seconds later (bad
+    // tunnel path: DERP relay choking on the tmux-redraw burst, MTU blackhole
+    // through a subnet router, …) used to loop forever: the successful connect
+    // cleared the strike streak, the instant death never counted as a failure,
+    // and AUTO re-picked TS every ~2 s. Deaths within this window of a connect
+    // now count as TS strikes so the existing 2-strike cooldown breaks the
+    // loop and falls back to Cloudflare.
+    private val TS_EARLY_DEATH_MS = 30_000L
+    private val lastConnectAt = java.util.concurrent.ConcurrentHashMap<String, Long>()
+    private val lastConnectTsEffective = java.util.concurrent.ConcurrentHashMap<String, Boolean>()
+    @Volatile private var lastNetworkTeardownAt = 0L
+
+    /** Record a successful connect for early-death attribution. */
+    private fun recordConnectSuccess(sessionId: String, server: com.clauderemote.model.SshServer, eff: com.clauderemote.model.SshServer) {
+        lastConnectAt[sessionId] = System.currentTimeMillis()
+        lastConnectTsEffective[sessionId] = isTailscaleEffective(server, eff)
+    }
+
+    /** From onConnectionLost: count a fresh-connection death on the TS path
+     *  as a TS strike — unless WE tore the transport down (network change). */
+    private fun maybeCountTsEarlyDeath(session: ClaudeSession) {
+        val at = lastConnectAt[session.id] ?: return
+        if (lastConnectTsEffective[session.id] != true) return
+        val now = System.currentTimeMillis()
+        if (now - at > TS_EARLY_DEATH_MS) return
+        if (now - lastNetworkTeardownAt < 5_000) return
+        FileLogger.log(TAG, "Tailscale transport died ${now - at}ms after connect for ${session.id}")
+        recordTailscaleFailure(session.server)
     }
 
     private suspend fun resolveTransport(server: com.clauderemote.model.SshServer): com.clauderemote.model.SshServer {
@@ -2157,6 +2195,7 @@ else:
                     sshEffective,
                     onOutput = { data -> emit(data) },
                     onConnectionLost = {
+                        maybeCountTsEarlyDeath(session)
                         // Auto-reconnect with tmux reattach
                         tabManager.updateTabStatus(session.id, SessionStatus.DISCONNECTED)
                         updateActivity(session.id, SessionActivity.DISCONNECTED)
@@ -2171,6 +2210,7 @@ else:
             throw e
         }
         noteConnectResult(session.server, sshEffective, ok = true)
+        recordConnectSuccess(session.id, session.server, sshEffective)
 
         // Wait for shell prompt (detect $ or # or >, max 3s)
         waitForShellPrompt(session.id, 3000)
@@ -2426,6 +2466,7 @@ else:
                                 reEffective,
                                 onOutput = { data -> emit(data) },
                                 onConnectionLost = {
+                                    maybeCountTsEarlyDeath(session)
                                     tabManager.updateTabStatus(session.id, SessionStatus.DISCONNECTED)
                                     reconnectScope.launch { autoReconnect(session, emit) }
                                 }
@@ -2436,6 +2477,7 @@ else:
                         throw e
                     }
                     noteConnectResult(session.server, reEffective, ok = true)
+                    recordConnectSuccess(session.id, session.server, reEffective)
 
                     // Wait for shell prompt, clear garbage, then attach tmux
                     waitForShellPrompt(session.id, 3000)
@@ -2958,6 +3000,8 @@ else:
         promptDetector.removeSession(sessionId)
         pendingInputs.remove(sessionId)
         terminalSizes.remove(sessionId)
+        lastConnectAt.remove(sessionId)
+        lastConnectTsEffective.remove(sessionId)
         confirmedUuids.remove(sessionId)
         _sessionActivities.update { it - sessionId }
         _connectionLabels.update { it - sessionId }
