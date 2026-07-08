@@ -203,7 +203,6 @@ fun TerminalScreen(
     // State — preserved from original
     var showControlBar by remember { mutableStateOf(true) }
     var compactMode by remember { mutableStateOf(false) }
-    var showCommandPicker by remember { mutableStateOf(false) }
     var currentFontSize by remember { mutableStateOf(14) }
     var showRenameDialog by remember { mutableStateOf(false) }
     var renameText by remember { mutableStateOf("") }
@@ -225,7 +224,6 @@ fun TerminalScreen(
     }
     var showClaudeMd by remember { mutableStateOf(false) }
     var claudeMdContent by remember { mutableStateOf("") }
-    var commandFilter by remember { mutableStateOf("") }
     var commands by remember { mutableStateOf(CommandFetcher.getCachedOrFallback()) }
     val activeSession = tabs.find { it.id == activeTabId }
     val scope = rememberCoroutineScope()
@@ -690,35 +688,6 @@ fun TerminalScreen(
                     )
                 }
 
-                if (showCommandPicker) {
-                    AlertDialog(
-                        onDismissRequest = {
-                            showCommandPicker = false
-                            commandFilter = ""
-                            try { inputFocusRequester.requestFocus() } catch (_: Exception) {}
-                        },
-                        containerColor = c.surface,
-                        confirmButton = {},
-                        text = {
-                            CommandPicker(
-                                commands = commands,
-                                filter = commandFilter,
-                                onFilterChange = { commandFilter = it },
-                                onSelect = { cmd ->
-                                    showCommandPicker = false
-                                    commandFilter = ""
-                                    onSendCommand(cmd.command + "\r")
-                                },
-                                onDismiss = {
-                                    showCommandPicker = false
-                                    commandFilter = ""
-                                    try { inputFocusRequester.requestFocus() } catch (_: Exception) {}
-                                }
-                            )
-                        }
-                    )
-                }
-
                 // Command palette
                 if (showPalette) {
                     val paletteActions = remember(tabs, activeTabId, commands) {
@@ -1170,9 +1139,14 @@ fun TerminalScreen(
                             onPageUp = onPageUp,
                             onPageDown = onPageDown,
                             onSwitchModel = onSwitchModel,
+                            // "/cmd" used to open a narrower slash-command-only
+                            // picker (CommandPicker) — a strict subset of the
+                            // fuzzy CommandPaletteDialog the "/" special key
+                            // already opens (slash commands PLUS tab/model/
+                            // navigation actions). Route both to the one
+                            // command surface instead of maintaining two.
                             onOpenCommands = {
-                                showCommandPicker = true
-                                commandFilter = ""
+                                showPalette = true
                                 if (onFetchCommands != null) {
                                     scope.launch { commands = onFetchCommands.invoke() }
                                 }
@@ -2611,95 +2585,6 @@ private fun PromptInputBar(
                             modifier = Modifier.height(24.dp)
                         )
                     }
-                }
-            }
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// COMMAND PICKER (logic preserved)
-// ---------------------------------------------------------------------------
-
-@Composable
-private fun CommandPicker(
-    commands: List<SlashCommand>,
-    filter: String,
-    onFilterChange: (String) -> Unit,
-    onSelect: (SlashCommand) -> Unit,
-    onDismiss: () -> Unit
-) {
-    val c = CRTheme.colors
-    val filtered = if (filter.isBlank()) commands
-    else commands.filter {
-        it.command.contains(filter, ignoreCase = true) ||
-        it.description.contains(filter, ignoreCase = true)
-    }
-    var selectedIndex by remember { mutableStateOf(0) }
-    LaunchedEffect(filter) { selectedIndex = 0 }
-
-    Surface(
-        modifier = Modifier.fillMaxWidth().fillMaxHeight(0.6f).padding(8.dp),
-        shape = MaterialTheme.shapes.medium,
-        color = c.surface,
-        tonalElevation = 8.dp,
-        shadowElevation = 8.dp
-    ) {
-        Column(modifier = Modifier.fillMaxSize()) {
-            val filterFocus = remember { FocusRequester() }
-            LaunchedEffect(Unit) { filterFocus.requestFocus() }
-            Row(
-                modifier = Modifier.fillMaxWidth().padding(8.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                OutlinedTextField(
-                    value = filter,
-                    onValueChange = onFilterChange,
-                    placeholder = { Text("Filter commands...", color = c.textDim) },
-                    modifier = Modifier.weight(1f)
-                        .focusRequester(filterFocus)
-                        .onPreviewKeyEvent { event ->
-                            if (event.type == KeyEventType.KeyDown) {
-                                when (event.key) {
-                                    Key.DirectionDown -> { selectedIndex = (selectedIndex + 1).coerceAtMost(filtered.size - 1); true }
-                                    Key.DirectionUp   -> { selectedIndex = (selectedIndex - 1).coerceAtLeast(0); true }
-                                    Key.Enter -> {
-                                        if (filtered.isNotEmpty() && selectedIndex in filtered.indices) onSelect(filtered[selectedIndex])
-                                        true
-                                    }
-                                    Key.Escape -> { onDismiss(); true }
-                                    else -> false
-                                }
-                            } else false
-                        },
-                    singleLine = true,
-                    textStyle = CRType.bodyDim.copy(color = c.text)
-                )
-                Spacer(Modifier.width(8.dp))
-                IconButton(onClick = onDismiss) { Icon(Icons.Default.Close, "Close", tint = c.textDim) }
-            }
-
-            val listState = rememberLazyListState()
-            LaunchedEffect(selectedIndex) {
-                if (selectedIndex in filtered.indices) listState.animateScrollToItem(selectedIndex)
-            }
-
-            LazyColumn(modifier = Modifier.fillMaxSize(), state = listState) {
-                itemsIndexed(filtered) { index, cmd ->
-                    val isSelected = index == selectedIndex
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .background(if (isSelected) c.tintAccent else Color.Transparent)
-                            .clickable { onSelect(cmd) }
-                            .padding(horizontal = 16.dp, vertical = 10.dp),
-                        horizontalArrangement = Arrangement.SpaceBetween
-                    ) {
-                        Text(cmd.command, style = CRType.mono,
-                            color = if (isSelected) c.accent else c.accent.copy(alpha = 0.85f))
-                        Text(cmd.description, style = CRType.bodyDim, color = c.textDim)
-                    }
-                    HorizontalDivider(color = c.border)
                 }
             }
         }
