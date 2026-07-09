@@ -57,4 +57,8 @@ dependencies {
     implementation("androidx.core:core-ktx:1.15.0")
     implementation("androidx.wear.compose:compose-material3:1.6.2")
     implementation("androidx.wear.compose:compose-foundation:1.6.2")
+    // Wearable Data Layer — talks to the phone app (androidApp's
+    // PhoneWearService). Version pinned against Google's Maven metadata
+    // directly (dl.google.com/.../maven-metadata.xml — ground truth).
+    implementation("com.google.android.gms:play-services-wearable:20.0.1")
 }

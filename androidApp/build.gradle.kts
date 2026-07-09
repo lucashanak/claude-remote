@@ -64,4 +64,8 @@ dependencies {
     implementation("androidx.fragment:fragment-ktx:1.8.5")
     implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.7.3")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")
+    // Wearable Data Layer — talks to the wearApp companion (session sync,
+    // reply/approve messages). Version pinned against Google's Maven
+    // metadata directly (ground truth), see wearApp/build.gradle.kts.
+    implementation("com.google.android.gms:play-services-wearable:20.0.1")
 }
