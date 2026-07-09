@@ -114,6 +114,7 @@ fun TerminalScreen(
     onMenuOpen: () -> Unit,
     onSendCommand: (String) -> Unit,
     onSwitchModel: (ClaudeModel) -> Unit,
+    onSwitchEffort: ((com.clauderemote.model.ClaudeEffort) -> Unit)? = null,
     onSendEscape: () -> Unit,
     onPageUp: () -> Unit = {},
     onPageDown: () -> Unit = {},
@@ -1139,6 +1140,7 @@ fun TerminalScreen(
                             onPageUp = onPageUp,
                             onPageDown = onPageDown,
                             onSwitchModel = onSwitchModel,
+                            onSwitchEffort = onSwitchEffort,
                             // "/cmd" used to open a narrower slash-command-only
                             // picker (CommandPicker) — a strict subset of the
                             // fuzzy CommandPaletteDialog the "/" special key
@@ -1619,11 +1621,13 @@ private fun CRControlBar(
     onPageUp: () -> Unit = {},
     onPageDown: () -> Unit = {},
     onSwitchModel: (ClaudeModel) -> Unit,
+    onSwitchEffort: ((com.clauderemote.model.ClaudeEffort) -> Unit)? = null,
     onOpenCommands: () -> Unit,
 ) {
     val c = CRTheme.colors
 
     var showModePop by remember { mutableStateOf(false) }
+    var showEffortPop by remember { mutableStateOf(false) }
     var showModelPop by remember { mutableStateOf(false) }
 
     Box(modifier = Modifier.fillMaxWidth()) {
@@ -1713,6 +1717,44 @@ private fun CRControlBar(
             }
         }
 
+        // Effort popup. No "active" highlight — unlike mode/model, effort
+        // isn't tracked on ClaudeSession (Claude doesn't echo it back in any
+        // form this app parses), so there's nothing to compare against.
+        if (showEffortPop && onSwitchEffort != null) {
+            Surface(
+                modifier = Modifier
+                    .align(Alignment.BottomStart)
+                    .fillMaxWidth()
+                    .padding(horizontal = 12.dp, vertical = 4.dp),
+                color = c.surface,
+                shape = RoundedCornerShape(12.dp),
+                tonalElevation = 8.dp,
+            ) {
+                Column(modifier = Modifier.padding(8.dp)) {
+                    Text("EFFORT", style = CRType.sectionH, color = c.textDim,
+                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp))
+                    com.clauderemote.model.ClaudeEffort.entries.forEach { effort ->
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable(
+                                    interactionSource = remember { MutableInteractionSource() },
+                                    indication = null,
+                                ) {
+                                    showEffortPop = false
+                                    onSwitchEffort(effort)
+                                }
+                                .padding(horizontal = 10.dp, vertical = 8.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Text(effort.displayName, style = CRType.bodyDim, color = c.text,
+                                modifier = Modifier.weight(1f))
+                        }
+                    }
+                }
+            }
+        }
+
         // Actual bar
         Row(
             modifier = Modifier
@@ -1738,7 +1780,7 @@ private fun CRControlBar(
                 ClaudeMode.NORMAL -> "NORM"
             }
             Surface(
-                onClick = { showModePop = !showModePop; showModelPop = false },
+                onClick = { showModePop = !showModePop; showModelPop = false; showEffortPop = false },
                 color = modeColor.copy(alpha = 0.12f),
                 shape = RoundedCornerShape(6.dp),
             ) {
@@ -1754,7 +1796,7 @@ private fun CRControlBar(
 
             // Model chip
             Surface(
-                onClick = { showModelPop = !showModelPop; showModePop = false },
+                onClick = { showModelPop = !showModelPop; showModePop = false; showEffortPop = false },
                 color = c.tintAccent,
                 shape = RoundedCornerShape(6.dp),
             ) {
@@ -1765,6 +1807,24 @@ private fun CRControlBar(
                 ) {
                     Text("model", style = CRType.monoTiny, color = c.textDim)
                     Text(session.model.displayName.uppercase(), style = CRType.pill, color = c.accent)
+                }
+            }
+
+            // Effort chip — no per-session "current" state to show (see the
+            // popup's kdoc), just a launcher for the picker.
+            if (onSwitchEffort != null) {
+                Surface(
+                    onClick = { showEffortPop = !showEffortPop; showModePop = false; showModelPop = false },
+                    color = c.surface2,
+                    shape = RoundedCornerShape(6.dp),
+                ) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(4.dp),
+                    ) {
+                        Text("effort", style = CRType.monoTiny, color = c.textDim)
+                    }
                 }
             }
 
