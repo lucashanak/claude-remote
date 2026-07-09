@@ -63,4 +63,9 @@ dependencies {
     // directly (dl.google.com/.../maven-metadata.xml — ground truth).
     implementation("com.google.android.gms:play-services-wearable:20.0.1")
     implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.7.3")
+    // RemoteInputIntentHelper — launches the watch's native voice/keyboard
+    // input screen for the reply flow (mirrors the phone's own
+    // ActivityResultContracts.StartActivityForResult + RecognizerIntent
+    // pattern used elsewhere for dictation).
+    implementation("androidx.wear:wear-input:1.2.0")
 }
