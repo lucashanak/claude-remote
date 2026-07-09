@@ -202,6 +202,17 @@ jobs:
           name: android-apk
           path: ClaudeRemote.apk
 
+      - name: Build Wear OS companion APK (debug — sideload via adb, not distributed through this signing pipeline)
+        run: |
+          ./gradlew :wearApp:assembleDebug
+          cp wearApp/build/outputs/apk/debug/wearApp-debug.apk ClaudeRemoteWear-debug.apk
+
+      - name: Upload Wear APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: wear-apk
+          path: ClaudeRemoteWear-debug.apk
+
       - name: Upload patch artifact
         if: steps.patch.outputs.patch_files != ''
         uses: actions/upload-artifact@v4
@@ -369,6 +380,11 @@ jobs:
         with:
           name: android-patch
 
+      - name: Download Wear APK
+        uses: actions/download-artifact@v4
+        with:
+          name: wear-apk
+
       - name: Download DMG
         uses: actions/download-artifact@v4
         with:
@@ -403,7 +419,7 @@ jobs:
             case "$f" in *-debug-*) continue;; esac   # never ship the debug-symbols split
             [ -f "$f" ] && PKG="$f"
           done
-          ASSETS="ClaudeRemote.apk ClaudeRemote-macOS.dmg claude-remote-linux-x64.tar.gz claude-remote-linux.deb $PKG$PATCHES"
+          ASSETS="ClaudeRemote.apk ClaudeRemoteWear-debug.apk ClaudeRemote-macOS.dmg claude-remote-linux-x64.tar.gz claude-remote-linux.deb $PKG$PATCHES"
 
           if gh release view "$TAG" --repo "${{ github.repository }}" &>/dev/null; then
             echo "Release $TAG exists, uploading assets..."
