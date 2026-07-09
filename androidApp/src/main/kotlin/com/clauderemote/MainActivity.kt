@@ -167,6 +167,8 @@ class MainActivity : FragmentActivity() {
         // Expose to non-Compose entry points (notification RemoteInput reply,
         // future Wear data layer).
         OrchestratorHolder.orchestrator = sessionOrchestrator
+        // Keep the Wear companion app's session list in sync (Data Layer).
+        WearSync.start(applicationContext, tabManager, sessionOrchestrator)
         com.clauderemote.connection.MoshManager.init(this)
         val sshKeyManager = com.clauderemote.connection.SshKeyManager(prefs)
 
@@ -222,6 +224,9 @@ class MainActivity : FragmentActivity() {
                     ?.takeIf { it.isNotBlank() }
                     ?: hint
                 AlertNotifier.post(applicationContext, sessionId, title, body)
+                // Push the freshest message to the watch now — don't wait for
+                // WearSync's periodic debounced collector.
+                WearSync.pushNow()
             }
         }
 
