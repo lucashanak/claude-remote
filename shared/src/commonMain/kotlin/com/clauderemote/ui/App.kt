@@ -177,7 +177,11 @@ fun App(
                 paneSessions = current
             }
         }
-        sessionOrchestrator.switchTab(id)
+        // Re-selecting the already-active tab is a no-op for pane bookkeeping,
+        // but switchTab() itself is not free — it forces a transcript
+        // re-subscribe and a 2 KB tail replay. onFocusPane already guards this;
+        // match that here so switching to what's already active doesn't churn.
+        if (id != activeTabId) sessionOrchestrator.switchTab(id)
     }
 
     // FIX 2: Per-pane transcript collection keyed on BOTH sid AND claudeSessionId
