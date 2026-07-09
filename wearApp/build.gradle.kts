@@ -1,6 +1,7 @@
 plugins {
     id("com.android.application")
     kotlin("android")
+    kotlin("plugin.serialization")
     id("org.jetbrains.kotlin.plugin.compose")
 }
 
@@ -61,4 +62,5 @@ dependencies {
     // PhoneWearService). Version pinned against Google's Maven metadata
     // directly (dl.google.com/.../maven-metadata.xml — ground truth).
     implementation("com.google.android.gms:play-services-wearable:20.0.1")
+    implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.7.3")
 }
