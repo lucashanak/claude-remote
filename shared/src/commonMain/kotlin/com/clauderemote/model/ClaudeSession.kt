@@ -46,12 +46,20 @@ data class ClaudeSession(
     val durationText: String get() = formatElapsedCompact((System.currentTimeMillis() - connectedAt) / 1000)
 }
 
-fun formatElapsedCompact(elapsedSeconds: Long): String = when {
-    elapsedSeconds < 60 -> "${elapsedSeconds}s"
-    elapsedSeconds < 3600 -> "${elapsedSeconds / 60}m"
-    elapsedSeconds < 86400 -> "${elapsedSeconds / 3600}h${(elapsedSeconds % 3600) / 60}m"
-    elapsedSeconds < 7 * 86400 -> "${elapsedSeconds / 86400}d${(elapsedSeconds % 86400) / 3600}h"
-    else -> "${elapsedSeconds / (7 * 86400)}w"
+/**
+ * Clamped to >= 0: RemoteSession.durationText derives elapsed time from the
+ * SERVER's clock (tmux `session_created`), which can read slightly ahead of
+ * the phone's — an un-clamped negative would render a nonsense "-3s" chip.
+ */
+fun formatElapsedCompact(elapsedSeconds: Long): String {
+    val s = elapsedSeconds.coerceAtLeast(0)
+    return when {
+        s < 60 -> "${s}s"
+        s < 3600 -> "${s / 60}m"
+        s < 86400 -> "${s / 3600}h${(s % 3600) / 60}m"
+        s < 7 * 86400 -> "${s / 86400}d${(s % 86400) / 3600}h"
+        else -> "${s / (7 * 86400)}w"
+    }
 }
 
 data class TmuxSession(

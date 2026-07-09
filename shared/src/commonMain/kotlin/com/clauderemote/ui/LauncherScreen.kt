@@ -474,7 +474,7 @@ private fun SessionLauncherCard(
         folderBasename = folderBasename,
         alias = sessionAlias,
         pill = { ModePillSmall(mode = session.mode) },
-        statusDot = { StatusIndicator(status = session.status.toCRStatus()) },
+        statusDot = { mod -> StatusIndicator(status = session.status.toCRStatus(), modifier = mod) },
         trailingTime = session.durationText,
         onClick = onClick,
         onLongPress = onLongPress,
@@ -517,7 +517,7 @@ private fun SessionRow(
     folderBasename: String,
     alias: String?,
     pill: (@Composable () -> Unit)?,
-    statusDot: @Composable () -> Unit,
+    statusDot: @Composable (Modifier) -> Unit,
     trailingTime: String,
     onClick: () -> Unit,
     onLongPress: (() -> Unit)? = null,
@@ -535,7 +535,10 @@ private fun SessionRow(
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
             ) {
-                statusDot()
+                // Dense row is one line — always clamp the dot to 8dp regardless
+                // of statusViz (Pill viz would otherwise render full-width and
+                // blow out the row).
+                statusDot(Modifier.size(8.dp))
                 Text(
                     if (alias != null) "$folderBasename · $alias" else folderBasename,
                     style = CRType.cardTitle,
@@ -595,7 +598,7 @@ private fun SessionRow(
                 }
 
                 Column(horizontalAlignment = Alignment.End) {
-                    statusDot()
+                    statusDot(Modifier)
                     Spacer(Modifier.height(4.dp))
                     Text(
                         trailingTime,
@@ -854,9 +857,10 @@ private fun RemoteSessionCard(remote: RemoteSession, onClick: () -> Unit) {
         folderBasename = parsed.folder,
         alias = alias,
         pill = if (parsed.isYolo) { { YoloPillSmall() } } else null,
-        statusDot = {
+        statusDot = { mod ->
             StatusIndicator(
                 status = if (remote.tmuxSession.attached) CRStatus.Ready else CRStatus.Idle,
+                modifier = mod,
             )
         },
         trailingTime = remote.durationText,
