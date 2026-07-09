@@ -187,11 +187,14 @@ object ClaudeConfig {
     /** Enter */
     const val ENTER = "\r"
 
-    // Model switch: `/model <alias>` selects immediately, no interactive picker
-    fun modelSwitchCommand(model: ClaudeModel): String = "/model ${model.cliValue ?: "default"}\n"
+    // Model switch: `/model <alias>` selects immediately, no interactive picker.
+    // No trailing newline — the caller (sendSlashCommand) types this char-by-
+    // char and sends \r itself; a whole "text+\n" burst gets pasted as
+    // literal text by Claude's TUI instead of executed.
+    fun modelSwitchCommand(model: ClaudeModel): String = "/model ${model.cliValue ?: "default"}"
 
-    // Effort switch: `/effort <level>` selects immediately, no interactive picker
-    fun effortSwitchCommand(effort: ClaudeEffort): String = "/effort ${effort.cliValue}\n"
+    // Effort switch: `/effort <level>` selects immediately, no interactive picker.
+    fun effortSwitchCommand(effort: ClaudeEffort): String = "/effort ${effort.cliValue}"
 
     fun escapeSequence(): String = ESCAPE
 

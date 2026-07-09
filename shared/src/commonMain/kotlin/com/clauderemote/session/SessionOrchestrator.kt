@@ -2781,7 +2781,7 @@ else:
     }
 
     fun switchModel(sessionId: String, model: ClaudeModel) {
-        sendInput(sessionId, ClaudeConfig.modelSwitchCommand(model))
+        reconnectScope.launch { sendSlashCommand(sessionId, ClaudeConfig.modelSwitchCommand(model)) }
     }
 
     fun switchModelForAllSessions(model: ClaudeModel) {
@@ -2789,11 +2789,29 @@ else:
     }
 
     fun switchEffort(sessionId: String, effort: ClaudeEffort) {
-        sendInput(sessionId, ClaudeConfig.effortSwitchCommand(effort))
+        reconnectScope.launch { sendSlashCommand(sessionId, ClaudeConfig.effortSwitchCommand(effort)) }
     }
 
     fun switchEffortForAllSessions(effort: ClaudeEffort) {
         tabManager.tabs.value.forEach { switchEffort(it.id, effort) }
+    }
+
+    /**
+     * Type [command] as discrete keystrokes with small gaps, then Enter
+     * after a longer pause — mirrors the chat input's slash-command send
+     * path (TerminalScreen's PromptInputBar/ExpandedInput). Sending a slash
+     * command as one burst (whole string + \n in a single write) is detected
+     * by Claude's TUI as a paste: it lands as literal text in the prompt
+     * ("//model opus") instead of driving the interactive picker, so nothing
+     * actually switches. switchModel/switchEffort used to do exactly that.
+     */
+    private suspend fun sendSlashCommand(sessionId: String, command: String) {
+        for (ch in command) {
+            sendInput(sessionId, ch.toString())
+            kotlinx.coroutines.delay(15)
+        }
+        kotlinx.coroutines.delay(60)
+        sendInput(sessionId, "\r")
     }
 
     fun sendEscape(sessionId: String) {

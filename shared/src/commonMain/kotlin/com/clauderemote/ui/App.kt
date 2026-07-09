@@ -945,6 +945,9 @@ fun App(
                         onSwitchModel = { model ->
                             activeTabId?.let { sessionOrchestrator.switchModel(it, model) }
                         },
+                        onSwitchEffort = { effort ->
+                            activeTabId?.let { sessionOrchestrator.switchEffort(it, effort) }
+                        },
                         onFetchClaudeMd = {
                             val id = activeTabId
                             if (id != null) {
