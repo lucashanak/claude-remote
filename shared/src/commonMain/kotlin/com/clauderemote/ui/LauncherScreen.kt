@@ -40,8 +40,10 @@ import com.clauderemote.model.SessionActivity
 import com.clauderemote.model.SessionStatus
 import com.clauderemote.model.SshServer
 import com.clauderemote.model.TmuxNameParser
+import com.clauderemote.model.durationText
 import com.clauderemote.ui.components.ActivityHeatmap
 import com.clauderemote.ui.components.CRCard
+import com.clauderemote.ui.components.CRStatus
 import com.clauderemote.ui.components.Pill
 import com.clauderemote.ui.components.ServerGlyph
 import com.clauderemote.ui.components.StatusIndicator
@@ -467,6 +469,63 @@ private fun SessionLauncherCard(
     val folderBasename = session.folder.trimEnd('/').substringAfterLast('/').ifBlank { session.folder }
     val sessionAlias = session.alias.ifBlank { null }
 
+    SessionRow(
+        serverName = session.server.name,
+        folderBasename = folderBasename,
+        alias = sessionAlias,
+        pill = { ModePillSmall(mode = session.mode) },
+        statusDot = { mod -> StatusIndicator(status = session.status.toCRStatus(), modifier = mod) },
+        trailingTime = session.durationText,
+        onClick = onClick,
+        onLongPress = onLongPress,
+        extraContent = if (m.showPreviewLine || m.showHeatmap) {
+            {
+                if (m.showPreviewLine) {
+                    Spacer(Modifier.height(8.dp))
+                    Text(
+                        "› ${session.folder}",
+                        style = CRType.mono,
+                        color = c.textDim,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+
+                if (m.showHeatmap) {
+                    Spacer(Modifier.height(8.dp))
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        ActivityHeatmap(
+                            values = session.history,
+                            modifier = Modifier.weight(1f).height(14.dp),
+                            color = c.accent,
+                        )
+                    }
+                }
+            }
+        } else null,
+    )
+}
+
+// ── Shared session row (active + remote sessions render identically) ─────────
+
+@Composable
+@OptIn(ExperimentalFoundationApi::class)
+private fun SessionRow(
+    serverName: String,
+    folderBasename: String,
+    alias: String?,
+    pill: (@Composable () -> Unit)?,
+    statusDot: @Composable (Modifier) -> Unit,
+    trailingTime: String,
+    onClick: () -> Unit,
+    onLongPress: (() -> Unit)? = null,
+    extraContent: (@Composable () -> Unit)? = null,
+) {
+    val c = CRTheme.colors
+    val m = CRTheme.metrics
+
     CRCard(
         modifier = Modifier.combinedClickable(onClick = onClick, onLongClick = onLongPress),
     ) {
@@ -476,12 +535,12 @@ private fun SessionLauncherCard(
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
             ) {
-                StatusIndicator(
-                    status = session.status.toCRStatus(),
-                    modifier = Modifier.size(8.dp),
-                )
+                // Dense row is one line — always clamp the dot to 8dp regardless
+                // of statusViz (Pill viz would otherwise render full-width and
+                // blow out the row).
+                statusDot(Modifier.size(8.dp))
                 Text(
-                    if (sessionAlias != null) "$folderBasename · $sessionAlias" else folderBasename,
+                    if (alias != null) "$folderBasename · $alias" else folderBasename,
                     style = CRType.cardTitle,
                     color = c.text,
                     maxLines = 1,
@@ -489,15 +548,15 @@ private fun SessionLauncherCard(
                     modifier = Modifier.weight(1f),
                 )
                 Text(
-                    session.server.name,
+                    serverName,
                     style = CRType.monoTiny,
                     color = c.textDim,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                 )
-                ModePillSmall(mode = session.mode)
+                pill?.invoke()
                 Text(
-                    session.durationText,
+                    trailingTime,
                     style = CRType.monoTiny,
                     color = c.textDim,
                 )
@@ -508,7 +567,7 @@ private fun SessionLauncherCard(
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(12.dp),
             ) {
-                ServerGlyph(name = session.server.name, modifier = Modifier.size(36.dp))
+                ServerGlyph(name = serverName, modifier = Modifier.size(36.dp))
 
                 Column(modifier = Modifier.weight(1f)) {
                     Row(
@@ -523,13 +582,13 @@ private fun SessionLauncherCard(
                             overflow = TextOverflow.Ellipsis,
                             modifier = Modifier.weight(1f, fill = false),
                         )
-                        ModePillSmall(mode = session.mode)
+                        pill?.invoke()
                     }
                     Spacer(Modifier.height(2.dp))
                     Text(
                         buildString {
-                            append(session.server.name)
-                            if (sessionAlias != null) { append(" · "); append(sessionAlias) }
+                            append(serverName)
+                            if (alias != null) { append(" · "); append(alias) }
                         },
                         style = CRType.mono,
                         color = c.textDim,
@@ -539,39 +598,17 @@ private fun SessionLauncherCard(
                 }
 
                 Column(horizontalAlignment = Alignment.End) {
-                    StatusIndicator(status = session.status.toCRStatus())
+                    statusDot(Modifier)
                     Spacer(Modifier.height(4.dp))
                     Text(
-                        session.durationText,
+                        trailingTime,
                         style = CRType.monoTiny,
                         color = c.textDim,
                     )
                 }
             }
 
-            if (m.showPreviewLine) {
-                Spacer(Modifier.height(8.dp))
-                Text(
-                    "› ${session.folder}",
-                    style = CRType.mono,
-                    color = c.textDim,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                )
-            }
-
-            if (m.showHeatmap) {
-                Spacer(Modifier.height(8.dp))
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    ActivityHeatmap(
-                        values = session.history,
-                        modifier = Modifier.weight(1f).height(14.dp),
-                        color = c.accent,
-                    )
-                }
-            }
+            extraContent?.invoke()
         }
     }
 }
@@ -589,6 +626,12 @@ private fun ModePillSmall(mode: ClaudeMode) {
         ClaudeMode.NORMAL      -> Triple(c.surface2,   c.modeNormal, "NORM")
     }
     Pill(text = label, background = bg, foreground = fg)
+}
+
+@Composable
+private fun YoloPillSmall() {
+    val c = CRTheme.colors
+    Pill(text = "YOLO", background = c.tintRed, foreground = c.modeYolo)
 }
 
 // ── Server launcher card ──────────────────────────────────────────────────────
@@ -806,34 +849,23 @@ private fun ServerHealthDot(health: ServerHealth) {
 
 @Composable
 private fun RemoteSessionCard(remote: RemoteSession, onClick: () -> Unit) {
-    val c = CRTheme.colors
-    CRCard(modifier = Modifier.clickable(onClick = onClick)) {
-        Row(
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(12.dp),
-        ) {
-            val attachedColor = if (remote.tmuxSession.attached) c.ready else c.textDim
-            Box(
-                Modifier
-                    .size(10.dp)
-                    .clip(RoundedCornerShape(999.dp))
-                    .background(attachedColor),
+    val parsed = TmuxNameParser.parse(remote.tmuxSession.name, remote.server.name)
+    val alias = parsed.alias.ifBlank { null }
+
+    SessionRow(
+        serverName = remote.server.name,
+        folderBasename = parsed.folder,
+        alias = alias,
+        pill = if (parsed.isYolo) { { YoloPillSmall() } } else null,
+        statusDot = { mod ->
+            StatusIndicator(
+                status = if (remote.tmuxSession.attached) CRStatus.Ready else CRStatus.Idle,
+                modifier = mod,
             )
-            Column(modifier = Modifier.weight(1f)) {
-                Text(remote.tmuxSession.name, style = CRType.cardTitle, color = c.text)
-                Spacer(Modifier.height(2.dp))
-                Text(
-                    "${remote.server.name} • ${remote.tmuxSession.windows}w" +
-                        if (remote.tmuxSession.attached) " • attached" else "",
-                    style = CRType.bodyDim,
-                    color = c.textDim,
-                )
-            }
-            if (remote.tmuxSession.attached) {
-                Pill(text = "attached", background = c.tintGreen, foreground = c.ready)
-            }
-        }
-    }
+        },
+        trailingTime = remote.durationText,
+        onClick = onClick,
+    )
 }
 
 // ── SessionStatus → CRStatus mapping ─────────────────────────────────────────

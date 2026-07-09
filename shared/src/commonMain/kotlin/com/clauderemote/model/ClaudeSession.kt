@@ -43,13 +43,22 @@ data class ClaudeSession(
         return folder.trimEnd('/').substringAfterLast('/').ifBlank { folder }
     }
 
-    val durationText: String get() {
-        val elapsed = (System.currentTimeMillis() - connectedAt) / 1000
-        return when {
-            elapsed < 60 -> "${elapsed}s"
-            elapsed < 3600 -> "${elapsed / 60}m"
-            else -> "${elapsed / 3600}h${(elapsed % 3600) / 60}m"
-        }
+    val durationText: String get() = formatElapsedCompact((System.currentTimeMillis() - connectedAt) / 1000)
+}
+
+/**
+ * Clamped to >= 0: RemoteSession.durationText derives elapsed time from the
+ * SERVER's clock (tmux `session_created`), which can read slightly ahead of
+ * the phone's — an un-clamped negative would render a nonsense "-3s" chip.
+ */
+fun formatElapsedCompact(elapsedSeconds: Long): String {
+    val s = elapsedSeconds.coerceAtLeast(0)
+    return when {
+        s < 60 -> "${s}s"
+        s < 3600 -> "${s / 60}m"
+        s < 86400 -> "${s / 3600}h${(s % 3600) / 60}m"
+        s < 7 * 86400 -> "${s / 86400}d${(s % 86400) / 3600}h"
+        else -> "${s / (7 * 86400)}w"
     }
 }
 
@@ -67,6 +76,12 @@ data class RemoteSession(
     val server: SshServer,
     val tmuxSession: TmuxSession
 )
+
+val RemoteSession.durationText: String get() {
+    val created = tmuxSession.created.toLongOrNull() ?: return ""
+    val elapsed = System.currentTimeMillis() / 1000 - created
+    return formatElapsedCompact(elapsed)
+}
 
 /**
  * Tmux session name convention: claude-{server}-{folder}[-yolo][--{alias}]
