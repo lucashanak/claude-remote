@@ -155,6 +155,30 @@ fun App(
             focusedPaneIndex = 0
         }
     }
+    // FIX 6: every path that switches the active session (CrumbBar prev/next,
+    // the session drawer/list, resuming from the launcher/history) must keep
+    // the grid's own bookkeeping (paneSessions/focusedPaneIndex) in step with
+    // activeTabId — mirrors onFocusPane/onAssignPane below. In single-pane
+    // mode the whole screen already renders straight off activeTabId, so this
+    // is a no-op there; in TWO/QUAD the focused *cell* (and its label) is
+    // driven by paneSessions[focusedPaneIndex], which sessionOrchestrator
+    // .switchTab() alone never touches — without this, switching sessions via
+    // anything other than a direct pane tap silently desyncs which cell is
+    // highlighted/labeled from what's actually shown underneath, or switches
+    // to a session that isn't placed in any visible pane at all.
+    fun switchActiveSession(id: String) {
+        if (gridLayout != GridLayout.ONE) {
+            val idx = paneSessions.indexOf(id)
+            if (idx >= 0) {
+                focusedPaneIndex = idx
+            } else {
+                val current = paneSessions.toMutableList()
+                if (focusedPaneIndex in current.indices) current[focusedPaneIndex] = id
+                paneSessions = current
+            }
+        }
+        sessionOrchestrator.switchTab(id)
+    }
 
     // FIX 2: Per-pane transcript collection keyed on BOTH sid AND claudeSessionId
     // so UUID rotation (/clear, /compact, /resume, first null→real reconcile)
@@ -673,7 +697,7 @@ fun App(
                             refreshServers()
                         },
                         onResumeSession = { session ->
-                            sessionOrchestrator.switchTab(session.id)
+                            switchActiveSession(session.id)
                             currentScreen = Screen.TERMINAL
                         },
                         onSessionLongPress = { session -> sessionMenuId = session.id },
@@ -803,7 +827,12 @@ fun App(
                             appSettings.invertColors = next
                             onInvertColorsChanged?.invoke(next)
                         },
-                        onTabSwitch = { sessionOrchestrator.switchTab(it) },
+                        // Every session-switch entry point OUTSIDE the pane grid
+                        // (CrumbBar prev/next, SessionDrawer pick, Command Palette
+                        // "Switch to") funnels through this one lambda — routed
+                        // through switchActiveSession so it stays in step with the
+                        // grid the same way tapping a pane does.
+                        onTabSwitch = { id -> switchActiveSession(id) },
                         onRenameSession = { id, newAlias ->
                             tabManager.updateAlias(id, newAlias)
                             // Also rename tmux session on server for cross-device sync
@@ -1207,7 +1236,7 @@ fun App(
                             // Switch to the already-open tab (uuid matched).
                             val tab = tabs.firstOrNull { it.claudeSessionId == hist.uuid }
                             if (tab != null) {
-                                sessionOrchestrator.switchTab(tab.id)
+                                switchActiveSession(tab.id)
                                 currentScreen = Screen.TERMINAL
                             }
                             // No remote-tmux fallback here: if uuid is in liveUuids
