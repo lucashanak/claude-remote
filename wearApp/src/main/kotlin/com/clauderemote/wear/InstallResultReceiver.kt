@@ -4,7 +4,6 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageInstaller
-import android.util.Log
 import androidx.core.content.IntentCompat
 
 /**
@@ -16,6 +15,7 @@ import androidx.core.content.IntentCompat
 class InstallResultReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
         val status = intent.getIntExtra(PackageInstaller.EXTRA_STATUS, -1)
+        WearLog.i(context, TAG, "onReceive status=$status")
         when (status) {
             PackageInstaller.STATUS_PENDING_USER_ACTION -> {
                 val confirmIntent = IntentCompat.getParcelableExtra(intent, Intent.EXTRA_INTENT, Intent::class.java)
@@ -23,11 +23,11 @@ class InstallResultReceiver : BroadcastReceiver() {
                 confirmIntent?.let { runCatching { context.startActivity(it) } }
             }
             PackageInstaller.STATUS_SUCCESS -> {
-                Log.i(TAG, "Wear update installed")
+                WearLog.i(context, TAG, "Wear update installed")
             }
             else -> {
                 val msg = intent.getStringExtra(PackageInstaller.EXTRA_STATUS_MESSAGE)
-                Log.w(TAG, "Wear update failed: status=$status message=$msg")
+                WearLog.w(context, TAG, "Wear update failed: status=$status message=$msg")
             }
         }
     }

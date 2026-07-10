@@ -4,7 +4,6 @@ import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageInstaller
-import android.util.Log
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
@@ -31,7 +30,7 @@ object WearUpdater {
     data class UpdateInfo(val version: String, val downloadUrl: String)
 
     /** Runs on a background thread; callback fires on that same background thread — caller hops back to main. */
-    fun checkLatest(onResult: (UpdateInfo?) -> Unit, onError: (String) -> Unit) {
+    fun checkLatest(context: Context, onResult: (UpdateInfo?) -> Unit, onError: (String) -> Unit) {
         executor.execute {
             try {
                 val body = httpGetString(RELEASES_URL)
@@ -46,7 +45,7 @@ object WearUpdater {
                     ?: throw IllegalStateException("asset has no browser_download_url")
                 onResult(UpdateInfo(version = tag.removePrefix("v"), downloadUrl = url))
             } catch (e: Exception) {
-                Log.w(TAG, "checkLatest failed: ${e.message}")
+                WearLog.w(context, TAG, "checkLatest failed: ${e.message}")
                 onError(e.message ?: "unknown error")
             }
         }
@@ -61,7 +60,7 @@ object WearUpdater {
                 installApk(context, bytes)
                 onProgress("Potvrďte instalaci na hodinkách")
             } catch (e: Exception) {
-                Log.w(TAG, "downloadAndInstall failed: ${e.message}")
+                WearLog.w(context, TAG, "downloadAndInstall failed: ${e.message}")
                 onError(e.message ?: "unknown error")
             }
         }
