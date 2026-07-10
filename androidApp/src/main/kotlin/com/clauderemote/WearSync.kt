@@ -58,6 +58,7 @@ object WearSync {
     @Volatile private var orchestrator: SessionOrchestrator? = null
 
     fun start(context: Context, tabManager: TabManager, orchestrator: SessionOrchestrator) {
+        FileLogger.log(TAG, "WearSync started")
         appContext = context.applicationContext
         this.tabManager = tabManager
         this.orchestrator = orchestrator
@@ -100,6 +101,7 @@ object WearSync {
             dataMap.putLong(KEY_TS, System.currentTimeMillis())
         }.asPutDataRequest().setUrgent()
         Wearable.getDataClient(ctx).putDataItem(request)
+            .addOnSuccessListener { FileLogger.log(TAG, "Pushed ${sessions.size} sessions to watch") }
             .addOnFailureListener { e -> FileLogger.log(TAG, "putDataItem failed: ${e.message}") }
     }
 }
