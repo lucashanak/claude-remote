@@ -1,12 +1,18 @@
 package com.clauderemote.wear
 
 import android.app.NotificationManager
+import com.google.android.gms.tasks.Tasks
+import com.google.android.gms.wearable.ChannelClient
 import com.google.android.gms.wearable.DataEvent
 import com.google.android.gms.wearable.DataEventBuffer
 import com.google.android.gms.wearable.DataMapItem
+import com.google.android.gms.wearable.Wearable
 import com.google.android.gms.wearable.WearableListenerService
 import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.json.Json
+import java.io.ByteArrayOutputStream
+import java.nio.ByteBuffer
+import java.util.concurrent.TimeUnit
 
 /**
  * Receives the phone's /sessions Data Layer pushes (WearSync.push()),
@@ -61,6 +67,64 @@ class WearDataListenerService : WearableListenerService() {
         }
     }
 
+    /**
+     * The phone (WearApkPusher) streams the watch's own update APK over this
+     * channel instead of the watch downloading it via HTTP — that path was
+     * unreliable (timeouts, screen sleeping mid-download). Requires the
+     * CHANNEL_EVENT intent-filter action alongside DATA_CHANGED in the
+     * manifest, or this never fires.
+     *
+     * Runs synchronously via Tasks.await rather than addOnSuccessListener:
+     * WearableListenerService callbacks already run off the main thread, and
+     * the default (unspecified) Task executor for gms Tasks IS the main
+     * thread — reading a multi-MB APK there would block the UI/watchdog for
+     * the whole transfer.
+     */
+    override fun onChannelOpened(channel: ChannelClient.Channel) {
+        WearLog.i(this, TAG, "onChannelOpened path=${channel.path}")
+        val channelClient = Wearable.getChannelClient(this)
+        if (channel.path != APK_PUSH_PATH) {
+            channelClient.close(channel)
+            return
+        }
+        runCatching {
+            val input = Tasks.await(channelClient.getInputStream(channel), 10, TimeUnit.SECONDS)
+            val bytes = input.use { readFramed(it) }
+            WearLog.i(this, TAG, "Received pushed APK: ${bytes.size} bytes")
+            WearUpdater.installApk(applicationContext, bytes)
+        }.onFailure { e -> WearLog.w(this, TAG, "Failed to read/install pushed APK: ${e.message}") }
+        channelClient.close(channel)
+    }
+
+    /**
+     * WearApkPusher writes an 8-byte big-endian length prefix before the APK
+     * bytes so a Bluetooth stall/process-death mid-transfer surfaces as an
+     * explicit "truncated transfer" failure here instead of a silent partial
+     * APK reaching PackageInstaller (which just reports a generic install
+     * failure with no clue it was a transfer problem, not a bad build).
+     */
+    private fun readFramed(input: java.io.InputStream): ByteArray {
+        val header = ByteArray(8)
+        var read = 0
+        while (read < 8) {
+            val n = input.read(header, read, 8 - read)
+            if (n < 0) throw IllegalStateException("stream closed before length header ($read/8 bytes)")
+            read += n
+        }
+        val expectedSize = ByteBuffer.wrap(header).long
+        val buffer = ByteArrayOutputStream(expectedSize.coerceIn(0, Int.MAX_VALUE.toLong()).toInt())
+        val chunk = ByteArray(8192)
+        var total = 0L
+        while (total < expectedSize) {
+            val n = input.read(chunk)
+            if (n < 0) break
+            buffer.write(chunk, 0, n)
+            total += n
+        }
+        if (total != expectedSize) throw IllegalStateException("truncated transfer: expected $expectedSize got $total bytes")
+        return buffer.toByteArray()
+    }
+
     private fun String?.isNotifyWorthy() = this == "WAITING_FOR_INPUT" || this == "APPROVAL_NEEDED"
 
     private fun isDoNotDisturb(): Boolean {
@@ -72,6 +136,7 @@ class WearDataListenerService : WearableListenerService() {
         private const val TAG = "WearDataListener"
         const val PATH = "/sessions"
         const val KEY_JSON = "json"
+        private const val APK_PUSH_PATH = "/apk_push"
         val WEAR_JSON = Json { ignoreUnknownKeys = true }
     }
 }

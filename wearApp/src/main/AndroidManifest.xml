@@ -36,12 +36,14 @@
             android:name="com.clauderemote.wear.InstallResultReceiver"
             android:exported="false" />
 
-        <!-- Receives the phone's /sessions Data Layer pushes (WearSync). -->
+        <!-- Receives the phone's /sessions Data Layer pushes (WearSync) and
+             the pushed-APK channel transfer (WearApkPusher). -->
         <service
             android:name="com.clauderemote.wear.WearDataListenerService"
             android:exported="true">
             <intent-filter>
                 <action android:name="com.google.android.gms.wearable.DATA_CHANGED" />
+                <action android:name="com.google.android.gms.wearable.CHANNEL_EVENT" />
                 <data
                     android:scheme="wear"
                     android:host="*"

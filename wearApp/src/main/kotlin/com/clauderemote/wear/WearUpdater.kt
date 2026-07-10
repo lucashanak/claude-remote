@@ -105,24 +105,34 @@ object WearUpdater {
         return conn
     }
 
-    private fun installApk(context: Context, apkBytes: ByteArray) {
+    /** Also called directly by [WearDataListenerService] for a phone-pushed APK (no HTTP download). */
+    fun installApk(context: Context, apkBytes: ByteArray) {
         val installer = context.packageManager.packageInstaller
         val params = PackageInstaller.SessionParams(PackageInstaller.SessionParams.MODE_FULL_INSTALL)
         val sessionId = installer.createSession(params)
-        val session = installer.openSession(sessionId)
-        session.openWrite("wear_update", 0, apkBytes.size.toLong()).use { out ->
-            out.write(apkBytes)
-            session.fsync(out)
+        // Session implements Closeable — .use() guarantees close() on every
+        // path; abandon() on failure so a bad write/commit (e.g. a truncated
+        // pushed APK) doesn't leak an active session and eventually make
+        // createSession() start throwing "too many active sessions".
+        installer.openSession(sessionId).use { session ->
+            try {
+                session.openWrite("wear_update", 0, apkBytes.size.toLong()).use { out ->
+                    out.write(apkBytes)
+                    session.fsync(out)
+                }
+                val intent = Intent(context, InstallResultReceiver::class.java)
+                // MUTABLE is required — the system fills in EXTRA_STATUS/EXTRA_INTENT
+                // on this intent when firing it; an immutable PendingIntent silently
+                // can't receive those extras.
+                val pendingIntent = PendingIntent.getBroadcast(
+                    context, sessionId, intent,
+                    PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_MUTABLE,
+                )
+                session.commit(pendingIntent.intentSender)
+            } catch (e: Exception) {
+                session.abandon()
+                throw e
+            }
         }
-        val intent = Intent(context, InstallResultReceiver::class.java)
-        // MUTABLE is required — the system fills in EXTRA_STATUS/EXTRA_INTENT
-        // on this intent when firing it; an immutable PendingIntent silently
-        // can't receive those extras.
-        val pendingIntent = PendingIntent.getBroadcast(
-            context, sessionId, intent,
-            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_MUTABLE,
-        )
-        session.commit(pendingIntent.intentSender)
-        session.close()
     }
 }

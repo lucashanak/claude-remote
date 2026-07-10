@@ -42,6 +42,7 @@ fun SettingsScreen(
     onImportServers: (() -> Unit)? = null,
     onViewLog: (() -> Unit)? = null,
     onTestNotification: (() -> Unit)? = null,
+    onUpdateWatch: (() -> Unit)? = null,
     sshKeyManager: com.clauderemote.connection.SshKeyManager? = null,
     appearance: AppearanceState = settings.loadAppearance(),
     onAppearanceChange: (AppearanceState) -> Unit = { settings.saveAppearance(it) }
@@ -372,6 +373,12 @@ fun SettingsScreen(
                             onClick = onTestNotification,
                             modifier = Modifier.fillMaxWidth(),
                         ) { Text("Otestovat notifikaci", color = c.accent) }
+                    }
+                    if (onUpdateWatch != null) {
+                        OutlinedButton(
+                            onClick = onUpdateWatch,
+                            modifier = Modifier.fillMaxWidth(),
+                        ) { Text("Aktualizovat hodinky", color = c.accent) }
                     }
                 }
             }

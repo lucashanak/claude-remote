@@ -291,6 +291,18 @@ class MainActivity : FragmentActivity() {
                         "Toto je testovací notifikace. Zkus „Odpovědět“ a „Přehrát“.",
                     )
                 },
+                onUpdateWatch = {
+                    val handler = android.os.Handler(android.os.Looper.getMainLooper())
+                    WearApkPusher.checkAndPush(
+                        applicationContext,
+                        onProgress = { msg -> handler.post {
+                            android.widget.Toast.makeText(this, msg, android.widget.Toast.LENGTH_SHORT).show()
+                        } },
+                        onError = { msg -> handler.post {
+                            android.widget.Toast.makeText(this, "Chyba: $msg", android.widget.Toast.LENGTH_LONG).show()
+                        } },
+                    )
+                },
                 onPickKeyFile = { callback ->
                     keyFileCallback = callback
                     keyFilePicker.launch("*/*")
