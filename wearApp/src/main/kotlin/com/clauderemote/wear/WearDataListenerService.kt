@@ -53,7 +53,17 @@ class WearDataListenerService : WearableListenerService() {
         WearLog.i(this, TAG, "maybeSpeakTransitions: autoSpeak=$autoSpeakOn dnd=$dnd sessions=${sessions.size}")
         if (!autoSpeakOn || dnd) return
         for (session in sessions) {
-            val wasNotifyWorthy = previousById[session.id]?.activity.isNotifyWorthy()
+            // No prior record at all (first onDataChanged after this
+            // process started, e.g. app restart/update/reboot) — we don't
+            // know whether this session has been sitting there waiting for
+            // hours or just flipped. Treating "unknown" as "wasn't
+            // notify-worthy" made EVERY already-waiting session look like a
+            // fresh transition on every process restart, reading out a pile
+            // of stale messages that hadn't actually changed. Skip instead;
+            // only a genuinely observed transition (previous state known
+            // and different) should speak.
+            val previous = previousById[session.id] ?: continue
+            val wasNotifyWorthy = previous.activity.isNotifyWorthy()
             val nowNotifyWorthy = session.activity.isNotifyWorthy()
             if (!nowNotifyWorthy) continue
             if (wasNotifyWorthy) continue // already was — not a fresh transition
