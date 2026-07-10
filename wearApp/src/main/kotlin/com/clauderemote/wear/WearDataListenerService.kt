@@ -68,9 +68,14 @@ class WearDataListenerService : WearableListenerService() {
             if (!nowNotifyWorthy) continue
             if (wasNotifyWorthy) continue // already was — not a fresh transition
             val text = session.lastMessage?.takeIf { it.isNotBlank() }
+            // Logs the PREVIOUS activity too — a session reported as reading
+            // out a message that "hadn't moved in days" needs this to tell
+            // apart a genuine (if surprising) phone-side activity flip from
+            // this process having just restarted and previousById being a
+            // stale/incomplete snapshot.
             WearLog.i(
                 this, TAG,
-                "transition for ${session.id}: activity=${session.activity} lastMessage=${if (text != null) "${text.length} chars" else "null/blank"}",
+                "transition for ${session.id}: ${previous.activity} -> ${session.activity} lastMessage=${if (text != null) "${text.length} chars" else "null/blank"}",
             )
             if (text == null) continue
             WatchTts.speak(applicationContext, text)
