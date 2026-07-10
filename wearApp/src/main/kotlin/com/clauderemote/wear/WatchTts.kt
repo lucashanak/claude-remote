@@ -106,6 +106,21 @@ object WatchTts {
         WearLog.i(context, TAG, "TextToSpeech engine constructed, awaiting init callback")
     }
 
+    /**
+     * Called when the user flips "Číst nahlas" off — QUEUE_ADD means any
+     * backlog already queued (e.g. from a burst of session transitions)
+     * keeps playing out otherwise, since the toggle only gates whether NEW
+     * text gets enqueued, not what's already sitting in the engine's queue.
+     * TextToSpeech.stop() both halts the current utterance and discards the
+     * rest of the queue.
+     */
+    fun stop(context: Context) {
+        synchronized(lock) {
+            engine?.stop()
+        }
+        WearLog.i(context, TAG, "stop() called — halted playback and cleared queue")
+    }
+
     private fun enqueue(context: Context, t: TextToSpeech, text: String, interrupt: Boolean) {
         if (interrupt) t.stop()
         val mode = if (interrupt) TextToSpeech.QUEUE_FLUSH else TextToSpeech.QUEUE_ADD

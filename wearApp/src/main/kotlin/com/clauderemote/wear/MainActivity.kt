@@ -86,6 +86,7 @@ private fun SessionListScreen(sessions: List<WearSessionInfo>, onSelect: (String
                 val next = !autoSpeak
                 autoSpeak = next
                 AutoSpeakPrefs.setEnabled(context, next)
+                if (!next) WatchTts.stop(context)
             }) {
                 Text(if (autoSpeak) "Číst nahlas: ANO" else "Číst nahlas: NE")
             }
