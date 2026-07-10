@@ -1,7 +1,6 @@
 package com.clauderemote.wear
 
 import android.app.NotificationManager
-import android.util.Log
 import com.google.android.gms.wearable.DataEvent
 import com.google.android.gms.wearable.DataEventBuffer
 import com.google.android.gms.wearable.DataMapItem
@@ -22,9 +21,9 @@ class WearDataListenerService : WearableListenerService() {
         // Logged unconditionally (not just on failure) — diagnosing the
         // watch side was blocked by having zero visibility into whether
         // this even gets invoked at all vs. invoked-but-silently-fine.
-        Log.i(TAG, "onDataChanged: ${dataEvents.count} event(s)")
+        WearLog.i(this, TAG, "onDataChanged: ${dataEvents.count} event(s)")
         for (event in dataEvents) {
-            Log.i(TAG, "event type=${event.type} path=${event.dataItem.uri.path}")
+            WearLog.i(this, TAG, "event type=${event.type} path=${event.dataItem.uri.path}")
             if (event.type != DataEvent.TYPE_CHANGED) continue
             if (event.dataItem.uri.path != PATH) continue
             runCatching {
@@ -32,9 +31,9 @@ class WearDataListenerService : WearableListenerService() {
                 val payload = WEAR_JSON.decodeFromString<WearSessionsPayload>(json)
                 val previousById = SessionRepository.sessions.value.associateBy { it.id }
                 SessionRepository.update(payload.sessions)
-                Log.i(TAG, "Updated repository with ${payload.sessions.size} sessions")
+                WearLog.i(this, TAG, "Updated repository with ${payload.sessions.size} sessions")
                 maybeSpeakTransitions(payload.sessions, previousById)
-            }.onFailure { e -> Log.w(TAG, "Failed to parse /sessions payload: ${e.message}") }
+            }.onFailure { e -> WearLog.w(this, TAG, "Failed to parse /sessions payload: ${e.message}") }
         }
         dataEvents.release()
     }
@@ -43,11 +42,21 @@ class WearDataListenerService : WearableListenerService() {
         sessions: List<WearSessionInfo>,
         previousById: Map<String, WearSessionInfo>,
     ) {
-        if (!AutoSpeakPrefs.isEnabled(this) || isDoNotDisturb()) return
+        val autoSpeakOn = AutoSpeakPrefs.isEnabled(this)
+        val dnd = isDoNotDisturb()
+        WearLog.i(this, TAG, "maybeSpeakTransitions: autoSpeak=$autoSpeakOn dnd=$dnd sessions=${sessions.size}")
+        if (!autoSpeakOn || dnd) return
         for (session in sessions) {
-            if (!session.activity.isNotifyWorthy()) continue
-            if (previousById[session.id]?.activity.isNotifyWorthy()) continue // already was — not a fresh transition
-            val text = session.lastMessage?.takeIf { it.isNotBlank() } ?: continue
+            val wasNotifyWorthy = previousById[session.id]?.activity.isNotifyWorthy()
+            val nowNotifyWorthy = session.activity.isNotifyWorthy()
+            if (!nowNotifyWorthy) continue
+            if (wasNotifyWorthy) continue // already was — not a fresh transition
+            val text = session.lastMessage?.takeIf { it.isNotBlank() }
+            WearLog.i(
+                this, TAG,
+                "transition for ${session.id}: activity=${session.activity} lastMessage=${if (text != null) "${text.length} chars" else "null/blank"}",
+            )
+            if (text == null) continue
             WatchTts.speak(applicationContext, text)
         }
     }

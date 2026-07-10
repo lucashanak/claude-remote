@@ -197,19 +197,19 @@ private fun fetchInitialSessions(context: Context) {
     val uri = Uri.Builder().scheme("wear").authority("*").path(WearDataListenerService.PATH).build()
     Wearable.getDataClient(context).getDataItems(uri)
         .addOnSuccessListener { buffer ->
-            android.util.Log.i("WearMainActivity", "fetchInitialSessions: ${buffer.count} item(s)")
+            WearLog.i(context, "WearMainActivity", "fetchInitialSessions: ${buffer.count} item(s)")
             runCatching {
                 val item = if (buffer.count > 0) buffer[0] else null
                 val json = item?.let { DataMapItem.fromDataItem(it).dataMap.getString(WearDataListenerService.KEY_JSON) }
                 if (json != null) {
                     val payload = WearDataListenerService.WEAR_JSON.decodeFromString<WearSessionsPayload>(json)
                     SessionRepository.update(payload.sessions)
-                    android.util.Log.i("WearMainActivity", "fetchInitialSessions: loaded ${payload.sessions.size} sessions")
+                    WearLog.i(context, "WearMainActivity", "fetchInitialSessions: loaded ${payload.sessions.size} sessions")
                 }
-            }.onFailure { e -> android.util.Log.w("WearMainActivity", "fetchInitialSessions parse failed: ${e.message}") }
+            }.onFailure { e -> WearLog.w(context, "WearMainActivity", "fetchInitialSessions parse failed: ${e.message}") }
             buffer.release()
         }
-        .addOnFailureListener { e -> android.util.Log.w("WearMainActivity", "fetchInitialSessions getDataItems failed: ${e.message}") }
+        .addOnFailureListener { e -> WearLog.w(context, "WearMainActivity", "fetchInitialSessions getDataItems failed: ${e.message}") }
 }
 
 /**
@@ -238,6 +238,7 @@ private fun UpdateSection() {
                 onClick = {
                     checking = true; status = ""
                     WearUpdater.checkLatest(
+                        context = context,
                         onResult = { result ->
                             mainHandler.post {
                                 checking = false

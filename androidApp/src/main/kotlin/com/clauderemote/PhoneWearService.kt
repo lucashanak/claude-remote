@@ -30,6 +30,10 @@ class PhoneWearService : WearableListenerService() {
             "/ping" -> FileLogger.log(TAG, "Wear ping received")
             "/reply" -> handleReply(messageEvent.data)
             "/approve" -> handleApprove(messageEvent.data)
+            // Watch-side log line (see wearApp's WearLog) — piggybacks on the
+            // phone's existing LogShipper so watch diagnostics show up in the
+            // same server-side log file as the phone's, no new infra needed.
+            "/log" -> FileLogger.log("Wear", String(messageEvent.data, Charsets.UTF_8))
             else -> FileLogger.log(TAG, "Unhandled wear message: ${messageEvent.path}")
         }
     }
