@@ -39,8 +39,7 @@
         <!-- Receives the phone's /sessions Data Layer pushes (WearSync). -->
         <service
             android:name="com.clauderemote.wear.WearDataListenerService"
-            android:exported="true"
-            android:permission="com.google.android.wearable.permission.BIND_LISTENER">
+            android:exported="true">
             <intent-filter>
                 <action android:name="com.google.android.gms.wearable.DATA_CHANGED" />
                 <data
