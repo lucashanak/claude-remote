@@ -1,6 +1,8 @@
 package com.clauderemote.wear
 
 import android.content.Context
+import android.media.AudioAttributes
+import android.media.AudioManager
 import android.speech.tts.TextToSpeech
 import java.util.Locale
 
@@ -65,6 +67,24 @@ object WatchTts {
                 } else {
                     WearLog.i(context, TAG, "cs-CZ language set, result=$langResult")
                 }
+                // speak() returning SUCCESS only means the engine accepted the
+                // request, not that anything audible came out — on some Wear
+                // OS builds STREAM_MUSIC output from a caller with no audio
+                // focus (e.g. a background service, not the foreground
+                // Activity) gets silently dropped. USAGE_ASSISTANCE_
+                // ACCESSIBILITY is the usage meant for exactly this ("app
+                // needs to speak something aloud regardless of foreground
+                // state"), same category TalkBack/screen readers use.
+                t.setAudioAttributes(
+                    AudioAttributes.Builder()
+                        .setUsage(AudioAttributes.USAGE_ASSISTANCE_ACCESSIBILITY)
+                        .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+                        .build()
+                )
+                val audioManager = context.getSystemService(Context.AUDIO_SERVICE) as? AudioManager
+                val musicVol = audioManager?.getStreamVolume(AudioManager.STREAM_MUSIC)
+                val musicMax = audioManager?.getStreamMaxVolume(AudioManager.STREAM_MUSIC)
+                WearLog.i(context, TAG, "STREAM_MUSIC volume=$musicVol/$musicMax")
                 ready = true
                 val text2 = pendingText
                 pendingText = null
