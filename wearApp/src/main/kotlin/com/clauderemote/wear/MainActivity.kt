@@ -170,7 +170,7 @@ private fun SessionDetailScreen(session: WearSessionInfo, onBack: () -> Unit) {
         }
         item {
             Button(onClick = {
-                session.lastMessage?.takeIf { it.isNotBlank() }?.let { WatchTts.speak(context, it) }
+                session.lastMessage?.takeIf { it.isNotBlank() }?.let { WatchTts.speak(context, it, interrupt = true) }
             }) { Text("🔊 Přehrát") }
         }
         if (status.isNotBlank()) {

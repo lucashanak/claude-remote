@@ -33,12 +33,22 @@ object WatchTts {
     @Volatile private var initializing = false
     @Volatile private var pendingText: String? = null
 
-    fun speak(context: Context, text: String) {
-        WearLog.i(context, TAG, "speak() called, ${text.length} chars, ready=$ready initializing=$initializing")
+    /**
+     * @param interrupt if true, stops whatever is currently speaking and
+     * speaks [text] immediately (the manual "Přehrát" tap — the user
+     * explicitly wants to hear this now). If false, queues after anything
+     * already speaking (auto-speak-on-transition) — with `interrupt` always
+     * true here, a burst of session transitions (common right after a
+     * sync) kept cutting each other off mid-sentence before finishing even
+     * one message; confirmed on a real device via the "speak() enqueue"
+     * log lines.
+     */
+    fun speak(context: Context, text: String, interrupt: Boolean = false) {
+        WearLog.i(context, TAG, "speak() called, ${text.length} chars, ready=$ready initializing=$initializing interrupt=$interrupt")
         synchronized(lock) {
             val existing = engine
             if (existing != null && ready) {
-                enqueue(context, existing, text)
+                enqueue(context, existing, text, interrupt)
                 return
             }
             pendingText = text
@@ -88,16 +98,19 @@ object WatchTts {
                 ready = true
                 val text2 = pendingText
                 pendingText = null
-                if (text2 != null) enqueue(context, t, text2)
+                // Nothing has spoken yet during boot, so queue-vs-flush is
+                // moot here — always safe to just queue.
+                if (text2 != null) enqueue(context, t, text2, interrupt = false)
             }
         }
         WearLog.i(context, TAG, "TextToSpeech engine constructed, awaiting init callback")
     }
 
-    private fun enqueue(context: Context, t: TextToSpeech, text: String) {
-        t.stop()
+    private fun enqueue(context: Context, t: TextToSpeech, text: String, interrupt: Boolean) {
+        if (interrupt) t.stop()
+        val mode = if (interrupt) TextToSpeech.QUEUE_FLUSH else TextToSpeech.QUEUE_ADD
         val id = "wear-utt-${System.nanoTime()}"
-        val result = t.speak(text, TextToSpeech.QUEUE_FLUSH, null, id)
-        WearLog.i(context, TAG, "speak($id) enqueue result=$result (0=SUCCESS, -1=ERROR)")
+        val result = t.speak(text, mode, null, id)
+        WearLog.i(context, TAG, "speak($id) enqueue mode=$mode result=$result (0=SUCCESS, -1=ERROR)")
     }
 }
