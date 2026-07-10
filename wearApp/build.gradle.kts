@@ -18,6 +18,24 @@ android {
         versionName = "1.0.0"
     }
 
+    // Fixed debug signing, committed to the repo. Without this, AGP
+    // auto-generates a NEW random debug keystore per build machine — and
+    // since GitHub Actions runners are fresh/ephemeral every run, every
+    // release would sign with a different key, so `adb install -r`
+    // (and the watch's own self-update) failed with
+    // INSTALL_FAILED_UPDATE_INCOMPATIBLE on every single update (confirmed
+    // on a real device). This debug key has zero security value — it's
+    // deliberately checked in so every build (CI or local) signs
+    // identically.
+    signingConfigs {
+        getByName("debug") {
+            storeFile = file("wear-debug.keystore")
+            storePassword = "android"
+            keyAlias = "weardebugkey"
+            keyPassword = "android"
+        }
+    }
+
     buildFeatures {
         compose = true
         buildConfig = true
