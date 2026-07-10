@@ -68,8 +68,13 @@ object WearUpdater {
     }
 
     private fun httpGetString(url: String): String {
-        val conn = openConnection(url)
+        val conn = newConnection(url)
+        // Must be set BEFORE connect() — HttpURLConnection throws
+        // "Cannot set request property after connection is made" otherwise.
+        // (Confirmed on a real device: newConnection() used to connect()
+        // internally, before the caller had a chance to set headers.)
         conn.setRequestProperty("Accept", "application/vnd.github+json")
+        conn.connect()
         if (conn.responseCode !in 200..299) throw IllegalStateException("HTTP ${conn.responseCode}")
         return conn.inputStream.bufferedReader().use { it.readText() }
     }
@@ -78,24 +83,26 @@ object WearUpdater {
      *  manually since cross-host redirects aren't always reliable via
      *  HttpURLConnection's own instanceFollowRedirects on every Android version. */
     private fun httpGetBytes(url: String): ByteArray {
-        var conn = openConnection(url)
+        var conn = newConnection(url)
+        conn.connect()
         var redirects = 0
         while (conn.responseCode in 300..399 && redirects < 5) {
             val next = conn.getHeaderField("Location") ?: break
             conn.disconnect()
-            conn = openConnection(next)
+            conn = newConnection(next)
+            conn.connect()
             redirects++
         }
         if (conn.responseCode !in 200..299) throw IllegalStateException("HTTP ${conn.responseCode}")
         return BufferedInputStream(conn.inputStream).use { it.readBytes() }
     }
 
-    private fun openConnection(url: String): HttpURLConnection {
+    /** Builds an unconnected HttpURLConnection — callers set headers, THEN call connect(). */
+    private fun newConnection(url: String): HttpURLConnection {
         val conn = URL(url).openConnection() as HttpURLConnection
         conn.instanceFollowRedirects = false
         conn.connectTimeout = 10_000
         conn.readTimeout = 30_000
-        conn.connect()
         return conn
     }
 
