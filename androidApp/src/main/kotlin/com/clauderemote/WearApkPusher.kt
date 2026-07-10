@@ -32,7 +32,14 @@ object WearApkPusher {
     private const val RELEASES_URL = "https://api.github.com/repos/$REPO/releases/latest"
     private const val ASSET_NAME = "ClaudeRemoteWear.apk"
     private const val CHANNEL_PATH = "/apk_push"
-    private const val WRITE_TIMEOUT_SEC = 60L
+    // Classic Bluetooth Data Layer throughput can be well under 100 KB/s in
+    // practice — a flat 60s killed a real ~21 MB transfer twice on a real
+    // device (both failures landed at ~48-61s, i.e. this watchdog firing on
+    // a still-progressing transfer, not an actual stall). Scale with size,
+    // assuming a conservative 40 KB/s floor, plus a fixed buffer for
+    // channel/session setup overhead.
+    private const val MIN_THROUGHPUT_BYTES_PER_SEC = 40 * 1024L
+    private const val WRITE_TIMEOUT_BUFFER_SEC = 60L
     private val executor = Executors.newSingleThreadExecutor()
 
     fun checkAndPush(context: Context, onProgress: (String) -> Unit, onError: (String) -> Unit) {
@@ -108,8 +115,9 @@ object WearApkPusher {
             // drops) — plain write() has no timeout of its own and would
             // otherwise wedge this object's single-thread executor forever,
             // queuing behind it any later push attempt.
+            val writeTimeoutSec = apkBytes.size / MIN_THROUGHPUT_BYTES_PER_SEC + WRITE_TIMEOUT_BUFFER_SEC
             val watchdog = Executors.newSingleThreadScheduledExecutor()
-            val abort = watchdog.schedule({ runCatching { output.close() } }, WRITE_TIMEOUT_SEC, TimeUnit.SECONDS)
+            val abort = watchdog.schedule({ runCatching { output.close() } }, writeTimeoutSec, TimeUnit.SECONDS)
             try {
                 output.use {
                     // 8-byte length prefix — lets the watch detect a
