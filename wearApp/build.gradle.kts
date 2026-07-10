@@ -10,7 +10,7 @@ android {
     compileSdk = 35
 
     defaultConfig {
-        applicationId = "com.clauderemote.wear"
+        applicationId = "com.clauderemote.android"
         // Wear OS 3+ only — androidx.wear.compose:compose-material3 requires it.
         minSdk = 30
         targetSdk = 35

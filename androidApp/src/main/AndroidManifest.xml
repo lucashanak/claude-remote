@@ -47,15 +47,17 @@
         </service>
 
         <!-- Receives Wearable Data Layer messages from the watch companion
-             app (com.clauderemote.wear). exported=true + the BIND_LISTENER
-             permission are required for Play Services to deliver to it —
-             this is a cross-app (GMS-process) bind, not same-app. pathPrefix
-             "/" so one service handles every path (/ping now, /reply and
-             /approve in later PRs) without further manifest changes. -->
+             app (installed applicationId com.clauderemote.android, same as
+             this app — required for Data Layer delivery; its code lives
+             under the .wear namespace only). exported=true + the
+             intent-filter below are what Play Services binds to; the
+             BIND_LISTENER permission attribute is legacy/unnecessary on
+             current Play Services (do not re-add it). pathPrefix "/" so one
+             service handles every path (/ping, /reply, /approve) without
+             further manifest changes. -->
         <service
             android:name="com.clauderemote.PhoneWearService"
-            android:exported="true"
-            android:permission="com.google.android.wearable.permission.BIND_LISTENER">
+            android:exported="true">
             <intent-filter>
                 <action android:name="com.google.android.gms.wearable.MESSAGE_RECEIVED" />
                 <data

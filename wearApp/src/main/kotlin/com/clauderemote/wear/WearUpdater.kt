@@ -25,7 +25,7 @@ import java.util.concurrent.Executors
 object WearUpdater {
     private const val TAG = "WearUpdater"
     private const val RELEASES_URL = "https://api.github.com/repos/lucashanak/claude-remote/releases/latest"
-    private const val ASSET_NAME = "ClaudeRemoteWear-debug.apk"
+    private const val ASSET_NAME = "ClaudeRemoteWear.apk"
     private val executor = Executors.newSingleThreadExecutor()
 
     data class UpdateInfo(val version: String, val downloadUrl: String)
