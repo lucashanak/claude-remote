@@ -113,6 +113,11 @@ jobs:
           CODE="${{ needs.version.outputs.code }}"
           sed -i "s/versionCode = .*/versionCode = $CODE/" androidApp/build.gradle.kts
           sed -i "s/versionName = .*/versionName = \"$VER\"/" androidApp/build.gradle.kts
+          # wearApp self-update (WearUpdater) compares its own
+          # BuildConfig.VERSION_NAME against the latest release tag, so it
+          # needs to track the same version as the phone.
+          sed -i "s/versionCode = .*/versionCode = $CODE/" wearApp/build.gradle.kts
+          sed -i "s/versionName = .*/versionName = \"$VER\"/" wearApp/build.gradle.kts
 
       - name: Build release APK
         run: ./gradlew :androidApp:assembleRelease

@@ -90,6 +90,7 @@ private fun SessionListScreen(sessions: List<WearSessionInfo>, onSelect: (String
                 Text(if (autoSpeak) "Číst nahlas: ANO" else "Číst nahlas: NE")
             }
         }
+        item { UpdateSection() }
         if (sessions.isEmpty()) {
             item { Text("No sessions yet") }
         }
@@ -206,4 +207,65 @@ private fun fetchInitialSessions(context: Context) {
             }
             buffer.release()
         }
+}
+
+/**
+ * Self-update: check GitHub Releases, then download+install on demand. After
+ * the one-time ADB sideload, this is the only thing future updates need —
+ * a tap here, then a tap to confirm the system's install dialog.
+ */
+@Composable
+private fun UpdateSection() {
+    val context = LocalContext.current
+    var checking by remember { mutableStateOf(false) }
+    var updateInfo by remember { mutableStateOf<WearUpdater.UpdateInfo?>(null) }
+    var status by remember { mutableStateOf("") }
+    // WearUpdater's callbacks fire on a background executor thread; Compose
+    // state must be mutated on the main thread.
+    val mainHandler = remember { android.os.Handler(android.os.Looper.getMainLooper()) }
+
+    androidx.compose.foundation.layout.Column(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalAlignment = Alignment.CenterHorizontally,
+    ) {
+        Text("Verze: ${BuildConfig.VERSION_NAME}")
+        val info = updateInfo
+        if (info == null) {
+            Button(
+                onClick = {
+                    checking = true; status = ""
+                    WearUpdater.checkLatest(
+                        onResult = { result ->
+                            mainHandler.post {
+                                checking = false
+                                if (result != null && result.version != BuildConfig.VERSION_NAME) {
+                                    updateInfo = result
+                                } else {
+                                    status = "Máte nejnovější verzi"
+                                }
+                            }
+                        },
+                        onError = { msg -> mainHandler.post { checking = false; status = "Chyba: $msg" } },
+                    )
+                },
+                enabled = !checking,
+            ) {
+                Text(if (checking) "Kontroluji…" else "Zkontrolovat aktualizace")
+            }
+        } else {
+            Button(onClick = {
+                status = "Stahuji…"
+                WearUpdater.downloadAndInstall(
+                    context, info.downloadUrl,
+                    onProgress = { msg -> mainHandler.post { status = msg } },
+                    onError = { msg -> mainHandler.post { status = "Chyba: $msg" } },
+                )
+            }) {
+                Text("Aktualizovat na v${info.version}")
+            }
+        }
+        if (status.isNotBlank()) {
+            Text(status)
+        }
+    }
 }
