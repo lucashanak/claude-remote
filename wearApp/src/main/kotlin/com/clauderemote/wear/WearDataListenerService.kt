@@ -19,7 +19,12 @@ import kotlinx.serialization.json.Json
  */
 class WearDataListenerService : WearableListenerService() {
     override fun onDataChanged(dataEvents: DataEventBuffer) {
+        // Logged unconditionally (not just on failure) — diagnosing the
+        // watch side was blocked by having zero visibility into whether
+        // this even gets invoked at all vs. invoked-but-silently-fine.
+        Log.i(TAG, "onDataChanged: ${dataEvents.count} event(s)")
         for (event in dataEvents) {
+            Log.i(TAG, "event type=${event.type} path=${event.dataItem.uri.path}")
             if (event.type != DataEvent.TYPE_CHANGED) continue
             if (event.dataItem.uri.path != PATH) continue
             runCatching {
@@ -27,6 +32,7 @@ class WearDataListenerService : WearableListenerService() {
                 val payload = WEAR_JSON.decodeFromString<WearSessionsPayload>(json)
                 val previousById = SessionRepository.sessions.value.associateBy { it.id }
                 SessionRepository.update(payload.sessions)
+                Log.i(TAG, "Updated repository with ${payload.sessions.size} sessions")
                 maybeSpeakTransitions(payload.sessions, previousById)
             }.onFailure { e -> Log.w(TAG, "Failed to parse /sessions payload: ${e.message}") }
         }
