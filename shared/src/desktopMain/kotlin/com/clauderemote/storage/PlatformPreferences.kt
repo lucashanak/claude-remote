@@ -20,6 +20,8 @@ actual class PlatformPreferences {
 
     actual fun getString(key: String, default: String): String = props.getProperty(key, default)
     actual fun putString(key: String, value: String) { props.setProperty(key, value); save() }
+    // Already a blocking file write above — same implementation serves both.
+    actual fun putStringSync(key: String, value: String) { putString(key, value) }
     actual fun getInt(key: String, default: Int): Int = props.getProperty(key)?.toIntOrNull() ?: default
     actual fun putInt(key: String, value: Int) { props.setProperty(key, value.toString()); save() }
     actual fun getBoolean(key: String, default: Boolean): Boolean = props.getProperty(key)?.toBooleanStrictOrNull() ?: default

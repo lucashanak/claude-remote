@@ -8,6 +8,7 @@ actual class PlatformPreferences(context: Context) {
 
     actual fun getString(key: String, default: String): String = prefs.getString(key, default) ?: default
     actual fun putString(key: String, value: String) { prefs.edit().putString(key, value).apply() }
+    actual fun putStringSync(key: String, value: String) { prefs.edit().putString(key, value).commit() }
     actual fun getInt(key: String, default: Int): Int = prefs.getInt(key, default)
     actual fun putInt(key: String, value: Int) { prefs.edit().putInt(key, value).apply() }
     actual fun getBoolean(key: String, default: Boolean): Boolean = prefs.getBoolean(key, default)

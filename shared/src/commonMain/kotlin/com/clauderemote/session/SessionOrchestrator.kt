@@ -3001,10 +3001,13 @@ else:
                 try {
                     if (cleanupConn != null) {
                         try {
-                            com.clauderemote.connection.TmuxManager.killSession(
+                            val killed = com.clauderemote.connection.TmuxManager.killSession(
                                 cleanupConn.getSession() ?: error("no ssh"),
                                 session.tmuxSessionName
                             )
+                            if (!killed) {
+                                FileLogger.error(TAG, "Tmux kill returned failure for $sessionId (${session.tmuxSessionName}) — pane may still be alive", null)
+                            }
                         } catch (e: Exception) {
                             FileLogger.error(TAG, "Tmux kill failed for $sessionId: ${e.message}", e)
                         }
@@ -3196,13 +3199,13 @@ else:
         DUNIT="${'$'}HOME/.config/systemd/user/claude-remote-drift.service"
         DTIMER="${'$'}HOME/.config/systemd/user/claude-remote-drift.timer"
         LOCK="${'$'}HOME/.claude-remote/sessions.lock"
-        MARKER="claude-remote-restore-v5"
+        MARKER="claude-remote-restore-v6"
         touch "${'$'}LOCK"
         echo "[${'$'}(date -u +%FT%TZ)] install: invoked by client" >> "${'$'}HOME/.claude-remote/install.log"
         if ! grep -q "${'$'}MARKER" "${'$'}SCRIPT" 2>/dev/null; then
             cat > "${'$'}SCRIPT" <<'RESTORE_EOF'
 #!/usr/bin/env bash
-# claude-remote-restore-v5 — recreates tmux+claude sessions from sessions.json (snapshot under flock)
+# claude-remote-restore-v6 — recreates tmux+claude sessions from sessions.json (snapshot under flock)
 set -u
 LOG="${'$'}HOME/.claude-remote/restore.log"
 exec >> "${'$'}LOG" 2>&1
@@ -3235,7 +3238,10 @@ if [ "${'$'}HAVE_JQ" = "1" ]; then
         FOLDER_EXP="${'$'}{FOLDER/#\~/${'$'}HOME}"
         case "${'$'}FOLDER_EXP" in /*) ;; *) FOLDER_EXP="${'$'}HOME/${'$'}FOLDER_EXP";; esac
         [ -d "${'$'}FOLDER_EXP" ] || { echo "skip ${'$'}TMUX_NAME — folder ${'$'}FOLDER_EXP missing"; continue; }
-        ARGS=("claude")
+        case "${'$'}MODEL" in
+            LOCAL|LOCAL_ORNITH|LOCAL_QWEN) ARGS=("claude-local");;
+            *) ARGS=("claude");;
+        esac
         case "${'$'}MODEL" in
             OPUS) ARGS+=(--model opus);;
             FABLE) ARGS+=(--model fable);;
@@ -3311,7 +3317,7 @@ RESTORE_EOF
         if ! grep -q "${'$'}MARKER" "${'$'}DRIFT" 2>/dev/null; then
             cat > "${'$'}DRIFT" <<'DRIFT_EOF'
 #!/usr/bin/env bash
-# claude-remote-restore-v5 — drift daemon: reconciles sessions.json to mirror
+# claude-remote-restore-v6 — drift daemon: reconciles sessions.json to mirror
 # the LIVE claude-server-* tmux sessions every minute. Self-healing: re-adds
 # live sessions a misbehaving/old client truncated away, refreshes
 # claudeSessionId from claude's per-pid state files, preserves client-set

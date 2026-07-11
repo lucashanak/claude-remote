@@ -68,6 +68,18 @@ class SessionStorage(private val prefs: PlatformPreferences) {
         prefs.putString(KEY_SESSIONS, json.encodeToString(sessions))
     }
 
+    /**
+     * Synchronous variant for the close/forget path: on Android, [putString]
+     * is a fire-and-forget `apply()` — if the process dies (backgrounded and
+     * reaped) before that async write lands, the next launch reads the STALE
+     * list, restores the "closed" tab, and reconnectSession's missing-tmux
+     * fallback relaunches a fresh session under the same name. A blocking
+     * write here closes that race.
+     */
+    private fun saveSync(sessions: List<PersistedSession>) {
+        prefs.putStringSync(KEY_SESSIONS, json.encodeToString(sessions))
+    }
+
     fun upsert(session: PersistedSession) {
         val list = load().toMutableList()
         // Match first by app-internal id, then fall back to (server, tmux name)
@@ -85,7 +97,7 @@ class SessionStorage(private val prefs: PlatformPreferences) {
     }
 
     fun remove(sessionId: String) {
-        save(load().filter { it.id != sessionId })
+        saveSync(load().filter { it.id != sessionId })
     }
 
     /**
