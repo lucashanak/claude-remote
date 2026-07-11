@@ -83,7 +83,6 @@ fun App(
     terminalScrolledUp: Boolean = false,
     terminalPendingOutput: Boolean = false,
     onJumpToLatest: (() -> Unit)? = null,
-    onUpdateWatch: (() -> Unit)? = null,
     terminalContent: @Composable (modifier: Modifier) -> Unit,
     // #75: keep emulator composed under the Chat overlay so screenReader works in
     // Chat. Android single-pane passes true; desktop stays false (SwingPanel bleeds
@@ -1148,7 +1147,6 @@ fun App(
                         onImportServers = onImportServers,
                         onViewLog = { currentScreen = Screen.LOG_VIEWER },
                         onTestNotification = onTestNotification,
-                        onUpdateWatch = onUpdateWatch,
                     )
                 }
 

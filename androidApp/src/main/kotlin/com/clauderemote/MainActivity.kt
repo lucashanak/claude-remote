@@ -291,13 +291,6 @@ class MainActivity : FragmentActivity() {
                         "Toto je testovací notifikace. Zkus „Odpovědět“ a „Přehrát“.",
                     )
                 },
-                onUpdateWatch = {
-                    // Runs as a foreground service (progress shown via its own
-                    // notification) — the transfer can take several minutes,
-                    // longer than a plain background task survives once the
-                    // screen locks or the app backgrounds.
-                    WearApkPushService.start(applicationContext)
-                },
                 onPickKeyFile = { callback ->
                     keyFileCallback = callback
                     keyFilePicker.launch("*/*")

@@ -267,12 +267,12 @@ private fun UpdateSection() {
             }
         } else {
             Button(onClick = {
-                status = "Stahuji…"
-                WearUpdater.downloadAndInstall(
-                    context, info.downloadUrl,
-                    onProgress = { msg -> mainHandler.post { status = msg } },
-                    onError = { msg -> mainHandler.post { status = "Chyba: $msg" } },
-                )
+                // Runs as a foreground service (progress shown via its own
+                // notification) — the download can take a while relayed
+                // through the phone, longer than a plain background task
+                // survives once the watch goes to ambient/screen-off.
+                status = "Stahuji na pozadí — viz notifikace"
+                WearUpdateService.start(context, info.downloadUrl)
             }) {
                 Text("Aktualizovat na v${info.version}")
             }

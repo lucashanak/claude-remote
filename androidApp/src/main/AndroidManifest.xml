@@ -6,7 +6,6 @@
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
-    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
@@ -46,15 +45,6 @@
                 android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
                 android:value="Keeping SSH session alive in background" />
         </service>
-
-        <!-- Wraps WearApkPusher in a foreground service — the transfer can
-             take several minutes over classic Bluetooth, and without this
-             Android's background execution limits silently suspended it as
-             soon as the phone screen locked or the app backgrounded. -->
-        <service
-            android:name="com.clauderemote.WearApkPushService"
-            android:exported="false"
-            android:foregroundServiceType="dataSync" />
 
         <!-- Receives Wearable Data Layer messages from the watch companion
              app (installed applicationId com.clauderemote.android, same as

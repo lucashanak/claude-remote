@@ -9,6 +9,8 @@
     <uses-permission android:name="android.permission.INTERNET" />
     <!-- Self-update: install the downloaded APK over this app. -->
     <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
 
     <application
         android:allowBackup="true"
@@ -36,25 +38,27 @@
             android:name="com.clauderemote.wear.InstallResultReceiver"
             android:exported="false" />
 
-        <!-- Receives the phone's /sessions Data Layer pushes (WearSync) and
-             the pushed-APK channel transfer (WearApkPusher). -->
+        <!-- Wraps the self-update download in a foreground service — Wear
+             OS's background-execution limits silently suspended the plain
+             background download once the watch went to ambient/screen-off. -->
+        <service
+            android:name="com.clauderemote.wear.WearUpdateService"
+            android:exported="false"
+            android:foregroundServiceType="dataSync" />
+
+        <!-- Receives the phone's /sessions Data Layer pushes (WearSync). -->
         <service
             android:name="com.clauderemote.wear.WearDataListenerService"
             android:exported="true">
             <intent-filter>
                 <action android:name="com.google.android.gms.wearable.DATA_CHANGED" />
-                <action android:name="com.google.android.gms.wearable.CHANNEL_EVENT" />
-                <!-- Scoped to this app's own two paths, not a "/" wildcard —
-                     a wildcard wakes this process for ANY Data Layer traffic
+                <!-- Scoped to this app's own path, not a "/" wildcard — a
+                     wildcard wakes this process for ANY Data Layer traffic
                      on the device, not just its own. -->
                 <data
                     android:scheme="wear"
                     android:host="*"
                     android:pathPrefix="/sessions" />
-                <data
-                    android:scheme="wear"
-                    android:host="*"
-                    android:pathPrefix="/apk_push" />
             </intent-filter>
         </service>
 

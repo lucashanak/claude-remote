@@ -25,6 +25,7 @@ object WearUpdater {
     private const val TAG = "WearUpdater"
     private const val RELEASES_URL = "https://api.github.com/repos/lucashanak/claude-remote/releases/latest"
     private const val ASSET_NAME = "ClaudeRemoteWear.apk"
+    private const val MAX_DOWNLOAD_ATTEMPTS = 3
     private val executor = Executors.newSingleThreadExecutor()
 
     data class UpdateInfo(val version: String, val downloadUrl: String)
@@ -53,16 +54,21 @@ object WearUpdater {
 
     fun downloadAndInstall(context: Context, url: String, onProgress: (String) -> Unit, onError: (String) -> Unit) {
         executor.execute {
-            try {
-                onProgress("Stahuji…")
-                val bytes = httpGetBytes(url)
-                onProgress("Instaluji…")
-                installApk(context, bytes)
-                onProgress("Potvrďte instalaci na hodinkách")
-            } catch (e: Exception) {
-                WearLog.w(context, TAG, "downloadAndInstall failed: ${e.message}")
-                onError(e.message ?: "unknown error")
+            var lastError: Exception? = null
+            for (attempt in 1..MAX_DOWNLOAD_ATTEMPTS) {
+                try {
+                    onProgress(if (attempt == 1) "Stahuji…" else "Stahuji… (pokus $attempt/$MAX_DOWNLOAD_ATTEMPTS)")
+                    val bytes = httpGetBytes(url)
+                    onProgress("Instaluji…")
+                    installApk(context, bytes)
+                    onProgress("Potvrďte instalaci na hodinkách")
+                    return@execute
+                } catch (e: Exception) {
+                    lastError = e
+                    WearLog.w(context, TAG, "downloadAndInstall attempt $attempt/$MAX_DOWNLOAD_ATTEMPTS failed: ${e.message}")
+                }
             }
+            onError(lastError?.message ?: "unknown error")
         }
     }
 
@@ -105,8 +111,7 @@ object WearUpdater {
         return conn
     }
 
-    /** Also called directly by [WearDataListenerService] for a phone-pushed APK (no HTTP download). */
-    fun installApk(context: Context, apkBytes: ByteArray) {
+    private fun installApk(context: Context, apkBytes: ByteArray) {
         val installer = context.packageManager.packageInstaller
         val params = PackageInstaller.SessionParams(PackageInstaller.SessionParams.MODE_FULL_INSTALL)
         val sessionId = installer.createSession(params)
