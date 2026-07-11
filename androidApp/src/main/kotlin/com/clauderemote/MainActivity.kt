@@ -292,16 +292,11 @@ class MainActivity : FragmentActivity() {
                     )
                 },
                 onUpdateWatch = {
-                    val handler = android.os.Handler(android.os.Looper.getMainLooper())
-                    WearApkPusher.checkAndPush(
-                        applicationContext,
-                        onProgress = { msg -> handler.post {
-                            android.widget.Toast.makeText(this, msg, android.widget.Toast.LENGTH_SHORT).show()
-                        } },
-                        onError = { msg -> handler.post {
-                            android.widget.Toast.makeText(this, "Chyba: $msg", android.widget.Toast.LENGTH_LONG).show()
-                        } },
-                    )
+                    // Runs as a foreground service (progress shown via its own
+                    // notification) — the transfer can take several minutes,
+                    // longer than a plain background task survives once the
+                    // screen locks or the app backgrounds.
+                    WearApkPushService.start(applicationContext)
                 },
                 onPickKeyFile = { callback ->
                     keyFileCallback = callback
