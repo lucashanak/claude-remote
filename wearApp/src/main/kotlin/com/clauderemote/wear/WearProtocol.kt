@@ -17,6 +17,7 @@ data class WearSessionInfo(
     val status: String,
     val activity: String,
     val lastMessage: String?,
+    val lastMessageAt: Long = 0,
 )
 
 @Serializable

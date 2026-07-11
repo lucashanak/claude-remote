@@ -5,6 +5,7 @@ import android.content.Context
 import android.net.Uri
 import android.os.Bundle
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
@@ -60,6 +61,13 @@ private fun WearApp() {
     var selectedId by remember { mutableStateOf<String?>(null) }
     val selected = selectedId?.let { id -> sessions.firstOrNull { it.id == id } }
 
+    // Without this, Wear OS's system swipe-back gesture has no in-app back
+    // stack to pop (this screen nav is just a mutableStateOf, not a real
+    // NavHost) and falls through to dismissing/exiting the whole Activity
+    // instead of just returning to the session list — reported on a real
+    // device as "swipe back from a session kicks me out of the app".
+    BackHandler(enabled = selectedId != null) { selectedId = null }
+
     if (selected != null) {
         SessionDetailScreen(session = selected, onBack = { selectedId = null })
     } else {
@@ -95,7 +103,7 @@ private fun SessionListScreen(sessions: List<WearSessionInfo>, onSelect: (String
         if (sessions.isEmpty()) {
             item { Text("No sessions yet") }
         }
-        sessions.forEach { session ->
+        sessions.sortedByDescending { it.lastMessageAt }.forEach { session ->
             item { SessionRow(session, onClick = { onSelect(session.id) }) }
         }
     }

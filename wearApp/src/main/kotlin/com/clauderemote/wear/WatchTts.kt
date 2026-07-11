@@ -27,6 +27,21 @@ import java.util.Locale
 object WatchTts {
     private const val TAG = "WatchTts"
     private val lock = Any()
+    // A bound TextToSpeech engine was never released once constructed —
+    // process-scoped, so it stayed bound to the system TTS service
+    // indefinitely even during long stretches with nothing to say. Shutting
+    // down after a period of no new speak() calls frees it; the next speak()
+    // just reconstructs it (a few hundred ms, same cost as the very first
+    // utterance already pays).
+    private const val IDLE_SHUTDOWN_MS = 30_000L
+    private val idleHandler = android.os.Handler(android.os.Looper.getMainLooper())
+    private val idleShutdownRunnable = Runnable {
+        synchronized(lock) {
+            engine?.shutdown()
+            engine = null
+            ready = false
+        }
+    }
 
     @Volatile private var engine: TextToSpeech? = null
     @Volatile private var ready = false
@@ -127,5 +142,7 @@ object WatchTts {
         val id = "wear-utt-${System.nanoTime()}"
         val result = t.speak(text, mode, null, id)
         WearLog.i(context, TAG, "speak($id) enqueue mode=$mode result=$result (0=SUCCESS, -1=ERROR)")
+        idleHandler.removeCallbacks(idleShutdownRunnable)
+        idleHandler.postDelayed(idleShutdownRunnable, IDLE_SHUTDOWN_MS)
     }
 }

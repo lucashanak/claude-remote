@@ -44,10 +44,17 @@
             <intent-filter>
                 <action android:name="com.google.android.gms.wearable.DATA_CHANGED" />
                 <action android:name="com.google.android.gms.wearable.CHANNEL_EVENT" />
+                <!-- Scoped to this app's own two paths, not a "/" wildcard —
+                     a wildcard wakes this process for ANY Data Layer traffic
+                     on the device, not just its own. -->
                 <data
                     android:scheme="wear"
                     android:host="*"
-                    android:pathPrefix="/" />
+                    android:pathPrefix="/sessions" />
+                <data
+                    android:scheme="wear"
+                    android:host="*"
+                    android:pathPrefix="/apk_push" />
             </intent-filter>
         </service>
 
