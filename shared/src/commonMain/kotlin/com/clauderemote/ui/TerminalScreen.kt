@@ -1319,13 +1319,20 @@ private fun CRTopBar(
                 }
             }
 
-            // Session title — tapping opens the slide-in SessionDrawer
+            // Session title — tapping opens the slide-in SessionDrawer.
+            // The inner Row MUST fillMaxWidth() so it's hard-capped to this
+            // Box's weighted share: without it, a long title's natural Text
+            // width can make the Row report a size larger than what it was
+            // given, pushing the invert-colors/more-menu buttons off-screen
+            // to the right instead of being absorbed by ellipsis here.
             Box(modifier = Modifier.weight(1f)) {
                 Row(
-                    modifier = Modifier.clickable(
-                        interactionSource = remember { MutableInteractionSource() },
-                        indication = null,
-                    ) { if (hasMultiple && !wideMode) onOpenDrawer() },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable(
+                            interactionSource = remember { MutableInteractionSource() },
+                            indication = null,
+                        ) { if (hasMultiple && !wideMode) onOpenDrawer() },
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(6.dp)
                 ) {
@@ -1339,6 +1346,8 @@ private fun CRTopBar(
                         style = CRType.cardTitle,
                         color = c.text,
                         maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f, fill = false),
                     )
                     if (hasMultiple && !wideMode) {
                         Text("(${tabs.size})", style = CRType.monoTiny, color = c.textDim)
@@ -1347,33 +1356,50 @@ private fun CRTopBar(
                 }
             }
 
-            // Git status chip (branch + dirty/ahead/behind) — only for git repos
-            if (gitStatus != null) {
-                GitChip(gitStatus)
-            }
-
-            // Active model chip
-            if (activeSession != null) {
-                ModelChip(activeSession.model)
-            }
-
-            // Latency
-            if (latencyMs != null) {
-                val latColor = when {
-                    latencyMs < 100 -> c.ready
-                    latencyMs < 300 -> c.working
-                    else -> c.disconnected
+            // Informational chips (git branch, model, latency, usage) are
+            // secondary — nice to see, safe to lose. A hard width CEILING +
+            // horizontalScroll (rather than a second weight(1f)) means this
+            // cluster still shrinks to its actual content in the common case
+            // — leaving the title as the sole weighted child, getting the
+            // full leftover, same as before — while never being able to grow
+            // past the ceiling and threaten the functional controls that
+            // follow (view toggle, compact/control-bar toggles, invert-
+            // colors, more-menu); scroll is the escape hatch if it's ever
+            // squeezed below its content's natural width.
+            Row(
+                modifier = Modifier
+                    .widthIn(max = 160.dp)
+                    .horizontalScroll(rememberScrollState()),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                // Git status chip (branch + dirty/ahead/behind) — only for git repos
+                if (gitStatus != null) {
+                    GitChip(gitStatus)
                 }
-                Text("${latencyMs}ms", style = CRType.monoTiny, color = latColor,
-                    modifier = Modifier.padding(horizontal = 4.dp))
-            }
 
-            // Usage mini bars
-            if (contextPercent != null || sessionUsagePercent != null || weekUsagePercent != null) {
-                Column(verticalArrangement = Arrangement.spacedBy(1.dp), modifier = Modifier.padding(horizontal = 4.dp)) {
-                    if (contextPercent != null) MiniBar("Ctx", contextPercent)
-                    if (sessionUsagePercent != null) MiniBar("5h", sessionUsagePercent)
-                    if (weekUsagePercent != null) MiniBar("Wk", weekUsagePercent)
+                // Active model chip
+                if (activeSession != null) {
+                    ModelChip(activeSession.model)
+                }
+
+                // Latency
+                if (latencyMs != null) {
+                    val latColor = when {
+                        latencyMs < 100 -> c.ready
+                        latencyMs < 300 -> c.working
+                        else -> c.disconnected
+                    }
+                    Text("${latencyMs}ms", style = CRType.monoTiny, color = latColor,
+                        modifier = Modifier.padding(horizontal = 4.dp))
+                }
+
+                // Usage mini bars
+                if (contextPercent != null || sessionUsagePercent != null || weekUsagePercent != null) {
+                    Column(verticalArrangement = Arrangement.spacedBy(1.dp), modifier = Modifier.padding(horizontal = 4.dp)) {
+                        if (contextPercent != null) MiniBar("Ctx", contextPercent)
+                        if (sessionUsagePercent != null) MiniBar("5h", sessionUsagePercent)
+                        if (weekUsagePercent != null) MiniBar("Wk", weekUsagePercent)
+                    }
                 }
             }
 
