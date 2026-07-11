@@ -119,7 +119,7 @@ fun LauncherScreen(
                                 )
                             }
                             DropdownMenu(expanded = showModelMenu, onDismissRequest = { showModelMenu = false }) {
-                                ClaudeModel.entries.filter { it != ClaudeModel.DEFAULT }.forEach { model ->
+                                ClaudeModel.selectable.filter { it != ClaudeModel.DEFAULT }.forEach { model ->
                                     DropdownMenuItem(
                                         text = { Text("Switch all to ${model.displayName}") },
                                         onClick = {

@@ -49,6 +49,6 @@ object CostCalculator {
         ClaudeModel.SONNET -> "sonnet"
         ClaudeModel.HAIKU -> "haiku"
         ClaudeModel.DEFAULT -> "sonnet"
-        ClaudeModel.LOCAL_ORNITH, ClaudeModel.LOCAL_QWEN -> "local"
+        ClaudeModel.LOCAL, ClaudeModel.LOCAL_ORNITH, ClaudeModel.LOCAL_QWEN -> "local"
     }
 }

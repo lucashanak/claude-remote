@@ -75,7 +75,7 @@ fun buildPaletteActions(
     })
 
     // Model switching
-    ClaudeModel.entries.filter { it != ClaudeModel.DEFAULT }.forEach { model ->
+    ClaudeModel.selectable.filter { it != ClaudeModel.DEFAULT }.forEach { model ->
         actions.add(PaletteAction("model_${model.name}", "Switch to ${model.displayName}", "Model") {
             onSwitchModel(model)
         })

@@ -18,12 +18,23 @@ enum class ClaudeModel(val displayName: String, val cliValue: String?, val isLoc
     FABLE("Fable", "fable"),
     SONNET("Sonnet", "sonnet"),
     HAIKU("Haiku", "haiku"),
-    // Local models: launched via the `claude-local` wrapper on the server,
-    // which already holds the gateway env (ANTHROPIC_BASE_URL/token). The app
-    // just swaps the launch binary + passes the model id — no gateway config
-    // lives in the app.
+    // Launched via the `claude-local` wrapper on the server, which already
+    // holds the gateway env (ANTHROPIC_BASE_URL/token) and its own default
+    // model. No cliValue on purpose: the local model lineup changes too
+    // often to hardcode here — pick the actual model from inside the
+    // session afterward (/model).
+    LOCAL("Claude-local", null, isLocal = true),
+    // Deprecated: superseded by LOCAL above. Kept only so already-persisted
+    // sessions/settings referencing these names still deserialize instead of
+    // crashing (PersistedSession.model / SshServer.defaultClaudeModel have no
+    // coerceInputValues fallback). Not shown in any picker — see [selectable].
     LOCAL_ORNITH("Ornith (local)", "ornith-fast", isLocal = true),
     LOCAL_QWEN("Qwen3-Coder (local)", "qwen3-coder", isLocal = true);
+
+    companion object {
+        /** Entries offered in model pickers — excludes deprecated per-model local variants. */
+        val selectable: List<ClaudeModel> = entries.filter { it != LOCAL_ORNITH && it != LOCAL_QWEN }
+    }
 }
 
 @Serializable

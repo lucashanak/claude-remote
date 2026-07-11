@@ -365,7 +365,7 @@ fun ConnectScreen(
                     }
                     LabeledRow("Model") {
                         Segmented(
-                            options = ClaudeModel.entries,
+                            options = ClaudeModel.selectable,
                             selected = selectedModel,
                             onSelect = { selectedModel = it },
                             modifier = Modifier.fillMaxWidth(),

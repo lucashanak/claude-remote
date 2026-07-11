@@ -217,7 +217,7 @@ fun SettingsScreen(
 
                     SettingsRow(label = "Model") {
                         FlowRow(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                            ClaudeModel.entries.forEach { model ->
+                            ClaudeModel.selectable.forEach { model ->
                                 val selected = defaultModel == model
                                 Pill(
                                     text = model.displayName,
