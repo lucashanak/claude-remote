@@ -9,6 +9,7 @@ import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import java.io.BufferedInputStream
+import java.io.File
 import java.net.HttpURLConnection
 import java.net.URL
 import java.util.concurrent.Executors
@@ -52,23 +53,45 @@ object WearUpdater {
         }
     }
 
-    fun downloadAndInstall(context: Context, url: String, onProgress: (String) -> Unit, onError: (String) -> Unit) {
+    /** Where [download] saves the given version's APK, and where [install] reads it back from.
+     *  Version-tagged so a leftover file from a previous check/download cycle never gets mistaken
+     *  for THIS version already being downloaded. */
+    fun downloadedFile(context: Context, version: String): File = File(context.cacheDir, "wear_update_$version.apk")
+
+    /** Separate from [install] so a slow/flaky download can be retried without re-installing,
+     *  and a failed install doesn't require re-downloading the whole APK again. */
+    fun download(context: Context, version: String, url: String, onProgress: (String) -> Unit, onError: (String) -> Unit) {
         executor.execute {
             var lastError: Exception? = null
             for (attempt in 1..MAX_DOWNLOAD_ATTEMPTS) {
                 try {
                     onProgress(if (attempt == 1) "Stahuji…" else "Stahuji… (pokus $attempt/$MAX_DOWNLOAD_ATTEMPTS)")
                     val bytes = httpGetBytes(url)
-                    onProgress("Instaluji…")
-                    installApk(context, bytes)
-                    onProgress("Potvrďte instalaci na hodinkách")
+                    downloadedFile(context, version).writeBytes(bytes)
+                    onProgress("Staženo")
                     return@execute
                 } catch (e: Exception) {
                     lastError = e
-                    WearLog.w(context, TAG, "downloadAndInstall attempt $attempt/$MAX_DOWNLOAD_ATTEMPTS failed: ${e.message}")
+                    WearLog.w(context, TAG, "download attempt $attempt/$MAX_DOWNLOAD_ATTEMPTS failed: ${e.message}")
                 }
             }
             onError(lastError?.message ?: "unknown error")
+        }
+    }
+
+    fun install(context: Context, version: String, onProgress: (String) -> Unit, onError: (String) -> Unit) {
+        executor.execute {
+            try {
+                val file = downloadedFile(context, version)
+                if (!file.exists()) throw IllegalStateException("no downloaded APK for $version")
+                onProgress("Instaluji…")
+                installApk(context, file.readBytes())
+                onProgress("Potvrďte instalaci na hodinkách")
+                file.delete()
+            } catch (e: Exception) {
+                WearLog.w(context, TAG, "install failed: ${e.message}")
+                onError(e.message ?: "unknown error")
+            }
         }
     }
 

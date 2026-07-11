@@ -21,6 +21,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -222,9 +223,13 @@ private fun fetchInitialSessions(context: Context) {
 }
 
 /**
- * Self-update: check GitHub Releases, then download+install on demand. After
- * the one-time ADB sideload, this is the only thing future updates need —
- * a tap here, then a tap to confirm the system's install dialog.
+ * Self-update: three explicit taps — check GitHub Releases, download the
+ * APK, then install it — rather than one combined "download+install"
+ * action. Splitting them means a flaky download can be retried without
+ * re-installing, and (since the download is saved to a version-tagged file
+ * rather than held only in memory) a failed install can be retried without
+ * re-downloading the whole ~22 MB APK again. After the one-time ADB
+ * sideload, this is the only thing future updates need.
  */
 @Composable
 private fun UpdateSection() {
@@ -235,6 +240,21 @@ private fun UpdateSection() {
     // WearUpdater's callbacks fire on a background executor thread; Compose
     // state must be mutated on the main thread.
     val mainHandler = remember { android.os.Handler(android.os.Looper.getMainLooper()) }
+    var downloaded by remember(updateInfo?.version) {
+        mutableStateOf(updateInfo?.let { WearUpdater.downloadedFile(context, it.version).exists() } ?: false)
+    }
+
+    // The download runs in WearUpdateService, independent of this Activity
+    // (the whole point — it survives the screen going to ambient/the app
+    // backgrounding) — poll for the file rather than needing a callback
+    // channel back from the service.
+    LaunchedEffect(updateInfo?.version) {
+        val info = updateInfo ?: return@LaunchedEffect
+        while (!downloaded) {
+            kotlinx.coroutines.delay(1000)
+            if (WearUpdater.downloadedFile(context, info.version).exists()) downloaded = true
+        }
+    }
 
     androidx.compose.foundation.layout.Column(
         modifier = Modifier.fillMaxWidth(),
@@ -242,39 +262,46 @@ private fun UpdateSection() {
     ) {
         Text("Verze: ${BuildConfig.VERSION_NAME}")
         val info = updateInfo
-        if (info == null) {
-            Button(
-                onClick = {
-                    checking = true; status = ""
-                    WearUpdater.checkLatest(
-                        context = context,
-                        onResult = { result ->
-                            mainHandler.post {
-                                checking = false
-                                if (result != null && result.version != BuildConfig.VERSION_NAME) {
-                                    updateInfo = result
-                                } else {
-                                    status = "Máte nejnovější verzi"
+        when {
+            info == null -> {
+                Button(
+                    onClick = {
+                        checking = true; status = ""
+                        WearUpdater.checkLatest(
+                            context = context,
+                            onResult = { result ->
+                                mainHandler.post {
+                                    checking = false
+                                    if (result != null && result.version != BuildConfig.VERSION_NAME) {
+                                        updateInfo = result
+                                    } else {
+                                        status = "Máte nejnovější verzi"
+                                    }
                                 }
-                            }
-                        },
-                        onError = { msg -> mainHandler.post { checking = false; status = "Chyba: $msg" } },
-                    )
-                },
-                enabled = !checking,
-            ) {
-                Text(if (checking) "Kontroluji…" else "Zkontrolovat aktualizace")
+                            },
+                            onError = { msg -> mainHandler.post { checking = false; status = "Chyba: $msg" } },
+                        )
+                    },
+                    enabled = !checking,
+                ) {
+                    Text(if (checking) "Kontroluji…" else "Zkontrolovat aktualizace")
+                }
             }
-        } else {
-            Button(onClick = {
-                // Runs as a foreground service (progress shown via its own
-                // notification) — the download can take a while relayed
-                // through the phone, longer than a plain background task
-                // survives once the watch goes to ambient/screen-off.
-                status = "Stahuji na pozadí — viz notifikace"
-                WearUpdateService.start(context, info.downloadUrl)
-            }) {
-                Text("Aktualizovat na v${info.version}")
+            !downloaded -> {
+                Button(onClick = {
+                    status = "Stahuji na pozadí — viz notifikace"
+                    WearUpdateService.startDownload(context, info.version, info.downloadUrl)
+                }) {
+                    Text("Stáhnout v${info.version}")
+                }
+            }
+            else -> {
+                Button(onClick = {
+                    status = "Instaluji na pozadí — viz notifikace"
+                    WearUpdateService.startInstall(context, info.version)
+                }) {
+                    Text("Nainstalovat v${info.version}")
+                }
             }
         }
         if (status.isNotBlank()) {
