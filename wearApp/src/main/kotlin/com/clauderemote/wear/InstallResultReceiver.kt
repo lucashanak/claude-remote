@@ -7,6 +7,7 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageInstaller
+import android.os.Build
 import androidx.core.app.NotificationCompat
 import androidx.core.content.IntentCompat
 
@@ -17,13 +18,21 @@ import androidx.core.content.IntentCompat
  *
  * Does NOT call context.startActivity() directly on the confirmation intent
  * — confirmed on a real device that if the watch screen is asleep/ambient
- * when this fires (e.g. an update pushed from the phone while nobody's
- * looking at the watch), nothing becomes visible and there's no way back to
- * it afterward. That's also a background-activity-start violation on
- * API 34+ regardless of screen state (this receiver isn't on the BAL
- * exemption list). A notification-tap PendingIntent IS a documented BAL
- * exemption and needs no screen-wake trickery — the user just confirms
- * whenever they next glance at the watch.
+ * when this fires, nothing becomes visible. That's also a
+ * background-activity-start violation on API 34+ regardless of screen state
+ * (this receiver isn't on the BAL exemption list). Instead posts a
+ * notification with a tap PendingIntent (a documented BAL exemption) AND —
+ * researched specifically because USE_FULL_SCREEN_INTENT's Android 14
+ * auto-revocation is enforced by Google Play's *installer* denying the
+ * permission for apps that fail its calling/alarm review, not by the OS
+ * itself; a sideloaded install never goes through that denial path, so the
+ * permission should stay in its default-granted state — a
+ * setFullScreenIntent pointed at a trampoline Activity
+ * ([WakeAndConfirmActivity]) that actually wakes the screen. Gated behind
+ * canUseFullScreenIntent() in case an OEM skin (this targets Xiaomi/HyperOS,
+ * known for aggressive background/permission policy) diverges from AOSP
+ * defaults; the plain tap notification is always posted regardless, so
+ * there's no dead end either way.
  */
 class InstallResultReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
@@ -52,20 +61,38 @@ class InstallResultReceiver : BroadcastReceiver() {
                 NotificationChannel(CHANNEL_ID, "Aktualizace", NotificationManager.IMPORTANCE_HIGH)
             )
         }
-        val pendingIntent = PendingIntent.getActivity(
+        val tapPendingIntent = PendingIntent.getActivity(
             context, 0, confirmIntent,
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
-        val notification = NotificationCompat.Builder(context, CHANNEL_ID)
+        val builder = NotificationCompat.Builder(context, CHANNEL_ID)
             .setSmallIcon(android.R.drawable.ic_dialog_info)
             .setContentTitle("Aktualizace hodinek")
             .setContentText("Klepnutím potvrďte instalaci")
-            .setContentIntent(pendingIntent)
+            .setContentIntent(tapPendingIntent)
             .setAutoCancel(true)
             .setPriority(NotificationCompat.PRIORITY_HIGH)
-            .build()
-        nm.notify(NOTIFICATION_ID, notification)
-        WearLog.i(context, TAG, "Posted install-confirm notification")
+            .setCategory(NotificationCompat.CATEGORY_ALARM)
+
+        // canUseFullScreenIntent() only exists from API 34 — below that the
+        // Android-14-era auto-revocation this whole mechanism is about
+        // doesn't apply in the first place, so treat as always allowed.
+        val canUseFsi = Build.VERSION.SDK_INT < Build.VERSION_CODES.UPSIDE_DOWN_CAKE || nm.canUseFullScreenIntent()
+        if (canUseFsi) {
+            val wakeIntent = Intent(context, WakeAndConfirmActivity::class.java).apply {
+                putExtra(WakeAndConfirmActivity.EXTRA_CONFIRM_INTENT, confirmIntent)
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+            val fullScreenPendingIntent = PendingIntent.getActivity(
+                context, 1, wakeIntent,
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+            )
+            builder.setFullScreenIntent(fullScreenPendingIntent, true)
+        } else {
+            WearLog.w(context, TAG, "canUseFullScreenIntent() false — falling back to tap-only notification")
+        }
+        nm.notify(NOTIFICATION_ID, builder.build())
+        WearLog.i(context, TAG, "Posted install-confirm notification (fsi=$canUseFsi)")
     }
 
     companion object {
