@@ -863,6 +863,26 @@ class SessionOrchestrator(
     private val fetchJson = kotlinx.serialization.json.Json { ignoreUnknownKeys = true }
 
     /**
+     * True unless the server's authoritative sessions.json was fetched
+     * successfully AND no longer lists this tmux name — i.e. some device's
+     * forgetSession() removed it. Fail-open (true) on any fetch problem so a
+     * network blip can't be mistaken for "closed elsewhere" and wrongly drop
+     * a tab that's still legitimately tracked.
+     */
+    private suspend fun stillTrackedOnServer(sshManager: SshManager, tmuxSessionName: String): Boolean {
+        val remote = fetchSessionsFromServer(sshManager) ?: return true
+        return remote.any { it.tmuxSessionName == tmuxSessionName }
+    }
+
+    /**
+     * Thrown by [sendTmuxCommand] when a tab's tmux is missing AND another
+     * device already closed it server-side. [sendTmuxCommand] has already
+     * torn the tab down locally by the time this is thrown — callers should
+     * stop reconnecting/retrying, not treat it as a connection failure.
+     */
+    private class SessionClosedElsewhereException : Exception()
+
+    /**
      * [fetchSessionsFromServer] with a per-server TTL cache. All sessions on a
      * server reconcile against the SAME sessions.json every 15 s — only the
      * first one inside the TTL pays the exec, the rest reuse the snapshot.
@@ -2128,7 +2148,11 @@ else:
             false
         }
 
-    private suspend fun connectSsh(session: ClaudeSession, isNewTmuxSession: Boolean) {
+    private suspend fun connectSsh(
+        session: ClaudeSession,
+        isNewTmuxSession: Boolean,
+        checkClosedElsewhere: Boolean = false,
+    ) {
         val sshManager = SshManager(serverStorage, transportPool = transportPool(session.server.id))
         connections[session.id] = sshManager
 
@@ -2289,7 +2313,7 @@ else:
         ensureStreamd(sshManager)
 
         // Tmux
-        sendTmuxCommand(sshManager, session, isNewTmuxSession)
+        sendTmuxCommand(sshManager, session, isNewTmuxSession, checkClosedElsewhere)
         promptDetector.suppressFor(3000) // suppress during tmux screen redraw
 
         // Apply saved terminal dimensions — TerminalView won't fire onResize
@@ -2299,7 +2323,12 @@ else:
         }
     }
 
-    private fun sendTmuxCommand(sshManager: SshManager, session: ClaudeSession, isNew: Boolean) {
+    private suspend fun sendTmuxCommand(
+        sshManager: SshManager,
+        session: ClaudeSession,
+        isNew: Boolean,
+        checkClosedElsewhere: Boolean = false,
+    ) {
         if (isNew) {
             val command = ClaudeConfig.buildTmuxLaunchCommand(
                 tmuxSessionName = session.tmuxSessionName,
@@ -2315,6 +2344,19 @@ else:
             // someone killed it), recreate it and re-launch claude with --resume
             // so the conversation continues. Otherwise plain attach.
             val tmuxExists = probeTmuxSession(sshManager, session.tmuxSessionName)
+            if (!tmuxExists && checkClosedElsewhere && !stillTrackedOnServer(sshManager, session.tmuxSessionName)) {
+                // Another device's forgetSession() already pushed this tmux name
+                // out of the shared sessions.json — respect that instead of
+                // resurrecting a session the user consciously closed elsewhere.
+                // Only trusted for the reconnect-to-an-already-tracked-tab path
+                // (checkClosedElsewhere=true); launchSession's attach/history-resume
+                // callers pass false since their target may legitimately be new
+                // to sessions.json.
+                FileLogger.log(TAG, "Tmux '${session.tmuxSessionName}' missing and no longer tracked server-side — closed on another device, forgetting locally")
+                sessionStorage?.remove(session.id)
+                disconnectSession(session.id)
+                throw SessionClosedElsewhereException()
+            }
             val escaped = session.tmuxSessionName.replace("'", "'\\''")
             val command = if (tmuxExists) {
                 "tmux set-option -g window-size latest 2>/dev/null; tmux set-option -g history-limit 100000 2>/dev/null; tmux attach-session -t '$escaped'"
@@ -2543,7 +2585,7 @@ else:
                     waitForShellPrompt(session.id, 3000)
                     sshManager.sendInput("\u0003\n") // Ctrl-C + Enter to clear
                     kotlinx.coroutines.delay(100)
-                    sendTmuxCommand(sshManager, session, false)
+                    sendTmuxCommand(sshManager, session, false, checkClosedElsewhere = true)
                     promptDetector.suppressFor(3000) // suppress during tmux screen redraw after reconnect
 
                     // Re-send terminal dimensions — the new SshManager defaults
@@ -2564,6 +2606,9 @@ else:
                     emit("\r\n\u001B[32mReconnected!\u001B[0m\r\n")
                     FileLogger.log(TAG, "Auto-reconnect succeeded for ${session.id}")
                     flushPendingInputs(session.id)
+                    return
+                } catch (e: SessionClosedElsewhereException) {
+                    FileLogger.log(TAG, "Auto-reconnect for ${session.id} aborted — closed on another device")
                     return
                 } catch (e: Exception) {
                     FileLogger.error(TAG, "Auto-reconnect attempt $attempt failed", e)
@@ -2929,7 +2974,7 @@ else:
             if (session.connectionType == ConnectionType.MOSH) {
                 connectMosh(session, false)
             } else {
-                connectSsh(session, false) // attach to existing tmux
+                connectSsh(session, false, checkClosedElsewhere = true) // attach to existing tmux
             }
             tabManager.updateTabStatus(sessionId, SessionStatus.ACTIVE)
             // Clear the DISCONNECTED activity left over from restore/disconnect —
@@ -2944,6 +2989,8 @@ else:
             // — they may have died during the outage), not just watcher+refresh.
             attachSessionRuntime(sessionId, session.tmuxSessionName)
             FileLogger.log(TAG, "Reconnected: $sessionId")
+        } catch (e: SessionClosedElsewhereException) {
+            FileLogger.log(TAG, "reconnectSession($sessionId) aborted — closed on another device")
         } catch (e: Exception) {
             FileLogger.error(TAG, "Reconnect failed", e)
             tabManager.updateTabStatus(sessionId, SessionStatus.ERROR)
