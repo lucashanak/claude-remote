@@ -1357,15 +1357,18 @@ private fun CRTopBar(
             }
 
             // Informational chips (git branch, model, latency, usage) are
-            // secondary — nice to see, safe to lose. Sharing a weighted +
-            // horizontally-scrollable slot with the title means this cluster
-            // can NEVER push the functional controls that follow (view
-            // toggle, compact/control-bar toggles, invert-colors, more-menu)
-            // past the screen edge: a scrollable child clips its own content
-            // to whatever width it's given instead of demanding more.
+            // secondary — nice to see, safe to lose. A hard width CEILING +
+            // horizontalScroll (rather than a second weight(1f)) means this
+            // cluster still shrinks to its actual content in the common case
+            // — leaving the title as the sole weighted child, getting the
+            // full leftover, same as before — while never being able to grow
+            // past the ceiling and threaten the functional controls that
+            // follow (view toggle, compact/control-bar toggles, invert-
+            // colors, more-menu); scroll is the escape hatch if it's ever
+            // squeezed below its content's natural width.
             Row(
                 modifier = Modifier
-                    .weight(1f, fill = false)
+                    .widthIn(max = 160.dp)
                     .horizontalScroll(rememberScrollState()),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
