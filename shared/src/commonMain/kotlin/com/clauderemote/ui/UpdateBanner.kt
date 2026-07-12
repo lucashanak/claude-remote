@@ -59,10 +59,18 @@ fun UpdateBanner(
                                 style = MaterialTheme.typography.bodyMedium
                             )
                         } else if (info != null) {
-                            val onAndroid = try { Class.forName("android.os.Build"); true } catch (_: Exception) { false }
+                            val onAndroid = UpdateChecker.isAndroid
+                            val isLinux = !onAndroid &&
+                                UpdateChecker.desktopPlatform() == UpdateChecker.DesktopPlatform.LINUX
                             val dlSize = when {
                                 onAndroid && info.hasPatch -> info.totalPatchSize
                                 onAndroid -> info.apkSize
+                                isLinux -> when (UpdateChecker.linuxPkgKind(info)) {
+                                    UpdateChecker.LinuxPkg.PKG -> info.pkgSize
+                                    UpdateChecker.LinuxPkg.DEB -> info.debSize
+                                    UpdateChecker.LinuxPkg.TARGZ -> info.tarGzSize
+                                    UpdateChecker.LinuxPkg.NONE -> 0
+                                }
                                 info.dmgSize > 0 -> info.dmgSize
                                 else -> info.apkSize
                             }

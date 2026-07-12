@@ -416,8 +416,22 @@ fun App(
                 val usePatch = onAndroid && info.hasPatch && onGetCurrentApk != null
 
                 if (!usePatch) {
-                    // Full download path (desktop or no patches available)
-                    val downloadUrl = if (onAndroid) info.apkUrl else info.dmgUrl.ifBlank { info.apkUrl }
+                    // Full download path (desktop or no patches available).
+                    // Pick the asset that matches the running platform — on Linux
+                    // that's the distro's package (.pkg.tar.zst / .deb / tarball),
+                    // NOT the .dmg (which used to be grabbed here and then fed to
+                    // macOS-only hdiutil, crashing the Linux updater).
+                    val downloadUrl = when {
+                        onAndroid -> info.apkUrl
+                        UpdateChecker.desktopPlatform() == UpdateChecker.DesktopPlatform.LINUX ->
+                            when (UpdateChecker.linuxPkgKind(info)) {
+                                UpdateChecker.LinuxPkg.PKG -> info.pkgUrl
+                                UpdateChecker.LinuxPkg.DEB -> info.debUrl
+                                UpdateChecker.LinuxPkg.TARGZ -> info.tarGzUrl
+                                UpdateChecker.LinuxPkg.NONE -> ""
+                            }
+                        else -> info.dmgUrl.ifBlank { info.apkUrl }
+                    }
                     if (downloadUrl.isBlank()) {
                         updateState = updateState.copy(error = "No update available for this platform")
                         return@launch
@@ -445,6 +459,18 @@ fun App(
 
                     updateState = updateState.copy(statusText = "Installing v${info.version}...", progress = 100)
                     onInstallUpdate?.invoke(bytes, info)
+                    // On Linux the system package installer opens in its own
+                    // window and we hand control to it (no in-place swap /
+                    // relaunch like macOS), so clear the spinner instead of
+                    // leaving the banner stuck on "Installing...".
+                    if (!onAndroid &&
+                        UpdateChecker.desktopPlatform() == UpdateChecker.DesktopPlatform.LINUX
+                    ) {
+                        updateState = updateState.copy(
+                            downloading = false,
+                            statusText = "Installer opened — finish it, then restart the app."
+                        )
+                    }
                 } else {
                     // Patch update path
                     updateState = updateState.copy(downloading = true, error = null, statusText = "Reading current APK...")

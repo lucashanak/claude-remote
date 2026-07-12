@@ -273,27 +273,15 @@ fun main() = application {
         else readJediTermSnapshot(termWidget, rowCount = 16)
     }
 
-    // Desktop notifications via SystemTray
+    // Desktop notifications. On Linux the AWT SystemTray balloon renders as an
+    // ugly, text-less mini window (the toolkit has no real freedesktop backend),
+    // so we use `notify-send` — the universal D-Bus (org.freedesktop.Notifications)
+    // path that KDE Plasma, GNOME, XFCE et al. implement natively. macOS/Windows
+    // keep the AWT tray balloon, which works acceptably there.
     sessionOrchestrator.onClaudeNeedsInput = { _, hint, _ ->
         if (appSettings.notificationsEnabled) {
-            try {
-                if (java.awt.SystemTray.isSupported()) {
-                    val tray = java.awt.SystemTray.getSystemTray()
-                    if (tray.trayIcons.isEmpty()) {
-                        val icon = java.awt.Toolkit.getDefaultToolkit().createImage(
-                            object {}.javaClass.getResource("/icon.png")
-                        )
-                        val trayIcon = java.awt.TrayIcon(icon, "Claude Remote")
-                        trayIcon.isImageAutoSize = true
-                        tray.add(trayIcon)
-                    }
-                    tray.trayIcons.firstOrNull()?.displayMessage(
-                        "Claude Remote", hint, java.awt.TrayIcon.MessageType.INFO
-                    )
-                }
-            } catch (e: Exception) {
-                FileLogger.log("Desktop", "System tray notification failed: ${e.message}")
-            }
+            if (IS_LINUX) sendLinuxNotification(hint)
+            else sendTrayNotification(hint)
         }
     }
 
@@ -353,7 +341,13 @@ fun main() = application {
                 try {
                     val tmpDir = File(System.getProperty("java.io.tmpdir"), "claude-remote-update")
                     tmpDir.mkdirs()
-                    if (info.dmgUrl.isNotBlank()) {
+                    if (IS_LINUX) {
+                        // Hand the downloaded distro package to the system's GUI
+                        // installer (polkit prompt) — we never had a Linux branch
+                        // before, so it fell through to the macOS `hdiutil` path
+                        // and crashed with "Cannot run program hdiutil".
+                        installLinuxUpdate(bytes, info, tmpDir)
+                    } else if (IS_MAC && info.dmgUrl.isNotBlank()) {
                         val dmgFile = File(tmpDir, "ClaudeRemote-${info.version}.dmg")
                         dmgFile.writeBytes(bytes)
 
@@ -444,56 +438,11 @@ fun main() = application {
                 }
             },
             onPickFile = { callback ->
-                // Native macOS NSOpenPanel via java.awt.FileDialog.
-                // (We tried JFileChooser as a fallback when this seemed
-                // to wedge — user is correct, that ugly Swing dialog is
-                // not acceptable. Going back to native and properly
-                // handling the failure path instead.)
-                //
-                // Two safety nets so the caller's CompletableDeferred
-                // never hangs the way it did originally:
-                //   • Fired-once guard: callback() runs exactly once on
-                //     every code path, including exceptions and the
-                //     unreachable "fell through finally without firing"
-                //     case.
-                //   • Exception logging: when FileDialog does throw
-                //     (some JBR/macOS combos do), it goes to FileLogger
-                //     so we can actually see the stack trace in the
-                //     Log Viewer instead of vanishing.
-                javax.swing.SwingUtilities.invokeLater {
-                    var fired = false
-                    fun fire(pairs: List<Pair<ByteArray, String>>) {
-                        if (fired) return
-                        fired = true
-                        callback(pairs)
-                    }
-                    try {
-                        val parent = javax.swing.SwingUtilities.getWindowAncestor(termWidget) as? java.awt.Frame
-                        val dialog = java.awt.FileDialog(parent, "Attach File", java.awt.FileDialog.LOAD)
-                        dialog.isMultipleMode = true
-                        dialog.isVisible = true
-                        val files = dialog.files
-                        if (files != null && files.isNotEmpty()) {
-                            val pairs = files.mapNotNull { f ->
-                                try { f.readBytes() to f.name } catch (_: Exception) { null }
-                            }
-                            fire(pairs)
-                        } else {
-                            fire(emptyList())
-                        }
-                    } catch (e: Throwable) {
-                        com.clauderemote.util.FileLogger.error(
-                            "Main", "FileDialog failed: ${e.message}", e
-                        )
-                        fire(emptyList())
-                    } finally {
-                        if (!fired) fire(emptyList())
-                        termWidget?.let { w ->
-                            w.revalidate()
-                            w.repaint()
-                        }
-                    }
-                }
+                // Native picker per platform: zenity/kdialog portal on Linux
+                // (AWT FileDialog is unreliable inside a Compose window there),
+                // NSOpenPanel via java.awt.FileDialog on macOS. See
+                // pickFilesForAttach for the full rationale and safety nets.
+                pickFilesForAttach(callback)
             },
             onSaveFile = { bytes, suggestedName ->
                 // Show the native save dialog on the EDT, then write bytes on a
@@ -689,6 +638,238 @@ fun main() = application {
 private val IS_MAC: Boolean =
     System.getProperty("os.name").orEmpty().lowercase().contains("mac")
 
+private val IS_LINUX: Boolean =
+    System.getProperty("os.name").orEmpty().lowercase().let {
+        it.contains("nux") || it.contains("nix") || it.contains("aix")
+    }
+
+/**
+ * Invert the terminal at the JediTerm source on ALL desktop platforms.
+ *
+ * The terminal is a heavyweight Swing/AWT component (SwingPanel), whose native
+ * pixels are painted over the Compose Skia layer on every OS — so the Compose
+ * color-matrix "invert" filter in App.kt only ever flips the Compose chrome,
+ * never the terminal, regardless of platform. Originally this was macOS-gated
+ * on the assumption that the Compose filter inverted the terminal on
+ * Linux/Windows; it does not, which is why invert appeared dead on Linux. There
+ * is no double-invert risk precisely because the Compose filter can't reach the
+ * heavyweight surface.
+ */
+private val INVERT_TERMINAL_AT_SOURCE: Boolean = IS_MAC || IS_LINUX
+
+/**
+ * Install a downloaded Linux update by handing the package to the distro's GUI
+ * installer. The app lives in /opt (root-owned), so we can't do a silent
+ * in-place swap the way the macOS path replaces the bundle in /Applications —
+ * instead the user confirms the install via a polkit prompt, then restarts.
+ *
+ * [UpdateChecker.linuxPkgKind] is the same call the download step used to pick
+ * the asset, so the file extension here always matches what was fetched.
+ */
+private fun installLinuxUpdate(
+    bytes: ByteArray,
+    info: com.clauderemote.util.UpdateInfo,
+    tmpDir: File
+) {
+    val kind = com.clauderemote.util.UpdateChecker.linuxPkgKind(info)
+    val file = when (kind) {
+        com.clauderemote.util.UpdateChecker.LinuxPkg.PKG ->
+            File(tmpDir, "claude-remote-${info.version}.pkg.tar.zst")
+        com.clauderemote.util.UpdateChecker.LinuxPkg.DEB ->
+            File(tmpDir, "claude-remote-${info.version}.deb")
+        com.clauderemote.util.UpdateChecker.LinuxPkg.TARGZ ->
+            File(tmpDir, "claude-remote-${info.version}.tar.gz")
+        com.clauderemote.util.UpdateChecker.LinuxPkg.NONE -> {
+            FileLogger.log("Desktop", "No Linux package in release — opening releases page")
+            openReleasesPage()
+            return
+        }
+    }
+    file.writeBytes(bytes)
+    FileLogger.log("Desktop", "Linux update downloaded: ${file.absolutePath} (kind=$kind)")
+
+    // Prefer a graphical package installer (shows a polkit auth prompt, no root
+    // handled by us). Fall back through progressively more generic handlers,
+    // and finally the release page so the user is never left stuck.
+    val launched = when (kind) {
+        com.clauderemote.util.UpdateChecker.LinuxPkg.PKG ->
+            tryLaunch("pamac-installer", file.absolutePath) ||
+                tryLaunch("gnome-software", "--local-filename=${file.absolutePath}") ||
+                tryLaunch("xdg-open", file.absolutePath)
+        com.clauderemote.util.UpdateChecker.LinuxPkg.DEB ->
+            tryLaunch("xdg-open", file.absolutePath) ||
+                tryLaunch("gdebi-gtk", file.absolutePath)
+        // Portable tarball: no installer — reveal it in the file manager so the
+        // user can extract over their install dir.
+        else -> tryLaunch("xdg-open", file.parentFile.absolutePath)
+    }
+    if (!launched) {
+        FileLogger.log("Desktop", "No installer launched — opening releases page")
+        openReleasesPage()
+    }
+}
+
+/** Start a process, returning true only if the command actually exists/launched. */
+private fun tryLaunch(vararg cmd: String): Boolean = try {
+    ProcessBuilder(*cmd).start()
+    FileLogger.log("Desktop", "Launched: ${cmd.joinToString(" ")}")
+    true
+} catch (e: Exception) {
+    FileLogger.log("Desktop", "Not available: ${cmd.firstOrNull()} (${e.message})")
+    false
+}
+
+private fun openReleasesPage() {
+    try {
+        java.awt.Desktop.getDesktop()
+            .browse(java.net.URI(com.clauderemote.util.UpdateChecker.RELEASES_PAGE))
+    } catch (e: Exception) {
+        FileLogger.error("Desktop", "Failed to open releases page: ${e.message}", e)
+    }
+}
+
+/**
+ * Fire a native Linux notification via `notify-send` (freedesktop D-Bus). The
+ * `-i claude-remote` icon and desktop-entry hint make KDE/GNOME attribute it to
+ * the app. If notify-send is missing we skip rather than fall back to the AWT
+ * balloon — the user would rather have no notification than the ugly one.
+ */
+private fun sendLinuxNotification(hint: String) {
+    try {
+        ProcessBuilder(
+            "notify-send",
+            "-a", "Claude Remote",
+            "-i", "claude-remote",
+            "-h", "string:desktop-entry:claude-remote",
+            "Claude Remote", hint
+        ).start()
+    } catch (e: Exception) {
+        FileLogger.log("Desktop", "notify-send unavailable, notification skipped: ${e.message}")
+    }
+}
+
+/** AWT SystemTray balloon — used on macOS/Windows where it renders acceptably. */
+private fun sendTrayNotification(hint: String) {
+    try {
+        if (java.awt.SystemTray.isSupported()) {
+            val tray = java.awt.SystemTray.getSystemTray()
+            if (tray.trayIcons.isEmpty()) {
+                val icon = java.awt.Toolkit.getDefaultToolkit().createImage(
+                    object {}.javaClass.getResource("/icon.png")
+                )
+                val trayIcon = java.awt.TrayIcon(icon, "Claude Remote")
+                trayIcon.isImageAutoSize = true
+                tray.add(trayIcon)
+            }
+            tray.trayIcons.firstOrNull()?.displayMessage(
+                "Claude Remote", hint, java.awt.TrayIcon.MessageType.INFO
+            )
+        }
+    } catch (e: Exception) {
+        FileLogger.log("Desktop", "System tray notification failed: ${e.message}")
+    }
+}
+
+/**
+ * Pick files for attachment. On Linux the AWT [java.awt.FileDialog] embedded in
+ * a Compose/Skiko window is unreliable (it falls back to the ancient Motif peer
+ * under many WMs and multi-select comes back empty), so we drive the native
+ * desktop-portal picker via `zenity`/`kdialog` and only fall back to AWT when
+ * neither is present. Elsewhere (macOS) FileDialog is the native NSOpenPanel and
+ * works well, so it stays the primary path.
+ *
+ * [callback] is always invoked exactly once with the selected (bytes, name)
+ * pairs, or an empty list on cancel/failure.
+ */
+private fun pickFilesForAttach(callback: (List<Pair<ByteArray, String>>) -> Unit) {
+    if (IS_LINUX) {
+        // zenity/kdialog block until the user is done, so run off the EDT.
+        Thread {
+            val portalFiles = pickFilesViaPortal()
+            if (portalFiles != null) {
+                callback(portalFiles.mapNotNull { f ->
+                    try { f.readBytes() to f.name } catch (_: Exception) { null }
+                })
+            } else {
+                // No portal tool installed — fall back to the AWT dialog.
+                FileLogger.log("Main", "No zenity/kdialog found; using AWT FileDialog")
+                pickFilesViaAwt(callback)
+            }
+        }.apply { isDaemon = true }.start()
+        return
+    }
+    pickFilesViaAwt(callback)
+}
+
+/**
+ * Returns the selected files via a native portal dialog, an empty list if the
+ * user cancelled, or null if neither `zenity` nor `kdialog` is available (so the
+ * caller can fall back to AWT).
+ */
+private fun pickFilesViaPortal(): List<File>? {
+    // zenity: newline-separated absolute paths on stdout (robust with spaces).
+    runPortal(
+        listOf("zenity", "--file-selection", "--multiple", "--separator=\n", "--title=Attach File")
+    )?.let { out ->
+        return out.split("\n").map { it.trim() }.filter { it.isNotEmpty() }.map { File(it) }
+    }
+    // kdialog (KDE): single file to avoid space-separated multi-path parsing.
+    runPortal(listOf("kdialog", "--getopenfilename", System.getProperty("user.home") ?: "."))
+        ?.let { out ->
+            val path = out.trim()
+            return if (path.isEmpty()) emptyList() else listOf(File(path))
+        }
+    return null
+}
+
+/**
+ * Run a portal picker command. Returns its stdout on a clean pick, "" on cancel,
+ * or null when the program isn't installed (so the next option can be tried).
+ */
+private fun runPortal(cmd: List<String>): String? = try {
+    val proc = ProcessBuilder(cmd).redirectErrorStream(false).start()
+    val out = proc.inputStream.bufferedReader().readText()
+    val code = proc.waitFor()
+    // Exit 0 = picked, 1 = user cancelled (both mean the tool exists → not null).
+    if (code == 0) out else ""
+} catch (e: Exception) {
+    // IOException here means the binary wasn't found — signal "try the next one".
+    FileLogger.log("Main", "Portal picker unavailable: ${cmd.firstOrNull()} (${e.message})")
+    null
+}
+
+/** The original AWT FileDialog picker (native NSOpenPanel on macOS). */
+private fun pickFilesViaAwt(callback: (List<Pair<ByteArray, String>>) -> Unit) {
+    javax.swing.SwingUtilities.invokeLater {
+        var fired = false
+        fun fire(pairs: List<Pair<ByteArray, String>>) {
+            if (fired) return
+            fired = true
+            callback(pairs)
+        }
+        try {
+            val parent = javax.swing.SwingUtilities.getWindowAncestor(termWidget) as? java.awt.Frame
+            val dialog = java.awt.FileDialog(parent, "Attach File", java.awt.FileDialog.LOAD)
+            dialog.isMultipleMode = true
+            dialog.isVisible = true
+            val files = dialog.files
+            if (files != null && files.isNotEmpty()) {
+                fire(files.mapNotNull { f ->
+                    try { f.readBytes() to f.name } catch (_: Exception) { null }
+                })
+            } else {
+                fire(emptyList())
+            }
+        } catch (e: Throwable) {
+            FileLogger.error("Main", "FileDialog failed: ${e.message}", e)
+            fire(emptyList())
+        } finally {
+            if (!fired) fire(emptyList())
+            termWidget?.let { w -> w.revalidate(); w.repaint() }
+        }
+    }
+}
+
 /** 255-complement of a JediTerm core color (alpha preserved). */
 private fun invertCoreColor(c: com.jediterm.core.Color): com.jediterm.core.Color =
     com.jediterm.core.Color(255 - c.red, 255 - c.green, 255 - c.blue, c.alpha)
@@ -715,7 +896,7 @@ private fun DesktopTerminalView(
                 panel.background = java.awt.Color(0x1E, 0x1E, 0x1E)
                 // Live invert flag read by the settings provider on every paint.
                 // Updated from the SwingPanel `update` lambda on recomposition.
-                terminalInvertColors = IS_MAC && invertColors
+                terminalInvertColors = INVERT_TERMINAL_AT_SOURCE && invertColors
 
                 // Reuse existing widget if already created
                 val existing = termWidget
@@ -782,9 +963,10 @@ private fun DesktopTerminalView(
                         // in-memory lookup) instead of trusting a cached flag — so the
                         // terminal can never get stuck inverted: even if the
                         // recomposition-driven repaint in `update` is missed when the
-                        // toggle flips, the next natural paint self-corrects. macOS-only.
+                        // toggle flips, the next natural paint self-corrects. All
+                        // desktop platforms (see INVERT_TERMINAL_AT_SOURCE).
                         private val invertActive: Boolean
-                            get() = IS_MAC && appSettings.invertColors
+                            get() = INVERT_TERMINAL_AT_SOURCE && appSettings.invertColors
 
                         override fun getDefaultForeground(): com.jediterm.terminal.TerminalColor =
                             if (invertActive) invFg else darkFg
@@ -853,10 +1035,10 @@ private fun DesktopTerminalView(
         update = { panel ->
             // Called on recomposition — panel now has correct size from Compose layout
             val widget = termWidget ?: return@SwingPanel
-            // Live "invert colors" toggle (macOS only). The settings provider reads
-            // terminalInvertColors on every paint, so flipping it + repainting
-            // re-renders inverted/normal without recreating the widget.
-            val nextInvert = IS_MAC && invertColors
+            // Live "invert colors" toggle (all desktop platforms). The settings
+            // provider reads terminalInvertColors on every paint, so flipping it +
+            // repainting re-renders inverted/normal without recreating the widget.
+            val nextInvert = INVERT_TERMINAL_AT_SOURCE && invertColors
             if (nextInvert != terminalInvertColors) {
                 terminalInvertColors = nextInvert
                 widget.terminalPanel.repaint()

@@ -20,7 +20,14 @@ data class UpdateInfo(
     val patchChain: List<PatchStep>,
     val apkSha256: String?,
     val dmgUrl: String = "",
-    val dmgSize: Long = 0
+    val dmgSize: Long = 0,
+    // Linux release assets (Arch/Manjaro pacman pkg, Debian pkg, portable tarball).
+    val pkgUrl: String = "",
+    val pkgSize: Long = 0,
+    val debUrl: String = "",
+    val debSize: Long = 0,
+    val tarGzUrl: String = "",
+    val tarGzSize: Long = 0
 ) {
     val totalPatchSize: Long get() = patchChain.sumOf { it.size }
     val hasPatch: Boolean get() = patchChain.isNotEmpty()
@@ -30,6 +37,57 @@ object UpdateChecker {
 
     private const val REPO = "lucashanak/claude-remote"
     private const val MAX_PATCH_CHAIN = 10
+
+    const val RELEASES_PAGE = "https://github.com/$REPO/releases/latest"
+
+    enum class DesktopPlatform { MAC, WINDOWS, LINUX, OTHER }
+
+    /** The running Android runtime is also "os.name == Linux"; callers must
+     *  check [isAndroid] before trusting [desktopPlatform]. */
+    val isAndroid: Boolean by lazy {
+        try { Class.forName("android.os.Build"); true } catch (_: Throwable) { false }
+    }
+
+    fun desktopPlatform(): DesktopPlatform {
+        val os = System.getProperty("os.name").orEmpty().lowercase()
+        return when {
+            os.contains("mac") -> DesktopPlatform.MAC
+            os.contains("win") -> DesktopPlatform.WINDOWS
+            os.contains("nux") || os.contains("nix") || os.contains("aix") -> DesktopPlatform.LINUX
+            else -> DesktopPlatform.OTHER
+        }
+    }
+
+    enum class LinuxPkg { PKG, DEB, TARGZ, NONE }
+
+    // Distro probes are cached — the banner re-reads the pkg kind on every
+    // recomposition and we don't want to fork `command -v` each time.
+    private val hasPacman: Boolean by lazy {
+        commandExists("pacman") || java.io.File("/etc/arch-release").exists()
+    }
+    private val hasDpkg: Boolean by lazy { commandExists("dpkg") }
+
+    /**
+     * Which Linux release asset to fetch/install, matched to the running distro:
+     * pacman-based (Arch/Manjaro) → .pkg.tar.zst, dpkg-based (Debian/Ubuntu) → .deb,
+     * otherwise the portable tarball. Falls back to whatever asset exists so a
+     * release that only ships one of them still updates. Both the download step
+     * and the install step call this so they always agree on the file kind.
+     */
+    fun linuxPkgKind(info: UpdateInfo): LinuxPkg {
+        return when {
+            hasPacman && info.pkgUrl.isNotBlank() -> LinuxPkg.PKG
+            hasDpkg && info.debUrl.isNotBlank() -> LinuxPkg.DEB
+            info.debUrl.isNotBlank() -> LinuxPkg.DEB
+            info.pkgUrl.isNotBlank() -> LinuxPkg.PKG
+            info.tarGzUrl.isNotBlank() -> LinuxPkg.TARGZ
+            else -> LinuxPkg.NONE
+        }
+    }
+
+    private fun commandExists(cmd: String): Boolean = try {
+        ProcessBuilder("sh", "-c", "command -v $cmd").start().waitFor() == 0
+    } catch (_: Exception) { false }
 
     /**
      * Check for updates. Returns null if current version is latest.
@@ -60,6 +118,12 @@ object UpdateChecker {
             var apkSize = 0L
             var dmgUrl = ""
             var dmgSize = 0L
+            var pkgUrl = ""
+            var pkgSize = 0L
+            var debUrl = ""
+            var debSize = 0L
+            var tarGzUrl = ""
+            var tarGzSize = 0L
             val latestAssets = latest.optJSONArray("assets") ?: return@withContext null
             for (i in 0 until latestAssets.length()) {
                 val a = latestAssets.getJSONObject(i)
@@ -67,11 +131,17 @@ object UpdateChecker {
                 val url = a.optString("browser_download_url", "")
                 val size = a.optLong("size", 0)
                 when {
-                    name.endsWith(".apk") -> { apkUrl = url; apkSize = size }
+                    // The phone APK is "ClaudeRemote.apk"; skip the Wear companion.
+                    name.endsWith(".apk") && !name.contains("Wear") -> { apkUrl = url; apkSize = size }
                     name.endsWith(".dmg") -> { dmgUrl = url; dmgSize = size }
+                    name.endsWith(".pkg.tar.zst") -> { pkgUrl = url; pkgSize = size }
+                    name.endsWith(".deb") -> { debUrl = url; debSize = size }
+                    name.endsWith(".tar.gz") -> { tarGzUrl = url; tarGzSize = size }
                 }
             }
-            if (apkUrl.isBlank() && dmgUrl.isBlank()) return@withContext null
+            if (apkUrl.isBlank() && dmgUrl.isBlank() &&
+                pkgUrl.isBlank() && debUrl.isBlank() && tarGzUrl.isBlank()
+            ) return@withContext null
 
             // Extract SHA-256 from release body
             val body = latest.optString("body", "")
@@ -114,7 +184,10 @@ object UpdateChecker {
             }
             val validChain = if (ver == latestVer) chain else emptyList()
 
-            UpdateInfo(latestVer, apkUrl, apkSize, validChain, sha256, dmgUrl, dmgSize)
+            UpdateInfo(
+                latestVer, apkUrl, apkSize, validChain, sha256, dmgUrl, dmgSize,
+                pkgUrl, pkgSize, debUrl, debSize, tarGzUrl, tarGzSize
+            )
         } catch (e: Exception) {
             FileLogger.error("UpdateChecker", "Check failed", e)
             null
