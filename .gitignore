@@ -16,8 +16,6 @@ local.properties
 *.iml
 .DS_Store
 
-## xterm.js vendored in repo (shared-assets/terminal/)
-
 ## Mosh build artifacts
 build-mosh-tmp/
 androidApp/src/main/jniLibs/
