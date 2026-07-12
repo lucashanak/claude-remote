@@ -2,6 +2,7 @@ package com.clauderemote.ui.theme
 
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.Immutable
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.darkColorScheme
 
@@ -15,6 +16,7 @@ import androidx.compose.material3.darkColorScheme
  * across the window boundary as ordinary data, then [reprovide] it inside
  * the new root before rendering content that expects CRTheme to be present.
  */
+@Immutable
 data class CRThemeSnapshot(
     val variant: CRVariant,
     val density: CRDensity,

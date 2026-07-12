@@ -327,7 +327,7 @@ fun TerminalScreen(
         // is why the Layout 1/2/4 picker never appeared there) always offer it when
         // there is more than one session. Phones stay single-pane unless genuinely wide.
         val wideMode = (!isMobile || maxWidth > 700.dp) && hasMultiple
-        // Captured once: the more-menu picker runs inside an AlertDialog lambda
+        // Captured once: the more-menu picker runs inside a FloatingDialog lambda
         // that no longer has the BoxWithConstraintsScope receiver in scope.
         val allowQuadLayout = !isMobile || maxWidth > 1000.dp
 
@@ -444,13 +444,34 @@ fun TerminalScreen(
                     confirmButton = {},
                     text = {
                             Column {
-                                TextButton(onClick = {
-                                    moreMenu = false
-                                    showPalette = true
-                                    if (onFetchCommands != null) {
-                                        scope.launch { commands = onFetchCommands.invoke() }
-                                    }
-                                }, modifier = Modifier.fillMaxWidth()) { Text("Command Palette", color = c.text) }
+                                // CommandPaletteDialog is a custom in-window Box overlay (not
+                                // a FloatingDialog) — see its own doc comment for why: a past
+                                // Compose Desktop / macOS bug where system Dialog content never
+                                // rendered. That means it's still subject to the SAME
+                                // SwingPanel-always-on-top problem this whole commit otherwise
+                                // fixes: on desktop, in Raw view, it would open invisibly behind
+                                // the terminal. Disable the entry there rather than expose a
+                                // menu item that silently does nothing — composeTerminalUnderTranscript
+                                // is true only on Android, which has no heavyweight surface to
+                                // hide behind.
+                                val paletteBlockedByRawView =
+                                    !composeTerminalUnderTranscript && terminalView == CRTerminalView.Raw
+                                TextButton(
+                                    onClick = {
+                                        moreMenu = false
+                                        showPalette = true
+                                        if (onFetchCommands != null) {
+                                            scope.launch { commands = onFetchCommands.invoke() }
+                                        }
+                                    },
+                                    enabled = !paletteBlockedByRawView,
+                                    modifier = Modifier.fillMaxWidth(),
+                                ) {
+                                    Text(
+                                        if (paletteBlockedByRawView) "Command Palette (switch to Chat first)" else "Command Palette",
+                                        color = if (paletteBlockedByRawView) c.textDim else c.text,
+                                    )
+                                }
                                 if (onFetchClaudeMd != null) {
                                     TextButton(onClick = {
                                         moreMenu = false
