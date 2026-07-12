@@ -128,8 +128,6 @@ fun TerminalScreen(
     onSaveClaudeMd: (suspend (String) -> Unit)? = null,
     onFetchCommands: (suspend () -> List<SlashCommand>)? = null,
     onFontSizeChange: ((Int) -> Unit)? = null,
-    onShowNativeMenu: (() -> Unit)? = null,
-    onNativeRenameDialog: ((sessionId: String, currentAlias: String) -> Unit)? = null,
     onAttachRemote: ((com.clauderemote.model.RemoteSession) -> Unit)? = null,
     remoteSessions: List<com.clauderemote.model.RemoteSession> = emptyList(),
     contextPercent: Int? = null,
@@ -189,6 +187,10 @@ fun TerminalScreen(
     val c = CRTheme.colors
     val m = CRTheme.metrics
     val terminalView = LocalCRTerminalView.current
+    // Captured once for every FloatingDialog in this screen — a new
+    // top-level window (the desktop actual) opens its own composition root
+    // and needs these values re-provided explicitly; see CRThemeSnapshot.
+    val crThemeSnapshot = com.clauderemote.ui.theme.CRThemeSnapshot.current()
 
     // #70: transient auto-switch to raw when Claude is awaiting a choice. The
     // user can dismiss (stay in Chat) per-prompt; a NEW prompt re-triggers the
@@ -345,7 +347,6 @@ fun TerminalScreen(
                     onMenuOpen = onMenuOpen,
                     onAttachRemote = onAttachRemote,
                     onRenameSession = onRenameSession,
-                    onNativeRenameDialog = onNativeRenameDialog,
                     onSessionLongPress = onSessionLongPress,
                     modifier = Modifier.width(sidePanelWidth).fillMaxHeight()
                 )
@@ -398,17 +399,12 @@ fun TerminalScreen(
                     onTerminalViewChange = onTerminalViewChange,
                     onToggleCompact = { compactMode = !compactMode },
                     onToggleControlBar = { showControlBar = !showControlBar },
-                    onMoreMenu = {
-                        // Desktop's native popup anchors to the JediTerm SwingPanel, which
-                        // is absent in Chat/transcript view (so the popup can't show) and
-                        // never carries the Layout (split-view) picker. Use the in-app
-                        // Compose dialog whenever the SwingPanel isn't the active surface —
-                        // this makes the menu openable in Chat and the Layout picker
-                        // reachable on desktop. Raw view keeps the native popup (a Compose
-                        // dialog can render behind the heavyweight SwingPanel there).
-                        if (onShowNativeMenu != null && terminalView == CRTerminalView.Raw) onShowNativeMenu.invoke()
-                        else moreMenu = true
-                    },
+                    // "..." always opens the same in-app menu, in every terminal
+                    // view and on every platform: FloatingDialog (see its own doc
+                    // comment) is what makes this safe on desktop's Raw view,
+                    // where a plain in-window dialog would render behind the
+                    // SwingPanel-embedded terminal.
+                    onMoreMenu = { moreMenu = true },
                     onOpenDrawer = { showSessionDrawer = true },
                 )
 
@@ -441,12 +437,12 @@ fun TerminalScreen(
                 }
 
                 // ── More / rename / command dialogs ────────────────────────
-                if (moreMenu) {
-                    AlertDialog(
-                        onDismissRequest = { moreMenu = false },
-                        confirmButton = {},
-                        containerColor = c.surface,
-                        text = {
+                com.clauderemote.ui.components.FloatingDialog(
+                    visible = moreMenu,
+                    onDismiss = { moreMenu = false },
+                    theme = crThemeSnapshot,
+                    confirmButton = {},
+                    text = {
                             Column {
                                 TextButton(onClick = {
                                     moreMenu = false
@@ -554,12 +550,12 @@ fun TerminalScreen(
                             }
                         }
                     )
-                }
 
-                if (showRestartConfirm && activeSession != null) {
-                    AlertDialog(
-                        onDismissRequest = { showRestartConfirm = false },
-                        containerColor = c.surface,
+                if (activeSession != null) {
+                    com.clauderemote.ui.components.FloatingDialog(
+                        visible = showRestartConfirm,
+                        onDismiss = { showRestartConfirm = false },
+                        theme = crThemeSnapshot,
                         title = { Text("Restart Claude Code", color = c.text) },
                         text = {
                             Text(
@@ -668,10 +664,11 @@ fun TerminalScreen(
                 }
 
                 // Rename dialog
-                if (showRenameDialog && activeSession != null) {
-                    AlertDialog(
-                        onDismissRequest = { showRenameDialog = false },
-                        containerColor = c.surface,
+                if (activeSession != null) {
+                    com.clauderemote.ui.components.FloatingDialog(
+                        visible = showRenameDialog,
+                        onDismiss = { showRenameDialog = false },
+                        theme = crThemeSnapshot,
                         title = { Text("Rename session", color = c.text) },
                         text = {
                             OutlinedTextField(
@@ -722,9 +719,10 @@ fun TerminalScreen(
                     var editMode by remember { mutableStateOf(false) }
                     var editText by remember(claudeMdContent) { mutableStateOf(claudeMdContent) }
                     var saving by remember { mutableStateOf(false) }
-                    AlertDialog(
-                        onDismissRequest = { showClaudeMd = false; editMode = false },
-                        containerColor = c.surface,
+                    com.clauderemote.ui.components.FloatingDialog(
+                        visible = true,
+                        onDismiss = { showClaudeMd = false; editMode = false },
+                        theme = crThemeSnapshot,
                         confirmButton = {
                             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                                 if (editMode) {
@@ -1917,7 +1915,6 @@ private fun SessionSidePanel(
     onMenuOpen: () -> Unit,
     onAttachRemote: ((com.clauderemote.model.RemoteSession) -> Unit)?,
     onRenameSession: ((sessionId: String, newAlias: String) -> Unit)? = null,
-    onNativeRenameDialog: ((sessionId: String, currentAlias: String) -> Unit)? = null,
     onSessionLongPress: ((String) -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
@@ -1927,33 +1924,32 @@ private fun SessionSidePanel(
     var renamingItem by remember { mutableStateOf<SessionItem?>(null) }
     var renameText by remember { mutableStateOf("") }
 
-    // Rename dialog (compose-only path)
-    if (onNativeRenameDialog == null) {
-        renamingItem?.let { item ->
-            AlertDialog(
-                onDismissRequest = { renamingItem = null },
-                containerColor = c.surface,
-                title = { Text("Rename session", color = c.text) },
-                text = {
-                    OutlinedTextField(
-                        value = renameText,
-                        onValueChange = { renameText = it },
-                        label = { Text("Alias") },
-                        singleLine = true
-                    )
-                },
-                confirmButton = {
-                    TextButton(onClick = {
-                        item.tab?.let { onRenameSession?.invoke(it.id, renameText.trim()) }
-                        renamingItem = null
-                    }) { Text("OK", color = c.accent) }
-                },
-                dismissButton = {
-                    TextButton(onClick = { renamingItem = null }) { Text("Cancel", color = c.textDim) }
-                }
+    // Rename dialog. FloatingDialog (not a plain AlertDialog) so it renders
+    // above the SwingPanel-embedded terminal on desktop when the drawer is
+    // opened over Raw view — same reasoning as the terminal's "..." menu.
+    com.clauderemote.ui.components.FloatingDialog(
+        visible = renamingItem != null,
+        onDismiss = { renamingItem = null },
+        theme = com.clauderemote.ui.theme.CRThemeSnapshot.current(),
+        title = { Text("Rename session", color = c.text) },
+        text = {
+            OutlinedTextField(
+                value = renameText,
+                onValueChange = { renameText = it },
+                label = { Text("Alias") },
+                singleLine = true
             )
+        },
+        confirmButton = {
+            TextButton(onClick = {
+                renamingItem?.tab?.let { onRenameSession?.invoke(it.id, renameText.trim()) }
+                renamingItem = null
+            }) { Text("OK", color = c.accent) }
+        },
+        dismissButton = {
+            TextButton(onClick = { renamingItem = null }) { Text("Cancel", color = c.textDim) }
         }
-    }
+    )
 
     // Re-group flat items by server id/name
     val allFlat: List<SessionItem> = remember(allSessions) { allSessions.values.flatten() }
@@ -2059,12 +2055,8 @@ private fun SessionSidePanel(
                         onTabClose = onTabClose,
                         onAttachRemote = onAttachRemote,
                         onRename = if (onRenameSession != null) { label ->
-                            if (onNativeRenameDialog != null && item.tab != null) {
-                                onNativeRenameDialog.invoke(item.tab.id, label)
-                            } else {
-                                renameText = label
-                                renamingItem = item
-                            }
+                            renameText = label
+                            renamingItem = item
                         } else null,
                         onLongPress = if (isMobile && onSessionLongPress != null && item.tab != null) {
                             { onSessionLongPress(item.tab.id) }

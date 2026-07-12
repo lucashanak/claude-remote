@@ -74,9 +74,6 @@ fun App(
     onPickFile: ((callback: (List<Pair<ByteArray, String>>) -> Unit) -> Unit)? = null,
     onSaveFile: ((bytes: ByteArray, suggestedName: String) -> Unit)? = null,
     onApplyFontSize: ((Int) -> Unit)? = null,
-    onShowNativeMenu: (() -> Unit)? = null,
-    onNativeRenameDialog: ((sessionId: String, currentAlias: String) -> Unit)? = null,
-    onNativeCloseConfirm: ((sessionId: String) -> Unit)? = null,
     sshKeyManager: com.clauderemote.connection.SshKeyManager? = null,
     exitApp: (() -> Unit)? = null,
     onInvertColorsChanged: ((Boolean) -> Unit)? = null,
@@ -893,8 +890,6 @@ fun App(
                                 }
                             }
                         },
-                        onShowNativeMenu = onShowNativeMenu,
-                        onNativeRenameDialog = onNativeRenameDialog,
                         onReconnect = { id ->
                             scope.launch { sessionOrchestrator.reconnectSession(id) }
                         },
@@ -906,11 +901,7 @@ fun App(
                             // session and kills the remote tmux pane, which
                             // is destructive enough that we don't want a
                             // single misclick to lose the conversation.
-                            if (onNativeCloseConfirm != null) {
-                                onNativeCloseConfirm.invoke(id)
-                            } else {
-                                tabCloseConfirmId = id
-                            }
+                            tabCloseConfirmId = id
                         },
                         onSessionLongPress = { id -> sessionMenuId = id },
                         onNewTab = { currentScreen = Screen.LAUNCHER },
@@ -1308,27 +1299,32 @@ fun App(
             )
         }
 
-        // Close tab confirmation
-        tabCloseConfirmId?.let { id ->
-            val session = tabManager.getTab(id)
-            AlertDialog(
-                onDismissRequest = { tabCloseConfirmId = null },
-                title = { Text("Close Session") },
-                text = { Text("Permanently close session on ${session?.server?.name ?: "server"}? The tmux pane will be killed and the conversation removed from your tab list.") },
-                confirmButton = {
-                    TextButton(onClick = {
-                        tabCloseConfirmId = null
-                        scope.launch {
-                            sessionOrchestrator.forgetSession(id)
-                            if (tabManager.tabs.value.isEmpty()) currentScreen = Screen.LAUNCHER
-                        }
-                    }) { Text("Close") }
-                },
-                dismissButton = {
-                    TextButton(onClick = { tabCloseConfirmId = null }) { Text("Cancel") }
-                }
-            )
-        }
+        // Close tab confirmation. FloatingDialog (not a plain AlertDialog) so
+        // it renders above the SwingPanel-embedded terminal on desktop when
+        // triggered while Raw view is active.
+        com.clauderemote.ui.components.FloatingDialog(
+            visible = tabCloseConfirmId != null,
+            onDismiss = { tabCloseConfirmId = null },
+            theme = com.clauderemote.ui.theme.CRThemeSnapshot.current(),
+            title = { Text("Close Session") },
+            text = {
+                val session = tabCloseConfirmId?.let { tabManager.getTab(it) }
+                Text("Permanently close session on ${session?.server?.name ?: "server"}? The tmux pane will be killed and the conversation removed from your tab list.")
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    val id = tabCloseConfirmId ?: return@TextButton
+                    tabCloseConfirmId = null
+                    scope.launch {
+                        sessionOrchestrator.forgetSession(id)
+                        if (tabManager.tabs.value.isEmpty()) currentScreen = Screen.LAUNCHER
+                    }
+                }) { Text("Close") }
+            },
+            dismissButton = {
+                TextButton(onClick = { tabCloseConfirmId = null }) { Text("Cancel") }
+            }
+        )
 
         // Session long-press context menu (mobile). Desktop uses its native
         // right-click menu instead. Styled to match the CR design system.
