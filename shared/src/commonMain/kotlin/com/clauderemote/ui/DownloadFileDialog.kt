@@ -9,7 +9,6 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
@@ -24,7 +23,9 @@ import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.unit.dp
+import com.clauderemote.ui.components.FloatingDialog
 import com.clauderemote.ui.theme.CRTheme
+import com.clauderemote.ui.theme.CRThemeSnapshot
 import com.clauderemote.ui.theme.CRType
 
 /** Image file extensions we will attempt to preview inline. */
@@ -49,9 +50,10 @@ fun DownloadPathDialog(
 ) {
     val c = CRTheme.colors
     var path by remember { mutableStateOf("") }
-    AlertDialog(
-        onDismissRequest = { if (!busy) onDismiss() },
-        containerColor = c.surface,
+    FloatingDialog(
+        visible = true,
+        onDismiss = { if (!busy) onDismiss() },
+        theme = CRThemeSnapshot.current(),
         title = { Text("Download file", color = c.text) },
         text = {
             Column {
@@ -108,9 +110,10 @@ fun ImagePreviewDialog(
     onClose: () -> Unit,
 ) {
     val c = CRTheme.colors
-    AlertDialog(
-        onDismissRequest = onClose,
-        containerColor = c.surface,
+    FloatingDialog(
+        visible = true,
+        onDismiss = onClose,
+        theme = CRThemeSnapshot.current(),
         title = { Text(fileName, color = c.text) },
         text = {
             Column {
