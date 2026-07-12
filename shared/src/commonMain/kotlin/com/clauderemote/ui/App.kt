@@ -126,6 +126,7 @@ fun App(
     val gitStatuses by sessionOrchestrator.gitStatuses.collectAsState()
     val pendingCounts by sessionOrchestrator.pendingCounts.collectAsState()
     val serverHealth by sessionOrchestrator.serverHealth.collectAsState()
+    val reconnectStatus by sessionOrchestrator.reconnectStatus.collectAsState()
 
     var serverList by remember { mutableStateOf(serverStorage.loadServers()) }
     val tabs by tabManager.tabs.collectAsState()
@@ -167,6 +168,7 @@ fun App(
     // highlighted/labeled from what's actually shown underneath, or switches
     // to a session that isn't placed in any visible pane at all.
     fun switchActiveSession(id: String) {
+        FileLogger.log("App", "switchActiveSession target=$id layout=$gridLayout focusedPane=$focusedPaneIndex targetStatus=${tabs.firstOrNull { it.id == id }?.status}")
         if (gridLayout != GridLayout.ONE) {
             val idx = paneSessions.indexOf(id)
             if (idx >= 0) {
@@ -1063,6 +1065,7 @@ fun App(
                         weekResetMin = activeServerId?.let { weekResetMin[it] },
                         sessionActivities = sessionActivities,
                         hookActiveSessions = hookActiveSessions,
+                        reconnectStatus = reconnectStatus,
                         contextPercent = activeTabId?.let { contextPercents[it] },
                         gitStatus = activeTabId?.let { gitStatuses[it] },
                         latencyMs = activeTabId?.let { latencies[it] },
@@ -1125,6 +1128,7 @@ fun App(
                         // FIX 1: index-aware focus — switch raw terminal only when
                         // the chosen pane holds a different session.
                         onFocusPane = { index, sid ->
+                            FileLogger.log("App", "onFocusPane index=$index sid=$sid status=${tabs.firstOrNull { it.id == sid }?.status}")
                             focusedPaneIndex = index
                             if (sid != null && sid != activeTabId) {
                                 sessionOrchestrator.switchTab(sid)
@@ -1134,6 +1138,7 @@ fun App(
                         // pane, clear that other pane to prevent two cells sharing
                         // the same session (and both rendering terminalContent).
                         onAssignPane = { index, sid ->
+                            FileLogger.log("App", "onAssignPane index=$index sid=$sid status=${tabs.firstOrNull { it.id == sid }?.status}")
                             val current = paneSessions.toMutableList()
                             // Clear any existing pane that already holds this sid.
                             for (j in current.indices) {

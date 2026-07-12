@@ -31,6 +31,15 @@ import kotlinx.coroutines.withContext
 import kotlin.random.Random
 
 /**
+ * Live reconnect progress for a session, surfaced to the UI so a reconnecting
+ * pane shows "Reconnecting (N/3)…" / "Retrying in Ns" instead of looking frozen.
+ * [maxAttempts] <= 0 means the unbounded background re-arm loop is running (no
+ * fixed cap); [nextRetryAtMillis] is a wall-clock (System.currentTimeMillis)
+ * target the UI can count down to, or null when an attempt is in flight.
+ */
+data class ReconnectInfo(val attempt: Int, val maxAttempts: Int, val nextRetryAtMillis: Long?)
+
+/**
  * Orchestrates the full flow: server → SSH connect → tmux → cd folder → claude.
  * Manages one SshManager per active session/tab.
  * Buffers terminal output per session for tab switching.
@@ -418,6 +427,13 @@ class SessionOrchestrator(
     // (which re-runs restoreAndReconnect) recovered it.
     private val reconnectRetryJobs = java.util.concurrent.ConcurrentHashMap<String, kotlinx.coroutines.Job>()
 
+    // Live reconnect progress per session (attempt count / next-retry time), so
+    // the UI can show a "Reconnecting…"/"Retrying in Ns" indicator on the
+    // focused banner AND non-focused grid panes instead of a blank/frozen look.
+    // Entry present ⇒ a reconnect is actively in progress; absence ⇒ idle.
+    private val _reconnectStatus = kotlinx.coroutines.flow.MutableStateFlow<Map<String, ReconnectInfo>>(emptyMap())
+    val reconnectStatus: kotlinx.coroutines.flow.StateFlow<Map<String, ReconnectInfo>> = _reconnectStatus
+
     /**
      * Arm (idempotently) the persistent reconnect loop for [sessionId].
      * Backoff 2s → 60s (+jitter). Exits when the tab is ACTIVE, the tab is
@@ -429,24 +445,35 @@ class SessionOrchestrator(
         val existing = reconnectRetryJobs[sessionId]
         if (existing?.isActive == true) return
         reconnectRetryJobs[sessionId] = reconnectScope.launch {
-            var attempt = 1
-            while (isActive) {
-                val base = (2000L shl (attempt - 1).coerceAtMost(5)).coerceAtMost(60_000L)
-                kotlinx.coroutines.delay(base + kotlin.random.Random.nextLong(500))
-                val tab = tabManager.getTab(sessionId) ?: break // closed/forgotten
-                if (tab.status == SessionStatus.ACTIVE) break   // recovered elsewhere
-                if (tab.status != SessionStatus.CONNECTING) {
-                    FileLogger.log(TAG, "Re-arm reconnect attempt $attempt for $sessionId")
-                    try {
-                        reconnectSession(sessionId)
-                    } catch (e: Exception) {
-                        FileLogger.error(TAG, "Re-arm reconnect attempt $attempt failed for $sessionId", e)
+            try {
+                var attempt = 1
+                while (isActive) {
+                    val base = (2000L shl (attempt - 1).coerceAtMost(5)).coerceAtMost(60_000L)
+                    val wait = base + kotlin.random.Random.nextLong(500)
+                    // Unbounded background phase: publish a countdown target so the
+                    // UI shows "Retrying in Ns" (maxAttempts <= 0 ⇒ no fixed cap).
+                    _reconnectStatus.update { it + (sessionId to ReconnectInfo(attempt, maxAttempts = -1, nextRetryAtMillis = System.currentTimeMillis() + wait)) }
+                    kotlinx.coroutines.delay(wait)
+                    val tab = tabManager.getTab(sessionId) ?: break // closed/forgotten
+                    if (tab.status == SessionStatus.ACTIVE) break   // recovered elsewhere
+                    if (tab.status != SessionStatus.CONNECTING) {
+                        FileLogger.log(TAG, "Re-arm reconnect attempt $attempt for $sessionId")
+                        // Attempt in flight — no countdown target.
+                        _reconnectStatus.update { it + (sessionId to ReconnectInfo(attempt, maxAttempts = -1, nextRetryAtMillis = null)) }
+                        try {
+                            reconnectSession(sessionId)
+                        } catch (e: Exception) {
+                            FileLogger.error(TAG, "Re-arm reconnect attempt $attempt failed for $sessionId", e)
+                        }
+                        if (tabManager.getTab(sessionId)?.status == SessionStatus.ACTIVE) break
                     }
-                    if (tabManager.getTab(sessionId)?.status == SessionStatus.ACTIVE) break
+                    attempt++
                 }
-                attempt++
+            } finally {
+                // Clears on recovery, tab-close, or cancellation (disconnectSession).
+                _reconnectStatus.update { it - sessionId }
+                reconnectRetryJobs.remove(sessionId)
             }
-            reconnectRetryJobs.remove(sessionId)
         }
     }
 
@@ -2534,6 +2561,9 @@ else:
             for (attempt in 1..maxAttempts) {
                 emit("\r\n\u001B[33mConnection lost. Reconnecting ($attempt/$maxAttempts)...\u001B[0m\r\n")
                 FileLogger.log(TAG, "Auto-reconnect attempt $attempt/$maxAttempts for ${session.id}")
+                // Publish live progress so the focused banner + non-focused grid
+                // panes show "Reconnecting (N/3)…" instead of a frozen blank.
+                _reconnectStatus.update { it + (session.id to ReconnectInfo(attempt, maxAttempts, nextRetryAtMillis = null)) }
                 // Attempt 1 fires IMMEDIATELY (no backoff): the dominant drop
                 // cause on Starlink is a satellite-handover public-IP change that
                 // kills the old TCP while the new path is already up — so an
@@ -2546,7 +2576,7 @@ else:
                 val jitter = kotlin.random.Random.nextLong(500)
                 if (base + jitter > 0) kotlinx.coroutines.delay(base + jitter)
                 // Tab closed during the backoff — stop reconnecting it.
-                if (tabManager.getTab(session.id) == null) return
+                if (tabManager.getTab(session.id) == null) { _reconnectStatus.update { it - session.id }; return }
 
                 try {
                     // Clean up old connection
@@ -2605,10 +2635,12 @@ else:
                     attachSessionRuntime(session.id, session.tmuxSessionName)
                     emit("\r\n\u001B[32mReconnected!\u001B[0m\r\n")
                     FileLogger.log(TAG, "Auto-reconnect succeeded for ${session.id}")
+                    _reconnectStatus.update { it - session.id }
                     flushPendingInputs(session.id)
                     return
                 } catch (e: SessionClosedElsewhereException) {
                     FileLogger.log(TAG, "Auto-reconnect for ${session.id} aborted — closed on another device")
+                    _reconnectStatus.update { it - session.id }
                     return
                 } catch (e: Exception) {
                     FileLogger.error(TAG, "Auto-reconnect attempt $attempt failed", e)
@@ -3073,6 +3105,7 @@ else:
 
     suspend fun disconnectSession(sessionId: String) {
         reconnectRetryJobs.remove(sessionId)?.cancel()
+        _reconnectStatus.update { it - sessionId }
         gitStatusJobs.remove(sessionId)?.cancel()
         sessionIdRefreshJobs.remove(sessionId)?.cancel()
         // Per-SERVER loops (usage, latency, notify watcher) serve every session

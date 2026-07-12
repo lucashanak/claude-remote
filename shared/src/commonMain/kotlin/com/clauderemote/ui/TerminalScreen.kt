@@ -140,6 +140,7 @@ fun TerminalScreen(
     weekResetMin: Int? = null,
     sessionActivities: Map<String, com.clauderemote.model.SessionActivity> = emptyMap(),
     hookActiveSessions: Set<String> = emptySet(),
+    reconnectStatus: Map<String, com.clauderemote.session.ReconnectInfo> = emptyMap(),
     latencyMs: Long? = null,
     pendingInputCount: Int = 0,
     onClearPending: (() -> Unit)? = null,
@@ -644,15 +645,19 @@ fun TerminalScreen(
                     )
                 }
 
-                // Disconnected banner
+                // Disconnected banner. When an auto-reconnect is actively in
+                // progress we show its live status ("Reconnecting… (N/3)" /
+                // "Retrying in Ns") so the user knows recovery is already
+                // underway — the manual "Reconnect" button stays as an override.
                 if (activeSession?.status == SessionStatus.DISCONNECTED || activeSession?.status == SessionStatus.ERROR) {
+                    val reconnectLabel = rememberReconnectLabel(activeSession?.let { reconnectStatus[it.id] })
                     Surface(color = c.tintRed) {
                         Row(
                             modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 6.dp),
                             horizontalArrangement = Arrangement.SpaceBetween,
                             verticalAlignment = Alignment.CenterVertically
                         ) {
-                            Text("Disconnected", style = CRType.bodyDim, color = c.disconnected)
+                            Text(reconnectLabel ?: "Disconnected", style = CRType.bodyDim, color = c.disconnected)
                             if (onReconnect != null && activeSession != null) {
                                 TextButton(onClick = { onReconnect(activeSession.id) }) {
                                     Text("Reconnect", color = c.accent)
@@ -898,6 +903,15 @@ fun TerminalScreen(
                                                 text = "asks",
                                                 background = c.approval.copy(alpha = 0.25f),
                                                 foreground = c.approval,
+                                            )
+                                        }
+                                        // Reconnect indicator: a pane whose session is silently
+                                        // reconnecting must not look inertly frozen.
+                                        rememberReconnectLabel(reconnectStatus[sid], compact = true)?.let { rl ->
+                                            Pill(
+                                                text = rl,
+                                                background = c.tintRed,
+                                                foreground = c.disconnected,
                                             )
                                         }
                                     }
@@ -2784,5 +2798,45 @@ private fun activityDotColor(
         SessionStatus.ACTIVE       -> Color(0xFF4ADE80)
         SessionStatus.CONNECTING   -> Color(0xFFFBBF24)
         SessionStatus.DISCONNECTED, SessionStatus.ERROR -> Color(0xFFF87171)
+    }
+}
+
+/**
+ * Live, self-ticking label for an in-progress reconnect (or null when idle).
+ * Re-derives once a second so the "Retrying in Ns" countdown advances without
+ * a manual timer at each call site. [compact] yields a short "↻ Ns"/"↻" form
+ * for tight grid-pane pills; the full form is used on the disconnected banner.
+ */
+@Composable
+private fun rememberReconnectLabel(
+    info: com.clauderemote.session.ReconnectInfo?,
+    compact: Boolean = false,
+): String? {
+    if (info == null) return null
+    return androidx.compose.runtime.produceState(
+        initialValue = reconnectLabelOf(info, compact),
+        info, compact,
+    ) {
+        while (true) {
+            value = reconnectLabelOf(info, compact)
+            kotlinx.coroutines.delay(1000)
+        }
+    }.value
+}
+
+private fun reconnectLabelOf(info: com.clauderemote.session.ReconnectInfo, compact: Boolean): String {
+    val next = info.nextRetryAtMillis
+    return when {
+        next != null -> {
+            val secs = ((next - System.currentTimeMillis() + 999) / 1000).coerceAtLeast(0)
+            when {
+                secs <= 0L -> if (compact) "↻" else "Retrying…"
+                compact -> "↻ ${secs}s"
+                else -> "Retrying in ${secs}s"
+            }
+        }
+        compact -> "↻"
+        info.maxAttempts > 0 -> "Reconnecting… (${info.attempt}/${info.maxAttempts})"
+        else -> "Reconnecting…"
     }
 }
