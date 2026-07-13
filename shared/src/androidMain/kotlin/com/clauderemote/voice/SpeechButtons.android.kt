@@ -138,6 +138,11 @@ actual fun MicButton(
             return
         }
         val sessionBase = currentTextState.value
+        // Guard against late partials/finals landing after this dictation is
+        // done (e.g. a trailing message arriving after the user already sent
+        // the input) re-injecting text into the field. onFinal bumps the
+        // session so nothing after it can write.
+        val mySession = sessionId.incrementAndGet()
         val dictation = SonioxDictation(
             context = context.applicationContext,
             apiKey = cfg.apiKey,
@@ -145,15 +150,20 @@ actual fun MicButton(
             // Live word-by-word growth: each partial replaces the field with
             // the base text + the running transcript so far.
             onPartial = { phrase ->
+                if (sessionId.get() != mySession) return@SonioxDictation
                 onTextChangeState.value(appendDictated(sessionBase, phrase))
             },
             onFinal = { phrase ->
+                if (sessionId.get() != mySession) return@SonioxDictation
+                sessionId.incrementAndGet() // invalidate any trailing callback
                 onTextChangeState.value(appendDictated(sessionBase, phrase))
                 sonioxDictation?.stop()
                 sonioxDictation = null
                 listening = false
             },
             onError = { msg ->
+                if (sessionId.get() != mySession) return@SonioxDictation
+                sessionId.incrementAndGet()
                 Toast.makeText(context, msg, Toast.LENGTH_LONG).show()
                 sonioxDictation?.stop()
                 sonioxDictation = null

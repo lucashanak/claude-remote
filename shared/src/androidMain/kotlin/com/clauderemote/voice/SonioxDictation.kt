@@ -8,6 +8,7 @@ import android.media.AudioFormat
 import android.media.AudioRecord
 import android.media.MediaRecorder
 import androidx.core.content.ContextCompat
+import com.clauderemote.util.FileLogger
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.Response
@@ -32,16 +33,18 @@ import java.util.concurrent.TimeUnit
  * non-final tokens are the provisional tail that keeps getting rewritten.
  * [onPartial] fires with `finalText + provisional tail` on every message
  * (that's the live-growing text), and [onFinal] fires with the settled
- * transcript once the stream flushes.
+ * transcript when the utterance ends.
+ *
+ * Endpoint detection (`enable_endpoint_detection`) makes Soniox emit an
+ * `<end>` control token when the speaker pauses. In single-shot mode that
+ * ends the dictation (fires [onFinal], closes) so it stops on its own like
+ * the other engines; in [continuous] mode it just flushes the current
+ * utterance and keeps listening.
  *
  * Tokens include spaces and punctuation as their own tokens, so raw
  * concatenation of `text` reconstructs spacing — we never insert spaces
  * ourselves. `language_hints: ["cs","en"]` is what makes mixed Czech +
  * English (dictating code with English identifiers) transcribe in one pass.
- *
- * No client-side VAD/WAV/hallucination-filter: Soniox does endpointing
- * server-side, and a streaming token model doesn't invent "Titulky
- * vytvořil…" on silence the way batch Whisper does.
  */
 internal class SonioxDictation(
     private val context: Context,
@@ -62,6 +65,10 @@ internal class SonioxDictation(
     @Volatile private var ws: WebSocket? = null
     @Volatile private var stopped = false
     @Volatile private var captureThread: Thread? = null
+    // Single-shot: guarantees onFinal fires exactly once (endpoint OR manual
+    // stop OR server `finished`, whichever lands first) so a trailing message
+    // can't re-inject text after the caller has moved on.
+    @Volatile private var finalFired = false
 
     // Guarded by `this` — mutated from the WS listener thread, read when
     // building each partial/final string.
@@ -96,6 +103,7 @@ internal class SonioxDictation(
 
     private inner class Listener : WebSocketListener() {
         override fun onOpen(webSocket: WebSocket, response: Response) {
+            FileLogger.log(TAG, "WS open (continuous=$continuous)")
             val config = JSONObject().apply {
                 put("api_key", apiKey)
                 put("model", MODEL)
@@ -116,21 +124,23 @@ internal class SonioxDictation(
 
         override fun onMessage(webSocket: WebSocket, text: String) {
             val obj = runCatching { JSONObject(text) }.getOrNull() ?: return
-            obj.optString("error_code").takeIf { it.isNotBlank() && it != "null" }?.let {
-                postOnMain { onError("Soniox: ${obj.optString("error_message").ifBlank { it }}") }
+            val err = obj.optString("error_code").takeIf { it.isNotBlank() && it != "null" }
+            if (err != null) {
+                val msg = obj.optString("error_message").ifBlank { err }
+                FileLogger.log(TAG, "server error: $err — $msg")
+                postOnMain { onError("Soniox: $msg") }
                 return
             }
             val tokens = obj.optJSONArray("tokens")
             val provisional = StringBuilder()
+            var endpoint = false
             if (tokens != null) {
                 for (i in 0 until tokens.length()) {
                     val tok = tokens.optJSONObject(i) ?: continue
                     val t = tok.optString("text")
-                    // Endpoint / control tokens ("<end>", "<fin>") aren't
-                    // transcript text — skip them; in continuous mode an
-                    // endpoint flushes the current utterance as final.
+                    // Control tokens ("<end>", "<fin>") aren't transcript text.
                     if (t.startsWith("<") && t.endsWith(">")) {
-                        if (continuous && tok.optBoolean("is_final")) flushUtterance()
+                        if (tok.optBoolean("is_final")) endpoint = true
                         continue
                     }
                     if (tok.optBoolean("is_final")) {
@@ -143,17 +153,34 @@ internal class SonioxDictation(
             val running = synchronized(this@SonioxDictation) { finalText.toString() } + provisional
             if (running.isNotBlank()) postOnMain { onPartial?.invoke(running.trim()) }
 
-            if (obj.optBoolean("finished")) {
-                val settled = synchronized(this@SonioxDictation) { finalText.toString() }.trim()
-                postOnMain { onFinal(settled) }
-                runCatching { webSocket.close(1000, null) }
+            if (endpoint) {
+                if (continuous) {
+                    flushUtterance()
+                } else {
+                    fireFinalOnce(webSocket)
+                }
             }
+            if (obj.optBoolean("finished")) fireFinalOnce(webSocket)
         }
 
         override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
             if (stopped) return
+            FileLogger.log(TAG, "WS failure: ${t.message}")
             postOnMain { onError("Soniox: ${t.message ?: "chyba spojení"}") }
         }
+    }
+
+    /** Single-shot terminal: fire onFinal once, stop capture, close socket. */
+    private fun fireFinalOnce(webSocket: WebSocket) {
+        if (finalFired) return
+        finalFired = true
+        stopped = true
+        captureThread?.interrupt()
+        captureThread = null
+        val settled = synchronized(this) { finalText.toString() }.trim()
+        FileLogger.log(TAG, "final (${settled.length} chars)")
+        postOnMain { onFinal(settled) }
+        runCatching { webSocket.close(1000, null) }
     }
 
     /** Continuous mode only: emit the utterance-so-far and reset for the next. */
@@ -215,6 +242,7 @@ internal class SonioxDictation(
     }
 
     companion object {
+        private const val TAG = "SonioxStt"
         private const val WS_URL = "wss://stt-rt.soniox.com/transcribe-websocket"
         private const val MODEL = "stt-rt-v5"
         private const val SAMPLE_RATE = 16000

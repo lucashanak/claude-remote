@@ -1,6 +1,7 @@
 package com.clauderemote.voice
 
 import android.content.Context
+import com.clauderemote.util.FileLogger
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.MediaType.Companion.toMediaType
@@ -20,6 +21,7 @@ import java.util.concurrent.TimeUnit
  * `language` is sent as cs but mixed Czech/English text reads fine.
  */
 internal object SonioxTts {
+    private const val TAG = "SonioxTts"
     private const val TTS_URL = "https://tts-rt.soniox.com/tts"
     private const val MODEL = "tts-rt-v1"
     private const val SAMPLE_RATE = 24000
@@ -69,9 +71,13 @@ internal object SonioxTts {
                 val payload = resp.body?.string().orEmpty()
                 val msg = runCatching { JSONObject(payload).optString("error_message") }
                     .getOrNull()?.takeIf { it.isNotBlank() }
+                FileLogger.log(TAG, "HTTP ${resp.code} — ${msg ?: payload.take(200)}")
                 throw RuntimeException("HTTP ${resp.code}${if (msg != null) " — $msg" else ""}")
             }
-            resp.body?.bytes() ?: throw RuntimeException("Prázdná odpověď TTS")
+            val bytes = resp.body?.bytes() ?: throw RuntimeException("Prázdná odpověď TTS")
+            val ct = resp.header("Content-Type") ?: "?"
+            FileLogger.log(TAG, "ok: ${bytes.size} bytes, Content-Type=$ct")
+            bytes
         }
     }
 }
