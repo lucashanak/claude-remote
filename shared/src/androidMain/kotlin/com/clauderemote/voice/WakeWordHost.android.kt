@@ -41,6 +41,15 @@ import com.clauderemote.ui.theme.CRTheme
 import com.clauderemote.ui.theme.CRType
 import kotlinx.coroutines.launch
 
+// Soniox's built-in TTS voices (language-agnostic — each speaks any of the
+// 60+ supported languages). Source: soniox.com/docs/tts/concepts/voices.
+private val SONIOX_VOICES = listOf(
+    "Adrian", "Daniel", "Noah", "Jack", "Owen", "Kenji", "Rafael", "Mateo",
+    "Oliver", "Arthur", "Cooper", "Mason", "Arjun", "Rohan",
+    "Maya", "Nina", "Emma", "Claire", "Grace", "Mina", "Lucia", "Sofia",
+    "Isla", "Victoria", "Ruby", "Elise", "Priya", "Meera",
+)
+
 @Composable
 actual fun WakeWordSettingsCard(settings: AppSettings) {
     val context = LocalContext.current
@@ -60,6 +69,8 @@ actual fun WakeWordSettingsCard(settings: AppSettings) {
     var ttsEngine by remember { mutableStateOf(settings.ttsEngine) }
     var gcloudKey by remember { mutableStateOf(settings.googleCloudApiKey) }
     var gcloudVoice by remember { mutableStateOf(settings.googleCloudVoice) }
+    var sonioxKey by remember { mutableStateOf(settings.sonioxApiKey) }
+    var sonioxVoice by remember { mutableStateOf(settings.sonioxTtsVoice) }
     var testing by remember { mutableStateOf(false) }
     var speechRatePct by remember { mutableStateOf(settings.ttsSpeechRatePct) }
     var pitchPct by remember { mutableStateOf(settings.ttsPitchPct) }
@@ -159,10 +170,14 @@ actual fun WakeWordSettingsCard(settings: AppSettings) {
         Text("Rozpoznávání řeči (STT)", style = CRType.cardTitle, color = c.text)
         ModelDropdown(
             label = "Engine",
-            options = listOf(SttEngine.SYSTEM.displayName, SttEngine.SERVER.displayName),
+            options = listOf(
+                SttEngine.SYSTEM.displayName,
+                SttEngine.SERVER.displayName,
+                SttEngine.SONIOX.displayName,
+            ),
             selected = sttEngine.displayName,
             onSelect = { name ->
-                val picked = if (name == SttEngine.SYSTEM.displayName) SttEngine.SYSTEM else SttEngine.SERVER
+                val picked = SttEngine.entries.firstOrNull { it.displayName == name } ?: SttEngine.SYSTEM
                 sttEngine = picked; settings.sttEngine = picked
             },
         )
@@ -172,6 +187,29 @@ actual fun WakeWordSettingsCard(settings: AppSettings) {
                     "podpory v systému (např. HyperOS) se použije systémový " +
                     "Google hlasový dialog — stejný, co jede v Gboardu.",
                 style = CRType.bodyDim, color = c.textDim,
+            )
+        }
+        if (sttEngine == SttEngine.SONIOX) {
+            Text(
+                "Streamovaný přepis přes Soniox — slova naskakují průběžně, " +
+                    "sub-200ms, zvládá česko-anglický mix v jedné větě. " +
+                    "Vyžaduje Soniox API klíč (níže). Audio odchází Soniox.",
+                style = CRType.bodyDim, color = c.textDim,
+            )
+        }
+        // Soniox API key — shared by STT (streaming) and TTS. Shown whenever
+        // either side uses Soniox.
+        if (sttEngine == SttEngine.SONIOX || ttsEngine == TtsEngine.SONIOX) {
+            androidx.compose.material3.OutlinedTextField(
+                value = sonioxKey,
+                onValueChange = { sonioxKey = it; settings.sonioxApiKey = it },
+                label = { Text("Soniox API klíč") },
+                singleLine = true,
+                visualTransformation = androidx.compose.ui.text.input.PasswordVisualTransformation(),
+                keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(
+                    keyboardType = androidx.compose.ui.text.input.KeyboardType.Password,
+                ),
+                modifier = Modifier.fillMaxWidth(),
             )
         }
 
@@ -533,6 +571,21 @@ actual fun WakeWordSettingsCard(settings: AppSettings) {
                     label = { Text("Hlas (nebo zadej jiný z Google katalogu)") },
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth(),
+                )
+            }
+
+            TtsEngine.SONIOX -> {
+                Text(
+                    "Soniox TTS — jeden hlas mluví libovolným z 60+ jazyků " +
+                        "(vč. češtiny). Vyžaduje Soniox API klíč (nahoře u STT). " +
+                        "Text odchází Soniox.",
+                    style = CRType.bodyDim, color = c.textDim,
+                )
+                ModelDropdown(
+                    label = "Hlas",
+                    options = SONIOX_VOICES,
+                    selected = sonioxVoice,
+                    onSelect = { sonioxVoice = it; settings.sonioxTtsVoice = it },
                 )
             }
         }

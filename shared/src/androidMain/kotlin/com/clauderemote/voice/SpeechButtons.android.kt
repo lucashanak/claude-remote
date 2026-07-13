@@ -62,8 +62,9 @@ actual fun MicButton(
     // Render nothing only when no backend is usable — otherwise show the
     // button so the user can tap and see a concrete error (model missing,
     // permission denied, etc.) instead of being unable to interact at all.
-    // The Server engine only needs a URL, so it always keeps the button.
-    if (engine != SttEngine.SERVER && !srAvailable && !whisperReady) return
+    // The Server / Soniox engines only need config (URL / API key), so they
+    // always keep the button.
+    if (engine != SttEngine.SERVER && engine != SttEngine.SONIOX && !srAvailable && !whisperReady) return
 
     val onTextChangeState = rememberUpdatedState(onTextChange)
     val currentTextState = rememberUpdatedState(currentText)
@@ -72,6 +73,7 @@ actual fun MicButton(
     var recognizer by remember { mutableStateOf<SpeechRecognizer?>(null) }
     var whisperDictation by remember { mutableStateOf<WhisperDictation?>(null) }
     var serverDictation by remember { mutableStateOf<ServerDictation?>(null) }
+    var sonioxDictation by remember { mutableStateOf<SonioxDictation?>(null) }
     val sessionId = remember { AtomicInteger(0) }
 
     DisposableEffect(Unit) {
@@ -85,6 +87,8 @@ actual fun MicButton(
             whisperDictation = null
             serverDictation?.stop()
             serverDictation = null
+            sonioxDictation?.stop()
+            sonioxDictation = null
         }
     }
 
@@ -119,6 +123,44 @@ actual fun MicButton(
             },
         )
         serverDictation = dictation
+        dictation.start()
+        listening = true
+    }
+
+    fun startSoniox() {
+        val cfg = sonioxConfig(context)
+        if (cfg.apiKey.isBlank()) {
+            Toast.makeText(
+                context,
+                "Chybí Soniox API klíč. Otevřete Nastavení → Voice.",
+                Toast.LENGTH_LONG,
+            ).show()
+            return
+        }
+        val sessionBase = currentTextState.value
+        val dictation = SonioxDictation(
+            context = context.applicationContext,
+            apiKey = cfg.apiKey,
+            continuous = false,
+            // Live word-by-word growth: each partial replaces the field with
+            // the base text + the running transcript so far.
+            onPartial = { phrase ->
+                onTextChangeState.value(appendDictated(sessionBase, phrase))
+            },
+            onFinal = { phrase ->
+                onTextChangeState.value(appendDictated(sessionBase, phrase))
+                sonioxDictation?.stop()
+                sonioxDictation = null
+                listening = false
+            },
+            onError = { msg ->
+                Toast.makeText(context, msg, Toast.LENGTH_LONG).show()
+                sonioxDictation?.stop()
+                sonioxDictation = null
+                listening = false
+            },
+        )
+        sonioxDictation = dictation
         dictation.start()
         listening = true
     }
@@ -279,6 +321,7 @@ actual fun MicButton(
             SttEngine.SERVER -> startServer()
             SttEngine.WHISPER -> startWhisper()
             SttEngine.SYSTEM -> startSr()
+            SttEngine.SONIOX -> startSoniox()
         }
     }
 
@@ -297,6 +340,8 @@ actual fun MicButton(
                 serverDictation = null
                 whisperDictation?.stop()
                 whisperDictation = null
+                sonioxDictation?.stop()
+                sonioxDictation = null
                 recognizer?.stopListening()
                 listening = false
                 return@IconButton

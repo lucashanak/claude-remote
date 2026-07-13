@@ -200,6 +200,15 @@ internal fun speakRouted(
                 GoogleCloudTts.speak(context, cfg.apiKey, cfg.voice, clean, rate, onFinish, onError)
             }
         }
+        com.clauderemote.model.TtsEngine.SONIOX -> {
+            val cfg = sonioxConfig(context)
+            if (cfg.apiKey.isBlank()) {
+                onError?.invoke("Chybí Soniox API klíč (Nastavení → Voice).")
+                onFinish()
+            } else {
+                SonioxTts.speak(context, cfg.apiKey, cfg.ttsVoice, clean, onFinish, onError)
+            }
+        }
         com.clauderemote.model.TtsEngine.SYSTEM -> {
             TtsHolder.speak(context, clean, onFinish, onError)
         }

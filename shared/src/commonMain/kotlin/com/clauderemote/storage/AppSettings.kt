@@ -220,6 +220,18 @@ class AppSettings(private val prefs: PlatformPreferences) {
         get() = prefs.getString("gcloud_tts_voice", "cs-CZ-Wavenet-A")
         set(value) = prefs.putString("gcloud_tts_voice", value.trim())
 
+    // Soniox — one cloud key shared by both STT (streaming WebSocket) and
+    // TTS (REST). Never committed; entered by the user in Voice settings.
+    var sonioxApiKey: String
+        get() = prefs.getString("soniox_api_key", "")
+        set(value) = prefs.putString("soniox_api_key", value.trim())
+
+    // Soniox voices are language-agnostic (one voice speaks any of 60+
+    // languages), so this is a speaker name, not a locale — default "Adrian".
+    var sonioxTtsVoice: String
+        get() = prefs.getString("soniox_tts_voice", "Adrian")
+        set(value) = prefs.putString("soniox_tts_voice", value.trim())
+
     // Voice activation (wake word) — opt-in, foreground-only. Reuses the STT
     // server: while idle + foregrounded it VAD-listens and opens the dialog
     // when the transcript contains [wakeWord]. Off by default (always-on mic).

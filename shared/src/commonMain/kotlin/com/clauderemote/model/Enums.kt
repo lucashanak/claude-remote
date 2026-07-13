@@ -71,7 +71,8 @@ enum class AuthMethod {
 enum class SttEngine(val displayName: String) {
     SYSTEM("Systémový (Google)"),
     WHISPER("Whisper (offline)"),
-    SERVER("Server (faster-whisper)");
+    SERVER("Server (faster-whisper)"),
+    SONIOX("Soniox (streaming)");
 }
 
 /**
@@ -89,7 +90,8 @@ enum class SttEngine(val displayName: String) {
 enum class TtsEngine(val displayName: String) {
     SYSTEM("Google (v zařízení)"),
     SERVER("Server (Piper/XTTS)"),
-    GOOGLE_CLOUD("Google Cloud");
+    GOOGLE_CLOUD("Google Cloud"),
+    SONIOX("Soniox");
 }
 
 enum class SessionStatus {

@@ -66,6 +66,16 @@ internal fun ttsServerConfig(context: Context): TtsServerConfig {
     )
 }
 
+internal data class SonioxConfig(val apiKey: String, val ttsVoice: String)
+
+internal fun sonioxConfig(context: Context): SonioxConfig {
+    val p = context.getSharedPreferences("claude_remote", Context.MODE_PRIVATE)
+    return SonioxConfig(
+        apiKey = p.getString("soniox_api_key", "").orEmpty(),
+        ttsVoice = p.getString("soniox_tts_voice", "Adrian").orEmpty().ifBlank { "Adrian" },
+    )
+}
+
 internal data class GoogleCloudConfig(val apiKey: String, val voice: String)
 
 internal fun googleCloudConfig(context: Context): GoogleCloudConfig {

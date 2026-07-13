@@ -335,9 +335,11 @@ private class DialogueController(
     private var recognizer: SpeechRecognizer? = null
     private var whisperDictation: WhisperDictation? = null
     private var serverDictation: ServerDictation? = null
+    private var sonioxDictation: SonioxDictation? = null
     private val engine = selectedSttEngine(context)
     private val useWhisper = engine == com.clauderemote.model.SttEngine.WHISPER
     private val useServer = engine == com.clauderemote.model.SttEngine.SERVER
+    private val useSoniox = engine == com.clauderemote.model.SttEngine.SONIOX
     private val sessionGen = AtomicInteger(0)
     @Volatile private var stopped = false
     @Volatile private var paused = false  // true while TTS is speaking
@@ -349,7 +351,7 @@ private class DialogueController(
     fun start() {
         stopped = false
         paused = false
-        if (!useWhisper && !useServer) {
+        if (!useWhisper && !useServer && !useSoniox) {
             // SYSTEM engine: lazily build the bound SpeechRecognizer.
             ensureRecognizer()
         }
@@ -370,6 +372,8 @@ private class DialogueController(
         whisperDictation = null
         serverDictation?.stop()
         serverDictation = null
+        sonioxDictation?.stop()
+        sonioxDictation = null
     }
 
     /** Restart listening on the configured engine without re-initialising. */
@@ -404,6 +408,8 @@ private class DialogueController(
         whisperDictation = null
         serverDictation?.stop()
         serverDictation = null
+        sonioxDictation?.stop()
+        sonioxDictation = null
         onStateChange(VoiceState.Speaking)
         val onSpoken = {
             paused = false
@@ -436,6 +442,10 @@ private class DialogueController(
         if (stopped || paused) return
         if (useServer) {
             beginServerListening()
+            return
+        }
+        if (useSoniox) {
+            beginSonioxListening()
             return
         }
         if (useWhisper) {
@@ -566,6 +576,43 @@ private class DialogueController(
             },
         )
         serverDictation = dictation
+        dictation.start()
+    }
+
+    private fun beginSonioxListening() {
+        if (sonioxDictation != null) return
+        val cfg = sonioxConfig(context)
+        if (cfg.apiKey.isBlank()) {
+            onStateChange(VoiceState.Error("Chybí Soniox API klíč. Otevřete Nastavení → Voice."))
+            return
+        }
+        val mySession = sessionGen.incrementAndGet()
+        val dictation = SonioxDictation(
+            context = context,
+            apiKey = cfg.apiKey,
+            continuous = true,
+            onFinal = { phrase ->
+                if (stopped || paused || sessionGen.get() != mySession) return@SonioxDictation
+                sonioxDictation?.stop()
+                sonioxDictation = null
+                if (phrase.isNotBlank()) onCommit(phrase) else beginListening()
+            },
+            onError = { msg ->
+                if (sessionGen.get() != mySession) return@SonioxDictation
+                sonioxDictation?.stop()
+                sonioxDictation = null
+                onStateChange(VoiceState.Error(msg))
+            },
+            onListening = {
+                if (!stopped && !paused && sessionGen.get() == mySession) {
+                    onStateChange(VoiceState.Listening)
+                }
+            },
+            onPartial = { text ->
+                if (!stopped && !paused && sessionGen.get() == mySession) onPartial(text)
+            },
+        )
+        sonioxDictation = dictation
         dictation.start()
     }
 
