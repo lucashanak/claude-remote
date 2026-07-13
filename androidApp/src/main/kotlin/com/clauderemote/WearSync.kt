@@ -34,7 +34,13 @@ data class WearSessionInfo(
 )
 
 @Serializable
-data class WearSessionsPayload(val sessions: List<WearSessionInfo>)
+data class WearSessionsPayload(
+    val sessions: List<WearSessionInfo>,
+    // Soniox key synced to the watch so it can run its own on-watch STT/TTS.
+    // Rides the existing /sessions push (same personal account); blank when
+    // the user hasn't set a Soniox key on the phone.
+    val sonioxApiKey: String = "",
+)
 
 /**
  * Pushes a snapshot of live sessions to the watch companion app via the
@@ -120,7 +126,9 @@ object WearSync {
                 lastMessageAt = changedAt,
             )
         }
-        val payload = json.encodeToString<WearSessionsPayload>(WearSessionsPayload(sessions))
+        val sonioxKey = ctx.getSharedPreferences("claude_remote", Context.MODE_PRIVATE)
+            .getString("soniox_api_key", "").orEmpty()
+        val payload = json.encodeToString<WearSessionsPayload>(WearSessionsPayload(sessions, sonioxKey))
         // No forced per-push timestamp field: letting the DataItem's bytes be
         // identical when nothing actually changed lets putDataItem's own
         // dedup skip the sync entirely — previously a timestamp was stamped

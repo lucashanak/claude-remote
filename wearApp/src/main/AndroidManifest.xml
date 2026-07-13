@@ -7,6 +7,8 @@
          routes this transparently through the paired phone's connection
          even on watches with no LTE/Wi-Fi of their own. -->
     <uses-permission android:name="android.permission.INTERNET" />
+    <!-- Soniox on-watch dictation (streams mic audio to Soniox). -->
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
     <!-- Self-update: install the downloaded APK over this app. -->
     <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />

@@ -21,7 +21,25 @@ data class WearSessionInfo(
 )
 
 @Serializable
-data class WearSessionsPayload(val sessions: List<WearSessionInfo>)
+data class WearSessionsPayload(
+    val sessions: List<WearSessionInfo>,
+    val sonioxApiKey: String = "",
+)
+
+/**
+ * Process-wide holder for the Soniox API key synced from the phone (rides the
+ * /sessions payload). Written by [WearDataListenerService] on each push, read
+ * by the on-watch Soniox STT/TTS. In-memory only — re-synced on every push, so
+ * it repopulates within ~a second of the app connecting; no need to persist.
+ */
+object SonioxKeyStore {
+    @Volatile var apiKey: String = ""
+        private set
+
+    fun update(key: String) {
+        if (key.isNotBlank()) apiKey = key
+    }
+}
 
 /**
  * Process-wide holder for the latest synced session list. Written by

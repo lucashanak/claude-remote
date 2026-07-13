@@ -87,4 +87,6 @@ dependencies {
     // ActivityResultContracts.StartActivityForResult + RecognizerIntent
     // pattern used elsewhere for dictation).
     implementation("androidx.wear:wear-input:1.2.0")
+    // Soniox streaming STT/TTS over WebSocket (same version as `shared`).
+    implementation("com.squareup.okhttp3:okhttp:4.12.0")
 }

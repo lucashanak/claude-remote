@@ -29,6 +29,7 @@ class WearDataListenerService : WearableListenerService() {
             runCatching {
                 val json = DataMapItem.fromDataItem(event.dataItem).dataMap.getString(KEY_JSON) ?: return@runCatching
                 val payload = WEAR_JSON.decodeFromString<WearSessionsPayload>(json)
+                SonioxKeyStore.update(payload.sonioxApiKey)
                 val previousById = SessionRepository.sessions.value.associateBy { it.id }
                 SessionRepository.update(payload.sessions)
                 WearLog.i(this, TAG, "Updated repository with ${payload.sessions.size} sessions")
@@ -72,7 +73,9 @@ class WearDataListenerService : WearableListenerService() {
                 "transition for ${session.id}: ${previous.activity} -> ${session.activity} lastMessage=${if (text != null) "${text.length} chars" else "null/blank"}",
             )
             if (text == null) continue
-            WatchTts.speak(applicationContext, text)
+            // Soniox voice when a key is synced from the phone; falls back to
+            // on-device WatchTts internally when there's no key.
+            SonioxWatchTts.speak(applicationContext, text)
         }
     }
 

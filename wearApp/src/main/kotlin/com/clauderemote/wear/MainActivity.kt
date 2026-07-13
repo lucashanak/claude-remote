@@ -9,6 +9,8 @@ import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
+import android.content.pm.PackageManager
+import androidx.core.content.ContextCompat
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -134,6 +136,13 @@ private fun SessionRow(session: WearSessionInfo, onClick: () -> Unit) {
 private fun SessionDetailScreen(session: WearSessionInfo, onBack: () -> Unit) {
     val context = LocalContext.current
     var status by remember { mutableStateOf("") }
+    var dictating by remember { mutableStateOf(false) }
+    var draft by remember { mutableStateOf("") }
+    var stt by remember { mutableStateOf<SonioxWatchStt?>(null) }
+
+    androidx.compose.runtime.DisposableEffect(Unit) {
+        onDispose { stt?.stop(); stt = null }
+    }
 
     val replyLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.StartActivityForResult()
@@ -144,6 +153,31 @@ private fun SessionDetailScreen(session: WearSessionInfo, onBack: () -> Unit) {
             sendReply(context, session.id, text) { status = it }
         }
     }
+
+    fun startSonioxDictation() {
+        draft = ""
+        val d = SonioxWatchStt(
+            context = context.applicationContext,
+            onPartial = { draft = it },
+            onFinal = { phrase ->
+                stt = null
+                dictating = false
+                if (phrase.isNotBlank()) {
+                    status = "Odesílám…"
+                    sendReply(context, session.id, phrase) { status = it }
+                }
+            },
+            onError = { msg -> stt = null; dictating = false; status = "Chyba: $msg" },
+            onListening = { status = "Poslouchám…" },
+        )
+        stt = d
+        dictating = true
+        d.start()
+    }
+
+    val micPermLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { granted -> if (granted) startSonioxDictation() else status = "Bez mikrofonu to nejde" }
 
     ScalingLazyColumn(
         modifier = Modifier.fillMaxSize().padding(horizontal = 12.dp),
@@ -164,6 +198,24 @@ private fun SessionDetailScreen(session: WearSessionInfo, onBack: () -> Unit) {
                 replyLauncher.launch(intent)
             }) { Text("Odpovědět") }
         }
+        // Soniox on-watch dictation — stream mic → transcript → send as reply.
+        item {
+            Button(onClick = {
+                if (dictating) {
+                    stt?.stop() // stop early; onFinal sends what was captured
+                } else if (ContextCompat.checkSelfPermission(
+                        context, android.Manifest.permission.RECORD_AUDIO,
+                    ) == PackageManager.PERMISSION_GRANTED
+                ) {
+                    startSonioxDictation()
+                } else {
+                    micPermLauncher.launch(android.Manifest.permission.RECORD_AUDIO)
+                }
+            }) { Text(if (dictating) "⏹ Stop" else "🎤 Diktovat") }
+        }
+        if (dictating && draft.isNotBlank()) {
+            item { Text(draft) }
+        }
         if (session.activity == "APPROVAL_NEEDED") {
             item {
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -180,7 +232,9 @@ private fun SessionDetailScreen(session: WearSessionInfo, onBack: () -> Unit) {
         }
         item {
             Button(onClick = {
-                session.lastMessage?.takeIf { it.isNotBlank() }?.let { WatchTts.speak(context, it, interrupt = true) }
+                // Soniox voice when a key is synced; falls back to on-device
+                // WatchTts internally otherwise.
+                session.lastMessage?.takeIf { it.isNotBlank() }?.let { SonioxWatchTts.speak(context, it) }
             }) { Text("🔊 Přehrát") }
         }
         if (status.isNotBlank()) {
@@ -213,6 +267,7 @@ private fun fetchInitialSessions(context: Context) {
                 val json = item?.let { DataMapItem.fromDataItem(it).dataMap.getString(WearDataListenerService.KEY_JSON) }
                 if (json != null) {
                     val payload = WearDataListenerService.WEAR_JSON.decodeFromString<WearSessionsPayload>(json)
+                    SonioxKeyStore.update(payload.sonioxApiKey)
                     SessionRepository.update(payload.sessions)
                     WearLog.i(context, "WearMainActivity", "fetchInitialSessions: loaded ${payload.sessions.size} sessions")
                 }
