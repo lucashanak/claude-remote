@@ -2629,8 +2629,8 @@ private fun PromptInputBar(
 
                 // Dictation (cs-CZ STT) — no-op on platforms without speech support.
                 MicButton(
-                    currentText = text.text,
-                    onTextChange = { setInput(it) },
+                    value = text,
+                    onValueChange = { text = it },
                     modifier = Modifier.size(32.dp),
                     tint = c.textDim,
                 )

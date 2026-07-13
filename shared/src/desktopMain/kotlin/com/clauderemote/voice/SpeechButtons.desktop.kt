@@ -3,11 +3,12 @@ package com.clauderemote.voice
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.input.TextFieldValue
 
 @Composable
 actual fun MicButton(
-    currentText: String,
-    onTextChange: (String) -> Unit,
+    value: TextFieldValue,
+    onValueChange: (TextFieldValue) -> Unit,
     modifier: Modifier,
     tint: Color,
 ) {

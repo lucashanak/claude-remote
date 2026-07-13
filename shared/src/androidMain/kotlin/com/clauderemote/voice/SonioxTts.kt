@@ -37,6 +37,9 @@ internal object SonioxTts {
     private const val WS_URL = "wss://tts-rt.soniox.com/tts-websocket"
     private const val MODEL = "tts-rt-v1"
     private const val SAMPLE_RATE = 24000
+    private const val LEAD_IN_BYTES = 4800   // 100 ms silence @ 24kHz mono 16-bit
+    private const val DRAIN_TICK_MS = 20L
+    private const val DRAIN_MAX_TICKS = 400   // 8s cap
 
     private val http = OkHttpClient.Builder().build()
 
@@ -92,6 +95,10 @@ internal object SonioxTts {
     ) : WebSocketListener() {
 
         private val streamId = "cr-$gen"
+        // Frames written to the track so far (mono 16-bit → 2 bytes/frame).
+        // Used to drain the buffer fully before release so the last word
+        // isn't cut off.
+        @Volatile private var writtenFrames = 0
 
         override fun onOpen(webSocket: WebSocket, response: Response) {
             val config = JSONObject().apply {
@@ -102,7 +109,11 @@ internal object SonioxTts {
                 put("voice", voice.ifBlank { "Adrian" })
                 put("audio_format", "pcm_s16le")
                 put("sample_rate", SAMPLE_RATE)
-                if (rate != 1.0f) put("speed", rate.coerceIn(0.5f, 2.0f).toDouble())
+                // Speed is applied client-side via AudioTrack.playbackParams
+                // (pitch-preserving time-stretch), NOT via Soniox's `speed`
+                // field — that field hard-rejects anything outside 0.7–1.3
+                // with a 400 (confirmed against the live API), which would
+                // break TTS entirely at a slider setting like 1.5.
             }
             webSocket.send(config.toString())
             // Whole reply in one shot; server streams audio as it generates.
@@ -165,21 +176,45 @@ internal object SonioxTts {
                     .setTransferMode(AudioTrack.MODE_STREAM)
                     .build()
                 track.set(t)
+                // Reading speed, pitch-preserved. Clamped to a device-safe
+                // range; if the device rejects the value, playback just stays
+                // at 1.0 rather than failing.
+                if (rate != 1.0f) runCatching {
+                    t.playbackParams = t.playbackParams.setSpeed(rate.coerceIn(0.5f, 2.5f))
+                }
                 runCatching { t.play() }
-                FileLogger.log(TAG, "playback started")
+                // Lead-in silence: MODE_STREAM warms up on the first buffer and
+                // clips the very start otherwise — a short pad means the real
+                // first word starts after the track is already running.
+                val silence = ByteArray(LEAD_IN_BYTES)
+                runCatching { t.write(silence, 0, silence.size) }
+                writtenFrames += LEAD_IN_BYTES / 2
+                FileLogger.log(TAG, "playback started (speed=$rate)")
             }
             // Blocking write = natural backpressure; the OkHttp reader thread
             // paces to playback speed instead of buffering the whole reply.
             runCatching { t.write(pcm, 0, pcm.size) }
+            writtenFrames += pcm.size / 2
         }
 
         private fun finishPlayback(webSocket: WebSocket) {
             if (gen != generation.get()) return
-            // stop() on a MODE_STREAM track plays out what's already written,
-            // then stops — so we drain rather than cut the tail off.
-            track.getAndSet(null)?.let {
-                runCatching { it.stop() }
-                runCatching { it.release() }
+            track.getAndSet(null)?.let { t ->
+                // Wait for the play head to reach the last written frame before
+                // stopping — releasing right after the final write() cut the
+                // last word off (the buffered tail hadn't played yet). Capped
+                // so a stuck head can't hang the thread.
+                runCatching {
+                    var guard = 0
+                    while (gen == generation.get() &&
+                        t.playbackHeadPosition < writtenFrames &&
+                        guard++ < DRAIN_MAX_TICKS
+                    ) {
+                        Thread.sleep(DRAIN_TICK_MS)
+                    }
+                    t.stop()
+                }
+                runCatching { t.release() }
             }
             ws.compareAndSet(webSocket, null)
             runCatching { webSocket.close(1000, null) }

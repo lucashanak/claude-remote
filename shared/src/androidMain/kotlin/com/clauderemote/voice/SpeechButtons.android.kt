@@ -31,6 +31,8 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.TextRange
+import androidx.compose.ui.text.input.TextFieldValue
 import androidx.core.content.ContextCompat
 import java.util.concurrent.atomic.AtomicInteger
 
@@ -50,8 +52,8 @@ private fun appendDictated(base: String, addition: String): String {
 
 @Composable
 actual fun MicButton(
-    currentText: String,
-    onTextChange: (String) -> Unit,
+    value: TextFieldValue,
+    onValueChange: (TextFieldValue) -> Unit,
     modifier: Modifier,
     tint: Color,
 ) {
@@ -66,8 +68,24 @@ actual fun MicButton(
     // always keep the button.
     if (engine != SttEngine.SERVER && engine != SttEngine.SONIOX && !srAvailable && !whisperReady) return
 
-    val onTextChangeState = rememberUpdatedState(onTextChange)
-    val currentTextState = rememberUpdatedState(currentText)
+    val onValueChangeState = rememberUpdatedState(onValueChange)
+    val valueState = rememberUpdatedState(value)
+
+    // Captures the caret/selection at dictation start and returns a sink that
+    // splices each (partial or final) phrase in AT THAT POINT — replacing any
+    // selected text — leaving the caret just after the inserted words. Fixed
+    // anchors (not the live caret) so streaming partials keep rewriting the
+    // same span instead of walking the cursor forward.
+    fun dictationEmitter(): (String) -> Unit {
+        val v = valueState.value
+        val len = v.text.length
+        val before = v.text.substring(0, v.selection.min.coerceIn(0, len))
+        val after = v.text.substring(v.selection.max.coerceIn(0, len))
+        return { phrase ->
+            val head = appendDictated(before, phrase)
+            onValueChangeState.value(TextFieldValue(head + after, TextRange(head.length)))
+        }
+    }
     var listening by remember { mutableStateOf(false) }
     var pendingStart by remember { mutableStateOf(false) }
     var recognizer by remember { mutableStateOf<SpeechRecognizer?>(null) }
@@ -102,7 +120,7 @@ actual fun MicButton(
             ).show()
             return
         }
-        val sessionBase = currentTextState.value
+        val emit = dictationEmitter()
         val dictation = ServerDictation(
             context = context.applicationContext,
             baseUrl = cfg.url,
@@ -110,7 +128,7 @@ actual fun MicButton(
             apiKey = cfg.apiKey,
             continuous = false,
             onFinal = { phrase ->
-                onTextChangeState.value(appendDictated(sessionBase, phrase))
+                emit(phrase)
                 serverDictation?.stop()
                 serverDictation = null
                 listening = false
@@ -137,7 +155,7 @@ actual fun MicButton(
             ).show()
             return
         }
-        val sessionBase = currentTextState.value
+        val emit = dictationEmitter()
         // Guard against late partials/finals landing after this dictation is
         // done (e.g. a trailing message arriving after the user already sent
         // the input) re-injecting text into the field. onFinal bumps the
@@ -147,16 +165,16 @@ actual fun MicButton(
             context = context.applicationContext,
             apiKey = cfg.apiKey,
             continuous = false,
-            // Live word-by-word growth: each partial replaces the field with
-            // the base text + the running transcript so far.
+            // Live word-by-word growth: each partial re-splices the running
+            // transcript in at the cursor position.
             onPartial = { phrase ->
                 if (sessionId.get() != mySession) return@SonioxDictation
-                onTextChangeState.value(appendDictated(sessionBase, phrase))
+                emit(phrase)
             },
             onFinal = { phrase ->
                 if (sessionId.get() != mySession) return@SonioxDictation
                 sessionId.incrementAndGet() // invalidate any trailing callback
-                onTextChangeState.value(appendDictated(sessionBase, phrase))
+                emit(phrase)
                 sonioxDictation?.stop()
                 sonioxDictation = null
                 listening = false
@@ -189,7 +207,7 @@ actual fun MicButton(
             ?.firstOrNull()
             .orEmpty()
         if (text.isNotBlank()) {
-            onTextChangeState.value(appendDictated(currentTextState.value, text))
+            dictationEmitter()(text)
         }
     }
 
@@ -212,12 +230,12 @@ actual fun MicButton(
             ).show()
             return
         }
-        val sessionBase = currentTextState.value
+        val emit = dictationEmitter()
         val dictation = WhisperDictation(
             context = context.applicationContext,
             continuous = false,
             onFinal = { phrase ->
-                onTextChangeState.value(appendDictated(sessionBase, phrase))
+                emit(phrase)
                 whisperDictation?.stop()
                 whisperDictation = null
                 listening = false
@@ -252,7 +270,7 @@ actual fun MicButton(
             return
         }
         val mySession = sessionId.incrementAndGet()
-        val sessionBase = currentTextState.value
+        val emit = dictationEmitter()
         val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
             putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
             putExtra(RecognizerIntent.EXTRA_LANGUAGE, CZECH_LOCALE_TAG)
@@ -306,7 +324,7 @@ actual fun MicButton(
                     ?.firstOrNull()
                     .orEmpty()
                 if (phrase.isNotBlank()) {
-                    onTextChangeState.value(appendDictated(sessionBase, phrase))
+                    emit(phrase)
                 }
                 listening = false
             }
@@ -317,7 +335,7 @@ actual fun MicButton(
                     ?.firstOrNull()
                     .orEmpty()
                 if (phrase.isNotBlank()) {
-                    onTextChangeState.value(appendDictated(sessionBase, phrase))
+                    emit(phrase)
                 }
             }
             override fun onEvent(eventType: Int, params: Bundle?) {}
