@@ -49,11 +49,30 @@ private const val KEY_REPLY = "reply_text"
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        requestNotificationPermission()
         fetchInitialSessions(applicationContext)
         setContent {
             MaterialTheme {
                 WearApp()
             }
+        }
+    }
+
+    /**
+     * On Android 13+/Wear OS 4, notify() is a silent no-op until the user
+     * grants POST_NOTIFICATIONS — which is why the update-progress and
+     * install-confirm notifications never appeared. Ask once on launch.
+     */
+    private fun requestNotificationPermission() {
+        if (android.os.Build.VERSION.SDK_INT < 33) return
+        if (ContextCompat.checkSelfPermission(
+                this, android.Manifest.permission.POST_NOTIFICATIONS,
+            ) == PackageManager.PERMISSION_GRANTED
+        ) return
+        runCatching {
+            androidx.core.app.ActivityCompat.requestPermissions(
+                this, arrayOf(android.Manifest.permission.POST_NOTIFICATIONS), 1001,
+            )
         }
     }
 }
