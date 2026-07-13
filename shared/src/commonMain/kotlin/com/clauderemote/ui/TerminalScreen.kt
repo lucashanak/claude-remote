@@ -2627,6 +2627,14 @@ private fun PromptInputBar(
                     }
                 )
 
+                // Clear the whole input — quick escape when dictation garbles
+                // it. Only shown when there's something to clear.
+                if (text.text.isNotEmpty()) {
+                    IconButton(onClick = { setInput("") }, modifier = Modifier.size(32.dp)) {
+                        Icon(Icons.Default.Close, "Clear input", tint = c.textDim, modifier = Modifier.size(18.dp))
+                    }
+                }
+
                 // Dictation (cs-CZ STT) — no-op on platforms without speech support.
                 MicButton(
                     value = text,
