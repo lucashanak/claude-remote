@@ -23,6 +23,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -71,6 +72,12 @@ actual fun MicButton(
     val onValueChangeState = rememberUpdatedState(onValueChange)
     val valueState = rememberUpdatedState(value)
 
+    // Last text WE emitted from dictation — lets us tell our own updates apart
+    // from an external change to the field (send clears it, the X button, or
+    // the user editing) so a late streaming partial can't re-inject text after
+    // the user has moved on.
+    var lastEmitted by remember { mutableStateOf<String?>(null) }
+
     // Captures the caret/selection at dictation start and returns a sink that
     // splices each (partial or final) phrase in AT THAT POINT — replacing any
     // selected text — leaving the caret just after the inserted words. Fixed
@@ -83,7 +90,9 @@ actual fun MicButton(
         val after = v.text.substring(v.selection.max.coerceIn(0, len))
         return { phrase ->
             val head = appendDictated(before, phrase)
-            onValueChangeState.value(TextFieldValue(head + after, TextRange(head.length)))
+            val next = head + after
+            lastEmitted = next
+            onValueChangeState.value(TextFieldValue(next, TextRange(head.length)))
         }
     }
     var listening by remember { mutableStateOf(false) }
@@ -107,6 +116,22 @@ actual fun MicButton(
             serverDictation = null
             sonioxDictation?.stop()
             sonioxDictation = null
+        }
+    }
+
+    // If the field changes to something we didn't emit while a dictation is
+    // running — the user sent (input cleared), tapped the X, or edited by
+    // hand — cancel the dictation so a trailing streaming partial can't
+    // re-inject the old text.
+    LaunchedEffect(value.text) {
+        if (listening && lastEmitted != null && value.text != lastEmitted) {
+            serverDictation?.stop(); serverDictation = null
+            whisperDictation?.stop(); whisperDictation = null
+            sonioxDictation?.stop(); sonioxDictation = null
+            runCatching { recognizer?.stopListening() }
+            sessionId.incrementAndGet()
+            listening = false
+            lastEmitted = null
         }
     }
 

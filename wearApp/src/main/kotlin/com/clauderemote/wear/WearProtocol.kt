@@ -24,10 +24,15 @@ data class WearSessionInfo(
 data class WearSessionsPayload(
     val sessions: List<WearSessionInfo>,
     val sonioxApiKey: String = "",
+    // TTS voice + reading speed (percent, 100 = 1.0x) mirrored from the
+    // phone's Voice settings so the watch reads aloud with the same voice
+    // and speed the user chose there.
+    val sonioxVoice: String = "Adrian",
+    val ttsSpeedPct: Int = 100,
 )
 
 /**
- * Process-wide holder for the Soniox API key synced from the phone (rides the
+ * Process-wide holder for the Soniox config synced from the phone (rides the
  * /sessions payload). Written by [WearDataListenerService] on each push, read
  * by the on-watch Soniox STT/TTS. In-memory only — re-synced on every push, so
  * it repopulates within ~a second of the app connecting; no need to persist.
@@ -35,9 +40,15 @@ data class WearSessionsPayload(
 object SonioxKeyStore {
     @Volatile var apiKey: String = ""
         private set
+    @Volatile var ttsVoice: String = "Adrian"
+        private set
+    @Volatile var ttsSpeedPct: Int = 100
+        private set
 
-    fun update(key: String) {
+    fun update(key: String, voice: String = "Adrian", speedPct: Int = 100) {
         if (key.isNotBlank()) apiKey = key
+        if (voice.isNotBlank()) ttsVoice = voice
+        if (speedPct in 25..400) ttsSpeedPct = speedPct
     }
 }
 

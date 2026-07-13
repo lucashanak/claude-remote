@@ -139,9 +139,10 @@ private fun SessionDetailScreen(session: WearSessionInfo, onBack: () -> Unit) {
     var dictating by remember { mutableStateOf(false) }
     var draft by remember { mutableStateOf("") }
     var stt by remember { mutableStateOf<SonioxWatchStt?>(null) }
+    var speaking by remember { mutableStateOf(false) }
 
     androidx.compose.runtime.DisposableEffect(Unit) {
-        onDispose { stt?.stop(); stt = null }
+        onDispose { stt?.stop(); stt = null; SonioxWatchTts.stop() }
     }
 
     val replyLauncher = rememberLauncherForActivityResult(
@@ -232,10 +233,18 @@ private fun SessionDetailScreen(session: WearSessionInfo, onBack: () -> Unit) {
         }
         item {
             Button(onClick = {
-                // Soniox voice when a key is synced; falls back to on-device
-                // WatchTts internally otherwise.
-                session.lastMessage?.takeIf { it.isNotBlank() }?.let { SonioxWatchTts.speak(context, it) }
-            }) { Text("🔊 Přehrát") }
+                if (speaking) {
+                    SonioxWatchTts.stop()
+                    speaking = false
+                } else {
+                    // Soniox voice when a key is synced; falls back to
+                    // on-device WatchTts internally otherwise.
+                    session.lastMessage?.takeIf { it.isNotBlank() }?.let {
+                        speaking = true
+                        SonioxWatchTts.speak(context, it) { speaking = false }
+                    }
+                }
+            }) { Text(if (speaking) "⏹ Zastavit" else "🔊 Přehrát") }
         }
         if (status.isNotBlank()) {
             item { Text(status) }
@@ -267,7 +276,7 @@ private fun fetchInitialSessions(context: Context) {
                 val json = item?.let { DataMapItem.fromDataItem(it).dataMap.getString(WearDataListenerService.KEY_JSON) }
                 if (json != null) {
                     val payload = WearDataListenerService.WEAR_JSON.decodeFromString<WearSessionsPayload>(json)
-                    SonioxKeyStore.update(payload.sonioxApiKey)
+                    SonioxKeyStore.update(payload.sonioxApiKey, payload.sonioxVoice, payload.ttsSpeedPct)
                     SessionRepository.update(payload.sessions)
                     WearLog.i(context, "WearMainActivity", "fetchInitialSessions: loaded ${payload.sessions.size} sessions")
                 }

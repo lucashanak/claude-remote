@@ -40,22 +40,31 @@ object SonioxWatchTts {
     private val generation = AtomicInteger(0)
     private val ws = AtomicReference<WebSocket?>(null)
     private val track = AtomicReference<AudioTrack?>(null)
+    private val completion = AtomicReference<(() -> Unit)?>(null)
 
-    fun speak(context: Context, text: String, voice: String = "Adrian") {
+    /** @param onDone fired (on main) when playback finishes on its own or fails. */
+    fun speak(context: Context, text: String, onDone: () -> Unit = {}) {
         val apiKey = SonioxKeyStore.apiKey
         if (apiKey.isBlank()) {
             WearLog.w(context, TAG, "no Soniox key — falling back to on-device TTS")
             WatchTts.speak(context, text)
+            main.post(onDone)
             return
         }
         stop()
+        completion.set(onDone)
         val gen = generation.incrementAndGet()
         val req = Request.Builder().url(WS_URL).build()
-        ws.set(http.newWebSocket(req, Listener(context.applicationContext, gen, apiKey, voice, text)))
+        ws.set(http.newWebSocket(req, Listener(
+            context.applicationContext, gen, apiKey,
+            SonioxKeyStore.ttsVoice, SonioxKeyStore.ttsSpeedPct, text,
+        )))
     }
 
+    /** Stop playback now (the "stop reading" button / a superseding speak). */
     fun stop() {
         generation.incrementAndGet()
+        completion.set(null) // caller-initiated stop — don't fire onDone
         ws.getAndSet(null)?.let { runCatching { it.close(1000, null) } }
         track.getAndSet(null)?.let {
             runCatching { it.pause(); it.flush(); it.stop() }
@@ -63,11 +72,16 @@ object SonioxWatchTts {
         }
     }
 
+    private fun fireDone() {
+        completion.getAndSet(null)?.let { main.post(it) }
+    }
+
     private class Listener(
         private val ctx: Context,
         private val gen: Int,
         private val apiKey: String,
         private val voice: String,
+        private val speedPct: Int,
         private val text: String,
     ) : WebSocketListener() {
         private val streamId = "cr-$gen"
@@ -94,6 +108,7 @@ object SonioxWatchTts {
             val err = obj.optString("error_code").takeIf { it.isNotBlank() && it != "null" }
             if (err != null) {
                 WearLog.w(ctx, TAG, "server error: $err — ${obj.optString("error_message")}")
+                fireDone()
                 stop()
                 return
             }
@@ -136,6 +151,10 @@ object SonioxWatchTts {
                     .setTransferMode(AudioTrack.MODE_STREAM)
                     .build()
                 track.set(t)
+                // Reading speed synced from the phone, pitch-preserved.
+                if (speedPct != 100) runCatching {
+                    t.playbackParams = t.playbackParams.setSpeed((speedPct / 100f).coerceIn(0.5f, 2.5f))
+                }
                 runCatching { t.play() }
                 val silence = ByteArray(LEAD_IN_BYTES)
                 runCatching { t.write(silence, 0, silence.size) }
@@ -163,6 +182,7 @@ object SonioxWatchTts {
             }
             ws.compareAndSet(webSocket, null)
             runCatching { webSocket.close(1000, null) }
+            fireDone()
         }
     }
 }

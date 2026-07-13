@@ -40,6 +40,9 @@ data class WearSessionsPayload(
     // Rides the existing /sessions push (same personal account); blank when
     // the user hasn't set a Soniox key on the phone.
     val sonioxApiKey: String = "",
+    // Mirror the phone's TTS voice + reading speed to the watch.
+    val sonioxVoice: String = "Adrian",
+    val ttsSpeedPct: Int = 100,
 )
 
 /**
@@ -126,9 +129,13 @@ object WearSync {
                 lastMessageAt = changedAt,
             )
         }
-        val sonioxKey = ctx.getSharedPreferences("claude_remote", Context.MODE_PRIVATE)
-            .getString("soniox_api_key", "").orEmpty()
-        val payload = json.encodeToString<WearSessionsPayload>(WearSessionsPayload(sessions, sonioxKey))
+        val prefs = ctx.getSharedPreferences("claude_remote", Context.MODE_PRIVATE)
+        val sonioxKey = prefs.getString("soniox_api_key", "").orEmpty()
+        val sonioxVoice = prefs.getString("soniox_tts_voice", "Adrian").orEmpty().ifBlank { "Adrian" }
+        val ttsSpeedPct = prefs.getInt("tts_speech_rate_pct", 100)
+        val payload = json.encodeToString<WearSessionsPayload>(
+            WearSessionsPayload(sessions, sonioxKey, sonioxVoice, ttsSpeedPct),
+        )
         // No forced per-push timestamp field: letting the DataItem's bytes be
         // identical when nothing actually changed lets putDataItem's own
         // dedup skip the sync entirely — previously a timestamp was stamped
