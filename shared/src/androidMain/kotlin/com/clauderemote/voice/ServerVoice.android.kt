@@ -86,7 +86,14 @@ internal object MediaTtsCore {
                         runCatching { file.delete() }
                         fireCompletion()
                     }
-                    mp.setOnErrorListener { _, _, _ ->
+                    mp.setOnErrorListener { _, what, extra ->
+                        // MediaPlayer failures are otherwise silent here — log
+                        // so an unplayable payload (e.g. a bad audio container)
+                        // is diagnosable from the server logs, not just "TTS
+                        // nefunguje" with no trace.
+                        com.clauderemote.util.FileLogger.log(
+                            "MediaTtsCore", "playback error what=$what extra=$extra (${bytes.size}B $ext)",
+                        )
                         runCatching { file.delete() }
                         fireCompletion()
                         true
@@ -94,6 +101,9 @@ internal object MediaTtsCore {
                     mp.prepare()
                     mp.start()
                 }.onFailure {
+                    com.clauderemote.util.FileLogger.log(
+                        "MediaTtsCore", "prepare/start failed: ${it.message} (${bytes.size}B $ext)",
+                    )
                     runCatching { file.delete() }
                     fireCompletion()
                 }

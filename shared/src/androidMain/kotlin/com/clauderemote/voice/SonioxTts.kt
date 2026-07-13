@@ -39,7 +39,7 @@ internal object SonioxTts {
         onFinish: () -> Unit,
         onError: ((String) -> Unit)? = null,
     ) {
-        MediaTtsCore.speak(context, ".wav", onFinish, onError) {
+        MediaTtsCore.speak(context, ".mp3", onFinish, onError) {
             fetch(apiKey, voice, text)
         }
     }
@@ -56,7 +56,11 @@ internal object SonioxTts {
             .put("model", MODEL)
             .put("language", "cs")
             .put("voice", voice.ifBlank { "Adrian" })
-            .put("audio_format", "wav")
+            // mp3, not wav: the realtime TTS endpoint returns a streamed WAV
+            // whose header data-length MediaPlayer can't play (silent fail);
+            // mp3 is self-delimiting and plays reliably (same path as
+            // GoogleCloudTts).
+            .put("audio_format", "mp3")
             .put("sample_rate", SAMPLE_RATE)
             .put("text", text)
             .toString()
