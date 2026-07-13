@@ -43,6 +43,8 @@ import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.input.key.*
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.input.TextFieldValue
+import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -2335,7 +2337,18 @@ private fun PromptInputBar(
         try { inputFocusRequester?.requestFocus() } catch (_: Exception) {}
     }
 
-    var text by rememberSaveable { mutableStateOf("") }
+    // TextFieldValue (not a plain String) so programmatic text changes
+    // (dictation, prompt templates, history pick) can place the cursor at the
+    // END. With the String overload, Compose preserves the prior selection
+    // offset, so setting text while the field was empty left the caret stuck
+    // at position 0 — reported after voice dictation.
+    var text by rememberSaveable(stateSaver = TextFieldValue.Saver) {
+        mutableStateOf(TextFieldValue(""))
+    }
+    // Set the field content and move the caret to the end — for every
+    // non-typing update (typing goes through onValueChange, which keeps the
+    // user's own caret).
+    fun setInput(s: String) { text = TextFieldValue(s, TextRange(s.length)) }
     var attachedFilesRaw by rememberSaveable { mutableStateOf("") }
     val attachedFiles: List<String> = if (attachedFilesRaw.isBlank()) emptyList() else attachedFilesRaw.split('\n')
     var uploading by remember { mutableStateOf(false) }
@@ -2348,8 +2361,8 @@ private fun PromptInputBar(
     val history: List<String> = if (historyRaw.isBlank()) emptyList()
     else historyRaw.split(" ").filter { it.isNotBlank() }
 
-    val suggestions = if (text.startsWith("/") && text.length > 1 && !text.contains("\n")) {
-        commands.filter { it.command.contains(text.trim(), ignoreCase = true) }.take(5)
+    val suggestions = if (text.text.startsWith("/") && text.text.length > 1 && !text.text.contains("\n")) {
+        commands.filter { it.command.contains(text.text.trim(), ignoreCase = true) }.take(5)
     } else emptyList()
 
     fun addToHistory(msg: String) {
@@ -2359,7 +2372,7 @@ private fun PromptInputBar(
     }
 
     fun buildAndSend() {
-        val userText = text.trim()
+        val userText = text.text.trim()
         if (attachedFiles.isEmpty() && userText.isNotBlank()) {
             addToHistory(userText)
             onSend(userText)
@@ -2372,7 +2385,7 @@ private fun PromptInputBar(
             onSendCommand("\r")
             return
         }
-        text = ""
+        setInput("")
         attachedFilesRaw = ""
         expanded = false
     }
@@ -2395,7 +2408,7 @@ private fun PromptInputBar(
                         TextButton(onClick = { showTemplates = !showTemplates }) { Text("Templates", color = c.textDim) }
                         TextButton(onClick = { showHistory = !showHistory }) { Text("History", color = c.textDim) }
                     }
-                    Text("${text.length} chars", style = CRType.monoTiny, color = c.textDim)
+                    Text("${text.text.length} chars", style = CRType.monoTiny, color = c.textDim)
                 }
 
                 if (showTemplates) {
@@ -2406,7 +2419,7 @@ private fun PromptInputBar(
                     ) {
                         PROMPT_TEMPLATES.forEach { tmpl ->
                             AssistChip(
-                                onClick = { text = tmpl; showTemplates = false },
+                                onClick = { setInput(tmpl); showTemplates = false },
                                 label = { Text(tmpl.trimEnd(), style = CRType.pill) }
                             )
                         }
@@ -2421,7 +2434,7 @@ private fun PromptInputBar(
                             Text(
                                 text = if (item.length > 60) item.take(57) + "..." else item,
                                 modifier = Modifier.fillMaxWidth()
-                                    .clickable { text = item; showHistory = false }
+                                    .clickable { setInput(item); showHistory = false }
                                     .padding(horizontal = 12.dp, vertical = 8.dp),
                                 style = CRType.bodyDim, color = c.text
                             )
@@ -2467,7 +2480,7 @@ private fun PromptInputBar(
                     cursorBrush = SolidColor(c.accent),
                     decorationBox = { innerTextField ->
                         OutlinedTextFieldDefaults.DecorationBox(
-                            value = text,
+                            value = text.text,
                             innerTextField = innerTextField,
                             enabled = true,
                             singleLine = false,
@@ -2514,8 +2527,8 @@ private fun PromptInputBar(
                                 else Icon(Icons.Default.Add, "Attach", tint = c.textDim, modifier = Modifier.size(20.dp))
                             }
                         }
-                        if (text.isNotBlank()) {
-                            IconButton(onClick = { text = "" }, modifier = Modifier.size(36.dp)) {
+                        if (text.text.isNotBlank()) {
+                            IconButton(onClick = { setInput("") }, modifier = Modifier.size(36.dp)) {
                                 Icon(Icons.Default.Close, "Clear", tint = c.textDim, modifier = Modifier.size(16.dp))
                             }
                         }
@@ -2542,7 +2555,7 @@ private fun PromptInputBar(
                 ) {
                     suggestions.forEach { cmd ->
                         AssistChip(
-                            onClick = { onSendCommand(cmd.command + "\r"); text = "" },
+                            onClick = { onSendCommand(cmd.command + "\r"); setInput("") },
                             label = { Text(cmd.command, style = CRType.mono) }
                         )
                     }
@@ -2592,7 +2605,7 @@ private fun PromptInputBar(
                     keyboardOptions = KeyboardOptions(imeAction = ImeAction.None),
                     decorationBox = { innerTextField ->
                         OutlinedTextFieldDefaults.DecorationBox(
-                            value = text,
+                            value = text.text,
                             innerTextField = innerTextField,
                             enabled = true,
                             singleLine = false,
@@ -2616,8 +2629,8 @@ private fun PromptInputBar(
 
                 // Dictation (cs-CZ STT) — no-op on platforms without speech support.
                 MicButton(
-                    currentText = text,
-                    onTextChange = { text = it },
+                    currentText = text.text,
+                    onTextChange = { setInput(it) },
                     modifier = Modifier.size(32.dp),
                     tint = c.textDim,
                 )
@@ -2669,7 +2682,7 @@ private fun PromptInputBar(
                             Text(
                                 text = if (item.length > 50) item.take(47) + "..." else item,
                                 modifier = Modifier.fillMaxWidth()
-                                    .clickable { text = item; showHistory = false }
+                                    .clickable { setInput(item); showHistory = false }
                                     .padding(horizontal = 12.dp, vertical = 6.dp),
                                 style = CRType.bodyDim, color = c.text
                             )

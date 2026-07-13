@@ -206,7 +206,7 @@ internal fun speakRouted(
                 onError?.invoke("Chybí Soniox API klíč (Nastavení → Voice).")
                 onFinish()
             } else {
-                SonioxTts.speak(context, cfg.apiKey, cfg.ttsVoice, clean, onFinish, onError)
+                SonioxTts.speak(context, cfg.apiKey, cfg.ttsVoice, clean, rate, onFinish, onError)
             }
         }
         com.clauderemote.model.TtsEngine.SYSTEM -> {
@@ -215,10 +215,11 @@ internal fun speakRouted(
     }
 }
 
-/** Stops every TTS engine (file-based core + on-device). */
+/** Stops every TTS engine (file-based core + on-device + Soniox stream). */
 internal fun stopAllTts() {
     MediaTtsCore.stop()
     TtsHolder.stop()
+    SonioxTts.stop()
 }
 
 /**
