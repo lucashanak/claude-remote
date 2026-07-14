@@ -1872,6 +1872,33 @@ else:
     fun lastAssistantText(sessionId: String): String? =
         lastAssistantEntry(sessionId)?.text?.takeIf { it.isNotBlank() }
 
+    /**
+     * Last [limit] user/assistant messages (oldest→newest) for the watch's
+     * lazy history fetch (see PhoneWearService's /history-request). Reads
+     * whatever transcript stream already exists — one runs once a session has
+     * been opened; empty if none yet. Role is "user"/"assistant"; tool calls,
+     * results, thinking and system notes are dropped — the watch only shows
+     * the conversational back-and-forth. Falls back to the single last
+     * assistant message when the transcript has none of the above but does
+     * have one assistant entry, so an offline/never-opened-in-Chat session
+     * still shows something rather than nothing.
+     */
+    fun recentMessages(sessionId: String, limit: Int = 10): List<Pair<String, String>> {
+        val stream = synchronized(transcriptLock) { transcriptStreams[sessionId] } ?: return emptyList()
+        val messages = stream.entries.value.mapNotNull { entry ->
+            when (entry) {
+                is TranscriptEntry.UserPrompt -> "user" to entry.text
+                is TranscriptEntry.AssistantText -> "assistant" to entry.text
+                else -> null
+            }
+        }.filter { it.second.isNotBlank() }.takeLast(limit)
+        if (messages.isNotEmpty()) return messages
+        // Fallback: nothing conversational parsed yet — hand back the single
+        // last assistant message as a 1-element list if we have one.
+        val last = lastAssistantEntry(sessionId)?.text?.takeIf { it.isNotBlank() }
+        return if (last != null) listOf("assistant" to last) else emptyList()
+    }
+
     /** Id of the most recent assistant message — used to dedup notifications. */
     private fun lastAssistantId(sessionId: String): String? =
         lastAssistantEntry(sessionId)?.id

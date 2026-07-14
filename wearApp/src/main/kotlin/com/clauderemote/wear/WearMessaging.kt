@@ -44,3 +44,13 @@ fun sendApprove(context: Context, sessionId: String, answer: String, onResult: (
     val json = MESSAGING_JSON.encodeToString<WearApproveRequest>(WearApproveRequest(sessionId, answer))
     sendToPhone(context, "/approve", json.toByteArray(Charsets.UTF_8), onResult)
 }
+
+/**
+ * Best-effort ask for a session's recent history (see WearHistory.kt). The
+ * phone answers on /history-reply, which the open detail screen listens for.
+ * Fire-and-forget like the rest — never blocks the UI or the actions.
+ */
+fun sendHistoryRequest(context: Context, sessionId: String, onResult: (String) -> Unit = {}) {
+    val json = MESSAGING_JSON.encodeToString<WearHistoryRequest>(WearHistoryRequest(sessionId))
+    sendToPhone(context, "/history-request", json.toByteArray(Charsets.UTF_8), onResult)
+}

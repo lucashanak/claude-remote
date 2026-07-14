@@ -54,10 +54,16 @@ import androidx.wear.compose.material3.ScreenScaffold
 import androidx.wear.compose.material3.Text
 import androidx.wear.input.RemoteInputIntentHelper
 import com.google.android.gms.wearable.DataMapItem
+import com.google.android.gms.wearable.MessageClient
 import com.google.android.gms.wearable.Wearable
 import kotlinx.serialization.decodeFromString
+import kotlinx.serialization.json.Json
 
 private const val KEY_REPLY = "reply_text"
+
+// Parser for the /history-reply payload (see WearHistory.kt). Tolerant of
+// unknown keys so an older/newer phone build can't break decoding.
+private val HISTORY_JSON = Json { ignoreUnknownKeys = true }
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -305,6 +311,40 @@ private fun SessionDetailScreen(session: WearSessionInfo) {
     // activity), zahoď status, ať "Odesláno ✓" nezůstane viset po vyřešení.
     LaunchedEffect(session.activity) { status = "" }
 
+    // Lazy historie: posledních ~10 zpráv session si vyžádáme od telefonu až
+    // při otevření detailu (NENÍ součástí /sessions pushe). Reply dorazí přes
+    // MessageClient na /history-reply — viz listener níže.
+    val historyMap by HistoryStore.history.collectAsState()
+    val history = historyMap[session.id]
+    // Fallback flag: když do ~5 s nic nedorazí (telefon offline / starý build),
+    // spadneme na dosavadní jednorázový session.lastMessage.
+    var historyTimedOut by remember(session.id) { mutableStateOf(false) }
+    LaunchedEffect(session.id) {
+        HistoryStore.clear(session.id)
+        historyTimedOut = false
+        sendHistoryRequest(context, session.id)
+        kotlinx.coroutines.delay(5_000)
+        historyTimedOut = true
+    }
+
+    // Watch jinak žádné příchozí MessageClient zprávy neposlouchá — registrace
+    // je scoped jen na dobu otevřeného detailu (žádná manifest service netřeba).
+    androidx.compose.runtime.DisposableEffect(session.id) {
+        val client = Wearable.getMessageClient(context)
+        val listener = MessageClient.OnMessageReceivedListener { event ->
+            if (event.path == "/history-reply") {
+                runCatching {
+                    val reply = HISTORY_JSON.decodeFromString<WearHistoryReply>(
+                        String(event.data, Charsets.UTF_8),
+                    )
+                    HistoryStore.put(reply.sessionId, reply.messages)
+                }
+            }
+        }
+        client.addListener(listener)
+        onDispose { client.removeListener(listener) }
+    }
+
     androidx.compose.runtime.DisposableEffect(Unit) {
         onDispose { stt?.stop(); stt = null; SonioxWatchTts.stop() }
     }
@@ -535,9 +575,32 @@ private fun SessionDetailScreen(session: WearSessionInfo) {
                     modifier = Modifier.fillMaxWidth(),
                 ) { Text(if (speaking) "⏹ Zastavit" else "🔊 Přehrát") }
             }
-            // Zpráva až POD akcemi (uživatel chtěl tlačítka nad zprávou). Bez
-            // maxLines ořezu — dlouhá se scrolluje, akce zůstávají nahoře.
-            item { Card(onClick = {}) { Text(session.lastMessage ?: "(no message)") } }
+            // Historie až POD akcemi (uživatel chtěl tlačítka nad zprávou).
+            // Posledních ~10 zpráv, role-labeled, scrolluje se zbytkem detailu;
+            // akce zůstávají nahoře a fungují okamžitě (historie neblokuje nic).
+            when {
+                !history.isNullOrEmpty() -> {
+                    history.forEach { msg ->
+                        item {
+                            Card(onClick = {}) {
+                                Text(
+                                    if (msg.role == "user") "Ty:" else "Claude:",
+                                    color = MaterialTheme.colorScheme.primary,
+                                    fontSize = 12.sp,
+                                )
+                                Text(msg.text)
+                            }
+                        }
+                    }
+                }
+                // Fallback: telefon offline / starý build → původní jednorázová
+                // zpráva, kterou detail zobrazoval dosud.
+                historyTimedOut -> item {
+                    Card(onClick = {}) { Text(session.lastMessage ?: "(no message)") }
+                }
+                // Ještě čekáme na reply od telefonu.
+                else -> item { Text("Načítám historii…") }
+            }
             if (status.isNotBlank()) {
                 item { Text(status) }
             }
