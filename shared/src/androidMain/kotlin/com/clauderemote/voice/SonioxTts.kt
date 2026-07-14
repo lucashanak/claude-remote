@@ -46,7 +46,10 @@ internal object SonioxTts {
     private const val WS_URL = "wss://tts-rt.soniox.com/tts-websocket"
     private const val MODEL = "tts-rt-v1"
     private const val SAMPLE_RATE = 24000
-    private const val BITRATE = 48000
+    // Soniox MP3 only allows [32000,64000,96000,128000,192000,256000,320000];
+    // 48000 was rejected with HTTP 400 → no audio at all. 64k is the lowest
+    // valid speech-grade rate.
+    private const val BITRATE = 64000
     // MediaCodec dequeue timeouts (µs). MediaCodec calls are blocking, so these
     // bound how long the decoder threads park between polls.
     private const val INPUT_TIMEOUT_US = 10_000L
