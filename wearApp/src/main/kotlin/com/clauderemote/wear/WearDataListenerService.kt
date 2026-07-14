@@ -66,6 +66,19 @@ class WearDataListenerService : WearableListenerService() {
             // only a genuinely observed transition (previous state known
             // and different) should act.
             val previous = previousById[session.id] ?: continue
+
+            // DISCONNECTED (either end of the transition) is a visibility
+            // change, not a real state change: when the phone loses its link
+            // it marks every session DISCONNECTED, and on reconnect they ALL
+            // re-report their true state at once. Acting on "DISCONNECTED ->
+            // WAITING_FOR_INPUT" posted a burst of notifications on every
+            // reconnect for sessions that were already waiting, not freshly
+            // waiting (observed: 8 in ~7s). Treat DISCONNECTED like an unknown
+            // baseline — never notify OUT of it (we didn't observe the real
+            // moment it started waiting) and never cancel INTO it (a transient
+            // phone-side drop doesn't mean the session stopped waiting).
+            if (previous.activity == "DISCONNECTED" || session.activity == "DISCONNECTED") continue
+
             val wasNotifyWorthy = previous.activity.isNotifyWorthy()
             val nowNotifyWorthy = session.activity.isNotifyWorthy()
 
