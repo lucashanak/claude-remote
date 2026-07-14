@@ -6,8 +6,6 @@ import android.content.Context
 import android.content.pm.PackageManager
 import android.media.AudioFormat
 import android.media.AudioRecord
-import android.media.MediaCodec
-import android.media.MediaFormat
 import android.media.MediaRecorder
 import android.os.Handler
 import android.os.Looper
@@ -23,28 +21,29 @@ import org.json.JSONArray
 import org.json.JSONObject
 import java.util.ArrayDeque
 import java.util.concurrent.TimeUnit
-import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * On-watch streaming STT via Soniox's WebSocket API — dictate a reply on the
  * watch in Soniox's Czech (+English code-switching) instead of the system
  * voice input. Port of the phone's SonioxDictation (wearApp has no dependency
- * on `shared`). Captures 16-kHz PCM from the mic, encodes it on-device to
- * AMR-WB (16-kHz, 23.85 kbit/s) and streams that — the compressed uplink is
- * ~10x smaller than raw PCM, which matters on a watch whose Soniox socket is
- * tunnelled through the phone's Bluetooth link. AMR-WB is what Google Live
- * Transcribe streams to realtime STT, and Soniox's auto-detect turns the first
- * partial around in ~1.3 s (vs ~3.6 s for AAC-LC at the same ~10x compression).
+ * on `shared`). Captures 16-kHz PCM from the mic, converts each frame inline to
+ * G.711 μ-law (`mulaw`) and streams that. μ-law is a raw 1-byte-per-sample
+ * codec: no MediaCodec, no encoder thread — the conversion is a fast table
+ * lookup on the capture thread. It halves the uplink vs raw PCM (128 kbps at
+ * 16 kHz) while Soniox decodes it in realtime (~0.8 s to first word, like PCM),
+ * and unlike telephony 8 kHz μ-law we keep the full 16 kHz bandwidth. (An
+ * earlier AMR-WB path compressed ~10x harder but added ~1.3 s of first-word
+ * latency — Soniox has to decode it — so it was dropped for lower latency.)
  * Gets word-by-word tokens back;
  * [onPartial] fires with the growing transcript, [onFinal] with the settled
  * text once an endpoint (silence) is detected or [stop] is called. Requires a
  * Soniox key synced from the phone ([SonioxKeyStore]) and RECORD_AUDIO.
  *
- * Unlike the phone port, mic capture (and the encoder) start the instant
- * [start] is called (NOT in onOpen): on a watch with no Wi-Fi the handshake
- * can take seconds — so whatever the user says before onOpen would be lost
- * ("cuts off the start"). Frames produced before the socket is ready are
- * buffered and flushed the moment it opens.
+ * Unlike the phone port, mic capture starts the instant [start] is called (NOT
+ * in onOpen): on a watch with no Wi-Fi the handshake can take seconds — so
+ * whatever the user says before onOpen would be lost ("cuts off the start").
+ * μ-law frames produced before the socket is ready are buffered and flushed
+ * the moment it opens.
  */
 internal class SonioxWatchStt(
     private val context: Context,
@@ -67,32 +66,24 @@ internal class SonioxWatchStt(
     @Volatile private var stopped = false
     @Volatile private var captureThread: Thread? = null
     @Volatile private var finalFired = false
-    // AMR-WB encoder; null means it couldn't be created and we fall back to raw
-    // PCM so dictation still works (see [startEncoder]).
-    @Volatile private var amrEncoder: AmrWbEncoder? = null
-    // The AMR-WB stream must open with the 9-byte "#!AMR-WB\n" magic BEFORE any
-    // encoded frame, or Soniox's auto-detect can't recognise the codec. Sent
-    // once (via the same live/backlog path so it stays first even after a
-    // drainBacklog) — see [start].
-    @Volatile private var headerSent = false
     private val finalText = StringBuilder()
 
-    // Outbound frames (AMR-WB, or raw PCM in the fallback path) produced before
-    // the socket opened, flushed on onOpen. Guarded by itself. Capped so a
-    // socket that never opens can't grow it unbounded.
+    // Outbound μ-law frames produced before the socket opened, flushed on
+    // onOpen. Guarded by itself. Capped so a socket that never opens can't
+    // grow it unbounded.
     private val backlog = ArrayDeque<ByteString>()
 
     // Diagnostics logged with the final, so a bad transcript is explainable
     // without a device in hand:
     //  - connect latency: how long onOpen took (≈ how much lead the pre-buffer
     //    had to cover; large = the old code would have clipped that much).
-    //  - sent bytes: total compressed AMR-WB bytes pushed to the socket
-    //    (~24 kbit/s, ~10x smaller than the old raw PCM); ≈0 means the mic
-    //    captured nothing (permission/screen-off), lots + 0 chars means audio
-    //    flowed but Soniox heard silence/garbage.
+    //  - sent bytes: total μ-law bytes pushed to the socket (128 kbit/s @ 16
+    //    kHz, half of raw PCM); ≈0 means the mic captured nothing
+    //    (permission/screen-off), lots + 0 chars means audio flowed but Soniox
+    //    heard silence/garbage.
     //  - peak WS queue: bytes stuck in OkHttp's send buffer — grows when the
-    //    uplink (BT tunnel) can't keep up; AMR-WB's small frames keep this near
-    //    zero where raw PCM would back it up.
+    //    uplink (BT tunnel) can't keep up; μ-law is 128 kbit/s (vs ~24 for the
+    //    old AMR-WB), so watch this to see if the BT tunnel holds up.
     private var startNanos = 0L
     @Volatile private var connectMs = -1L
     @Volatile private var bytesSent = 0L
@@ -112,13 +103,8 @@ internal class SonioxWatchStt(
             return
         }
         startNanos = System.nanoTime()
-        // Encoder + capture BEFORE the socket handshake — see class kdoc. Frames
+        // Capture BEFORE the socket handshake — see class kdoc. μ-law frames
         // buffer into [backlog] until onOpen flips [liveSocket] on.
-        amrEncoder = startEncoder()
-        // Queue the AMR-WB magic as the very first outbound item — before any
-        // captured frame — so it survives drainBacklog and reaches Soniox first.
-        // Only in the AMR path: the PCM fallback streams raw samples, no magic.
-        if (amrEncoder != null) sendMagicHeaderOnce()
         startCapture()
         ws = http.newWebSocket(Request.Builder().url(WS_URL).build(), Listener(apiKey))
     }
@@ -126,11 +112,14 @@ internal class SonioxWatchStt(
     fun stop() {
         if (stopped) return
         stopped = true
-        // Don't force-release the encoder here: the capture thread's finally
-        // block signals end-of-stream so the AMR-WB tail drains and the encoder's
-        // onEnd sends the Soniox end-of-audio marker only AFTER the last frames
-        // have gone out. In the PCM fallback there's no encoder, so send it now.
-        if (amrEncoder == null) runCatching { ws?.send("") }
+        // μ-law goes out inline on the capture loop, so the last chunk has
+        // already been sent by the time this runs — no encoder tail to drain.
+        // Just stop the loop and send the end-of-audio marker.
+        captureThread?.interrupt()
+        captureThread = null
+        // Empty string = end-of-audio; server finalizes remaining tokens and
+        // replies with finished:true, which fires onFinal + closes it.
+        runCatching { ws?.send("") }
     }
 
     private inner class Listener(private val apiKey: String) : WebSocketListener() {
@@ -140,10 +129,12 @@ internal class SonioxWatchStt(
             val config = JSONObject().apply {
                 put("api_key", apiKey)
                 put("model", MODEL)
-                // "auto": Soniox detects the codec (AMR-WB) and its 16-kHz mono
-                // rate from the "#!AMR-WB\n" magic + frame headers, so we send
-                // neither sample_rate nor num_channels — the stream carries them.
-                put("audio_format", "auto")
+                // "mulaw" is a raw (headerless) codec, so unlike a self-
+                // describing container we must state the sample rate + channel
+                // count explicitly — Soniox can't infer them from the stream.
+                put("audio_format", "mulaw")
+                put("sample_rate", SAMPLE_RATE)
+                put("num_channels", 1)
                 put("language_hints", JSONArray(listOf("cs", "en")))
                 put("enable_endpoint_detection", true)
             }
@@ -197,10 +188,6 @@ internal class SonioxWatchStt(
         stopped = true
         captureThread?.interrupt()
         captureThread = null
-        // Server-side endpoint: it already has all the audio, so just tear the
-        // encoder down (no tail to drain, unlike the user-stop path).
-        amrEncoder?.release()
-        amrEncoder = null
         val settled = synchronized(this) { finalText.toString() }.trim()
         WearLog.i(
             context, TAG,
@@ -211,21 +198,10 @@ internal class SonioxWatchStt(
     }
 
     /**
-     * Queue the "#!AMR-WB\n" magic once, as the first outbound item. Called from
-     * [start] before capture starts and before the socket opens, so it lands at
-     * the head of [backlog] and stays first even after [drainBacklog].
-     */
-    private fun sendMagicHeaderOnce() {
-        if (headerSent) return
-        headerSent = true
-        sendFrame(AMR_WB_MAGIC)
-    }
-
-    /**
-     * Route one outbound frame to the socket, or buffer it until [onOpen] flips
-     * [liveSocket] on — the pre-buffer-before-open mechanism that stops the
-     * start of speech being clipped. [bytesSent]/[peakQueueBytes] track the
-     * compressed AMR-WB bytes actually pushed.
+     * Route one outbound μ-law frame to the socket, or buffer it until [onOpen]
+     * flips [liveSocket] on — the pre-buffer-before-open mechanism that stops
+     * the start of speech being clipped. [bytesSent]/[peakQueueBytes] track the
+     * μ-law bytes actually pushed.
      */
     private fun sendFrame(frame: ByteString) {
         val socket = liveSocket
@@ -238,19 +214,11 @@ internal class SonioxWatchStt(
         } else {
             // Socket not open yet — buffer, but bound the backlog so a
             // never-opening socket can't grow it without limit. Eviction drops
-            // the oldest audio — EXCEPT the leading "#!AMR-WB\n" magic, which
-            // must survive to head the stream even if a slow handshake overflows
-            // the cap; drop the frame just behind it instead.
+            // the oldest audio.
             synchronized(backlog) {
                 backlog.addLast(frame)
                 while (backlog.size > MAX_BACKLOG_FRAMES) {
-                    if (backlog.peekFirst() === AMR_WB_MAGIC && backlog.size > 1) {
-                        val magic = backlog.removeFirst()
-                        backlog.removeFirst()
-                        backlog.addFirst(magic)
-                    } else {
-                        backlog.removeFirst()
-                    }
+                    backlog.removeFirst()
                 }
             }
         }
@@ -266,24 +234,6 @@ internal class SonioxWatchStt(
                 bytesSent += frame.size
             }
         }
-    }
-
-    /**
-     * Create + start the AMR-WB encoder that turns captured PCM into AMR-WB
-     * frames on [sendFrame]. Returns null (→ raw-PCM fallback in [startCapture])
-     * if the device can't give us an AMR-WB encoder — some OEM watches lack one,
-     * so we'd rather degrade to the old uncompressed path than kill dictation.
-     */
-    private fun startEncoder(): AmrWbEncoder? = runCatching {
-        AmrWbEncoder(
-            onFrame = { frame -> sendFrame(frame) },
-            // End-of-stream reached: the tail frames have already been emitted
-            // above, so it's safe to tell Soniox the audio is finished.
-            onEnd = { runCatching { ws?.send("") } },
-        ).also { it.start() }
-    }.getOrElse {
-        WearLog.w(context, TAG, "AMR-WB encoder nedostupný, fallback na PCM: ${it.message}")
-        null
     }
 
     @SuppressLint("MissingPermission")
@@ -318,28 +268,16 @@ internal class SonioxWatchStt(
                 while (!stopped && !Thread.currentThread().isInterrupted) {
                     val n = recorder.read(buf, 0, buf.size)
                     if (n <= 0) continue
-                    val enc = amrEncoder
-                    if (enc != null) {
-                        // Copy the valid slice out of the reused buffer; the
-                        // encoder's output thread produces AMR-WB → sendFrame.
-                        enc.encode(if (n == buf.size) buf.copyOf() else buf.copyOf(n))
-                    } else {
-                        // Fallback: stream raw PCM exactly as before.
-                        val chunk: ByteString =
-                            if (n == buf.size) buf.toByteString() else buf.toByteString(0, n)
-                        sendFrame(chunk)
-                    }
+                    // s16le PCM → μ-law inline (n bytes in → n/2 bytes out),
+                    // then through the live/backlog path. No codec, no thread.
+                    val mulaw = pcm16leToMulaw(buf, n)
+                    sendFrame(mulaw.toByteString())
                 }
             } catch (_: Throwable) {
                 // fall through to cleanup
             } finally {
                 runCatching { recorder.stop() }
                 runCatching { recorder.release() }
-                // User-stop path (not a server endpoint): flush the encoder tail
-                // from THIS thread — the sole codec-input thread, so no
-                // concurrent MediaCodec input access. signalEnd() drains the
-                // last audio and its onEnd sends the Soniox end-of-audio marker.
-                if (!finalFired) amrEncoder?.signalEnd()
             }
         }
         thread.isDaemon = true
@@ -348,138 +286,43 @@ internal class SonioxWatchStt(
     }
 
     /**
-     * PCM → AMR-WB encoder. Input is fed on the capture thread via [encode];
-     * a dedicated daemon thread pulls encoded frames and hands each one to
-     * [onFrame] as-is — AMR-WB frames already carry their own ToC/frame header,
-     * so (unlike the old ADTS AAC path) we prepend nothing; the stream's single
-     * "#!AMR-WB\n" magic is queued separately in [start]. All MediaCodec calls
-     * are runCatching-guarded — teardown races between the input and output
-     * threads surface as IllegalStateException, not crashes.
+     * Convert `len` bytes of 16-bit little-endian PCM (AudioRecord's native
+     * ENCODING_PCM_16BIT on ARM) into G.711 μ-law, one byte per sample.
      */
-    private inner class AmrWbEncoder(
-        private val onFrame: (ByteString) -> Unit,
-        private val onEnd: () -> Unit,
-    ) {
-        private val codec = MediaCodec.createEncoderByType(MIME_AMR_WB)
-        // Stop accepting input once end-of-stream is signalled or we're torn
-        // down, so a late [encode] from the capture thread is a no-op.
-        @Volatile private var accepting = true
-        // Requests the output thread to exit + tear the codec down. The codec is
-        // only ever stopped/released ON the output thread (in [cleanup]) to
-        // avoid freeing it underneath a blocked dequeue call.
-        @Volatile private var stopRequested = false
-        private val cleanedUp = AtomicBoolean(false)
-        // PCM bytes fed so far → presentation timestamps (µs). 16-bit mono.
-        private var fedBytes = 0L
-        private val outputThread = Thread { drainLoop() }.apply { isDaemon = true }
-
-        fun start() {
-            val fmt = MediaFormat.createAudioFormat(MIME_AMR_WB, SAMPLE_RATE, 1).apply {
-                // AMR-WB's highest mode: 23.85 kbit/s at 16 kHz.
-                setInteger(MediaFormat.KEY_BIT_RATE, AMR_WB_BIT_RATE)
-                setInteger(MediaFormat.KEY_MAX_INPUT_SIZE, FRAME_BYTES * 2)
-            }
-            codec.configure(fmt, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
-            codec.start()
-            outputThread.start()
+    private fun pcm16leToMulaw(pcm: ByteArray, len: Int): ByteArray {
+        val out = ByteArray(len / 2)
+        var j = 0
+        var i = 0
+        while (i + 1 < len) {
+            // s16 LE: low byte first, high byte sign-extended into the sample.
+            val sample = (pcm[i].toInt() and 0xFF) or (pcm[i + 1].toInt() shl 8)
+            out[j++] = linearToMulaw(sample.toShort().toInt())
+            i += 2
         }
+        return out
+    }
 
-        /** Feed one PCM chunk; batches across input buffers if it doesn't fit. */
-        fun encode(pcm: ByteArray) {
-            var offset = 0
-            while (offset < pcm.size && accepting) {
-                val idx = runCatching { codec.dequeueInputBuffer(INPUT_TIMEOUT_US) }.getOrElse { -1 }
-                if (idx < 0) continue
-                val ib = runCatching { codec.getInputBuffer(idx) }.getOrNull()
-                if (ib == null) {
-                    runCatching { codec.queueInputBuffer(idx, 0, 0, ptsUs(), 0) }
-                    continue
-                }
-                ib.clear()
-                val n = minOf(ib.remaining(), pcm.size - offset)
-                ib.put(pcm, offset, n)
-                val pts = ptsUs()
-                fedBytes += n
-                runCatching { codec.queueInputBuffer(idx, 0, n, pts, 0) }
-                offset += n
-            }
-        }
-
-        /**
-         * Queue an empty end-of-stream input buffer so the encoder flushes its
-         * tail; the output loop then emits the last frames and fires [onEnd].
-         * Runs on the capture thread (its finally block), i.e. the same thread
-         * as [encode].
-         */
-        fun signalEnd() {
-            if (!accepting) return
-            accepting = false
-            var tries = 0
-            while (tries < EOS_QUEUE_TRIES) {
-                val idx = runCatching { codec.dequeueInputBuffer(INPUT_TIMEOUT_US) }.getOrElse { -1 }
-                if (idx >= 0) {
-                    runCatching {
-                        codec.queueInputBuffer(
-                            idx, 0, 0, ptsUs(), MediaCodec.BUFFER_FLAG_END_OF_STREAM,
-                        )
-                    }
-                    return
-                }
-                tries++
-            }
-        }
-
-        /** Ask the output thread to stop + release the codec (no tail drain). */
-        fun release() {
-            accepting = false
-            stopRequested = true
-        }
-
-        private fun drainLoop() {
-            val info = MediaCodec.BufferInfo()
-            while (!stopRequested) {
-                // try/catch (not runCatching{}.getOrElse{break}) — `break` from
-                // an inline lambda needs Kotlin 2.2; this project is on 2.1.
-                val idx = try {
-                    codec.dequeueOutputBuffer(info, OUTPUT_TIMEOUT_US)
-                } catch (_: Throwable) {
-                    break
-                }
-                if (idx >= 0) {
-                    val isConfig = info.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG != 0
-                    // Skip any CSD/config buffer (AMR-WB normally emits none):
-                    // the frames are self-describing, so we never send it as audio.
-                    if (!isConfig && info.size > 0) {
-                        val ob = runCatching { codec.getOutputBuffer(idx) }.getOrNull()
-                        if (ob != null) {
-                            // Emit the AMR-WB frame verbatim — it already carries
-                            // its own ToC/frame header, so we prepend nothing.
-                            val frame = ByteArray(info.size)
-                            ob.position(info.offset)
-                            ob.get(frame, 0, info.size)
-                            onFrame(frame.toByteString())
-                        }
-                    }
-                    runCatching { codec.releaseOutputBuffer(idx, false) }
-                    if (info.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM != 0) {
-                        onEnd()
-                        break
-                    }
-                }
-                // INFO_OUTPUT_FORMAT_CHANGED / INFO_TRY_AGAIN_LATER: AMR-WB
-                // frames are self-describing, so no CSD to stash — just loop.
-            }
-            cleanup()
-        }
-
-        private fun cleanup() {
-            if (!cleanedUp.compareAndSet(false, true)) return
-            accepting = false
-            runCatching { codec.stop() }
-            runCatching { codec.release() }
-        }
-
-        private fun ptsUs(): Long = fedBytes * 1_000_000L / (SAMPLE_RATE.toLong() * 2L)
+    /**
+     * Standard G.711 μ-law compression of one 16-bit linear sample. The
+     * exponent is the classic 256-entry compress-table lookup, computed here
+     * as the high-bit position of the top 8 bits of `sample` (identical to the
+     * table). Verified against the reference vectors: 0→0xFF, +full→0x80,
+     * −full→0x00.
+     */
+    private fun linearToMulaw(pcmVal: Int): Byte {
+        val bias = 0x84
+        val clip = 32635
+        var sample = pcmVal
+        val sign = (sample shr 8) and 0x80
+        if (sign != 0) sample = -sample
+        if (sample > clip) sample = clip
+        sample += bias
+        val idx = (sample shr 7) and 0xFF
+        var exponent = 0
+        var v = idx
+        while (v > 1) { v = v shr 1; exponent++ }
+        val mantissa = (sample shr (exponent + 3)) and 0x0F
+        return ((sign or (exponent shl 4) or mantissa).inv() and 0xFF).toByte()
     }
 
     companion object {
@@ -487,21 +330,8 @@ internal class SonioxWatchStt(
         private const val WS_URL = "wss://stt-rt.soniox.com/transcribe-websocket"
         private const val MODEL = "stt-rt-v5"
         private const val SAMPLE_RATE = 16000
-        private const val FRAME_BYTES = 3200
-        // ~10 s of AMR-WB frames — a generous ceiling on pre-open buffering.
+        private const val FRAME_BYTES = 3200 // 100 ms @ 16 kHz mono 16-bit
+        // ~10 s of μ-law frames — a generous ceiling on pre-open buffering.
         private const val MAX_BACKLOG_FRAMES = 150
-
-        // = MediaFormat.MIMETYPE_AUDIO_AMR_WB (literal so it stays a const val).
-        private const val MIME_AMR_WB = "audio/amr-wb"
-        // AMR-WB's highest mode (23.85 kbit/s); ~10x smaller than raw 16-bit PCM.
-        private const val AMR_WB_BIT_RATE = 23850
-        private const val INPUT_TIMEOUT_US = 10_000L
-        private const val OUTPUT_TIMEOUT_US = 10_000L
-        // ~1 s of tries to hand off the end-of-stream input buffer.
-        private const val EOS_QUEUE_TRIES = 100
-
-        // AMR-WB stream signature — must be the very first bytes on the wire, once,
-        // before any frame, or Soniox's `audio_format:"auto"` can't detect the codec.
-        private val AMR_WB_MAGIC = "#!AMR-WB\n".toByteArray(Charsets.US_ASCII).toByteString()
     }
 }
