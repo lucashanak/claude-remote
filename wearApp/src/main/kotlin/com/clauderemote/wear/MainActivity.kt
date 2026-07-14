@@ -72,7 +72,11 @@ class MainActivity : ComponentActivity() {
         fetchInitialSessions(applicationContext)
         // Launched from a notification tap / full-screen wake — route to the
         // waiting session. NavRequest is the bridge to the Compose UI below.
-        NavRequest.request(intent?.getStringExtra(WearNotifier.EXTRA_SESSION_ID))
+        // "🎤 Diktovat" akce navíc předá EXTRA_START_DICTATION → auto-start.
+        NavRequest.request(
+            intent?.getStringExtra(WearNotifier.EXTRA_SESSION_ID),
+            intent?.getBooleanExtra(WearNotifier.EXTRA_START_DICTATION, false) == true,
+        )
         setContent {
             MaterialTheme {
                 WearApp()
@@ -86,7 +90,10 @@ class MainActivity : ComponentActivity() {
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
-        NavRequest.request(intent.getStringExtra(WearNotifier.EXTRA_SESSION_ID))
+        NavRequest.request(
+            intent.getStringExtra(WearNotifier.EXTRA_SESSION_ID),
+            intent.getBooleanExtra(WearNotifier.EXTRA_START_DICTATION, false),
+        )
     }
 
     /**
@@ -408,6 +415,18 @@ private fun SessionDetailScreen(session: WearSessionInfo) {
             startSonioxDictation()
         } else {
             micPermLauncher.launch(android.Manifest.permission.RECORD_AUDIO)
+        }
+    }
+
+    // Otevřeno přes "🎤 Diktovat" akci v notifikaci → rovnou spusť diktování
+    // (toggleDictation řeší i žádost o RECORD_AUDIO). Flag zkonzumuj HNED, ať se
+    // diktát nespustí znovu při recompose/rotaci; klíčovaný na session.id, takže
+    // se netriggeruje na jiné session.
+    val autoStartDictation by NavRequest.startDictation.collectAsState()
+    LaunchedEffect(session.id, autoStartDictation) {
+        if (autoStartDictation == session.id) {
+            NavRequest.consumeStartDictation()
+            if (!dictating) toggleDictation()
         }
     }
 

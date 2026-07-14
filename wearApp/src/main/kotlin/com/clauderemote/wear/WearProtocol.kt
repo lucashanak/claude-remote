@@ -96,11 +96,26 @@ object SessionRepository {
 object NavRequest {
     val requestedSessionId = MutableStateFlow<String?>(null)
 
-    fun request(id: String?) {
-        if (!id.isNullOrBlank()) requestedSessionId.value = id
+    // Session id for which the "🎤 Diktovat" notification action asked us to
+    // auto-start Soniox dictation on open. Keyed by id (not a bare bool) so a
+    // flag left over from one session can't fire on another. Consumed by
+    // SessionDetailScreen once it fires the dictation — NOT by consume() below,
+    // which only clears the nav target (WearApp calls it right after selecting
+    // the session, long before the detail screen gets a chance to read this).
+    val startDictation = MutableStateFlow<String?>(null)
+
+    fun request(id: String?, startDictation: Boolean = false) {
+        if (!id.isNullOrBlank()) {
+            requestedSessionId.value = id
+            if (startDictation) this.startDictation.value = id
+        }
     }
 
     fun consume() {
         requestedSessionId.value = null
+    }
+
+    fun consumeStartDictation() {
+        startDictation.value = null
     }
 }

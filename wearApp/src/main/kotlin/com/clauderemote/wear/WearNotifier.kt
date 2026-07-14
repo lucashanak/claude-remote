@@ -156,6 +156,10 @@ object WearNotifier {
             PendingIntent.FLAG_UPDATE_CURRENT or immutableFlag(),
         )
         builder.setFullScreenIntent(fullScreenPending, true)
+
+        // I approval jde diktovat: Soniox nejde spustit z notifikace (chce
+        // appku v popředí + mic), tak deep-linkni do detailu a rovnou nastartuj.
+        addDictateAction(context, builder, session)
     }
 
     private fun buildReply(context: Context, builder: NotificationCompat.Builder, session: WearSessionInfo) {
@@ -179,6 +183,28 @@ object WearNotifier {
             NotificationCompat.Action.Builder(0, "Odpovědět", replyPending)
                 .addRemoteInput(remoteInput)
                 .build()
+        )
+        // Soniox streaming diktát jako doplňková volba vedle systémového
+        // RemoteInputu ("Odpovědět" = Google hlas/klávesnice).
+        addDictateAction(context, builder, session)
+    }
+
+    /**
+     * "🎤 Diktovat" — na rozdíl od ostatních akcí getActivity (ne broadcast):
+     * chceme appku v POPŘEDÍ kvůli mic streamu. Deep-linkne do detailu session
+     * s [EXTRA_START_DICTATION], MainActivity pak přes [NavRequest] řekne UI, ať
+     * po otevření spustí Soniox diktování (viz SessionDetailScreen).
+     */
+    private fun addDictateAction(context: Context, builder: NotificationCompat.Builder, session: WearSessionInfo) {
+        val dictateIntent = deepLinkIntent(context, session.id).putExtra(EXTRA_START_DICTATION, true)
+        val dictatePending = PendingIntent.getActivity(
+            context,
+            requestCode(session.id, "dictate"),
+            dictateIntent,
+            PendingIntent.FLAG_UPDATE_CURRENT or immutableFlag(),
+        )
+        builder.addAction(
+            NotificationCompat.Action.Builder(0, "🎤 Diktovat", dictatePending).build()
         )
     }
 
@@ -212,6 +238,10 @@ object WearNotifier {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) PendingIntent.FLAG_MUTABLE else 0
 
     const val EXTRA_SESSION_ID = "session_id"
+    // Set by the "🎤 Diktovat" action so MainActivity knows to auto-start
+    // Soniox dictation once it routes to the session (a plain tap on the body
+    // just opens the session without it).
+    const val EXTRA_START_DICTATION = "start_dictation"
     const val EXTRA_ANSWER = "answer"
     const val KEY_REPLY_TEXT = "reply_text"
 
