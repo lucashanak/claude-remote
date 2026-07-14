@@ -98,7 +98,15 @@ object MessageSummarizer {
                     ?.optJSONObject("message")?.optString("content").orEmpty()
                 // Strip a stray <think> block defensively (enable_thinking:false
                 // should suppress it, but belt-and-braces).
-                thinkBlock.replace(content, "").trim().ifBlank { null }
+                val summary = thinkBlock.replace(content, "").trim().ifBlank { null }
+                // Log the produced summary (truncated) — on success the summarizer
+                // was otherwise silent, so the actual text sent to the watch/phone
+                // wasn't visible in the shipped server log for debugging.
+                FileLogger.log(
+                    "MessageSummarizer",
+                    "ok ($activity/$length, ${message.length}→${summary?.length ?: 0} zn): ${summary?.take(120) ?: "(prázdné)"}",
+                )
+                summary
             }
         }.onFailure { e ->
             FileLogger.log("MessageSummarizer", "summarize failed: ${e.message}")
