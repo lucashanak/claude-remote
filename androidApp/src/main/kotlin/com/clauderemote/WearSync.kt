@@ -31,6 +31,11 @@ data class WearSessionInfo(
     val activity: String,
     val lastMessage: String?,
     val lastMessageAt: Long = 0,
+    // One-sentence LLM summary of lastMessage for the watch notification body.
+    // Null when disabled, not notify-worthy, or the summarizer failed — the
+    // watch then falls back to the truncated lastMessage. New trailing field
+    // (defaulted) to stay wire-compatible with the wearApp copy.
+    val summary: String? = null,
 )
 
 @Serializable
@@ -73,6 +78,11 @@ object WearSync {
     private val lastMessageText = mutableMapOf<String, String?>()
     private val lastMessageAt = mutableMapOf<String, Long>()
 
+    // sessionId -> (message text that was summarized, resulting summary).
+    // Keyed on the exact text so an unchanged message isn't re-summarized on
+    // every debounced push — only a genuinely new lastMessage hits the LLM.
+    private val summaryCache = mutableMapOf<String, Pair<String, String>>()
+
     fun start(context: Context, tabManager: TabManager, orchestrator: SessionOrchestrator) {
         FileLogger.log(TAG, "WearSync started")
         appContext = context.applicationContext
@@ -103,11 +113,18 @@ object WearSync {
         scope.launch { push(urgent = true) }
     }
 
-    private fun push(urgent: Boolean) {
+    private suspend fun push(urgent: Boolean) {
         val ctx = appContext ?: return
         val tm = tabManager ?: return
         val orch = orchestrator ?: return
+        val prefs = ctx.getSharedPreferences("claude_remote", Context.MODE_PRIVATE)
         val activities = orch.sessionActivities.value
+        // LLM-summary config read once per push (opt-in; blank URL => off).
+        val llmEnabled = prefs.getBoolean("llm_summary_enabled", false)
+        val llmUrl = prefs.getString("llm_summary_url", "").orEmpty()
+        val llmKey = prefs.getString("llm_summary_api_key", "").orEmpty()
+        val llmModel = prefs.getString("llm_summary_model", "chadrock-35b-ace-saber-rocmfpx-q")
+            .orEmpty().ifBlank { "chadrock-35b-ace-saber-rocmfpx-q" }
         val sessions = tm.tabs.value.map { tab ->
             val text = orch.lastAssistantText(tab.id)
             // pushNow() (called right after a notification body is computed)
@@ -120,16 +137,17 @@ object WearSync {
                 }
                 lastMessageAt.getOrPut(tab.id) { System.currentTimeMillis() }
             }
+            val activity = (activities[tab.id] ?: com.clauderemote.model.SessionActivity.IDLE).name
             WearSessionInfo(
                 id = tab.id,
                 title = tab.tabTitle,
                 status = tab.status.name,
-                activity = (activities[tab.id] ?: com.clauderemote.model.SessionActivity.IDLE).name,
+                activity = activity,
                 lastMessage = text,
                 lastMessageAt = changedAt,
+                summary = if (llmEnabled) maybeSummarize(tab.id, activity, text, llmUrl, llmKey, llmModel) else null,
             )
         }
-        val prefs = ctx.getSharedPreferences("claude_remote", Context.MODE_PRIVATE)
         val sonioxKey = prefs.getString("soniox_api_key", "").orEmpty()
         val sonioxVoice = prefs.getString("soniox_tts_voice", "Adrian").orEmpty().ifBlank { "Adrian" }
         val ttsSpeedPct = prefs.getInt("tts_speech_rate_pct", 100)
@@ -149,5 +167,33 @@ object WearSync {
         Wearable.getDataClient(ctx).putDataItem(request)
             .addOnSuccessListener { FileLogger.log(TAG, "Pushed ${sessions.size} sessions to watch") }
             .addOnFailureListener { e -> FileLogger.log(TAG, "putDataItem failed: ${e.message}") }
+    }
+
+    /**
+     * Summarize [message] for the watch, but only for notify-worthy sessions
+     * (WAITING_FOR_INPUT / APPROVAL_NEEDED) with non-blank text — everything
+     * else stays null so we never spend an LLM call on an idle/streaming row.
+     * Cached per (session, text) so the frequent debounced pushes don't
+     * re-summarize an unchanged message. Returns null on any failure/timeout.
+     */
+    private suspend fun maybeSummarize(
+        sessionId: String,
+        activity: String,
+        message: String?,
+        url: String,
+        apiKey: String,
+        model: String,
+    ): String? {
+        if (activity != "WAITING_FOR_INPUT" && activity != "APPROVAL_NEEDED") return null
+        val msg = message?.trim()
+        if (msg.isNullOrBlank()) return null
+        val cached = synchronized(summaryCache) {
+            summaryCache[sessionId]?.takeIf { it.first == msg }?.second
+        }
+        if (cached != null) return cached
+        val summary = com.clauderemote.voice.MessageSummarizer
+            .summarize(url, apiKey, model, activity, msg) ?: return null
+        synchronized(summaryCache) { summaryCache[sessionId] = msg to summary }
+        return summary
     }
 }

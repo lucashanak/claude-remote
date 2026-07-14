@@ -267,6 +267,26 @@ class AppSettings(private val prefs: PlatformPreferences) {
         get() = prefs.getString("sherpa_keyword", "HEY CLAUDE")
         set(value) = prefs.putString("sherpa_keyword", value.trim())
 
+    // LLM summary for watch notifications (opt-in). When a session goes to
+    // WAITING_FOR_INPUT / APPROVAL_NEEDED, the phone asks a self-hosted
+    // OpenAI-compatible chat model to condense lastMessage into one short
+    // sentence and pushes it to the watch as the notification body.
+    var llmSummaryEnabled: Boolean
+        get() = prefs.getBoolean("llm_summary_enabled", false)
+        set(value) = prefs.putBoolean("llm_summary_enabled", value)
+
+    var llmSummaryUrl: String
+        get() = prefs.getString("llm_summary_url", "")
+        set(value) = prefs.putString("llm_summary_url", value.trim())
+
+    var llmSummaryApiKey: String
+        get() = prefs.getString("llm_summary_api_key", "")
+        set(value) = prefs.putString("llm_summary_api_key", value.trim())
+
+    var llmSummaryModel: String
+        get() = prefs.getString("llm_summary_model", "chadrock-35b-ace-saber-rocmfpx-q")
+        set(value) = prefs.putString("llm_summary_model", value.trim())
+
     fun loadAppearance(): AppearanceState = AppearanceState(
         variant = crVariant,
         density = crDensity,

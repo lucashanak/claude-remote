@@ -84,6 +84,10 @@ actual fun WakeWordSettingsCard(settings: AppSettings) {
     var porcupineKeyword by remember { mutableStateOf(settings.porcupineKeyword) }
     var sherpaKeyword by remember { mutableStateOf(settings.sherpaKeyword) }
     var sttEngine by remember { mutableStateOf(settings.sttEngine) }
+    var llmSummaryEnabled by remember { mutableStateOf(settings.llmSummaryEnabled) }
+    var llmSummaryUrl by remember { mutableStateOf(settings.llmSummaryUrl) }
+    var llmSummaryKey by remember { mutableStateOf(settings.llmSummaryApiKey) }
+    var llmSummaryModel by remember { mutableStateOf(settings.llmSummaryModel) }
     var sttTesting by remember { mutableStateOf(false) }
     var sttTestResult by remember { mutableStateOf("") }
     var pendingSttTest by remember { mutableStateOf(false) }
@@ -607,6 +611,58 @@ actual fun WakeWordSettingsCard(settings: AppSettings) {
             colors = ButtonDefaults.buttonColors(containerColor = c.accent, contentColor = c.accentInk),
         ) {
             Text(if (testing) "Přehrávám…" else "🔊 Otestovat hlas")
+        }
+
+        androidx.compose.material3.HorizontalDivider(color = c.border)
+
+        // ── LLM shrnutí zpráv (hodinky) ──────────────────────────────
+        // Own OpenAI-compatible endpoint (separate from the STT/TTS server):
+        // condenses lastMessage to one sentence for the watch notification.
+        androidx.compose.foundation.layout.Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = androidx.compose.ui.Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween,
+        ) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text("LLM shrnutí zpráv (hodinky)", style = CRType.cardTitle, color = c.text)
+                Text(
+                    "Když session čeká na vstup nebo schválení, telefon shrne " +
+                        "poslední zprávu do jedné věty a pošle ji na hodinky jako " +
+                        "text notifikace. Vyžaduje OpenAI-compatible server.",
+                    style = CRType.bodyDim, color = c.textDim,
+                )
+            }
+            androidx.compose.material3.Switch(
+                checked = llmSummaryEnabled,
+                onCheckedChange = { llmSummaryEnabled = it; settings.llmSummaryEnabled = it },
+            )
+        }
+        if (llmSummaryEnabled) {
+            androidx.compose.material3.OutlinedTextField(
+                value = llmSummaryUrl,
+                onValueChange = { llmSummaryUrl = it; settings.llmSummaryUrl = it },
+                label = { Text("LLM server URL (např. https://ai.hanaktech.org/openai/v1)") },
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth(),
+            )
+            androidx.compose.material3.OutlinedTextField(
+                value = llmSummaryKey,
+                onValueChange = { llmSummaryKey = it; settings.llmSummaryApiKey = it },
+                label = { Text("API klíč") },
+                singleLine = true,
+                visualTransformation = androidx.compose.ui.text.input.PasswordVisualTransformation(),
+                keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(
+                    keyboardType = androidx.compose.ui.text.input.KeyboardType.Password,
+                ),
+                modifier = Modifier.fillMaxWidth(),
+            )
+            androidx.compose.material3.OutlinedTextField(
+                value = llmSummaryModel,
+                onValueChange = { llmSummaryModel = it; settings.llmSummaryModel = it },
+                label = { Text("Model") },
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth(),
+            )
         }
     }
 }

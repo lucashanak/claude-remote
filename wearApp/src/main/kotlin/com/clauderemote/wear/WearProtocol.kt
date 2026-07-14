@@ -8,7 +8,8 @@ import kotlinx.serialization.Serializable
  * Wire model for the phone -> watch session snapshot (path "/sessions").
  * This module has no Gradle dependency on `androidApp` (kept dependency-free
  * — see build.gradle.kts), so it declares its own copy matching
- * androidApp's `WearSync.kt`. Keep the two in sync when the shape changes.
+ * androidApp's `WearSync.kt`. Keep the two in sync when the shape changes —
+ * the orchestrator there adds the same `summary` field.
  */
 @Serializable
 data class WearSessionInfo(
@@ -18,6 +19,10 @@ data class WearSessionInfo(
     val activity: String,
     val lastMessage: String?,
     val lastMessageAt: Long = 0,
+    // One-line LLM shrnutí `lastMessage` (může být null, když se nepodařilo
+    // vygenerovat nebo je vypnuté) — default null drží zpětnou kompatibilitu
+    // se staršími phone builds díky `ignoreUnknownKeys` na WEAR_JSON.
+    val summary: String? = null,
 )
 
 @Serializable

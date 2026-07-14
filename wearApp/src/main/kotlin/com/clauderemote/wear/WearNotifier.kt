@@ -83,6 +83,14 @@ object WearNotifier {
             PendingIntent.FLAG_UPDATE_CURRENT or immutableFlag(),
         )
 
+        // Notification body: preferuj LLM `summary` (krátké, jednořádkové) —
+        // surová `lastMessage` bývá klidně 7000+ znaků a na hodinkách je k
+        // ničemu. Když summary chybí (starší phone build / vypnuto / selhalo
+        // shrnutí), spadni na useknutou lastMessage jako dřív.
+        val body = session.summary?.takeIf { it.isNotBlank() }
+            ?: session.lastMessage?.take(100)?.let { if ((session.lastMessage?.length ?: 0) > 100) "$it…" else it }
+            ?: ""
+
         val builder = NotificationCompat.Builder(context, channelFor(session.activity))
             // A mipmap (color launcher icon) as the status-bar small icon
             // isn't the textbook monochrome silhouette, but it's the only
@@ -91,7 +99,8 @@ object WearNotifier {
             // app icon deliberately so these read as "from Claude Remote".
             .setSmallIcon(R.mipmap.ic_launcher)
             .setContentTitle(session.title)
-            .setContentText(session.lastMessage ?: "")
+            .setContentText(body)
+            .setStyle(NotificationCompat.BigTextStyle().bigText(body))
             .setContentIntent(contentPending)
             .setAutoCancel(true)
 
