@@ -38,12 +38,20 @@
 
         <activity
             android:name="com.clauderemote.wear.MainActivity"
-            android:exported="true">
+            android:exported="true"
+            android:launchMode="singleTop">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <!-- Handles the notifikace-first actions: Y/N approval and the inline
+             reply posted by WearNotifier are dispatched to the phone from
+             here without opening the app. -->
+        <receiver
+            android:name="com.clauderemote.wear.WearActionReceiver"
+            android:exported="false" />
 
         <!-- Handles the PackageInstaller session result (self-update). -->
         <receiver

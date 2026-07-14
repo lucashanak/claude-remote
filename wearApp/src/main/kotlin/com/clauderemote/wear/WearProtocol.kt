@@ -63,7 +63,39 @@ object SessionRepository {
     private val _sessions = MutableStateFlow<List<WearSessionInfo>>(emptyList())
     val sessions: StateFlow<List<WearSessionInfo>> = _sessions
 
+    // Elapsed realtime (not wall-clock — immune to the user/NTP changing the
+    // system time) of the last successful update; 0L = never synced yet.
+    // Lets the UI show data age and warn when the phone's gone quiet.
+    private val _lastSyncElapsed = MutableStateFlow(0L)
+    val lastSyncElapsed: StateFlow<Long> = _lastSyncElapsed
+
+    // Distinguishes "just launched, nothing has arrived yet" from "arrived,
+    // and it's genuinely empty" — both render as an empty list otherwise.
+    private val _hasLoaded = MutableStateFlow(false)
+    val hasLoaded: StateFlow<Boolean> = _hasLoaded
+
     fun update(payload: List<WearSessionInfo>) {
         _sessions.value = payload
+        _lastSyncElapsed.value = android.os.SystemClock.elapsedRealtime()
+        _hasLoaded.value = true
+    }
+}
+
+/**
+ * One-shot bridge from a notification/deep-link tap to the Compose UI's
+ * session selection. MainActivity (which owns the Intent) writes the tapped
+ * session id here; `WearApp()` collects it and opens that session, then
+ * clears it — clearing matters so a later swipe-back to the list doesn't get
+ * yanked straight back into the same session by a stale value.
+ */
+object NavRequest {
+    val requestedSessionId = MutableStateFlow<String?>(null)
+
+    fun request(id: String?) {
+        if (!id.isNullOrBlank()) requestedSessionId.value = id
+    }
+
+    fun consume() {
+        requestedSessionId.value = null
     }
 }
