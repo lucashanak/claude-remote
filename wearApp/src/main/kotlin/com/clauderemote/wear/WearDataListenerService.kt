@@ -35,6 +35,7 @@ class WearDataListenerService : WearableListenerService() {
                 val previousById = SessionRepository.sessions.value.associateBy { it.id }
                 SessionRepository.update(payload.sessions)
                 WearLog.i(this, TAG, "Updated repository with ${payload.sessions.size} sessions")
+                requestTileUpdate()
                 handleTransitions(payload.sessions, previousById)
             }.onFailure { e -> WearLog.w(this, TAG, "Failed to parse /sessions payload: ${e.message}") }
         }
@@ -97,6 +98,17 @@ class WearDataListenerService : WearableListenerService() {
             // on-device WatchTts internally when there's no key.
             SonioxWatchTts.speak(applicationContext, text)
         }
+    }
+
+    // Nudge the tile to re-render off the just-updated SessionRepository so
+    // its "N čeká" count is fresh without waiting for the freshness interval.
+    // runCatching: a tile refresh failure must never take down the listener
+    // (its notification/TTS work is the more important path).
+    private fun requestTileUpdate() {
+        runCatching {
+            androidx.wear.tiles.TileService.getUpdater(this)
+                .requestUpdate(WearTileService::class.java)
+        }.onFailure { e -> WearLog.w(this, TAG, "Tile update request failed: ${e.message}") }
     }
 
     private fun String?.isNotifyWorthy() = this == "WAITING_FOR_INPUT" || this == "APPROVAL_NEEDED"

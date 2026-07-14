@@ -89,4 +89,18 @@ dependencies {
     implementation("androidx.wear:wear-input:1.2.0")
     // Soniox streaming STT/TTS over WebSocket (same version as `shared`).
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
+
+    // Wear OS Tile (WearTileService) — the glanceable dlaždice. Tiles render
+    // in the system process from a serialized ProtoLayout, so this is the
+    // Java-builder ProtoLayout stack, NOT Compose. tiles 1.4.x targets the
+    // protolayout 1.2.x line, so all four are pinned to that matched set;
+    // protolayout-material provides the Text/Typography helpers used by the
+    // layout (the tiles 1.1-era `tiles-material` is superseded by it).
+    implementation("androidx.wear.tiles:tiles:1.4.1")
+    implementation("androidx.wear.protolayout:protolayout:1.2.1")
+    implementation("androidx.wear.protolayout:protolayout-material:1.2.1")
+    implementation("androidx.wear.protolayout:protolayout-expression:1.2.1")
+    // Futures.immediateFuture for the onTileRequest/onResourcesRequest returns
+    // (tiles ships only the ListenableFuture stub, not the full Futures API).
+    implementation("com.google.guava:guava:33.3.1-android")
 }

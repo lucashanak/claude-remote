@@ -93,5 +93,23 @@
             </intent-filter>
         </service>
 
+        <!-- Glanceable tile — swipe-from-watch-face summary of what needs the
+             user, without opening the app. Runs in this same process, so it
+             reads the shared SessionRepository directly. -->
+        <service
+            android:name="com.clauderemote.wear.WearTileService"
+            android:label="Claude Remote"
+            android:exported="true"
+            android:permission="com.google.android.wearable.permission.BIND_TILE_PROVIDER">
+            <intent-filter>
+                <action android:name="androidx.wear.tiles.action.BIND_TILE_PROVIDER" />
+            </intent-filter>
+            <!-- Optional editor preview; reuse the app icon since there is no
+                 dedicated tile-preview asset in the project. -->
+            <meta-data
+                android:name="androidx.wear.tiles.PREVIEW"
+                android:resource="@mipmap/ic_launcher" />
+        </service>
+
     </application>
 </manifest>
