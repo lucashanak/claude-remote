@@ -287,6 +287,20 @@ class AppSettings(private val prefs: PlatformPreferences) {
         get() = prefs.getString("llm_summary_model", "chadrock-35b-ace-saber-rocmfpx-q")
         set(value) = prefs.putString("llm_summary_model", value.trim())
 
+    // Also summarize the PHONE's own "Claude needs input" notification (not
+    // just the watch push). Off by default so existing phone notifications
+    // keep showing the raw message unless the user opts in.
+    var llmSummaryPhone: Boolean
+        get() = prefs.getBoolean("llm_summary_phone", false)
+        set(value) = prefs.putBoolean("llm_summary_phone", value)
+
+    // How long the summary should be — one of "SENTENCE" (1 short sentence),
+    // "SHORT" (2–3 sentences), "PARAGRAPH" (short paragraph). Drives both the
+    // system prompt and max_tokens in MessageSummarizer.
+    var llmSummaryLength: String
+        get() = prefs.getString("llm_summary_length", "SENTENCE")
+        set(value) = prefs.putString("llm_summary_length", value.trim())
+
     fun loadAppearance(): AppearanceState = AppearanceState(
         variant = crVariant,
         density = crDensity,

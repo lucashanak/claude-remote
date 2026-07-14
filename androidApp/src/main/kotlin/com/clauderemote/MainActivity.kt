@@ -226,7 +226,21 @@ class MainActivity : FragmentActivity() {
                     ?.let { com.clauderemote.voice.speakableFromMarkdown(it) }
                     ?.takeIf { it.isNotBlank() }
                     ?: hint
-                AlertNotifier.post(applicationContext, sessionId, title, notifBody)
+                if (appSettings.llmSummaryEnabled && appSettings.llmSummaryPhone) {
+                    // Summarize the phone notification too. Off-main + best-effort
+                    // (12 s timeout inside summaryFor); post once the LLM answers,
+                    // falling back to the raw body on null/failure. summaryFor
+                    // shares WearSync's per-(session,text) cache with the watch
+                    // push, so the same message is summarized at most once.
+                    // GlobalScope (not lifecycleScope) so a backgrounded/finishing
+                    // Activity still gets the notification out.
+                    GlobalScope.launch(Dispatchers.IO) {
+                        val summary = runCatching { WearSync.summaryFor(sessionId) }.getOrNull()
+                        AlertNotifier.post(applicationContext, sessionId, title, summary ?: notifBody)
+                    }
+                } else {
+                    AlertNotifier.post(applicationContext, sessionId, title, notifBody)
+                }
                 // Push the freshest message to the watch now — don't wait for
                 // WearSync's periodic debounced collector.
                 WearSync.pushNow()

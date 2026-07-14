@@ -60,6 +60,7 @@ object WearSync {
     private const val TAG = "WearSync"
     private const val PATH = "/sessions"
     private const val KEY_JSON = "json"
+    private const val DEFAULT_LLM_MODEL = "chadrock-35b-ace-saber-rocmfpx-q"
     // Matches the quiescence-y feel of the rest of the notify pipeline
     // without hammering the Data Layer on every streaming token.
     private const val DEBOUNCE_MS = 400L
@@ -123,8 +124,9 @@ object WearSync {
         val llmEnabled = prefs.getBoolean("llm_summary_enabled", false)
         val llmUrl = prefs.getString("llm_summary_url", "").orEmpty()
         val llmKey = prefs.getString("llm_summary_api_key", "").orEmpty()
-        val llmModel = prefs.getString("llm_summary_model", "chadrock-35b-ace-saber-rocmfpx-q")
-            .orEmpty().ifBlank { "chadrock-35b-ace-saber-rocmfpx-q" }
+        val llmModel = prefs.getString("llm_summary_model", DEFAULT_LLM_MODEL)
+            .orEmpty().ifBlank { DEFAULT_LLM_MODEL }
+        val llmLength = prefs.getString("llm_summary_length", "SENTENCE").orEmpty().ifBlank { "SENTENCE" }
         val sessions = tm.tabs.value.map { tab ->
             val text = orch.lastAssistantText(tab.id)
             // pushNow() (called right after a notification body is computed)
@@ -145,7 +147,7 @@ object WearSync {
                 activity = activity,
                 lastMessage = text,
                 lastMessageAt = changedAt,
-                summary = if (llmEnabled) maybeSummarize(tab.id, activity, text, llmUrl, llmKey, llmModel) else null,
+                summary = if (llmEnabled) maybeSummarize(tab.id, activity, text, llmUrl, llmKey, llmModel, llmLength) else null,
             )
         }
         val sonioxKey = prefs.getString("soniox_api_key", "").orEmpty()
@@ -183,6 +185,7 @@ object WearSync {
         url: String,
         apiKey: String,
         model: String,
+        length: String,
     ): String? {
         if (activity != "WAITING_FOR_INPUT" && activity != "APPROVAL_NEEDED") return null
         val msg = message?.trim()
@@ -192,8 +195,30 @@ object WearSync {
         }
         if (cached != null) return cached
         val summary = com.clauderemote.voice.MessageSummarizer
-            .summarize(url, apiKey, model, activity, msg) ?: return null
+            .summarize(url, apiKey, model, activity, msg, length) ?: return null
         synchronized(summaryCache) { summaryCache[sessionId] = msg to summary }
         return summary
+    }
+
+    /**
+     * Summary for the phone's own notification, resolved from the same config,
+     * source text (lastAssistantText) and per-(session,text) cache the watch
+     * push uses — so a given message is summarized only once no matter which
+     * surface asks first. Returns null when summaries are disabled or the call
+     * fails, so MainActivity falls back to the raw notification body.
+     */
+    suspend fun summaryFor(sessionId: String): String? {
+        val ctx = appContext ?: return null
+        val orch = orchestrator ?: return null
+        val prefs = ctx.getSharedPreferences("claude_remote", Context.MODE_PRIVATE)
+        if (!prefs.getBoolean("llm_summary_enabled", false)) return null
+        val url = prefs.getString("llm_summary_url", "").orEmpty()
+        val key = prefs.getString("llm_summary_api_key", "").orEmpty()
+        val model = prefs.getString("llm_summary_model", DEFAULT_LLM_MODEL)
+            .orEmpty().ifBlank { DEFAULT_LLM_MODEL }
+        val length = prefs.getString("llm_summary_length", "SENTENCE").orEmpty().ifBlank { "SENTENCE" }
+        val activity = (orch.sessionActivities.value[sessionId]
+            ?: com.clauderemote.model.SessionActivity.IDLE).name
+        return maybeSummarize(sessionId, activity, orch.lastAssistantText(sessionId), url, key, model, length)
     }
 }

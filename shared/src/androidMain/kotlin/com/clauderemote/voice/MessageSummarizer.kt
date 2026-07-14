@@ -12,10 +12,12 @@ import org.json.JSONObject
 import java.util.concurrent.TimeUnit
 
 /**
- * Condenses a session's last assistant message into one short Czech sentence
- * for the watch notification, via a self-hosted OpenAI-compatible chat
- * endpoint (`normalizeApiBase(url)` + `/v1/chat/completions` — same base
- * handling as [ServerTts], so a pasted `…/v1` URL doesn't double up).
+ * Condenses a session's last assistant message into a short Czech summary for
+ * the watch/phone notification, via an Open WebUI native chat endpoint
+ * (`normalizeApiBase(url)` + `/api/chat/completions`). OWUI's OpenAI
+ * passthrough (`/openai/v1`) is disabled server-side (403), so we target the
+ * native `/api` routes; `normalizeApiBase` only strips a trailing `/v1`, so a
+ * pasted domain root passes through unchanged.
  *
  * Strictly best-effort: any failure (timeout, non-200, malformed body, empty
  * content) returns null so the caller falls back to the truncated raw
@@ -37,21 +39,34 @@ object MessageSummarizer {
         model: String,
         activity: String,
         message: String,
+        // "SENTENCE" (default) / "SHORT" / "PARAGRAPH" — see AppSettings.
+        length: String = "SENTENCE",
     ): String? = withContext(Dispatchers.IO) {
         if (baseUrl.isBlank() || message.isBlank()) return@withContext null
         // Prompt differs by activity: an approval prompt is an action to
         // confirm, otherwise it's a question the agent is asking.
-        val system = if (activity == "APPROVAL_NEEDED") {
-            "Shrň, jakou akci má uživatel schválit, do JEDNÉ krátké věty " +
-                "(max ~12 slov) pro notifikaci na hodinkách. Česky, jen ta věta, bez uvozovek."
+        val subject = if (activity == "APPROVAL_NEEDED") {
+            "jakou akci má uživatel schválit"
         } else {
-            "Shrň, na co se AI agent ptá, do JEDNÉ krátké věty " +
-                "(max ~12 slov) pro notifikaci na hodinkách. Česky, jen ta věta, bez uvozovek."
+            "na co se AI agent ptá"
         }
+        // Length controls both the wording of the ask and the token budget so
+        // a longer target isn't truncated mid-sentence.
+        val target = when (length) {
+            "SHORT" -> "do 2–3 krátkých vět"
+            "PARAGRAPH" -> "do krátkého odstavce (max ~4 věty)"
+            else -> "do JEDNÉ krátké věty (max ~12 slov)"
+        }
+        val maxTokens = when (length) {
+            "SHORT" -> 160
+            "PARAGRAPH" -> 320
+            else -> 60
+        }
+        val system = "Shrň, $subject, $target pro notifikaci. Česky, jen text, bez uvozovek."
         val body = JSONObject()
             .put("model", model)
             .put("temperature", 0.3)
-            .put("max_tokens", 200)
+            .put("max_tokens", maxTokens)
             // Reasoning model: without this it emits a <think> block and
             // leaves `content` empty/leaky.
             .put("chat_template_kwargs", JSONObject().put("enable_thinking", false))
@@ -63,7 +78,7 @@ object MessageSummarizer {
             )
             .toString()
         val req = Request.Builder()
-            .url(normalizeApiBase(baseUrl) + "/v1/chat/completions")
+            .url(normalizeApiBase(baseUrl) + "/api/chat/completions")
             .post(body.toRequestBody("application/json".toMediaType()))
             .apply { if (apiKey.isNotBlank()) header("Authorization", "Bearer $apiKey") }
             .build()
@@ -89,4 +104,38 @@ object MessageSummarizer {
             FileLogger.log("MessageSummarizer", "summarize failed: ${e.message}")
         }.getOrNull()
     }
+
+    /**
+     * Fetch the model ids the server offers via Open WebUI's native
+     * `GET /api/models` (`{"data":[{"id":..}]}`) so the settings UI can offer
+     * a picker AND verify the URL+key in one tap. Unlike [summarize] this
+     * throws on failure so the UI can surface "nepodařilo se načíst" with the
+     * server's reason. Mirrors ServerCatalog.fetchModels (which uses `/v1`).
+     */
+    suspend fun fetchModels(baseUrl: String, apiKey: String): List<String> =
+        withContext(Dispatchers.IO) {
+            if (baseUrl.isBlank()) throw IllegalArgumentException("URL serveru je prázdné")
+            val req = Request.Builder()
+                .url(normalizeApiBase(baseUrl) + "/api/models")
+                .get()
+                .apply { if (apiKey.isNotBlank()) header("Authorization", "Bearer $apiKey") }
+                .build()
+            http.newCall(req).execute().use { resp ->
+                if (!resp.isSuccessful) throw RuntimeException("HTTP ${resp.code} z /api/models")
+                val payload = resp.body?.string().orEmpty()
+                if (payload.trimStart().startsWith("<")) {
+                    throw RuntimeException(
+                        "Server vrátil HTML místo JSON — zkontrolujte URL (chybí /api segment?)."
+                    )
+                }
+                val arr = JSONObject(payload).optJSONArray("data")
+                    ?: throw RuntimeException("Neočekávaný tvar JSONu (chybí pole 'data')")
+                buildList {
+                    for (i in 0 until arr.length()) {
+                        val id = arr.optJSONObject(i)?.optString("id").orEmpty()
+                        if (id.isNotBlank()) add(id)
+                    }
+                }.sorted()
+            }
+        }
 }

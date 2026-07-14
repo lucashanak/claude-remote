@@ -88,6 +88,10 @@ actual fun WakeWordSettingsCard(settings: AppSettings) {
     var llmSummaryUrl by remember { mutableStateOf(settings.llmSummaryUrl) }
     var llmSummaryKey by remember { mutableStateOf(settings.llmSummaryApiKey) }
     var llmSummaryModel by remember { mutableStateOf(settings.llmSummaryModel) }
+    var llmSummaryPhone by remember { mutableStateOf(settings.llmSummaryPhone) }
+    var llmSummaryLength by remember { mutableStateOf(settings.llmSummaryLength) }
+    var llmModels by remember { mutableStateOf<List<String>>(emptyList()) }
+    var loadingLlmModels by remember { mutableStateOf(false) }
     var sttTesting by remember { mutableStateOf(false) }
     var sttTestResult by remember { mutableStateOf("") }
     var pendingSttTest by remember { mutableStateOf(false) }
@@ -640,14 +644,22 @@ actual fun WakeWordSettingsCard(settings: AppSettings) {
         if (llmSummaryEnabled) {
             androidx.compose.material3.OutlinedTextField(
                 value = llmSummaryUrl,
-                onValueChange = { llmSummaryUrl = it; settings.llmSummaryUrl = it },
-                label = { Text("LLM server URL (např. https://ai.hanaktech.org/openai/v1)") },
+                onValueChange = {
+                    llmSummaryUrl = it; settings.llmSummaryUrl = it
+                    llmModels = emptyList()
+                },
+                // Open WebUI native API — doménový root (BEZ /openai, BEZ /v1);
+                // appka připojí /api/chat/completions a /api/models sama.
+                label = { Text("LLM server URL (např. https://ai.hanaktech.org)") },
                 singleLine = true,
                 modifier = Modifier.fillMaxWidth(),
             )
             androidx.compose.material3.OutlinedTextField(
                 value = llmSummaryKey,
-                onValueChange = { llmSummaryKey = it; settings.llmSummaryApiKey = it },
+                onValueChange = {
+                    llmSummaryKey = it; settings.llmSummaryApiKey = it
+                    llmModels = emptyList()
+                },
                 label = { Text("API klíč") },
                 singleLine = true,
                 visualTransformation = androidx.compose.ui.text.input.PasswordVisualTransformation(),
@@ -656,13 +668,84 @@ actual fun WakeWordSettingsCard(settings: AppSettings) {
                 ),
                 modifier = Modifier.fillMaxWidth(),
             )
+            // "Načíst modely" doubles as a connection test (GET /api/models).
+            // When it fills the dropdown the user picks from it; the free-text
+            // field stays as a fallback so a model can always be typed by hand.
+            Button(
+                onClick = {
+                    loadingLlmModels = true
+                    scope.launch {
+                        try {
+                            val result = MessageSummarizer.fetchModels(llmSummaryUrl, settings.llmSummaryApiKey)
+                            llmModels = result
+                            if (result.isEmpty()) {
+                                Toast.makeText(context, "Server vrátil prázdný seznam modelů.", Toast.LENGTH_LONG).show()
+                            }
+                        } catch (e: Throwable) {
+                            Toast.makeText(context, "Modely: ${e.message ?: "nepodařilo se načíst"}", Toast.LENGTH_LONG).show()
+                        } finally {
+                            loadingLlmModels = false
+                        }
+                    }
+                },
+                enabled = !loadingLlmModels && llmSummaryUrl.isNotBlank() && llmSummaryKey.isNotBlank(),
+                colors = ButtonDefaults.buttonColors(containerColor = c.accent, contentColor = c.accentInk),
+            ) {
+                Text(
+                    if (loadingLlmModels) "Načítám…"
+                    else if (llmModels.isEmpty()) "Načíst modely"
+                    else "Obnovit modely (${llmModels.size})"
+                )
+            }
+            if (llmModels.isNotEmpty()) {
+                ModelDropdown(
+                    label = "Model",
+                    options = llmModels,
+                    selected = llmSummaryModel,
+                    onSelect = { llmSummaryModel = it; settings.llmSummaryModel = it },
+                )
+            }
             androidx.compose.material3.OutlinedTextField(
                 value = llmSummaryModel,
                 onValueChange = { llmSummaryModel = it; settings.llmSummaryModel = it },
-                label = { Text("Model") },
+                label = { Text("Model (nebo zadej ručně)") },
                 singleLine = true,
                 modifier = Modifier.fillMaxWidth(),
             )
+            // Délka shrnutí — mapuje na system prompt + max_tokens v MessageSummarizer.
+            val lengthSentence = "Věta"
+            val lengthShort = "Krátké"
+            val lengthParagraph = "Odstavec"
+            ModelDropdown(
+                label = "Délka shrnutí",
+                options = listOf(lengthSentence, lengthShort, lengthParagraph),
+                selected = when (llmSummaryLength) {
+                    "SHORT" -> lengthShort
+                    "PARAGRAPH" -> lengthParagraph
+                    else -> lengthSentence
+                },
+                onSelect = { name ->
+                    val picked = when (name) {
+                        lengthShort -> "SHORT"
+                        lengthParagraph -> "PARAGRAPH"
+                        else -> "SENTENCE"
+                    }
+                    llmSummaryLength = picked; settings.llmSummaryLength = picked
+                },
+            )
+            // Watch summary rides the master toggle above; this extends it to
+            // the phone's own "Claude needs input" notification.
+            androidx.compose.foundation.layout.Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = androidx.compose.ui.Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween,
+            ) {
+                Text("Shrnovat i telefonní notifikace", style = CRType.bodyDim, color = c.text, modifier = Modifier.weight(1f))
+                androidx.compose.material3.Switch(
+                    checked = llmSummaryPhone,
+                    onCheckedChange = { llmSummaryPhone = it; settings.llmSummaryPhone = it },
+                )
+            }
         }
     }
 }
