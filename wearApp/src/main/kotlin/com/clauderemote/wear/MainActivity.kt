@@ -12,18 +12,14 @@ import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import android.content.pm.PackageManager
 import androidx.core.content.ContextCompat
-import androidx.compose.foundation.background
 import androidx.compose.foundation.border
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -34,15 +30,25 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.wear.compose.foundation.lazy.ScalingLazyColumn
+import androidx.wear.compose.foundation.lazy.rememberScalingLazyListState
+import androidx.wear.compose.foundation.rotary.RotaryScrollableDefaults
+import androidx.wear.compose.foundation.rotary.rotaryScrollable
+import androidx.wear.compose.material3.AppScaffold
 import androidx.wear.compose.material3.Button
+import androidx.wear.compose.material3.Card
+import androidx.wear.compose.material3.ListHeader
 import androidx.wear.compose.material3.MaterialTheme
+import androidx.wear.compose.material3.OutlinedButton
+import androidx.wear.compose.material3.ScreenScaffold
 import androidx.wear.compose.material3.Text
 import androidx.wear.input.RemoteInputIntentHelper
 import com.google.android.gms.wearable.DataMapItem
@@ -98,6 +104,9 @@ class MainActivity : ComponentActivity() {
 private fun WearApp() {
     val sessions by SessionRepository.sessions.collectAsState()
     var selectedId by remember { mutableStateOf<String?>(null) }
+    // Třetí "obrazovka" vedle seznamu a detailu. Nastavení jsou slepá ulička,
+    // proto stačí prostý boolean stav (nav je jen mutableStateOf, ne NavHost).
+    var showSettings by remember { mutableStateOf(false) }
     val selected = selectedId?.let { id -> sessions.firstOrNull { it.id == id } }
 
     // Notification/deep-link tap → open that session. Consumed immediately so
@@ -105,7 +114,7 @@ private fun WearApp() {
     // straight back into the same session by a lingering value.
     val requestedId by NavRequest.requestedSessionId.collectAsState()
     LaunchedEffect(requestedId) {
-        requestedId?.let { selectedId = it; NavRequest.consume() }
+        requestedId?.let { selectedId = it; showSettings = false; NavRequest.consume() }
     }
 
     // Without this, Wear OS's system swipe-back gesture has no in-app back
@@ -114,18 +123,33 @@ private fun WearApp() {
     // instead of just returning to the session list — reported on a real
     // device as "swipe back from a session kicks me out of the app".
     BackHandler(enabled = selectedId != null) { selectedId = null }
+    // Swipe-back ze Settings zpět na seznam (Settings se otevírá jen ze
+    // seznamu, takže se s tím pro detail výše nepere).
+    BackHandler(enabled = showSettings) { showSettings = false }
 
-    if (selected != null) {
-        SessionDetailScreen(session = selected, onBack = { selectedId = null })
-    } else {
-        SessionListScreen(sessions = sessions, onSelect = { selectedId = it })
+    // AppScaffold poskytuje TimeText na úrovni celé appky zadarmo (výchozí
+    // timeText slot) — nevoláme TimeText napřímo, ať se nepereme s jeho
+    // signaturou v M3 1.6.2 (viz poznámka u ScreenScaffold níže).
+    AppScaffold {
+        when {
+            showSettings -> SettingsScreen(onBack = { showSettings = false })
+            selected != null -> SessionDetailScreen(session = selected)
+            else -> SessionListScreen(
+                sessions = sessions,
+                onSelect = { selectedId = it },
+                onOpenSettings = { showSettings = true },
+            )
+        }
     }
 }
 
 @Composable
-private fun SessionListScreen(sessions: List<WearSessionInfo>, onSelect: (String) -> Unit) {
+private fun SessionListScreen(
+    sessions: List<WearSessionInfo>,
+    onSelect: (String) -> Unit,
+    onOpenSettings: () -> Unit,
+) {
     val context = LocalContext.current
-    var autoSpeak by remember { mutableStateOf(AutoSpeakPrefs.isEnabled(context)) }
     val lastSyncElapsed by SessionRepository.lastSyncElapsed.collectAsState()
     val hasLoaded by SessionRepository.hasLoaded.collectAsState()
 
@@ -151,44 +175,72 @@ private fun SessionListScreen(sessions: List<WearSessionInfo>, onSelect: (String
         }
     }
 
-    ScalingLazyColumn(
-        modifier = Modifier.fillMaxSize().padding(horizontal = 8.dp),
-        verticalArrangement = Arrangement.spacedBy(4.dp),
-    ) {
-        item {
-            // A plain toggle Button, not Switch — Wear Compose Material3's
-            // Switch signature in 1.6.2 didn't match the expected
-            // checked/onCheckedChange shape and isn't worth fighting blind
-            // with no device to verify against; a labeled button is just as
-            // functional for this one setting.
-            Button(onClick = {
-                val next = !autoSpeak
-                autoSpeak = next
-                AutoSpeakPrefs.setEnabled(context, next)
-                if (!next) WatchTts.stop(context)
-            }) {
-                Text(if (autoSpeak) "Číst nahlas: ANO" else "Číst nahlas: NE")
+    // Rotary (crown) scroll napojený na stejný list state jako ScalingLazyColumn.
+    val listState = rememberScalingLazyListState()
+    val focusRequester = remember { FocusRequester() }
+    LaunchedEffect(Unit) { focusRequester.requestFocus() }
+
+    // Rozděl na "čeká na vás" (APPROVAL_NEEDED → WAITING_FOR_INPUT, v tomto
+    // pořadí priority) a "ostatní" (nejnovější nahoře). Glanceable: to, co
+    // vyžaduje akci, je vždy nahoře.
+    val needsAction = sessions.filter { actionPriority(it.activity) < 2 }
+        .sortedBy { actionPriority(it.activity) }
+    val others = sessions.filter { actionPriority(it.activity) == 2 }
+        .sortedByDescending { it.lastMessageAt }
+
+    // ScreenScaffold: použito v nejjednodušší doložitelné podobě
+    // ScreenScaffold(scrollState = listState) { ... }. Pokud by signatura v
+    // 1.6.2 zlobila, stačí obal odstranit (obsah zůstane funkční) — TimeText
+    // dodává AppScaffold výše.
+    ScreenScaffold(scrollState = listState) {
+        ScalingLazyColumn(
+            state = listState,
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(horizontal = 8.dp)
+                .rotaryScrollable(RotaryScrollableDefaults.behavior(listState), focusRequester),
+            verticalArrangement = Arrangement.spacedBy(4.dp),
+        ) {
+            if (!phoneConnected) {
+                item { Text("⚠ Telefon není připojen", color = Color(0xFFFF5C5C)) }
             }
-        }
-        item { UpdateSection() }
-        if (!phoneConnected) {
-            item { Text("⚠ Telefon není připojen", color = Color(0xFFFF5C5C)) }
-        }
-        if (lastSyncElapsed > 0) {
-            val ageMs = nowElapsed - lastSyncElapsed
-            item {
-                Text(
-                    freshnessLabel(ageMs),
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
+            if (lastSyncElapsed > 0) {
+                val ageMs = nowElapsed - lastSyncElapsed
+                item {
+                    Text(
+                        freshnessLabel(ageMs),
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
             }
-        }
-        when {
-            !hasLoaded -> item { Text("Načítám…") }
-            sessions.isEmpty() -> item { Text("Žádné aktivní sessions") }
-        }
-        sessions.sortedByDescending { it.lastMessageAt }.forEach { session ->
-            item { SessionRow(session, onClick = { onSelect(session.id) }) }
+            // Badge jen když je co řešit — jinak by zabíral cenný horní slot.
+            if (needsAction.isNotEmpty()) {
+                item {
+                    Text(
+                        "${needsAction.size} čeká na vás",
+                        color = MaterialTheme.colorScheme.primary,
+                        fontSize = 14.sp,
+                    )
+                }
+            }
+            if (needsAction.isNotEmpty()) {
+                item { ListHeader { Text("ČEKÁ NA VÁS") } }
+                needsAction.forEach { session ->
+                    item { SessionRow(session, onClick = { onSelect(session.id) }) }
+                }
+            }
+            if (others.isNotEmpty()) {
+                item { ListHeader { Text("OSTATNÍ") } }
+                others.forEach { session ->
+                    item { SessionRow(session, onClick = { onSelect(session.id) }) }
+                }
+            }
+            when {
+                !hasLoaded -> item { Text("Načítám…") }
+                sessions.isEmpty() -> item { Text("Žádné aktivní sessions") }
+            }
+            // Nastavení patří pryč z hlavního toku — malé tlačítko na konci.
+            item { OutlinedButton(onClick = onOpenSettings) { Text("⚙ Nastavení") } }
         }
     }
 }
@@ -207,26 +259,37 @@ private fun freshnessLabel(ageMs: Long): String {
 
 @Composable
 private fun SessionRow(session: WearSessionInfo, onClick: () -> Unit) {
-    Row(
+    val color = activityColor(session.activity)
+    val label = activityLabel(session.activity)
+    // Card místo prostého dot+text řádku — ohraničený, klikací blok s větším
+    // dotykovým cílem. (TitleCard by byl idiomatičtější, ale jeho title/subtitle
+    // sloty mají v M3 1.6.2 křehčí signaturu; Card s vlastním obsahem je
+    // signaturově nejbezpečnější a dává plnou kontrolu nad layoutem.)
+    Card(
+        onClick = onClick,
         modifier = Modifier
             .fillMaxWidth()
-            .clickable(onClick = onClick)
-            .padding(vertical = 6.dp, horizontal = 4.dp),
-        verticalAlignment = Alignment.CenterVertically,
+            // Barva sama nestačí (TalkBack, barvoslepost) — stav i do popisu.
+            .semantics { contentDescription = "$label: ${session.title}" },
     ) {
-        Box(
-            modifier = Modifier
-                .size(10.dp)
-                .clip(CircleShape)
-                .background(activityColor(session.activity)),
-        )
-        Spacer(Modifier.size(8.dp))
-        Text(session.title, maxLines = 1)
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            // Stavový glyph obarvený stejně jako label — tvar nese informaci
+            // i bez barvy.
+            Text(activityGlyph(session.activity), color = color)
+            Spacer(Modifier.size(6.dp))
+            Text(
+                session.title,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f),
+            )
+        }
+        Text(label, color = color, fontSize = 12.sp)
     }
 }
 
 @Composable
-private fun SessionDetailScreen(session: WearSessionInfo, onBack: () -> Unit) {
+private fun SessionDetailScreen(session: WearSessionInfo) {
     val context = LocalContext.current
     var status by remember { mutableStateOf("") }
     var dictating by remember { mutableStateOf(false) }
@@ -308,139 +371,221 @@ private fun SessionDetailScreen(session: WearSessionInfo, onBack: () -> Unit) {
         ActivityResultContracts.RequestPermission()
     ) { granted -> if (granted) startSonioxDictation() else status = "Bez mikrofonu to nejde" }
 
-    ScalingLazyColumn(
-        modifier = Modifier.fillMaxSize().padding(horizontal = 12.dp),
-        verticalArrangement = Arrangement.spacedBy(8.dp),
-    ) {
-        item {
-            Box(modifier = Modifier.fillMaxWidth()) {
-                Button(onClick = onBack) { Text("← Zpět") }
-            }
+    // Přepínač diktování — sdílený mezi kontextovými bloky níže, ať se logika
+    // (stop / permission flow / start) neduplikuje.
+    fun toggleDictation() {
+        if (dictating) {
+            stt?.stop() // stop → onFinal naplní pendingDraft k potvrzení
+        } else if (ContextCompat.checkSelfPermission(
+                context, android.Manifest.permission.RECORD_AUDIO,
+            ) == PackageManager.PERMISSION_GRANTED
+        ) {
+            startSonioxDictation()
+        } else {
+            micPermLauncher.launch(android.Manifest.permission.RECORD_AUDIO)
         }
-        item { Text(session.title) }
-        item { Text(session.lastMessage ?: "(no message)") }
-        item {
-            Button(
-                onClick = {
-                    val remoteInputs = listOf(RemoteInput.Builder(KEY_REPLY).setLabel("Odpověď pro Claude").build())
-                    val intent = RemoteInputIntentHelper.createActionRemoteInputIntent()
-                    RemoteInputIntentHelper.putRemoteInputsExtra(intent, remoteInputs)
-                    replyLauncher.launch(intent)
-                },
-                enabled = !sending,
-            ) { Text("Odpovědět") }
-        }
-        // Soniox on-watch dictation — stream mic → transcript → potvrzení → send.
-        item {
-            Button(onClick = {
-                if (dictating) {
-                    stt?.stop() // stop → onFinal naplní pendingDraft k potvrzení
-                } else if (ContextCompat.checkSelfPermission(
-                        context, android.Manifest.permission.RECORD_AUDIO,
-                    ) == PackageManager.PERMISSION_GRANTED
-                ) {
-                    startSonioxDictation()
-                } else {
-                    micPermLauncher.launch(android.Manifest.permission.RECORD_AUDIO)
-                }
-            }) { Text(if (dictating) "⏹ Stop" else "🎤 Diktovat") }
-        }
-        if (dictating && draft.isNotBlank()) {
-            item { Text(draft) }
-        }
-        // Confirm-before-send: zachycený diktát v ohraničení, ať je jasné CO se
-        // pošle, s explicitním Odeslat / Zrušit / Znovu.
-        val pending = pendingDraft
-        if (pending != null && !dictating) {
-            item {
-                androidx.compose.foundation.layout.Column(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .border(1.dp, MaterialTheme.colorScheme.primary, RoundedCornerShape(8.dp))
-                        .padding(8.dp),
-                    verticalArrangement = Arrangement.spacedBy(6.dp),
-                ) {
-                    Text(pending)
-                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+    }
+
+    // Otevře systémový RemoteInput (klávesnice / hlas) pro textovou odpověď.
+    fun openReply() {
+        val remoteInputs = listOf(RemoteInput.Builder(KEY_REPLY).setLabel("Odpověď pro Claude").build())
+        val intent = RemoteInputIntentHelper.createActionRemoteInputIntent()
+        RemoteInputIntentHelper.putRemoteInputsExtra(intent, remoteInputs)
+        replyLauncher.launch(intent)
+    }
+
+    val listState = rememberScalingLazyListState()
+    val focusRequester = remember { FocusRequester() }
+    LaunchedEffect(Unit) { focusRequester.requestFocus() }
+
+    // ScreenScaffold + rotary jako u seznamu (viz poznámka tam). ŽÁDNÉ "← Zpět"
+    // tlačítko — Wear má systémový swipe-back (řeší parent BackHandler ve
+    // WearApp, ověřeno na zařízení), takže uvolníme nejcennější horní slot.
+    ScreenScaffold(scrollState = listState) {
+        ScalingLazyColumn(
+            state = listState,
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(horizontal = 12.dp)
+                .rotaryScrollable(RotaryScrollableDefaults.behavior(listState), focusRequester),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            item { Text(session.title, fontSize = 13.sp) }
+            // Zpráva do ohraničeného Cardu — vizuálně oddělí "co Claude řekl" od
+            // akcí. Bez maxLines ořezu: dlouhá zpráva se scrolluje.
+            item { Card(onClick = {}) { Text(session.lastMessage ?: "(no message)") } }
+
+            // Kontextový primární blok dle stavu session — nejdůležitější akce
+            // hned pod zprávou.
+            when (session.activity) {
+                "APPROVAL_NEEDED" -> {
+                    // Plná šířka pod sebou, ne vedle sebe: mis-tap schválit/zamítnout
+                    // je drahý, tak ať se cíle nepletou a jsou velké.
+                    item {
                         Button(
                             onClick = {
                                 if (!sending) {
                                     sending = true
                                     status = "Odesílám…"
-                                    sendReply(context, session.id, pending) { onSendResult(it) }
-                                    pendingDraft = null
+                                    sendApprove(context, session.id, "y") { onSendResult(it) }
                                 }
                             },
                             enabled = !sending,
-                            modifier = Modifier.weight(1f).semantics { contentDescription = "Odeslat odpověď" },
-                        ) { Text("✓") }
-                        Button(
-                            onClick = { pendingDraft = null },
-                            modifier = Modifier.weight(1f).semantics { contentDescription = "Zrušit" },
-                        ) { Text("✗") }
+                            modifier = Modifier.fillMaxWidth().semantics { contentDescription = "Schválit" },
+                        ) { Text("✓ Ano") }
+                    }
+                    item {
                         Button(
                             onClick = {
-                                pendingDraft = null
-                                // Znovu jen když mikrofon máme; jinak nech uživatele
-                                // tapnout Diktovat (kde běží permission flow).
-                                if (ContextCompat.checkSelfPermission(
-                                        context, android.Manifest.permission.RECORD_AUDIO,
-                                    ) == PackageManager.PERMISSION_GRANTED
-                                ) startSonioxDictation()
+                                if (!sending) {
+                                    sending = true
+                                    status = "Odesílám…"
+                                    sendApprove(context, session.id, "n") { onSendResult(it) }
+                                }
                             },
-                            modifier = Modifier.weight(1f).semantics { contentDescription = "Diktovat znovu" },
-                        ) { Text("↻") }
+                            enabled = !sending,
+                            modifier = Modifier.fillMaxWidth().semantics { contentDescription = "Zamítnout" },
+                        ) { Text("✗ Ne") }
+                    }
+                }
+                "WAITING_FOR_INPUT" -> {
+                    // Diktování je primární akce (velké tlačítko), textová
+                    // odpověď sekundární.
+                    item {
+                        Button(
+                            onClick = { toggleDictation() },
+                            modifier = Modifier.fillMaxWidth(),
+                        ) { Text(if (dictating) "⏹ Stop" else "🎤 Diktovat") }
+                    }
+                    item {
+                        OutlinedButton(onClick = { openReply() }, enabled = !sending) { Text("Odpovědět") }
+                    }
+                }
+                else -> {
+                    // WORKING / IDLE / DISCONNECTED — žádné Y/N; jen běžné akce.
+                    item {
+                        OutlinedButton(onClick = { openReply() }, enabled = !sending) { Text("Odpovědět") }
+                    }
+                    item {
+                        Button(onClick = { toggleDictation() }) {
+                            Text(if (dictating) "⏹ Stop" else "🎤 Diktovat")
+                        }
                     }
                 }
             }
-        }
-        if (session.activity == "APPROVAL_NEEDED") {
-            // Plná šířka pod sebou, ne vedle sebe: mis-tap schválit/zamítnout je
-            // drahý, tak ať se cíle nepletou a jsou velké.
-            item {
-                Button(
-                    onClick = {
-                        if (!sending) {
-                            sending = true
-                            status = "Odesílám…"
-                            sendApprove(context, session.id, "y") { onSendResult(it) }
-                        }
-                    },
-                    enabled = !sending,
-                    modifier = Modifier.fillMaxWidth().semantics { contentDescription = "Schválit" },
-                ) { Text("✓ Ano (Y)") }
+
+            // Live náhled diktátu — dokud posloucháme.
+            if (dictating && draft.isNotBlank()) {
+                item { Text(draft) }
             }
-            item {
-                Button(
-                    onClick = {
-                        if (!sending) {
-                            sending = true
-                            status = "Odesílám…"
-                            sendApprove(context, session.id, "n") { onSendResult(it) }
+            // Confirm-before-send: zachycený diktát v ohraničení, ať je jasné CO se
+            // pošle, s explicitním Odeslat / Zrušit / Znovu.
+            val pending = pendingDraft
+            if (pending != null && !dictating) {
+                item {
+                    androidx.compose.foundation.layout.Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .border(1.dp, MaterialTheme.colorScheme.primary, RoundedCornerShape(8.dp))
+                            .padding(8.dp),
+                        verticalArrangement = Arrangement.spacedBy(6.dp),
+                    ) {
+                        Text(pending)
+                        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                            Button(
+                                onClick = {
+                                    if (!sending) {
+                                        sending = true
+                                        status = "Odesílám…"
+                                        sendReply(context, session.id, pending) { onSendResult(it) }
+                                        pendingDraft = null
+                                    }
+                                },
+                                enabled = !sending,
+                                modifier = Modifier.weight(1f).semantics { contentDescription = "Odeslat odpověď" },
+                            ) { Text("✓") }
+                            Button(
+                                onClick = { pendingDraft = null },
+                                modifier = Modifier.weight(1f).semantics { contentDescription = "Zrušit" },
+                            ) { Text("✗") }
+                            Button(
+                                onClick = {
+                                    pendingDraft = null
+                                    // Znovu jen když mikrofon máme; jinak nech uživatele
+                                    // tapnout Diktovat (kde běží permission flow).
+                                    if (ContextCompat.checkSelfPermission(
+                                            context, android.Manifest.permission.RECORD_AUDIO,
+                                        ) == PackageManager.PERMISSION_GRANTED
+                                    ) startSonioxDictation()
+                                },
+                                modifier = Modifier.weight(1f).semantics { contentDescription = "Diktovat znovu" },
+                            ) { Text("↻") }
                         }
-                    },
-                    enabled = !sending,
-                    modifier = Modifier.fillMaxWidth().semantics { contentDescription = "Zamítnout" },
-                ) { Text("✗ Ne (N)") }
-            }
-        }
-        item {
-            Button(onClick = {
-                if (speaking) {
-                    SonioxWatchTts.stop()
-                    speaking = false
-                } else {
-                    // Soniox voice when a key is synced; falls back to
-                    // on-device WatchTts internally otherwise.
-                    session.lastMessage?.takeIf { it.isNotBlank() }?.let {
-                        speaking = true
-                        SonioxWatchTts.speak(context, it) { speaking = false }
                     }
                 }
-            }) { Text(if (speaking) "⏹ Zastavit" else "🔊 Přehrát") }
+            }
+
+            // TTS jako malá sekundární akce (ne velké tlačítko v hlavním sloupci).
+            // Soniox voice když je klíč nasynchronizovaný, jinak interně padá na
+            // on-device WatchTts.
+            item {
+                OutlinedButton(onClick = {
+                    if (speaking) {
+                        SonioxWatchTts.stop()
+                        speaking = false
+                    } else {
+                        session.lastMessage?.takeIf { it.isNotBlank() }?.let {
+                            speaking = true
+                            SonioxWatchTts.speak(context, it) { speaking = false }
+                        }
+                    }
+                }) { Text(if (speaking) "⏹ Zastavit" else "🔊 Přehrát") }
+            }
+            if (status.isNotBlank()) {
+                item { Text(status) }
+            }
         }
-        if (status.isNotBlank()) {
-            item { Text(status) }
+    }
+}
+
+@Composable
+private fun SettingsScreen(onBack: () -> Unit) {
+    val context = LocalContext.current
+    var autoSpeak by remember { mutableStateOf(AutoSpeakPrefs.isEnabled(context)) }
+
+    val listState = rememberScalingLazyListState()
+    val focusRequester = remember { FocusRequester() }
+    LaunchedEffect(Unit) { focusRequester.requestFocus() }
+
+    ScreenScaffold(scrollState = listState) {
+        ScalingLazyColumn(
+            state = listState,
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(horizontal = 8.dp)
+                .rotaryScrollable(RotaryScrollableDefaults.behavior(listState), focusRequester),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            item { Text("Nastavení") }
+            item {
+                // A plain toggle Button, not Switch — Wear Compose Material3's
+                // Switch signature in 1.6.2 didn't match the expected
+                // checked/onCheckedChange shape and isn't worth fighting blind
+                // with no device to verify against; a labeled button is just as
+                // functional for this one setting.
+                Button(onClick = {
+                    val next = !autoSpeak
+                    autoSpeak = next
+                    AutoSpeakPrefs.setEnabled(context, next)
+                    if (!next) WatchTts.stop(context)
+                }) {
+                    Text(if (autoSpeak) "Číst nahlas: ANO" else "Číst nahlas: NE")
+                }
+            }
+            item { UpdateSection() }
+            // Settings je slepá ulička — swipe-back funguje taky, ale explicitní
+            // Zavřít je jistota.
+            item { OutlinedButton(onClick = onBack) { Text("Zavřít") } }
         }
     }
 }
@@ -451,6 +596,34 @@ private fun activityColor(activity: String): Color = when (activity) {
     "APPROVAL_NEEDED" -> Color(0xFFFF5C5C)
     "DISCONNECTED" -> Color(0xFF6F7E96)
     else -> Color(0xFF4EE0A0) // IDLE
+}
+
+/** Stavový glyph — tvar nese informaci i bez barvy (barvoslepost, ambient). */
+private fun activityGlyph(activity: String): String = when (activity) {
+    "APPROVAL_NEEDED" -> "▲"
+    "WAITING_FOR_INPUT" -> "✎"
+    "WORKING" -> "⋯"
+    "DISCONNECTED" -> "⭘"
+    else -> "●" // IDLE
+}
+
+/** Krátký český stavový label pod titulem session. */
+private fun activityLabel(activity: String): String = when (activity) {
+    "APPROVAL_NEEDED" -> "Čeká schválení"
+    "WAITING_FOR_INPUT" -> "Napište"
+    "WORKING" -> "Pracuje"
+    "DISCONNECTED" -> "Odpojeno"
+    else -> "Nečinné" // IDLE
+}
+
+/**
+ * Priorita pro řazení/sekce: 0 = potřebuje schválit, 1 = čeká na vstup,
+ * 2 = ostatní. 0 a 1 tvoří sekci "ČEKÁ NA VÁS", 2 sekci "OSTATNÍ".
+ */
+private fun actionPriority(activity: String): Int = when (activity) {
+    "APPROVAL_NEEDED" -> 0
+    "WAITING_FOR_INPUT" -> 1
+    else -> 2
 }
 
 /**
