@@ -32,6 +32,11 @@ object SonioxWatchTts {
     private const val MODEL = "tts-rt-v1"
     private const val SAMPLE_RATE = 24000
     private const val LEAD_IN_BYTES = 4800
+    // Jitter buffer: accumulate ~0.75 s of audio before the first play() so a
+    // slow/uneven downlink (Soniox PCM tunnelled through the phone's Bluetooth
+    // link on a watch with no Wi-Fi) can't underrun AudioTrack and stutter.
+    // 24 kHz mono 16-bit = 48000 B/s, so 0.75 s = SAMPLE_RATE * 3 / 2 bytes.
+    private const val PREBUFFER_BYTES = SAMPLE_RATE * 3 / 2
     private const val DRAIN_TICK_MS = 20L
     private const val DRAIN_MAX_TICKS = 400
 
@@ -86,6 +91,10 @@ object SonioxWatchTts {
     ) : WebSocketListener() {
         private val streamId = "cr-$gen"
         @Volatile private var writtenFrames = 0
+        // Pre-play jitter buffer (see PREBUFFER_BYTES). Accessed only from the
+        // WS listener thread (onMessage is serialized), so no extra locking.
+        private val prebuffer = java.io.ByteArrayOutputStream()
+        @Volatile private var playing = false
 
         override fun onOpen(webSocket: WebSocket, response: Response) {
             WearLog.i(ctx, TAG, "WS open")
@@ -128,45 +137,65 @@ object SonioxWatchTts {
 
         private fun writePcm(pcm: ByteArray) {
             if (gen != generation.get()) return
-            var t = track.get()
-            if (t == null) {
-                val minBuf = AudioTrack.getMinBufferSize(
-                    SAMPLE_RATE, AudioFormat.CHANNEL_OUT_MONO, AudioFormat.ENCODING_PCM_16BIT,
-                )
-                t = AudioTrack.Builder()
-                    .setAudioAttributes(
-                        AudioAttributes.Builder()
-                            .setUsage(AudioAttributes.USAGE_ASSISTANCE_ACCESSIBILITY)
-                            .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
-                            .build(),
-                    )
-                    .setAudioFormat(
-                        AudioFormat.Builder()
-                            .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
-                            .setSampleRate(SAMPLE_RATE)
-                            .setChannelMask(AudioFormat.CHANNEL_OUT_MONO)
-                            .build(),
-                    )
-                    .setBufferSizeInBytes(maxOf(minBuf, SAMPLE_RATE))
-                    .setTransferMode(AudioTrack.MODE_STREAM)
-                    .build()
-                track.set(t)
-                // Reading speed synced from the phone, pitch-preserved.
-                if (speedPct != 100) runCatching {
-                    t.playbackParams = t.playbackParams.setSpeed((speedPct / 100f).coerceIn(0.5f, 2.5f))
-                }
-                runCatching { t.play() }
-                val silence = ByteArray(LEAD_IN_BYTES)
-                runCatching { t.write(silence, 0, silence.size) }
-                writtenFrames += LEAD_IN_BYTES / 2
-                WearLog.i(ctx, TAG, "playback started")
+            if (playing) {
+                val t = track.get() ?: return
+                runCatching { t.write(pcm, 0, pcm.size) }
+                writtenFrames += pcm.size / 2
+                return
             }
-            runCatching { t.write(pcm, 0, pcm.size) }
-            writtenFrames += pcm.size / 2
+            // Still filling the jitter buffer — hold audio until we have
+            // PREBUFFER_BYTES, then start playback with that head start.
+            prebuffer.write(pcm, 0, pcm.size)
+            if (prebuffer.size() >= PREBUFFER_BYTES) startPlayback()
+        }
+
+        /** Create the track, prime it with lead-in silence + the buffered audio, and play. */
+        private fun startPlayback() {
+            if (playing || gen != generation.get()) return
+            val minBuf = AudioTrack.getMinBufferSize(
+                SAMPLE_RATE, AudioFormat.CHANNEL_OUT_MONO, AudioFormat.ENCODING_PCM_16BIT,
+            )
+            val t = AudioTrack.Builder()
+                .setAudioAttributes(
+                    AudioAttributes.Builder()
+                        .setUsage(AudioAttributes.USAGE_ASSISTANCE_ACCESSIBILITY)
+                        .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+                        .build(),
+                )
+                .setAudioFormat(
+                    AudioFormat.Builder()
+                        .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
+                        .setSampleRate(SAMPLE_RATE)
+                        .setChannelMask(AudioFormat.CHANNEL_OUT_MONO)
+                        .build(),
+                )
+                // ~1 s hardware buffer (was ~0.5 s) — more slack to ride out
+                // downlink jitter without underrunning.
+                .setBufferSizeInBytes(maxOf(minBuf, SAMPLE_RATE * 2))
+                .setTransferMode(AudioTrack.MODE_STREAM)
+                .build()
+            track.set(t)
+            // Reading speed synced from the phone, pitch-preserved.
+            if (speedPct != 100) runCatching {
+                t.playbackParams = t.playbackParams.setSpeed((speedPct / 100f).coerceIn(0.5f, 2.5f))
+            }
+            runCatching { t.play() }
+            val silence = ByteArray(LEAD_IN_BYTES)
+            runCatching { t.write(silence, 0, silence.size) }
+            writtenFrames += LEAD_IN_BYTES / 2
+            val buffered = prebuffer.toByteArray()
+            prebuffer.reset()
+            runCatching { t.write(buffered, 0, buffered.size) }
+            writtenFrames += buffered.size / 2
+            playing = true
+            WearLog.i(ctx, TAG, "playback started (prebuffered ${buffered.size} B)")
         }
 
         private fun finishPlayback(webSocket: WebSocket) {
             if (gen != generation.get()) return
+            // Short message whose audio never reached the prebuffer threshold:
+            // flush what we have so it still plays.
+            if (!playing && prebuffer.size() > 0) startPlayback()
             track.getAndSet(null)?.let { t ->
                 runCatching {
                     var guard = 0

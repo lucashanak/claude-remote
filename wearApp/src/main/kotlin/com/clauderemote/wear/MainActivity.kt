@@ -46,6 +46,7 @@ import androidx.wear.compose.foundation.rotary.rotaryScrollable
 import androidx.wear.compose.material3.AppScaffold
 import androidx.wear.compose.material3.Button
 import androidx.wear.compose.material3.Card
+import androidx.wear.compose.material3.CompactButton
 import androidx.wear.compose.material3.ListHeader
 import androidx.wear.compose.material3.MaterialTheme
 import androidx.wear.compose.material3.OutlinedButton
@@ -395,18 +396,17 @@ private fun SessionDetailScreen(session: WearSessionInfo) {
             verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
             item { Text(session.title, fontSize = 13.sp) }
-            // Zpráva do ohraničeného Cardu — vizuálně oddělí "co Claude řekl" od
-            // akcí. Bez maxLines ořezu: dlouhá zpráva se scrolluje.
-            item { Card(onClick = {}) { Text(session.lastMessage ?: "(no message)") } }
 
-            // Kontextový primární blok dle stavu session — nejdůležitější akce
-            // hned pod zprávou.
+            // Akce NAD zprávou a kompaktní (CompactButton) — ať jsou hned
+            // dosažitelné bez scrollování přes (klidně dlouhou) zprávu; ta je
+            // teď až pod nimi. Y/N zůstávají na plnou šířku pod sebou (snadný
+            // cíl, mis-tap schválit/zamítnout je drahý), jen nižší.
             when (session.activity) {
                 "APPROVAL_NEEDED" -> {
                     // Plná šířka pod sebou, ne vedle sebe: mis-tap schválit/zamítnout
                     // je drahý, tak ať se cíle nepletou a jsou velké.
                     item {
-                        Button(
+                        CompactButton(
                             onClick = {
                                 if (!sending) {
                                     sending = true
@@ -419,7 +419,7 @@ private fun SessionDetailScreen(session: WearSessionInfo) {
                         ) { Text("✓ Ano") }
                     }
                     item {
-                        Button(
+                        CompactButton(
                             onClick = {
                                 if (!sending) {
                                     sending = true
@@ -433,27 +433,35 @@ private fun SessionDetailScreen(session: WearSessionInfo) {
                     }
                 }
                 "WAITING_FOR_INPUT" -> {
-                    // Diktování je primární akce (velké tlačítko), textová
-                    // odpověď sekundární.
+                    // Diktování je primární akce, textová odpověď sekundární.
                     item {
-                        Button(
+                        CompactButton(
                             onClick = { toggleDictation() },
                             modifier = Modifier.fillMaxWidth(),
                         ) { Text(if (dictating) "⏹ Stop" else "🎤 Diktovat") }
                     }
                     item {
-                        OutlinedButton(onClick = { openReply() }, enabled = !sending) { Text("Odpovědět") }
+                        CompactButton(
+                            onClick = { openReply() },
+                            enabled = !sending,
+                            modifier = Modifier.fillMaxWidth(),
+                        ) { Text("Odpovědět") }
                     }
                 }
                 else -> {
                     // WORKING / IDLE / DISCONNECTED — žádné Y/N; jen běžné akce.
                     item {
-                        OutlinedButton(onClick = { openReply() }, enabled = !sending) { Text("Odpovědět") }
+                        CompactButton(
+                            onClick = { openReply() },
+                            enabled = !sending,
+                            modifier = Modifier.fillMaxWidth(),
+                        ) { Text("Odpovědět") }
                     }
                     item {
-                        Button(onClick = { toggleDictation() }) {
-                            Text(if (dictating) "⏹ Stop" else "🎤 Diktovat")
-                        }
+                        CompactButton(
+                            onClick = { toggleDictation() },
+                            modifier = Modifier.fillMaxWidth(),
+                        ) { Text(if (dictating) "⏹ Stop" else "🎤 Diktovat") }
                     }
                 }
             }
@@ -476,7 +484,7 @@ private fun SessionDetailScreen(session: WearSessionInfo) {
                     ) {
                         Text(pending)
                         Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                            Button(
+                            CompactButton(
                                 onClick = {
                                     if (!sending) {
                                         sending = true
@@ -488,11 +496,11 @@ private fun SessionDetailScreen(session: WearSessionInfo) {
                                 enabled = !sending,
                                 modifier = Modifier.weight(1f).semantics { contentDescription = "Odeslat odpověď" },
                             ) { Text("✓") }
-                            Button(
+                            CompactButton(
                                 onClick = { pendingDraft = null },
                                 modifier = Modifier.weight(1f).semantics { contentDescription = "Zrušit" },
                             ) { Text("✗") }
-                            Button(
+                            CompactButton(
                                 onClick = {
                                     pendingDraft = null
                                     // Znovu jen když mikrofon máme; jinak nech uživatele
@@ -509,22 +517,27 @@ private fun SessionDetailScreen(session: WearSessionInfo) {
                 }
             }
 
-            // TTS jako malá sekundární akce (ne velké tlačítko v hlavním sloupci).
-            // Soniox voice když je klíč nasynchronizovaný, jinak interně padá na
-            // on-device WatchTts.
+            // TTS jako malá sekundární akce. Soniox voice když je klíč
+            // nasynchronizovaný, jinak interně padá na on-device WatchTts.
             item {
-                OutlinedButton(onClick = {
-                    if (speaking) {
-                        SonioxWatchTts.stop()
-                        speaking = false
-                    } else {
-                        session.lastMessage?.takeIf { it.isNotBlank() }?.let {
-                            speaking = true
-                            SonioxWatchTts.speak(context, it) { speaking = false }
+                CompactButton(
+                    onClick = {
+                        if (speaking) {
+                            SonioxWatchTts.stop()
+                            speaking = false
+                        } else {
+                            session.lastMessage?.takeIf { it.isNotBlank() }?.let {
+                                speaking = true
+                                SonioxWatchTts.speak(context, it) { speaking = false }
+                            }
                         }
-                    }
-                }) { Text(if (speaking) "⏹ Zastavit" else "🔊 Přehrát") }
+                    },
+                    modifier = Modifier.fillMaxWidth(),
+                ) { Text(if (speaking) "⏹ Zastavit" else "🔊 Přehrát") }
             }
+            // Zpráva až POD akcemi (uživatel chtěl tlačítka nad zprávou). Bez
+            // maxLines ořezu — dlouhá se scrolluje, akce zůstávají nahoře.
+            item { Card(onClick = {}) { Text(session.lastMessage ?: "(no message)") } }
             if (status.isNotBlank()) {
                 item { Text(status) }
             }

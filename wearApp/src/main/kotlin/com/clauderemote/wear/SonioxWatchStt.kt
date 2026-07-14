@@ -19,6 +19,7 @@ import okio.ByteString
 import okio.ByteString.Companion.toByteString
 import org.json.JSONArray
 import org.json.JSONObject
+import java.util.ArrayDeque
 import java.util.concurrent.TimeUnit
 
 /**
@@ -30,6 +31,13 @@ import java.util.concurrent.TimeUnit
  * settled text once an endpoint (silence) is detected or [stop] is called.
  * Requires a Soniox key synced from the phone ([SonioxKeyStore]) and the
  * RECORD_AUDIO permission.
+ *
+ * Unlike the phone port, mic capture starts the instant [start] is called
+ * (NOT in onOpen): on a watch with no Wi-Fi the Soniox socket is tunnelled
+ * through the phone's Bluetooth link and the handshake can take seconds — so
+ * whatever the user says before onOpen would be lost ("cuts off the start").
+ * Frames captured before the socket is ready are buffered and flushed the
+ * moment it opens.
  */
 internal class SonioxWatchStt(
     private val context: Context,
@@ -46,15 +54,31 @@ internal class SonioxWatchStt(
     private val main = Handler(Looper.getMainLooper())
 
     @Volatile private var ws: WebSocket? = null
+    // Set once the socket is open + configured — the capture thread reads this
+    // to decide whether to stream live or keep buffering into [backlog].
+    @Volatile private var liveSocket: WebSocket? = null
     @Volatile private var stopped = false
     @Volatile private var captureThread: Thread? = null
     @Volatile private var finalFired = false
-    // Total mic bytes actually pushed to Soniox — logged with the final so a
-    // "0 chars" result tells apart "mic captured nothing" (≈0 bytes, e.g.
-    // screen slept and throttled capture) from "audio sent, Soniox heard
-    // silence / wrong format" (many bytes, 0 chars).
-    @Volatile private var bytesSent = 0L
     private val finalText = StringBuilder()
+
+    // PCM frames captured before the socket opened, flushed on onOpen. Guarded
+    // by itself. Capped so a socket that never opens can't grow it unbounded.
+    private val backlog = ArrayDeque<ByteString>()
+
+    // Diagnostics logged with the final, so a bad transcript is explainable
+    // without a device in hand:
+    //  - connect latency: how long onOpen took (≈ how much lead the pre-buffer
+    //    had to cover; large = the old code would have clipped that much).
+    //  - mic bytes: ≈0 means the mic captured nothing (permission/screen-off),
+    //    lots + 0 chars means audio flowed but Soniox heard silence/garbage.
+    //  - peak WS queue: bytes stuck in OkHttp's send buffer — grows when the
+    //    uplink (BT tunnel) can't keep up with 256 kbit/s raw PCM, i.e. the
+    //    bandwidth-limited case that hurts accuracy.
+    private var startNanos = 0L
+    @Volatile private var connectMs = -1L
+    @Volatile private var bytesSent = 0L
+    @Volatile private var peakQueueBytes = 0L
 
     fun start() {
         val apiKey = SonioxKeyStore.apiKey
@@ -69,6 +93,10 @@ internal class SonioxWatchStt(
             main.post { onError("Chybí oprávnění mikrofonu.") }
             return
         }
+        startNanos = System.nanoTime()
+        // Capture BEFORE the socket handshake — see class kdoc. Frames buffer
+        // into [backlog] until onOpen flips [liveSocket] on.
+        startCapture()
         ws = http.newWebSocket(Request.Builder().url(WS_URL).build(), Listener(apiKey))
     }
 
@@ -82,7 +110,8 @@ internal class SonioxWatchStt(
 
     private inner class Listener(private val apiKey: String) : WebSocketListener() {
         override fun onOpen(webSocket: WebSocket, response: Response) {
-            WearLog.i(context, TAG, "WS open")
+            connectMs = (System.nanoTime() - startNanos) / 1_000_000
+            WearLog.i(context, TAG, "WS open (connect $connectMs ms)")
             val config = JSONObject().apply {
                 put("api_key", apiKey)
                 put("model", MODEL)
@@ -93,7 +122,8 @@ internal class SonioxWatchStt(
                 put("enable_endpoint_detection", true)
             }
             webSocket.send(config.toString())
-            startCapture(webSocket)
+            // Capture thread now drains [backlog] then streams live.
+            liveSocket = webSocket
         }
 
         override fun onMessage(webSocket: WebSocket, text: String) {
@@ -142,13 +172,28 @@ internal class SonioxWatchStt(
         captureThread?.interrupt()
         captureThread = null
         val settled = synchronized(this) { finalText.toString() }.trim()
-        WearLog.i(context, TAG, "final (${settled.length} chars, $bytesSent mic bytes sent)")
+        WearLog.i(
+            context, TAG,
+            "final (${settled.length} chars, $bytesSent mic bytes, connect $connectMs ms, peak WS queue $peakQueueBytes B)",
+        )
         main.post { onFinal(settled) }
         runCatching { webSocket.close(1000, null) }
     }
 
+    /** Flush frames captured before the socket opened, in order. */
+    private fun drainBacklog(socket: WebSocket) {
+        synchronized(backlog) {
+            while (backlog.isNotEmpty()) {
+                val frame = backlog.peekFirst()
+                if (!socket.send(frame)) return
+                backlog.removeFirst()
+                bytesSent += frame.size
+            }
+        }
+    }
+
     @SuppressLint("MissingPermission")
-    private fun startCapture(webSocket: WebSocket) {
+    private fun startCapture() {
         val thread = Thread {
             val minBuf = AudioRecord.getMinBufferSize(
                 SAMPLE_RATE, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT,
@@ -179,10 +224,24 @@ internal class SonioxWatchStt(
                 while (!stopped && !Thread.currentThread().isInterrupted) {
                     val n = recorder.read(buf, 0, buf.size)
                     if (n <= 0) continue
+                    // Copy out of the reused buffer before queuing/sending.
                     val chunk: ByteString =
                         if (n == buf.size) buf.toByteString() else buf.toByteString(0, n)
-                    if (!webSocket.send(chunk)) break
-                    bytesSent += n
+                    val socket = liveSocket
+                    if (socket != null) {
+                        drainBacklog(socket)
+                        if (!socket.send(chunk)) break
+                        bytesSent += n
+                        val q = socket.queueSize()
+                        if (q > peakQueueBytes) peakQueueBytes = q
+                    } else {
+                        // Socket not open yet — buffer, but bound the backlog so
+                        // a never-opening socket can't grow it without limit.
+                        synchronized(backlog) {
+                            backlog.addLast(chunk)
+                            while (backlog.size > MAX_BACKLOG_FRAMES) backlog.removeFirst()
+                        }
+                    }
                 }
             } catch (_: Throwable) {
                 // fall through to cleanup
@@ -202,5 +261,7 @@ internal class SonioxWatchStt(
         private const val MODEL = "stt-rt-v5"
         private const val SAMPLE_RATE = 16000
         private const val FRAME_BYTES = 3200
+        // ~15 s of 100 ms frames — a generous ceiling on pre-open buffering.
+        private const val MAX_BACKLOG_FRAMES = 150
     }
 }
