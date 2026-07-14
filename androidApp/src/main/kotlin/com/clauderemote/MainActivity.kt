@@ -208,7 +208,7 @@ class MainActivity : FragmentActivity() {
             }
         }
 
-        sessionOrchestrator.onClaudeNeedsInput = { sessionId, hint, isActiveTab ->
+        sessionOrchestrator.onClaudeNeedsInput = { sessionId, hint, isActiveTab, body ->
             val tab = tabManager.getTab(sessionId)
             val title = tab?.tabTitle ?: "Session"
             val fg = isAppInForeground
@@ -216,14 +216,17 @@ class MainActivity : FragmentActivity() {
             KeepAliveService.updateDescription(title)
             if ((!fg || !isActiveTab) && appSettings.notificationsEnabled) {
                 FileLogger.log("Notify", "Sending alert for '$title'")
-                // Prefer the last assistant message (cleaned of markdown) as
-                // the body so the notification — and the watch — show what
-                // Claude actually said, not just the generic hint.
-                val body = sessionOrchestrator.lastAssistantText(sessionId)
+                // Use the body the orchestrator resolved for THIS completion
+                // (cleaned of markdown) so the notification — and the watch —
+                // show what Claude actually said, not just the generic hint. It
+                // is null when the transcript couldn't be confirmed fresh, in
+                // which case we fall back to the hint (never the stale prior
+                // turn, which the orchestrator now gates out).
+                val notifBody = body
                     ?.let { com.clauderemote.voice.speakableFromMarkdown(it) }
                     ?.takeIf { it.isNotBlank() }
                     ?: hint
-                AlertNotifier.post(applicationContext, sessionId, title, body)
+                AlertNotifier.post(applicationContext, sessionId, title, notifBody)
                 // Push the freshest message to the watch now — don't wait for
                 // WearSync's periodic debounced collector.
                 WearSync.pushNow()

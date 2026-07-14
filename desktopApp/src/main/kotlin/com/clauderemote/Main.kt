@@ -278,7 +278,7 @@ fun main() = application {
     // so we use `notify-send` — the universal D-Bus (org.freedesktop.Notifications)
     // path that KDE Plasma, GNOME, XFCE et al. implement natively. macOS/Windows
     // keep the AWT tray balloon, which works acceptably there.
-    sessionOrchestrator.onClaudeNeedsInput = { _, hint, _ ->
+    sessionOrchestrator.onClaudeNeedsInput = { _, hint, _, _ ->
         if (appSettings.notificationsEnabled) {
             if (IS_LINUX) sendLinuxNotification(hint)
             else sendTrayNotification(hint)

@@ -248,6 +248,10 @@ class SessionOrchestrator(
         // the Stop-hook path passes "stop#<tmux>#<epoch>" so one completion
         // maps to exactly one key regardless of transcript freshness.
         eventKey: String? = null,
+        // Raw assistant text (markdown) for the just-finished turn, resolved by
+        // the Stop path after its atomic epoch claim wins; null for the other
+        // callers, in which case the platform falls back to the generic hint.
+        body: String? = null,
     ) {
         val now = System.currentTimeMillis()
         // Dedup by the explicit event key when given, else by (hint + last
@@ -259,19 +263,29 @@ class SessionOrchestrator(
         // INPUT_PROMPT on the same message still get through, while the same
         // (hint, message) repeat is suppressed. Previously only INPUT_PROMPT was
         // deduped, so APPROVAL/PERMISSION spammed on every flap.
+        // The check-and-update runs under a lock so non-epoch callers (APPROVAL
+        // etc.) can't race two coroutines through the same dedup slot; the
+        // platform callback is invoked OUTSIDE the lock (never hold a lock
+        // across a platform callback).
         val key = eventKey ?: lastAssistantId(sessionId)?.let { "$hint#$it" }
-        if (key != null && lastNotifiedKey[sessionId] == key) {
-            FileLogger.log(TAG, "Suppressed needs-input for $sessionId (same event)")
-            return
+        val proceed = synchronized(lastNotifiedKey) {
+            if (key != null && lastNotifiedKey[sessionId] == key) {
+                FileLogger.log(TAG, "Suppressed needs-input for $sessionId (same event)")
+                false
+            } else {
+                val last = lastNeedsInputAt[sessionId] ?: 0L
+                if (now - last < notifyDebounceMs) {
+                    FileLogger.log(TAG, "Suppressed needs-input for $sessionId (debounce)")
+                    false
+                } else {
+                    lastNeedsInputAt[sessionId] = now
+                    if (key != null) lastNotifiedKey[sessionId] = key
+                    true
+                }
+            }
         }
-        val last = lastNeedsInputAt[sessionId] ?: 0L
-        if (now - last < notifyDebounceMs) {
-            FileLogger.log(TAG, "Suppressed needs-input for $sessionId (debounce)")
-            return
-        }
-        lastNeedsInputAt[sessionId] = now
-        if (key != null) lastNotifiedKey[sessionId] = key
-        onClaudeNeedsInput?.invoke(sessionId, hint, isActive)
+        if (!proceed) return
+        onClaudeNeedsInput?.invoke(sessionId, hint, isActive, body)
     }
 
     private fun updateContextPercent(sessionId: String, percent: Int) {
@@ -295,7 +309,7 @@ class SessionOrchestrator(
     var onSessionActive: ((ClaudeSession) -> Unit)? = null
 
     // Notification callback when Claude needs attention
-    var onClaudeNeedsInput: ((sessionId: String, hint: String, isActiveTab: Boolean) -> Unit)? = null
+    var onClaudeNeedsInput: ((sessionId: String, hint: String, isActiveTab: Boolean, body: String?) -> Unit)? = null
 
     // Context window usage callback (0-100 percent)
     var onContextUpdate: ((sessionId: String, percent: Int) -> Unit)? = null
@@ -403,6 +417,17 @@ class SessionOrchestrator(
      *  session — dedups reconnect replays / statusline flaps re-notifying an
      *  already-seen event (per prompt type). */
     private val lastNotifiedKey = mutableMapOf<String, String>()
+    // Highest Stop-hook marker epoch (seconds) we've already NOTIFIED for a
+    // session. The watcher replays tail -n 25 on every reconnect and restarts
+    // every ~30-45 min; a completion is identified by its epoch, so we notify
+    // only for a STRICTLY NEWER epoch per session — replays (same/older epoch),
+    // the single-slot lastNotifiedKey overwrite, and the check-and-set race can
+    // no longer re-fire an already-notified completion. ConcurrentHashMap +
+    // the synchronized claim below make the check-and-set atomic.
+    private val lastNotifiedEpochSec = java.util.concurrent.ConcurrentHashMap<String, Long>()
+    // Assistant-message id sent in the last notification per session, so we never
+    // resend the previous round's message as a "new" completion body.
+    private val lastNotifiedAssistantId = java.util.concurrent.ConcurrentHashMap<String, String>()
     private val notifyDebounceMs = 5_000L
     /** A Stop-hook marker older than this (skew-corrected) is dropped as stale —
      *  it's a buffered replay from a network/HyperOS freeze, not a fresh
@@ -1285,19 +1310,46 @@ else:
                         }
                     }
                     FileLogger.log(TAG, "Stop hook fired for $sessionId: $line")
-                    // Pull the transcript up to the just-finished turn BEFORE
-                    // firing, so the notification body comes from the final
-                    // assistant message rather than the last periodic poll (up
-                    // to 30 s stale in background — it would show the previous
-                    // turn or a mid-turn preamble). BOUND the wait: pollOnce's
-                    // blocking read has no timeout, so on a frozen socket an
-                    // unbounded refresh could stall or suppress the notification
-                    // itself. Run it detached and wait at most 2 s, then fire
-                    // regardless — a slightly stale body beats a missed alert.
+                    // Atomic monotonic claim: only the FIRST observer of a
+                    // strictly-newer epoch proceeds; racing coroutines (watcher
+                    // restart) and tail-replays of same/older epochs bail here,
+                    // BEFORE the expensive body poll. This is now the primary
+                    // dedup for Stop events — fireNeedsInput's eventKey/debounce
+                    // stays as a secondary guard. Malformed lines (null epoch)
+                    // fall through to that guard unchanged.
+                    if (markerEpochSec != null) {
+                        val claimed = synchronized(lastNotifiedEpochSec) {
+                            val prev = lastNotifiedEpochSec[sessionId]
+                            if (prev != null && markerEpochSec <= prev) false
+                            else { lastNotifiedEpochSec[sessionId] = markerEpochSec; true }
+                        }
+                        if (!claimed) {
+                            FileLogger.log(TAG, "Suppressed duplicate/stale Stop hook for $sessionId (epoch $markerEpochSec <= last notified)")
+                            continue
+                        }
+                    }
+                    // Resolve the notification body from the just-finished turn.
+                    // Poll the transcript until it advances PAST the message we
+                    // sent last time (lastNotifiedAssistantId) — on a slow/
+                    // background socket the new turn may not be parsed for a
+                    // moment, and sending the prior turn's text is exactly the
+                    // "previous round's message" bug. If it doesn't advance in
+                    // time, send NO body (null) and let the platform fall back
+                    // to the generic hint. Cap total latency ~3 s so a genuinely
+                    // fresh alert isn't delayed waiting on a frozen socket.
                     val stream = synchronized(transcriptLock) { transcriptStreams[sessionId] }
+                    var body: String? = null
                     if (stream != null) {
-                        val refresh = reconnectScope.launch { stream.pollNow() }
-                        kotlinx.coroutines.withTimeoutOrNull(2_000) { refresh.join() }
+                        val prevId = lastNotifiedAssistantId[sessionId]
+                        kotlinx.coroutines.withTimeoutOrNull(3_000) {
+                            while (true) {
+                                reconnectScope.launch { stream.pollNow() }.join()
+                                val entry = lastAssistantEntry(sessionId)
+                                if (entry != null && entry.id != prevId) { body = entry.text; break }
+                                kotlinx.coroutines.delay(400)
+                            }
+                        }
+                        body?.let { lastAssistantEntry(sessionId)?.let { e -> lastNotifiedAssistantId[sessionId] = e.id } }
                     }
                     val isActiveTab = tabManager.activeTabId.value == sessionId
                     // Dedup on the MARKER itself — (tmux, epoch) identifies one
@@ -1309,6 +1361,7 @@ else:
                     fireNeedsInput(
                         sessionId, "Claude is ready for input", isActiveTab,
                         eventKey = markerEpochSec?.let { "stop#$markerTmux#$it" },
+                        body = body,
                     )
                     updateActivity(sessionId, SessionActivity.WAITING_FOR_INPUT)
                 }
@@ -3149,6 +3202,10 @@ else:
         }
         lastNeedsInputAt.remove(sessionId)
         lastNotifiedKey.remove(sessionId)
+        // Only on permanent forget — NOT on transient disconnect/reconnect, or
+        // a tail replay after reconnect would re-fire an already-notified epoch.
+        lastNotifiedEpochSec.remove(sessionId)
+        lastNotifiedAssistantId.remove(sessionId)
         setHookActive(sessionId, false)
         connections[sessionId]?.disconnect()
         connections.remove(sessionId)
