@@ -235,7 +235,7 @@ class MainActivity : FragmentActivity() {
                     // GlobalScope (not lifecycleScope) so a backgrounded/finishing
                     // Activity still gets the notification out.
                     GlobalScope.launch(Dispatchers.IO) {
-                        val summary = runCatching { WearSync.summaryFor(sessionId) }.getOrNull()
+                        val summary = runCatching { WearSync.summaryFor(sessionId, notifBody) }.getOrNull()
                         AlertNotifier.post(applicationContext, sessionId, title, summary ?: notifBody)
                     }
                 } else {

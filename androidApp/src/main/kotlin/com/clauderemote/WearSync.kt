@@ -79,10 +79,14 @@ object WearSync {
     private val lastMessageText = mutableMapOf<String, String?>()
     private val lastMessageAt = mutableMapOf<String, Long>()
 
-    // sessionId -> (message text that was summarized, resulting summary).
-    // Keyed on the exact text so an unchanged message isn't re-summarized on
-    // every debounced push — only a genuinely new lastMessage hits the LLM.
-    private val summaryCache = mutableMapOf<String, Pair<String, String>>()
+    // sessionId -> (message text that was summarized, resulting summary or null
+    // on failure). Keyed on the exact text so an unchanged message isn't
+    // re-summarized on every debounced push — only a genuinely new lastMessage
+    // hits the LLM. The summary is cached EVEN WHEN null: a timeout/HTTP-error
+    // result for a given text is remembered too, so a failed summarize isn't
+    // retried on every one of the frequent pushes (× many sessions = a storm of
+    // repeated failing calls). A changed message is a new key and retries.
+    private val summaryCache = mutableMapOf<String, Pair<String, String?>>()
 
     fun start(context: Context, tabManager: TabManager, orchestrator: SessionOrchestrator) {
         FileLogger.log(TAG, "WearSync started")
@@ -190,12 +194,16 @@ object WearSync {
         if (activity != "WAITING_FOR_INPUT" && activity != "APPROVAL_NEEDED") return null
         val msg = message?.trim()
         if (msg.isNullOrBlank()) return null
-        val cached = synchronized(summaryCache) {
-            summaryCache[sessionId]?.takeIf { it.first == msg }?.second
+        // Cache HIT for this exact text (present entry) → return its result even
+        // when null, WITHOUT calling the LLM again. This is what stops the retry
+        // storm: once we've tried a given text we don't try it again until the
+        // text changes.
+        val hit = synchronized(summaryCache) {
+            summaryCache[sessionId]?.takeIf { it.first == msg }
         }
-        if (cached != null) return cached
+        if (hit != null) return hit.second
         val summary = com.clauderemote.voice.MessageSummarizer
-            .summarize(url, apiKey, model, activity, msg, length) ?: return null
+            .summarize(url, apiKey, model, activity, msg, length)
         synchronized(summaryCache) { summaryCache[sessionId] = msg to summary }
         return summary
     }
@@ -207,9 +215,9 @@ object WearSync {
      * surface asks first. Returns null when summaries are disabled or the call
      * fails, so MainActivity falls back to the raw notification body.
      */
-    suspend fun summaryFor(sessionId: String): String? {
+    suspend fun summaryFor(sessionId: String, message: String): String? {
         val ctx = appContext ?: return null
-        val orch = orchestrator ?: return null
+        val orch = orchestrator
         val prefs = ctx.getSharedPreferences("claude_remote", Context.MODE_PRIVATE)
         if (!prefs.getBoolean("llm_summary_enabled", false)) return null
         val url = prefs.getString("llm_summary_url", "").orEmpty()
@@ -217,8 +225,14 @@ object WearSync {
         val model = prefs.getString("llm_summary_model", DEFAULT_LLM_MODEL)
             .orEmpty().ifBlank { DEFAULT_LLM_MODEL }
         val length = prefs.getString("llm_summary_length", "SENTENCE").orEmpty().ifBlank { "SENTENCE" }
-        val activity = (orch.sessionActivities.value[sessionId]
-            ?: com.clauderemote.model.SessionActivity.IDLE).name
-        return maybeSummarize(sessionId, activity, orch.lastAssistantText(sessionId), url, key, model, length)
+        // Summarize the body the caller (onClaudeNeedsInput) already resolved —
+        // NOT a re-fetched lastAssistantText. And the callback firing already
+        // means the session needs input, so force a notify-worthy activity:
+        // sessionActivities may not have flipped to WAITING/APPROVAL yet at
+        // callback time, and reading a stale IDLE/WORKING here made maybeSummarize
+        // bail to null → the phone silently fell back to the raw body.
+        val live = orch?.sessionActivities?.value?.get(sessionId)?.name
+        val activity = if (live == "APPROVAL_NEEDED") "APPROVAL_NEEDED" else "WAITING_FOR_INPUT"
+        return maybeSummarize(sessionId, activity, message, url, key, model, length)
     }
 }
