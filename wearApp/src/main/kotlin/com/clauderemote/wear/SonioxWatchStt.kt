@@ -49,6 +49,11 @@ internal class SonioxWatchStt(
     @Volatile private var stopped = false
     @Volatile private var captureThread: Thread? = null
     @Volatile private var finalFired = false
+    // Total mic bytes actually pushed to Soniox — logged with the final so a
+    // "0 chars" result tells apart "mic captured nothing" (≈0 bytes, e.g.
+    // screen slept and throttled capture) from "audio sent, Soniox heard
+    // silence / wrong format" (many bytes, 0 chars).
+    @Volatile private var bytesSent = 0L
     private val finalText = StringBuilder()
 
     fun start() {
@@ -137,7 +142,7 @@ internal class SonioxWatchStt(
         captureThread?.interrupt()
         captureThread = null
         val settled = synchronized(this) { finalText.toString() }.trim()
-        WearLog.i(context, TAG, "final (${settled.length} chars)")
+        WearLog.i(context, TAG, "final (${settled.length} chars, $bytesSent mic bytes sent)")
         main.post { onFinal(settled) }
         runCatching { webSocket.close(1000, null) }
     }
@@ -177,6 +182,7 @@ internal class SonioxWatchStt(
                     val chunk: ByteString =
                         if (n == buf.size) buf.toByteString() else buf.toByteString(0, n)
                     if (!webSocket.send(chunk)) break
+                    bytesSent += n
                 }
             } catch (_: Throwable) {
                 // fall through to cleanup

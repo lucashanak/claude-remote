@@ -13,7 +13,13 @@ android {
         applicationId = "com.clauderemote.android"
         // Wear OS 3+ only — androidx.wear.compose:compose-material3 requires it.
         minSdk = 30
-        targetSdk = 35
+        // Wear-side stays on 34 (Wear OS 5): targetSdk 35 blocks reading the
+        // system "clockwork_sysui_package" setting, which TileService.getUpdater()
+        // .requestUpdate() needs — on 35 every tile refresh threw
+        // "only readable to apps with targetSdkVersion <= 34" (caught, but the
+        // Tile then never refreshed on a phone push). 34 is the right target for
+        // a Wear companion and restores instant tile updates.
+        targetSdk = 34
         versionCode = 1
         versionName = "1.0.0"
     }

@@ -33,6 +33,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextOverflow
@@ -150,18 +151,7 @@ private fun SessionListScreen(
     onOpenSettings: () -> Unit,
 ) {
     val context = LocalContext.current
-    val lastSyncElapsed by SessionRepository.lastSyncElapsed.collectAsState()
     val hasLoaded by SessionRepository.hasLoaded.collectAsState()
-
-    // Ticking "now" so the freshness label (e.g. "před 3 min") keeps
-    // advancing while the screen is open, not just on the next data push.
-    var nowElapsed by remember { mutableStateOf(android.os.SystemClock.elapsedRealtime()) }
-    LaunchedEffect(Unit) {
-        while (true) {
-            nowElapsed = android.os.SystemClock.elapsedRealtime()
-            kotlinx.coroutines.delay(10_000)
-        }
-    }
 
     // Optimistic default (true) so the banner doesn't flash on app start
     // before the first node probe below has a chance to run.
@@ -183,8 +173,11 @@ private fun SessionListScreen(
     // Rozděl na "čeká na vás" (APPROVAL_NEEDED → WAITING_FOR_INPUT, v tomto
     // pořadí priority) a "ostatní" (nejnovější nahoře). Glanceable: to, co
     // vyžaduje akci, je vždy nahoře.
+    // Priorita akce první (APPROVAL_NEEDED → WAITING_FOR_INPUT), ale UVNITŘ
+    // stejné priority nejnovější nahoře — jinak "čeká na vás" ignoruje pořadí
+    // posledního použití, což působí jako by se seznam neřadil vůbec.
     val needsAction = sessions.filter { actionPriority(it.activity) < 2 }
-        .sortedBy { actionPriority(it.activity) }
+        .sortedWith(compareBy({ actionPriority(it.activity) }, { -it.lastMessageAt }))
     val others = sessions.filter { actionPriority(it.activity) == 2 }
         .sortedByDescending { it.lastMessageAt }
 
@@ -204,15 +197,11 @@ private fun SessionListScreen(
             if (!phoneConnected) {
                 item { Text("⚠ Telefon není připojen", color = Color(0xFFFF5C5C)) }
             }
-            if (lastSyncElapsed > 0) {
-                val ageMs = nowElapsed - lastSyncElapsed
-                item {
-                    Text(
-                        freshnessLabel(ageMs),
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
-            }
+            // Záměrně BEZ "aktualizováno před X": telefon pushuje jen při
+            // ZMĚNĚ session (+ DataItem dedup), takže čas od posledního pushe
+            // = čas od poslední změny, NE míra zastaralosti. Ukazovat ho
+            // svádělo k dojmu "rozbité spojení", i když data byla aktuální.
+            // Skutečný signál nese banner výše (connectedNodes probe).
             // Badge jen když je co řešit — jinak by zabíral cenný horní slot.
             if (needsAction.isNotEmpty()) {
                 item {
@@ -245,17 +234,6 @@ private fun SessionListScreen(
     }
 }
 
-/** Human-readable age of the last phone sync, in Czech, with a stale warning past 2 min. */
-private fun freshnessLabel(ageMs: Long): String {
-    val seconds = ageMs / 1000
-    val label = when {
-        seconds < 15 -> "právě teď"
-        seconds < 60 -> "před ${seconds} s"
-        seconds < 3600 -> "před ${seconds / 60} min"
-        else -> "před ${seconds / 3600} h"
-    }
-    return if (seconds > 120) "⚠ možná zastaralé — $label" else label
-}
 
 @Composable
 private fun SessionRow(session: WearSessionInfo, onClick: () -> Unit) {
@@ -305,6 +283,12 @@ private fun SessionDetailScreen(session: WearSessionInfo) {
     // Zámek proti dvojímu odeslání — fire-and-forget bez ACK, takže nervózní
     // dvojtap by jinak poslal akci dvakrát živému agentovi.
     var sending by remember { mutableStateOf(false) }
+
+    // Drž displej rozsvícený po dobu diktování. Bez toho watch po pár
+    // vteřinách ztlumí/uspí obrazovku, OS přiškrtí mic capture a Soniox
+    // dostane jen ticho → dřív se to projevovalo jako "final (0 chars)".
+    val view = LocalView.current
+    LaunchedEffect(dictating) { view.keepScreenOn = dictating }
 
     // Sjednocený dokončovací callback všech odeslání: zhasne zámek, přeloží
     // MessageClient výsledek do češtiny a bzikne na zápěstí. "Sent" znamená jen
