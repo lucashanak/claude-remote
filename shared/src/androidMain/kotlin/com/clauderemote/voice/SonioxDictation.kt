@@ -82,6 +82,11 @@ internal class SonioxDictation(
     // building each partial/final string.
     private val finalText = StringBuilder()
 
+    // Total bytes actually pushed to the socket, logged with the final (parity
+    // with the watch): a small value confirms the compressed AAC/ADTS path,
+    // a large one means the raw-PCM fallback kicked in.
+    @Volatile private var bytesSent = 0L
+
     fun start() {
         if (apiKey.isBlank()) {
             postOnMain { onError("Chybí Soniox API klíč (Nastavení → Voice).") }
@@ -199,7 +204,7 @@ internal class SonioxDictation(
         aacEncoder?.release()
         aacEncoder = null
         val settled = synchronized(this) { finalText.toString() }.trim()
-        FileLogger.log(TAG, "final (${settled.length} chars)")
+        FileLogger.log(TAG, "final (${settled.length} chars, $bytesSent sent bytes)")
         postOnMain { onFinal(settled) }
         runCatching { webSocket.close(1000, null) }
     }
@@ -225,7 +230,9 @@ internal class SonioxDictation(
             // Don't gate on `stopped`: the drain after stop() emits the tail
             // frames while stopped==true, and they must still reach the socket
             // before onEnd sends end-of-audio.
-            onFrame = { frame -> runCatching { webSocket.send(frame) } },
+            onFrame = { frame ->
+                if (runCatching { webSocket.send(frame) }.getOrDefault(false)) bytesSent += frame.size
+            },
             // End-of-stream reached: the tail frames have already been emitted
             // above, so it's safe to tell Soniox the audio is finished.
             onEnd = { runCatching { ws?.send("") } },
@@ -281,6 +288,7 @@ internal class SonioxDictation(
                         val chunk: ByteString =
                             if (n == buf.size) buf.toByteString() else buf.toByteString(0, n)
                         if (!webSocket.send(chunk)) break
+                        bytesSent += chunk.size
                     }
                 }
             } catch (_: Throwable) {
