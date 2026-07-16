@@ -442,6 +442,13 @@ actual fun SpeakerButton(
                     context, payload,
                     onFinish = { speaking = false },
                     onError = { msg ->
+                        // MUST reset speaking too — otherwise a failed read left
+                        // the button stuck "speaking", so the NEXT tap hit the
+                        // stop branch (stopAllTts) instead of playing, and
+                        // read-aloud silently did nothing until the button was
+                        // tapped an even number of times. (Errors were common on
+                        // the old TTS build, which is why it wedged.)
+                        speaking = false
                         Toast.makeText(context, "TTS: $msg", Toast.LENGTH_LONG).show()
                     },
                 )
