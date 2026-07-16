@@ -159,8 +159,18 @@ internal object SonioxTts {
         }
 
         override fun onMessage(webSocket: WebSocket, textMsg: String) {
-            if (gen != generation.get()) return
-            val obj = runCatching { JSONObject(textMsg) }.getOrNull() ?: return
+            val cur = generation.get()
+            val obj = runCatching { JSONObject(textMsg) }.getOrNull()
+            // Diagnostic: every frame, BEFORE the supersede check — so a
+            // silently-dropped stream (gen != cur) or an unexpected payload is
+            // visible instead of vanishing.
+            FileLogger.log(
+                TAG,
+                "msg gen=$gen cur=$cur audioB64=${obj?.optString("audio")?.length ?: -1} " +
+                    "err=${obj?.optString("error_code")} end=${obj?.optBoolean("audio_end")}",
+            )
+            if (gen != cur) return
+            if (obj == null) return
             val err = obj.optString("error_code").takeIf { it.isNotBlank() && it != "null" }
             if (err != null) {
                 val msg = obj.optString("error_message").ifBlank { err }
