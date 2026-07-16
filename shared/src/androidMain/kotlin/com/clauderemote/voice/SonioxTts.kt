@@ -23,11 +23,14 @@ import java.util.concurrent.atomic.AtomicReference
  * for a long chat reply.
  *
  * Here the text is sent once (`text_end: true`) and the server streams back
- * base64 PCM chunks (`{"audio": "..."}`) as it generates; each chunk is
- * decoded and written straight to an [AudioTrack] in MODE_STREAM, so
+ * base64 G.711 μ-law chunks (`{"audio": "..."}`) as it generates; each byte
+ * is expanded to a 16-bit PCM sample with a trivial table-style lookup (no
+ * MediaCodec) and written straight to an [AudioTrack] in MODE_STREAM, so
  * playback starts on the first chunk (~hundreds of ms) instead of after the
- * whole utterance. AudioTrack's blocking `write` provides natural
- * backpressure, so we never buffer the whole reply in memory.
+ * whole utterance. μ-law is raw (a compressed mp3/opus/aac decoder blocks the
+ * WS thread and stalls the stream); Soniox allows μ-law only at 8000 Hz.
+ * AudioTrack's blocking `write` provides natural backpressure, so we never
+ * buffer the whole reply in memory.
  *
  * Not file/MediaPlayer based (that's [MediaTtsCore], used by the other
  * engines) — a growing PCM stream needs AudioTrack, not a temp file.
@@ -36,8 +39,8 @@ internal object SonioxTts {
     private const val TAG = "SonioxTts"
     private const val WS_URL = "wss://tts-rt.soniox.com/tts-websocket"
     private const val MODEL = "tts-rt-v1"
-    private const val SAMPLE_RATE = 24000
-    private const val LEAD_IN_BYTES = 4800   // 100 ms silence @ 24kHz mono 16-bit
+    private const val SAMPLE_RATE = 8000     // μ-law is only allowed at 8000 Hz
+    private const val LEAD_IN_BYTES = 1600   // 100 ms silence @ 8kHz mono 16-bit
     private const val DRAIN_TICK_MS = 20L
     private const val DRAIN_MAX_TICKS = 400   // 8s cap
 
@@ -85,6 +88,29 @@ internal object SonioxTts {
         completion.getAndSet(null)?.let { postOnMain(it) }
     }
 
+    // G.711 μ-law → 16-bit little-endian PCM. Inverse of the STT uplink
+    // encode; a correct expand is required or the audio is noise.
+    private fun mulawToPcm16(mulaw: ByteArray): ByteArray {
+        val out = ByteArray(mulaw.size * 2)
+        var j = 0
+        for (b in mulaw) {
+            val s = mulawToLinear(b.toInt() and 0xFF)
+            out[j++] = (s and 0xFF).toByte()          // little-endian
+            out[j++] = ((s shr 8) and 0xFF).toByte()
+        }
+        return out
+    }
+
+    private fun mulawToLinear(mu: Int): Int {
+        val u = mu.inv() and 0xFF
+        val sign = u and 0x80
+        val exponent = (u shr 4) and 0x07
+        val mantissa = u and 0x0F
+        var sample = ((mantissa shl 3) + 0x84) shl exponent
+        sample -= 0x84
+        return if (sign != 0) -sample else sample     // 16-bit signed
+    }
+
     private class Listener(
         private val gen: Int,
         private val voice: String,
@@ -107,7 +133,9 @@ internal object SonioxTts {
                 put("model", MODEL)
                 put("language", "cs")
                 put("voice", voice.ifBlank { "Adrian" })
-                put("audio_format", "pcm_s16le")
+                // μ-law (raw G.711) instead of PCM — see class KDoc. Soniox
+                // rejects μ-law at any rate other than 8000 with a 400.
+                put("audio_format", "pcm_mulaw")
                 put("sample_rate", SAMPLE_RATE)
                 // Speed is applied client-side via AudioTrack.playbackParams
                 // (pitch-preserving time-stretch), NOT via Soniox's `speed`
@@ -135,8 +163,10 @@ internal object SonioxTts {
             }
             val b64 = obj.optString("audio")
             if (b64.isNotBlank()) {
-                val pcm = runCatching { Base64.decode(b64, Base64.DEFAULT) }.getOrNull()
-                if (pcm != null && pcm.isNotEmpty()) writePcm(pcm)
+                // base64 carries μ-law bytes — expand to 16-bit PCM before
+                // the AudioTrack write.
+                val mulaw = runCatching { Base64.decode(b64, Base64.DEFAULT) }.getOrNull()
+                if (mulaw != null && mulaw.isNotEmpty()) writePcm(mulawToPcm16(mulaw))
             }
             if (obj.optBoolean("audio_end") || obj.optBoolean("terminated")) {
                 finishPlayback(webSocket)
@@ -172,7 +202,7 @@ internal object SonioxTts {
                             .setChannelMask(AudioFormat.CHANNEL_OUT_MONO)
                             .build(),
                     )
-                    .setBufferSizeInBytes(maxOf(minBuf, SAMPLE_RATE)) // ~0.5s @ 24kHz mono 16-bit
+                    .setBufferSizeInBytes(maxOf(minBuf, SAMPLE_RATE)) // ~0.5s @ 8kHz mono 16-bit
                     .setTransferMode(AudioTrack.MODE_STREAM)
                     .build()
                 track.set(t)
