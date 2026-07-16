@@ -1811,12 +1811,14 @@ else:
     fun kickRedraw(sessionId: String, cols: Int, rows: Int) {
         val conn = connections[sessionId] ?: return
         if (cols <= 1 || rows <= 0) return
+        FileLogger.log("TermGeom", "kickRedraw $sessionId requested ${cols}x${rows}")
         // Sync pty geometry to the current view first (no-op if unchanged) —
         // each session's pty keeps the size from the last time *it* was
         // active, which may be stale after switching between sessions.
         conn.resize(cols, rows)
         val tmuxName = tabManager.getTab(sessionId)?.tmuxSessionName
         reconnectScope.launch {
+            if (tmuxName != null) probeTmuxGeometry(conn, tmuxName, sessionId, cols, rows)
             val refreshed = tmuxName != null && refreshTmuxClient(conn, tmuxName)
             if (!refreshed) {
                 // Fallback: SIGWINCH toggle. Shrink COLS, not ROWS — row
@@ -1856,6 +1858,38 @@ else:
                 false
             }
         }
+
+    /**
+     * Read-only diagnostic probe (TermGeom): logs tmux's actual pane geometry
+     * and the window-size option for [tmuxName], so it can be compared against
+     * the [cols]x[rows] the client requested in kickRedraw. Does not change any
+     * tmux state — additional telemetry alongside the existing refresh path.
+     */
+    private suspend fun probeTmuxGeometry(
+        conn: SshManager,
+        tmuxName: String,
+        sessionId: String,
+        cols: Int,
+        rows: Int,
+    ) = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+        try {
+            val sshSession = conn.getSession() ?: return@withContext
+            val escaped = tmuxName.replace("'", "'\\''")
+            val ch = sshSession.openChannel("exec") as com.jcraft.jsch.ChannelExec
+            ch.setCommand(
+                "tmux display-message -p -t '$escaped' " +
+                    "'#{pane_width}x#{pane_height} win=#{window_width}x#{window_height} ws=#{?window-size,#{window-size},?}' 2>/dev/null"
+            )
+            ch.inputStream = null
+            val input = ch.inputStream
+            ch.connect(1500)
+            val out = input.bufferedReader().readText().trim()
+            ch.disconnect()
+            FileLogger.log("TermGeom", "kickRedraw $sessionId tmux pane=$out (requested ${cols}x${rows})")
+        } catch (e: Exception) {
+            FileLogger.log("TermGeom", "kickRedraw $sessionId tmux probe failed: ${e.message}")
+        }
+    }
 
     private val reconnectScope = kotlinx.coroutines.CoroutineScope(
         kotlinx.coroutines.Dispatchers.IO + kotlinx.coroutines.SupervisorJob()

@@ -168,10 +168,13 @@ fun SshTerminal(
                         FileLogger.log("SshTerminal", "attached: ${w}x${h}px")
                         lastW = w; lastH = h
                         view.onScreenUpdated()
+                        FileLogger.log("TermGeom", "attach view=${w}x${h}px -> grid=${session.emulator?.mColumns}x${session.emulator?.mRows}")
                     } else if (sizeChanged) {
+                        val prevW = lastW; val prevH = lastH
                         lastW = w; lastH = h
                         view.updateSize()
                         view.onScreenUpdated()
+                        FileLogger.log("TermGeom", "refit view=${w}x${h}px (was ${prevW}x${prevH}) -> grid=${session.emulator?.mColumns}x${session.emulator?.mRows}")
                     }
                     if (!readyFired && handle.isReady) {
                         readyFired = true
@@ -182,6 +185,7 @@ fun SshTerminal(
                         // stays on cols/rows measured from the initial pass and
                         // tmux renders at the wrong size until the next real
                         // resize. Re-run tryAttach after a beat to catch that.
+                        FileLogger.log("TermGeom", "scheduled refit poke (300ms/800ms)")
                         view.postDelayed({ tryAttach() }, 300)
                         view.postDelayed({ tryAttach() }, 800)
                     }

@@ -170,6 +170,7 @@ class SshTtyConnector(
     }
 
     override fun resize(termSize: com.jediterm.core.util.TermSize) {
+        FileLogger.log("TermGeom", "resize cb ${termSize.columns}x${termSize.rows}")
         lastTermSize = termSize
         tabManager.activeTabId.value?.let { id ->
             sessionOrchestrator.resize(id, termSize.columns, termSize.rows)
@@ -184,6 +185,7 @@ class SshTtyConnector(
     fun reapplySize(fallback: com.jediterm.core.util.TermSize? = null) {
         val size = lastTermSize ?: fallback ?: return
         val id = tabManager.activeTabId.value ?: return
+        FileLogger.log("TermGeom", "reapplySize -> ${size.columns}x${size.rows}")
         sessionOrchestrator.resize(id, size.columns, size.rows)
     }
 }
@@ -772,6 +774,8 @@ private fun DesktopTerminalView(
                         override fun componentResized(e: java.awt.event.ComponentEvent?) {
                             existing.size = panel.size
                             existing.revalidate()
+                            val b = existing.terminalTextBuffer
+                            FileLogger.log("TermGeom", "reused resize panel=${panel.size.width}x${panel.size.height}px -> grid=${b?.width}x${b?.height}")
                         }
                     })
                     for (delay in listOf(100, 300, 800)) {
@@ -868,6 +872,7 @@ private fun DesktopTerminalView(
                             val fallback = if (b != null && b.width > 0 && b.height > 0)
                                 com.jediterm.core.util.TermSize(b.width, b.height)
                             else null
+                            FileLogger.log("TermGeom", "forceSize panel=${panel.size.width}x${panel.size.height}px -> grid=${b?.width}x${b?.height}")
                             connector.reapplySize(fallback)
                         }
                     }
