@@ -85,6 +85,17 @@ class SessionOrchestrator(
                 ClaudeState.UNKNOWN -> {} // keep last known activity
             }
         }
+        onLoginDetected = { sid, url ->
+            // SECURITY: never log the URL — it seams into the pasted auth code.
+            _loginFlow.update { cur ->
+                val next = if (url != null) com.clauderemote.model.LoginFlowState(sid, url)
+                else if (cur?.sessionId == sid) null else cur
+                if ((cur == null) != (next == null)) {
+                    FileLogger.log(TAG, "login flow ${if (next != null) "detected" else "cleared"} for $sid")
+                }
+                next
+            }
+        }
     }
 
     /**
@@ -95,6 +106,15 @@ class SessionOrchestrator(
     var screenReader: (suspend (sessionId: String) -> ScreenStateSnapshot?)?
         get() = promptDetector.screenReader
         set(value) { promptDetector.screenReader = value }
+
+    /**
+     * Full de-wrapped visible screen text of the ACTIVE session, or null. Used only
+     * for login-URL extraction; the platform returns null for background tabs.
+     * Pass-through to [InputPromptDetector.fullScreenReader].
+     */
+    var fullScreenReader: (suspend (sessionId: String) -> String?)?
+        get() = promptDetector.fullScreenReader
+        set(value) { promptDetector.fullScreenReader = value }
 
     // Per-session activity state (for health indicator dots)
     private val _sessionActivities = kotlinx.coroutines.flow.MutableStateFlow<Map<String, SessionActivity>>(emptyMap())
@@ -458,6 +478,14 @@ class SessionOrchestrator(
     // Entry present ⇒ a reconnect is actively in progress; absence ⇒ idle.
     private val _reconnectStatus = kotlinx.coroutines.flow.MutableStateFlow<Map<String, ReconnectInfo>>(emptyMap())
     val reconnectStatus: kotlinx.coroutines.flow.StateFlow<Map<String, ReconnectInfo>> = _reconnectStatus
+
+    // Active Claude `/login` OAuth flow detected on the current screen, or null.
+    // Fed by InputPromptDetector.onLoginDetected. The URL is never logged.
+    private val _loginFlow = kotlinx.coroutines.flow.MutableStateFlow<com.clauderemote.model.LoginFlowState?>(null)
+    val loginFlow: kotlinx.coroutines.flow.StateFlow<com.clauderemote.model.LoginFlowState?> = _loginFlow
+
+    /** Clear the login card for [sessionId] (user submitted the code or cancelled). */
+    fun clearLoginFlow(sessionId: String) { _loginFlow.update { if (it?.sessionId == sessionId) null else it } }
 
     /**
      * Arm (idempotently) the persistent reconnect loop for [sessionId].

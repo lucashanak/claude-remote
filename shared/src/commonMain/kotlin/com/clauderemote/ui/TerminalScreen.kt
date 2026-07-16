@@ -45,7 +45,9 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.TextRange
+import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.focus.FocusRequester
@@ -141,6 +143,10 @@ fun TerminalScreen(
     sessionActivities: Map<String, com.clauderemote.model.SessionActivity> = emptyMap(),
     hookActiveSessions: Set<String> = emptySet(),
     reconnectStatus: Map<String, com.clauderemote.session.ReconnectInfo> = emptyMap(),
+    loginFlow: com.clauderemote.model.LoginFlowState? = null,
+    onOpenLoginUrl: (String) -> Unit = {},
+    onSubmitLoginCode: (String) -> Unit = {},
+    onCancelLogin: () -> Unit = {},
     latencyMs: Long? = null,
     pendingInputCount: Int = 0,
     onClearPending: (() -> Unit)? = null,
@@ -682,6 +688,56 @@ fun TerminalScreen(
                                     Text("Reconnect", color = c.accent)
                                 }
                             }
+                        }
+                    }
+                }
+
+                // Login / switch-account card. Claude `/login` prints an OAuth URL
+                // hard-wrapped across terminal rows plus a "Paste code here" prompt;
+                // copying the wrapped URL from the raw terminal breaks it. This card
+                // surfaces the de-wrapped URL (open in browser / copy) and pastes the
+                // resulting code back into the session.
+                if (loginFlow != null && loginFlow.sessionId == activeSession?.id) {
+                    val clipboard = LocalClipboardManager.current
+                    var loginCode by remember(loginFlow.sessionId) { mutableStateOf("") }
+                    Surface(color = c.surface) {
+                        Column(
+                            modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp),
+                            verticalArrangement = Arrangement.spacedBy(6.dp),
+                        ) {
+                            Text("Přihlásit / přepnout účet", style = CRType.cardTitle, color = c.text)
+                            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                TextButton(onClick = { onOpenLoginUrl(loginFlow.url) }) {
+                                    Text("Otevřít přihlášení", color = c.accent)
+                                }
+                                TextButton(onClick = { clipboard.setText(AnnotatedString(loginFlow.url)) }) {
+                                    Text("Kopírovat URL", color = c.accent)
+                                }
+                            }
+                            OutlinedTextField(
+                                value = loginCode,
+                                onValueChange = { loginCode = it },
+                                label = { Text("Kód") },
+                                singleLine = true,
+                                modifier = Modifier.fillMaxWidth(),
+                            )
+                            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                TextButton(onClick = {
+                                    clipboard.getText()?.text?.let { loginCode = it }
+                                }) { Text("Vložit ze schránky", color = c.accent) }
+                                TextButton(onClick = {
+                                    onSubmitLoginCode(loginCode)
+                                    loginCode = ""
+                                }) { Text("Odeslat", color = c.accent) }
+                                TextButton(onClick = { onCancelLogin() }) {
+                                    Text("Zrušit", color = c.textDim)
+                                }
+                            }
+                            Text(
+                                "URL zkopíruj/otevři, přihlas se, kód vlož sem.",
+                                style = CRType.bodyDim,
+                                color = c.textDim,
+                            )
                         }
                     }
                 }

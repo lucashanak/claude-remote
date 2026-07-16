@@ -73,6 +73,7 @@ fun App(
     onImportServers: (() -> Unit)? = null,
     onPickFile: ((callback: (List<Pair<ByteArray, String>>) -> Unit) -> Unit)? = null,
     onSaveFile: ((bytes: ByteArray, suggestedName: String) -> Unit)? = null,
+    onOpenUrl: ((String) -> Unit)? = null,
     onApplyFontSize: ((Int) -> Unit)? = null,
     sshKeyManager: com.clauderemote.connection.SshKeyManager? = null,
     exitApp: (() -> Unit)? = null,
@@ -124,6 +125,7 @@ fun App(
     val pendingCounts by sessionOrchestrator.pendingCounts.collectAsState()
     val serverHealth by sessionOrchestrator.serverHealth.collectAsState()
     val reconnectStatus by sessionOrchestrator.reconnectStatus.collectAsState()
+    val loginFlow by sessionOrchestrator.loginFlow.collectAsState()
 
     var serverList by remember { mutableStateOf(serverStorage.loadServers()) }
     val tabs by tabManager.tabs.collectAsState()
@@ -1057,6 +1059,21 @@ fun App(
                         sessionActivities = sessionActivities,
                         hookActiveSessions = hookActiveSessions,
                         reconnectStatus = reconnectStatus,
+                        loginFlow = loginFlow,
+                        onOpenLoginUrl = { url -> onOpenUrl?.invoke(url) },
+                        onSubmitLoginCode = { code ->
+                            val clean = code.filterNot { it.isWhitespace() }
+                            activeTabId?.let {
+                                sessionOrchestrator.sendInput(it, clean + "\r")
+                                sessionOrchestrator.clearLoginFlow(it)
+                            }
+                        },
+                        onCancelLogin = {
+                            activeTabId?.let {
+                                sessionOrchestrator.sendEscape(it)
+                                sessionOrchestrator.clearLoginFlow(it)
+                            }
+                        },
                         contextPercent = activeTabId?.let { contextPercents[it] },
                         gitStatus = activeTabId?.let { gitStatuses[it] },
                         latencyMs = activeTabId?.let { latencies[it] },

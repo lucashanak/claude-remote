@@ -134,6 +134,18 @@ class SshTerminalSession(
     }
 
     /**
+     * Whole visible screen, de-wrapped (wrapped rows joined, no '\n' at wrap
+     * points). Used only for login-URL extraction. MUST be called on the Android
+     * main thread — the emulator is not thread-safe.
+     */
+    fun readFullScreenText(): String? {
+        val emu = mEmulator ?: return null
+        return try {
+            emu.screen.getSelectedText(0, 0, emu.mColumns, emu.mRows, true, true)
+        } catch (_: Exception) { null }
+    }
+
+    /**
      * Is [fg] a "reddish" foreground? Covers:
      *  - ANSI palette indices 1 (red) and 9 (bright red)
      *  - Common 256-color red indices Claude Code may use

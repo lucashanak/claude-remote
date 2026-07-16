@@ -105,6 +105,9 @@ class SshTerminalHandle internal constructor(
     fun readScreenStateSnapshot(rowCount: Int = 16): ScreenStateSnapshot? =
         session.readBottomRowsSnapshot(rowCount)
 
+    /** Full de-wrapped visible screen text. Main-thread only (see above). */
+    fun readFullScreenText(): String? = session.readFullScreenText()
+
     private companion object {
         // ESC [ 2 J — erase visible screen; ESC [ 3 J — erase scrollback;
         // ESC [ H — cursor home. Used as a prelude to buffer replay.

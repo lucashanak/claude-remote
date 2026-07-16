@@ -258,6 +258,12 @@ class MainActivity : FragmentActivity() {
                 else terminalHandle?.readScreenStateSnapshot()
             }
         }
+        sessionOrchestrator.fullScreenReader = { sessionId ->
+            withContext(Dispatchers.Main) {
+                if (tabManager.activeTabId.value != sessionId) null
+                else terminalHandle?.readFullScreenText()
+            }
+        }
 
         handleSessionIntent(intent)
         registerNetworkCallback()
@@ -296,6 +302,17 @@ class MainActivity : FragmentActivity() {
                         putExtra(Intent.EXTRA_SUBJECT, "Claude Remote Debug Log")
                     }
                     startActivity(Intent.createChooser(intent, "Share Log"))
+                },
+                onOpenUrl = { url ->
+                    // Do NOT log `url` — it carries the login/OAuth seam.
+                    try {
+                        startActivity(
+                            Intent(Intent.ACTION_VIEW, android.net.Uri.parse(url))
+                                .apply { addFlags(Intent.FLAG_ACTIVITY_NEW_TASK) }
+                        )
+                    } catch (e: Exception) {
+                        FileLogger.error("Login", "openUrl failed: ${e.message}", e)
+                    }
                 },
                 onTestNotification = {
                     // Exercises the real alert path (channel, sound, Wear

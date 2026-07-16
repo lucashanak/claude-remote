@@ -52,8 +52,22 @@ class InputPromptDetector(
      */
     var screenReader: (suspend (sessionId: String) -> ScreenStateSnapshot?)? = null
 
+    /**
+     * Platform-provided FULL de-wrapped visible screen reader. Returns the whole
+     * visible screen text (wrapped rows joined, no '\n' at wrap points) for the
+     * ACTIVE session, or null for background tabs. Used only for login-URL
+     * extraction, which needs the hard-wrapped authorize URL recovered.
+     */
+    var fullScreenReader: (suspend (sessionId: String) -> String?)? = null
+
     /** Fired once per transition into "waiting for input". */
     var onDetection: ((PromptDetection) -> Unit)? = null
+
+    /**
+     * Fires with the extracted OAuth URL when the Claude /login flow is on screen,
+     * or null when it has cleared. Never logs the URL (it carries the auth code seam).
+     */
+    var onLoginDetected: ((sessionId: String, url: String?) -> Unit)? = null
 
     /** Fired on every quiescence check (WORKING / IDLE / UNKNOWN) so UI can update activity dots. */
     var onStateChange: ((sessionId: String, state: ClaudeState) -> Unit)? = null
@@ -117,6 +131,20 @@ class InputPromptDetector(
             return
         }
         val classified = ScreenStateClassifier.classify(snapshot)
+
+        // Login (/login OAuth) detection — cheap marker check on the bottom
+        // snapshot, then a full de-wrapped read to recover the hard-wrapped
+        // authorize URL. runIdleCheck runs per-session, so only this session's
+        // login state is touched (null clears only when its own marker is gone).
+        val bottomText = snapshot.rows.joinToString("\n") { it.text }
+        if (bottomText.contains("Paste code here") || bottomText.contains("Browser didn't open")) {
+            val full = fullScreenReader?.invoke(sessionId)
+            val url = full?.let { LOGIN_URL_REGEX.find(it)?.value }
+            onLoginDetected?.invoke(sessionId, url)
+        } else {
+            onLoginDetected?.invoke(sessionId, null)
+        }
+
         when (classified) {
             ClaudeState.UNKNOWN -> scheduleRecheck(state, sessionId)
             ClaudeState.APPROVAL -> {
@@ -398,6 +426,10 @@ class InputPromptDetector(
             "wk:(?:\\[[^\\]]*\\]\\s*)?\\d{1,3}%\\([^)]*\\)\\s*\\|(.*?)session:",
             RegexOption.IGNORE_CASE
         )
+
+        // Claude /login prints an OAuth authorize URL; recovered from the
+        // de-wrapped full screen so the hard row-wrapping doesn't split it.
+        private val LOGIN_URL_REGEX = Regex("""https://[^\s]*oauth/authorize[^\s]*""")
 
         fun stripAnsi(text: String): String = ANSI_REGEX.replace(text, "")
 

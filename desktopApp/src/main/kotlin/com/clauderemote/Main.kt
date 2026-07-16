@@ -274,6 +274,10 @@ fun main() = application {
         if (tabManager.activeTabId.value != sessionId) null
         else readJediTermSnapshot(termWidget, rowCount = 16)
     }
+    sessionOrchestrator.fullScreenReader = { sessionId ->
+        if (tabManager.activeTabId.value != sessionId) null
+        else readJediTermFullText(termWidget)
+    }
 
     // Desktop notifications. On Linux the AWT SystemTray balloon renders as an
     // ugly, text-less mini window (the toolkit has no real freedesktop backend),
@@ -475,6 +479,15 @@ fun main() = application {
                             "Main", "Save FileDialog failed: ${e.message}", e
                         )
                     }
+                }
+            },
+            onOpenUrl = { url ->
+                // Do NOT log `url` — it carries the login/OAuth seam.
+                try {
+                    if (IS_LINUX) Runtime.getRuntime().exec(arrayOf("xdg-open", url))
+                    else java.awt.Desktop.getDesktop().browse(java.net.URI(url))
+                } catch (e: Exception) {
+                    com.clauderemote.util.FileLogger.error("Login", "openUrl failed: ${e.message}", e)
                 }
             },
             exitApp = ::exitApplication,
@@ -1168,6 +1181,32 @@ private fun readJediTermSnapshot(widget: JediTermWidget?, rowCount: Int): Screen
             result.add(RowSnapshot(String(text), reds))
         }
         return ScreenStateSnapshot(result, cols)
+    } finally {
+        buffer.unlock()
+    }
+}
+
+/**
+ * Whole visible screen text, de-wrapped: consecutive JediTerm lines are joined
+ * without a '\n' at wrap points (a line whose [TerminalLine.isWrapped] is true is
+ * one logical line with the next), so a hard-wrapped login URL is recovered
+ * intact. Used only for login-URL extraction.
+ */
+private fun readJediTermFullText(widget: JediTermWidget?): String? {
+    val w = widget ?: return null
+    val buffer = try { w.terminalTextBuffer } catch (_: Throwable) { return null } ?: return null
+    buffer.lock()
+    try {
+        val rows = buffer.height
+        if (rows <= 0) return null
+        val sb = StringBuilder()
+        for (r in 0 until rows) {
+            val line = buffer.getLine(r) ?: continue
+            sb.append(line.text)
+            // A wrapped line continues into the next physical row — no break.
+            if (!line.isWrapped) sb.append('\n')
+        }
+        return sb.toString()
     } finally {
         buffer.unlock()
     }
