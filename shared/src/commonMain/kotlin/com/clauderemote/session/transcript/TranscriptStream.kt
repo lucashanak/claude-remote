@@ -316,11 +316,17 @@ class TranscriptStream(
     ): Pair<List<String>, Long> {
         if (_entries.value.isEmpty()) _status.value = "reading…"
         val cmd = buildString {
+            // UUID is globally unique — locate the existing transcript by glob
+            // first (immune to the lossy cwd->dir encoding). Fall back to the
+            // corrected cwd encoding (every non-alphanumeric -> '-') only if the
+            // glob finds nothing (file not written yet). The `*` must stay
+            // unquoted so the shell expands it.
+            append("FILE=\$(ls \"\$HOME/.claude/projects/\"*/\"").append(safeUuid).append(".jsonl\" 2>/dev/null | head -1); ")
+            append("if [ -z \"\$FILE\" ]; then ")
             append("F='").append(safeFolder).append("'; ")
             append("case \"\$F\" in \"~\"*) F=\"\$HOME\${F#\"~\"}\";; esac; ")
-            append("ENC=\$(cd \"\$F\" 2>/dev/null && pwd | sed 's|/|-|g'); ")
-            append("[ -z \"\$ENC\" ] && { echo __OFFSET__-1; exit 0; }; ")
-            append("FILE=\"\$HOME/.claude/projects/\$ENC/").append(safeUuid).append(".jsonl\"; ")
+            append("ENC=\$(cd \"\$F\" 2>/dev/null && pwd | sed 's|[^a-zA-Z0-9]|-|g'); ")
+            append("[ -n \"\$ENC\" ] && FILE=\"\$HOME/.claude/projects/\$ENC/").append(safeUuid).append(".jsonl\"; fi; ")
             append("[ -f \"\$FILE\" ] || { echo __OFFSET__-1; exit 0; }; ")
             append("SZ=\$(wc -c < \"\$FILE\" 2>/dev/null || echo 0); ")
             // Initial (offset<=0) or file shrank (rotation) → last N lines;

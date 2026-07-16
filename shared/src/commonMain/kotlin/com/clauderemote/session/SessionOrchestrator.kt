@@ -1394,25 +1394,33 @@ else:
     // python3 is missing or the channel dies.
 
     /** Marker doubles as the version gate — bump vN to force reinstall. */
-    private val STREAMD_MARKER = "claude-remote-streamd v1"
+    private val STREAMD_MARKER = "claude-remote-streamd v2"
 
     private val STREAMD_SCRIPT = """
         #!/usr/bin/env python3
-        # claude-remote-streamd v1 — single-channel transcript delta streamer.
+        # claude-remote-streamd v2 — single-channel transcript delta streamer.
         # stdin : {"op":"watch","id":..,"cwd":..,"uuid":..,"off":N}  (off<0 = from EOF)
         #         {"op":"unwatch","id":..}
         # stdout: {"t":"hello","v":1} | {"t":"hb"} | {"t":"d","id":..,"u":..,"o":N,"b":b64}
-        import sys, os, json, time, base64, threading
+        import sys, os, json, time, base64, threading, glob, re
 
         watches = {}
         lock = threading.Lock()
         TAIL = 200000  # initial backlog bytes when off==0 (~2000 lines)
 
         def resolve(cwd, uuid):
+            # UUID is globally unique — find the existing transcript directly, immune to
+            # the lossy cwd->dir encoding (tmux mangles '.'/'_' in session names, so a
+            # restored session's cwd can't be reconstructed exactly).
+            hits = glob.glob(os.path.join(os.path.expanduser('~/.claude/projects'), '*', uuid + '.jsonl'))
+            if hits:
+                return max(hits, key=os.path.getmtime)
+            # Not written yet — compute the expected path (Claude replaces every
+            # non-alphanumeric char with '-') so we can watch for its creation.
             p = os.path.expanduser(cwd)
             if not os.path.isabs(p):
                 p = os.path.join(os.path.expanduser('~'), p)
-            enc = os.path.realpath(p).replace('/', '-')
+            enc = re.sub(r'[^a-zA-Z0-9]', '-', os.path.realpath(p))
             return os.path.join(os.path.expanduser('~/.claude/projects'), enc, uuid + '.jsonl')
 
         def emit(o):
@@ -2555,8 +2563,12 @@ else:
                 F='$escapedFolder'
                 E="${'$'}{F/#~/${'$'}HOME}"
                 case "${'$'}E" in /*) ;; *) E="${'$'}HOME/${'$'}E";; esac
-                ENC=${'$'}(echo "${'$'}E" | sed 's|/|-|g')
-                [ -f "${'$'}HOME/.claude/projects/${'$'}ENC/$uuid.jsonl" ] && echo YES || echo NO
+                # UUID is globally unique — a transcript matching it anywhere means
+                # it exists, immune to the lossy cwd->dir encoding. Fall back to the
+                # corrected encoding (every non-alphanumeric -> '-') for a not-yet-
+                # globbable path.
+                ENC=${'$'}(echo "${'$'}E" | sed 's|[^a-zA-Z0-9]|-|g')
+                if ls "${'$'}HOME/.claude/projects/"*/"$uuid.jsonl" >/dev/null 2>&1 || [ -f "${'$'}HOME/.claude/projects/${'$'}ENC/$uuid.jsonl" ]; then echo YES; else echo NO; fi
             """.trimIndent()
             val ch = sshSession.openChannel("exec") as com.jcraft.jsch.ChannelExec
             ch.setCommand(cmd)
