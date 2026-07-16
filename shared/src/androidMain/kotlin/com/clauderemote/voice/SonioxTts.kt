@@ -84,6 +84,7 @@ internal object SonioxTts {
             fireCompletion()
             return
         }
+        FileLogger.log(TAG, "speak: ${text.length} chars, gen=$gen, voice=$voice")
         val listener = Listener(gen, voice, apiKey, text, rate, onError)
         ws.set(http.newWebSocket(Request.Builder().url(WS_URL).build(), listener))
     }
@@ -133,6 +134,7 @@ internal object SonioxTts {
         private fun framesOf(bytes: Int) = bytes / (2 * outChannels)
 
         override fun onOpen(webSocket: WebSocket, response: Response) {
+            FileLogger.log(TAG, "WS open (gen=$gen)")
             val config = JSONObject().apply {
                 put("api_key", apiKey)
                 put("stream_id", streamId) // required — server rejects config without it
@@ -186,8 +188,10 @@ internal object SonioxTts {
         }
 
         override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
+            // Log ALWAYS (even superseded) — a stale-gen silent return hid the
+            // real reason read-aloud died with no trace after speakRouted.
+            FileLogger.log(TAG, "WS failure (gen=$gen cur=${generation.get()}) code=${response?.code}: ${t.message}")
             if (gen != generation.get()) return
-            FileLogger.log(TAG, "WS failure: ${t.message}")
             onError?.let { postOnMain { it("Soniox TTS: ${t.message ?: "chyba spojení"}") } }
             stop()
         }
