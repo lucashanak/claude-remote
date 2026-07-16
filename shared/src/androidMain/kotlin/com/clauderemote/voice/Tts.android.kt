@@ -181,12 +181,23 @@ internal fun speakRouted(
         return
     }
     val rate = ttsSpeechRate(context)
-    when (selectedTtsEngine(context)) {
+    val engine = selectedTtsEngine(context)
+    // Log which engine actually handled a read-aloud + why it bailed. The
+    // per-engine blank-config paths below only surface an onError Toast, which
+    // never reaches the shipped server log — so a "nothing reads" report was
+    // previously invisible in the log (couldn't tell SERVER-vs-SONIOX-vs-SYSTEM
+    // or a missing key/URL from a real failure).
+    fun err(msg: String) {
+        com.clauderemote.util.FileLogger.log("Tts", "speakRouted engine=$engine → $msg")
+        onError?.invoke(msg)
+        onFinish()
+    }
+    com.clauderemote.util.FileLogger.log("Tts", "speakRouted engine=$engine, ${clean.length} chars")
+    when (engine) {
         com.clauderemote.model.TtsEngine.SERVER -> {
             val cfg = ttsServerConfig(context)
             if (cfg.url.isBlank()) {
-                onError?.invoke("Není nastavená adresa serveru (Nastavení → Voice).")
-                onFinish()
+                err("Není nastavená adresa serveru (Nastavení → Voice).")
             } else {
                 ServerTts.speak(context, cfg.url, cfg.model, cfg.voice, cfg.apiKey, clean, rate, onFinish, onError)
             }
@@ -194,8 +205,7 @@ internal fun speakRouted(
         com.clauderemote.model.TtsEngine.GOOGLE_CLOUD -> {
             val cfg = googleCloudConfig(context)
             if (cfg.apiKey.isBlank()) {
-                onError?.invoke("Chybí Google Cloud API klíč (Nastavení → Voice).")
-                onFinish()
+                err("Chybí Google Cloud API klíč (Nastavení → Voice).")
             } else {
                 GoogleCloudTts.speak(context, cfg.apiKey, cfg.voice, clean, rate, onFinish, onError)
             }
@@ -203,8 +213,7 @@ internal fun speakRouted(
         com.clauderemote.model.TtsEngine.SONIOX -> {
             val cfg = sonioxConfig(context)
             if (cfg.apiKey.isBlank()) {
-                onError?.invoke("Chybí Soniox API klíč (Nastavení → Voice).")
-                onFinish()
+                err("Chybí Soniox API klíč (Nastavení → Voice).")
             } else {
                 SonioxTts.speak(context, cfg.apiKey, cfg.ttsVoice, clean, rate, onFinish, onError)
             }
