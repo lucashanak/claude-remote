@@ -961,8 +961,10 @@ private fun installSelectionGuard(termPanel: com.jediterm.terminal.ui.TerminalPa
             val buffer = termPanel.terminalTextBuffer
             buffer.lock()
             try {
-                lastSelectionText = com.jediterm.terminal.model.SelectionUtil
-                    .getSelectionText(sel, buffer)
+                lastSelectionText = dewrapFullWidth(
+                    com.jediterm.terminal.model.SelectionUtil.getSelectionText(sel, buffer),
+                    buffer.width,
+                )
             } finally {
                 buffer.unlock()
             }
@@ -1030,7 +1032,10 @@ private fun installNativeSelectionCopy(termPanel: com.jediterm.terminal.ui.Termi
                 val text: String
                 buffer.lock()
                 try {
-                    text = com.jediterm.terminal.model.SelectionUtil.getSelectionText(selection, buffer)
+                    text = dewrapFullWidth(
+                        com.jediterm.terminal.model.SelectionUtil.getSelectionText(selection, buffer),
+                        buffer.width,
+                    )
                 } finally {
                     buffer.unlock()
                 }
@@ -1186,6 +1191,19 @@ private fun readJediTermSnapshot(widget: JediTermWidget?, rowCount: Int): Screen
     }
 }
 
+/** De-wrap tmux hard-wrapped lines: join a line to the next when it fills the
+ *  full terminal width (tmux wraps without setting JediTerm's isWrapped flag). */
+private fun dewrapFullWidth(text: String, columns: Int): String {
+    if (columns <= 0) return text
+    val lines = text.split("\n")
+    return buildString {
+        for ((i, line) in lines.withIndex()) {
+            append(line)
+            if (i < lines.size - 1 && line.length < columns) append('\n')
+        }
+    }
+}
+
 /**
  * Whole visible screen text, de-wrapped: consecutive JediTerm lines are joined
  * without a '\n' at wrap points (a line whose [TerminalLine.isWrapped] is true is
@@ -1199,12 +1217,17 @@ private fun readJediTermFullText(widget: JediTermWidget?): String? {
     try {
         val rows = buffer.height
         if (rows <= 0) return null
+        val cols = buffer.width
         val sb = StringBuilder()
         for (r in 0 until rows) {
             val line = buffer.getLine(r) ?: continue
-            sb.append(line.text)
+            val text = line.text
+            sb.append(text)
             // A wrapped line continues into the next physical row — no break.
-            if (!line.isWrapped) sb.append('\n')
+            // tmux hard-wraps without setting isWrapped, so also treat a line that
+            // fills the full width as a continuation.
+            val wrapped = line.isWrapped || (cols > 0 && text.length >= cols)
+            if (!wrapped) sb.append('\n')
         }
         return sb.toString()
     } finally {

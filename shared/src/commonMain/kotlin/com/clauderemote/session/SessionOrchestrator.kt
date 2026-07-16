@@ -3045,6 +3045,22 @@ else:
         sendInput(sessionId, "\r")
     }
 
+    /** Submit a pasted /login auth code: send the code, then a separate Enter so
+     *  Claude's prompt doesn't treat code+CR as one paste (which won't submit). */
+    fun submitLoginCode(sessionId: String, code: String) {
+        reconnectScope.launch {
+            sendInput(sessionId, code)
+            kotlinx.coroutines.delay(120)
+            sendInput(sessionId, "\r")
+        }
+    }
+
+    /** Trigger Claude's /login flow on [sessionId] (types it char-by-char like a
+     *  real slash command so the TUI doesn't treat it as a paste). */
+    fun sendLoginCommand(sessionId: String) {
+        reconnectScope.launch { sendSlashCommand(sessionId, "/login") }
+    }
+
     fun sendEscape(sessionId: String) {
         sendInput(sessionId, ClaudeConfig.escapeSequence())
     }

@@ -147,6 +147,7 @@ fun TerminalScreen(
     onOpenLoginUrl: (String) -> Unit = {},
     onSubmitLoginCode: (String) -> Unit = {},
     onCancelLogin: () -> Unit = {},
+    onLogin: (() -> Unit)? = null,
     latencyMs: Long? = null,
     pendingInputCount: Int = 0,
     onClearPending: (() -> Unit)? = null,
@@ -1276,6 +1277,7 @@ fun TerminalScreen(
             // Keep the drawer open behind the menu — the context sheet floats
             // over the session list instead of dismissing it.
             onLongPressSession = onSessionLongPress,
+            onLogin = onLogin,
         )
 
         // ── ExpandedInput overlay ──────────────────────────────────────────

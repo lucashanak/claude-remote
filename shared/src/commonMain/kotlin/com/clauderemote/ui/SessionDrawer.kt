@@ -17,6 +17,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.AccountCircle
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Refresh
@@ -65,6 +66,7 @@ fun SessionDrawer(
     onNew: () -> Unit = {},
     onClose: () -> Unit = {},
     onLongPressSession: ((id: String) -> Unit)? = null,
+    onLogin: (() -> Unit)? = null,
 ) {
     if (!open && sessions.isEmpty() && remoteSessions.isEmpty()) return  // skip composition when not needed
 
@@ -244,6 +246,7 @@ fun SessionDrawer(
                     DrawerFooter(
                         onNew = { onNew(); onClose() },
                         onReattachAll = { /* no-op until wired */ },
+                        onLogin = onLogin?.let { cb -> { cb(); onClose() } },
                     )
                 }
             }
@@ -488,7 +491,7 @@ private fun DrawerModePill(mode: ClaudeMode) {
 // ── Footer ────────────────────────────────────────────────────────────────────
 
 @Composable
-private fun DrawerFooter(onNew: () -> Unit, onReattachAll: () -> Unit) {
+private fun DrawerFooter(onNew: () -> Unit, onReattachAll: () -> Unit, onLogin: (() -> Unit)? = null) {
     val c = CRTheme.colors
     val shape = RoundedCornerShape(8.dp)
     Row(
@@ -510,6 +513,21 @@ private fun DrawerFooter(onNew: () -> Unit, onReattachAll: () -> Unit) {
         ) {
             Icon(Icons.Default.Add, contentDescription = null, tint = c.accent, modifier = Modifier.size(14.dp))
             Text("New session", style = CRType.bodyDim, color = c.accent)
+        }
+
+        if (onLogin != null) {
+            Row(
+                Modifier
+                    .clip(shape)
+                    .border(1.dp, c.border, shape)
+                    .clickable(onClick = onLogin)
+                    .padding(horizontal = 12.dp, vertical = 8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                Icon(Icons.Default.AccountCircle, contentDescription = "Přihlásit", tint = c.textDim, modifier = Modifier.size(14.dp))
+                Text("Přihlásit", style = CRType.bodyDim, color = c.textDim)
+            }
         }
 
         IconButton(

@@ -1064,7 +1064,7 @@ fun App(
                         onSubmitLoginCode = { code ->
                             val clean = code.filterNot { it.isWhitespace() }
                             activeTabId?.let {
-                                sessionOrchestrator.sendInput(it, clean + "\r")
+                                sessionOrchestrator.submitLoginCode(it, clean)
                                 sessionOrchestrator.clearLoginFlow(it)
                             }
                         },
@@ -1074,6 +1074,7 @@ fun App(
                                 sessionOrchestrator.clearLoginFlow(it)
                             }
                         },
+                        onLogin = { activeTabId?.let { sessionOrchestrator.sendLoginCommand(it) } },
                         contextPercent = activeTabId?.let { contextPercents[it] },
                         gitStatus = activeTabId?.let { gitStatuses[it] },
                         latencyMs = activeTabId?.let { latencies[it] },
