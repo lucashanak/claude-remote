@@ -8,7 +8,6 @@ import com.clauderemote.model.*
 import com.clauderemote.session.transcript.TranscriptEntry
 import com.clauderemote.session.service.ConnectionRegistry
 import com.clauderemote.session.service.execReadWithWatchdog
-import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.update
 import com.clauderemote.storage.ServerStorage
@@ -18,7 +17,6 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
-import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext

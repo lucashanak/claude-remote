@@ -224,11 +224,69 @@ User preferences grouped by category:
 | Android | `SharedPreferences` (`"claude_remote"` namespace) |
 | Desktop | `~/.claude-remote/settings.properties` (Java Properties) |
 
+## Session Services
+
+`SessionOrchestrator` used to be a ~4000-line god-class. It is now a thin
+**session-lifecycle coordinator** (connect → tmux → claude, reconnect,
+disconnect, the `emit()` output fan-out, transport resolution) that owns and
+wires a set of single-responsibility collaborator services under
+`session/service/` (plus the existing `session/status`, `session/transcript`,
+and `session/notify` packages). The public API surface of `SessionOrchestrator`
+(constructor, callback `var`s, `StateFlow` vals, methods) is unchanged — the
+composition roots (`androidApp`, `desktopApp`, `ui/App.kt`) construct it exactly
+as before and it delegates to the services.
+
+| Service | Responsibility |
+|---------|----------------|
+| `ConnectionRegistry` | Per-session SSH/Mosh transports, per-server transport pools + connect gates, tab→server lookups. The seam every service uses to reach a live transport. |
+| `RemoteExec` (fn) | `execReadWithWatchdog` — one-shot exec with a hard wall-clock bound. |
+| `ServerHealthService` | Launcher reachability health + per-server latency polling. |
+| `GitStatusService` | Per-session git working-dir status (branch + dirty/ahead/behind). |
+| `UsageService` | 5h/week usage %, reset mins, usage tokens, ccusage polling. |
+| `TranscriptService` | Transcript streams (+ `transcriptLock`), context-token tracking, the shared streamd daemon. |
+| `StatusService` | Per-session activity state (`updateActivity`) + OMC remote-status pollers. |
+| `NotificationService` | Input-prompt detection, needs-input notifications, the Stop-hook watcher, login flow, offline input queue. |
+| `TerminalIOService` | Per-session output ring buffer + pty size tracking. |
+| `ClaudeControlService` | User input send path + offline queue + Claude slash-control (model/effort/login/escape). |
+| `RemoteOpsService` | tmux copy-mode scroll + SFTP upload/download. |
+| `SessionPersistenceService` | Shared `sessions.json`, restore-script install, real-session-id refresh, forget/rename. |
+
+Services take their dependencies by constructor injection (the shared
+`CoroutineScope`, `ConnectionRegistry`, `TabManager`, an `isBackground` getter,
+and lambdas bridging to sibling services or facade callbacks). Each service
+keeps its own lock private and exposes lock-holding methods — the raw
+`ConcurrentHashMap`s and monitors are never shared across responsibilities.
+
+## Module & file conventions
+
+To keep the modular structure from decaying back into god-files, new code
+should follow these rules:
+
+- **Soft limit ~500 lines per file.** Past that, split — no god-classes, no
+  2000-line Compose files. UI: one file = one screen or one contiguous area
+  (top bar, control bar, side panel…); non-`@Composable` logic (parsing,
+  render-model building) goes in its own `*Model.kt` / `*Parsing.kt`.
+- **One class = one responsibility.** Stateful logic that coordinates the
+  session lives behind a dedicated service in `session/service` (or
+  `session/{status,transcript,notify}`), not inline in the orchestrator.
+- **Shared mutable state stays behind its owning service, guarded by that
+  service's private lock.** Never expose a raw shared `ConcurrentHashMap` /
+  monitor across responsibilities; expose intent-revealing methods instead.
+- **Package layout:** `model` / `connection` / `storage` / `util` (core),
+  `session` + `session/{service,status,transcript,notify}` (domain),
+  `ui` + `ui/{components,theme}` (UI). New code belongs in the existing package
+  that matches its responsibility.
+- **Wiring is manual, in the composition root** (`Main.kt` / `MainActivity` /
+  `App.kt`); services receive their dependencies via the constructor. No DI
+  framework.
+- **Everything shared stays in `commonMain`;** platform specifics go behind
+  `expect`/`actual`.
+
 ## Kotlin Multiplatform Structure
 
 ```
 shared/src/
-├── commonMain/    # ~32 files — all shared logic
+├── commonMain/    # all shared logic (ui/, session/ + session/service, …)
 ├── androidMain/   # 3 actual implementations
 │   ├── MoshManager.kt          # ProcessBuilder with bundled binary
 │   ├── PlatformPreferences.kt  # SharedPreferences wrapper
