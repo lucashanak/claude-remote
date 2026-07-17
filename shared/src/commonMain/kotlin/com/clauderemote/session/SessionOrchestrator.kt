@@ -9,6 +9,7 @@ import com.clauderemote.session.status.RemoteSessionStatus
 import com.clauderemote.session.status.SessionStatusPoller
 import com.clauderemote.session.transcript.TranscriptEntry
 import com.clauderemote.session.transcript.TranscriptStream
+import com.clauderemote.session.service.ConnectionRegistry
 import com.clauderemote.session.service.execReadWithWatchdog
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -50,8 +51,7 @@ class SessionOrchestrator(
     private val tabManager: TabManager,
     private val sessionStorage: SessionStorage? = null
 ) {
-    private val connections = java.util.concurrent.ConcurrentHashMap<String, SshManager>()
-    private val moshConnections = mutableMapOf<String, com.clauderemote.connection.MoshManager>()
+    private val connectionRegistry = ConnectionRegistry(serverStorage, tabManager)
 
     // Per-session transcript streams (JSONL tail readers).
     private val transcriptStreams = mutableMapOf<String, TranscriptStream>()
@@ -391,44 +391,6 @@ class SessionOrchestrator(
     private val sessionsJsonCache = java.util.concurrent.ConcurrentHashMap<String, SessionsSnapshot>()
     private val sessionsJsonMutex = Mutex()
 
-    // Per-server gate on SIMULTANEOUS connect handshakes. A network blip drops
-    // every session at once and each SshManager independently fires an
-    // attempt-1 reconnect with zero backoff — at 21 sessions that was 21
-    // concurrent KEX/auth handshakes (21 WebSocket upgrades over CF) hammering
-    // a link that just came back. 3 at a time keeps the instant-reconnect feel
-    // for the single-drop Starlink case while serializing the herd.
-    private val connectGates = java.util.concurrent.ConcurrentHashMap<String, Semaphore>()
-    private fun connectGate(serverId: String): Semaphore =
-        connectGates.getOrPut(serverId) { Semaphore(3) }
-
-    // Shared SSH transports per server: tabs lease shell channels on pooled
-    // jsch Sessions (≤5 shells each) instead of each owning a TCP/WebSocket +
-    // KEX + auth + keepalive. 21 sessions on one box: 21 transports → ~5.
-    private val transportPools = java.util.concurrent.ConcurrentHashMap<String, com.clauderemote.connection.ServerTransportPool>()
-    private fun transportPool(serverId: String): com.clauderemote.connection.ServerTransportPool =
-        transportPools.getOrPut(serverId) { com.clauderemote.connection.ServerTransportPool(serverStorage) }
-
-    /** Server id of a session's tab, or null if the tab is gone. */
-    private fun serverIdOf(sessionId: String): String? =
-        tabManager.getTab(sessionId)?.server?.id
-
-    /** All session ids currently on [serverId]. */
-    private fun sessionIdsOnServer(serverId: String): List<String> =
-        tabManager.tabs.value.filter { it.server.id == serverId }.map { it.id }
-
-    /**
-     * Any CONNECTED session's live jsch Session on [serverId] — used by the
-     * per-server loops (usage, latency, notify watcher) so they survive any
-     * single tab's reconnect by simply picking another live connection.
-     */
-    private fun liveServerSession(serverId: String): Session? {
-        for ((sid, mgr) in connections) {
-            if (tabManager.getTab(sid)?.server?.id == serverId && mgr.isConnected) {
-                mgr.getSession()?.let { return it }
-            }
-        }
-        return null
-    }
     /** Per-session timestamp of the last "needs input" dispatch, used to debounce
      *  the Stop-hook fire stream — claude can emit several markers in quick
      *  succession (model handoff, tool retries) and we don't want to vibrate
@@ -539,7 +501,7 @@ class SessionOrchestrator(
      * exited during the outage stayed dead until app restart.
      */
     private fun attachSessionRuntime(sessionId: String, tmuxSessionName: String) {
-        serverIdOf(sessionId)?.let { serverId ->
+        connectionRegistry.serverIdOf(sessionId)?.let { serverId ->
             // Per-server loops: idempotent, first session on the server starts
             // them, later sessions just register/reuse.
             startServerUsagePolling(serverId)
@@ -547,7 +509,7 @@ class SessionOrchestrator(
             startNotifyWatcher(sessionId, tmuxSessionName, serverId)
         }
         startGitStatusPolling(sessionId)
-        connections[sessionId]?.let { conn ->
+        connectionRegistry.ssh(sessionId)?.let { conn ->
             startSessionIdRefresh(sessionId, tmuxSessionName, conn)
         }
         // Keep a transcript stream running for every connected session so the
@@ -588,10 +550,10 @@ class SessionOrchestrator(
      * reconnects on the new network within ~1 s instead of ~20.
      */
     fun onNetworkLost() {
-        FileLogger.log(TAG, "Network lost — tearing down ${transportPools.size} transport pool(s)")
+        FileLogger.log(TAG, "Network lost — tearing down ${connectionRegistry.transportPoolCount()} transport pool(s)")
         // Our own teardown must not count as Tailscale early-death strikes.
         lastNetworkTeardownAt = System.currentTimeMillis()
-        transportPools.values.forEach { it.teardownAll() }
+        connectionRegistry.teardownAllTransports()
         // The AUTO decision was made on the old network — a Wi-Fi→LTE switch
         // changes Tailscale reachability, so re-probe on the next resolve.
         resolvedTransportCache.clear()
@@ -610,7 +572,7 @@ class SessionOrchestrator(
         logShipper = com.clauderemote.util.LogShipper(
             appId = appId,
             scope = reconnectScope,
-            liveSession = { connections.values.firstOrNull { it.isConnected }?.getSession() },
+            liveSession = { connectionRegistry.anyLiveSession() },
         ).also { it.start() }
     }
 
@@ -622,7 +584,7 @@ class SessionOrchestrator(
         // dead links; 60s cuts that to ~13/min. Foreground restores 10s for fast
         // Starlink-handover detection. JSch applies the new interval live.
         val keepAlive = if (background) 60_000 else 10_000
-        connections.values.forEach { it.setKeepAliveInterval(keepAlive) }
+        connectionRegistry.setKeepAliveIntervalAll(keepAlive)
     }
 
     private fun startServerUsagePolling(serverId: String) {
@@ -643,7 +605,7 @@ class SessionOrchestrator(
                     // chips dead until app restart.
                     if (!isInBackground) {
                         try {
-                            val sshSession = liveServerSession(serverId)
+                            val sshSession = connectionRegistry.liveServerSession(serverId)
                             if (sshSession != null) {
                                 // 60s budget: the first run may npm-install ccusage.
                                 val output = execReadWithWatchdog(
@@ -694,7 +656,7 @@ class SessionOrchestrator(
         lastGitProbeAt[sessionId] = System.currentTimeMillis()
         try {
             val folder = tabManager.getTab(sessionId)?.folder ?: "~"
-            val conn = connections[sessionId] ?: return
+            val conn = connectionRegistry.ssh(sessionId) ?: return
             val sshSession = conn.getSession() ?: return
             val escapedFolder = folder.replace("'", "'\\''")
             val cmd = """
@@ -741,7 +703,7 @@ class SessionOrchestrator(
             lastServerProbeAt[server.id] = now
             reconnectScope.launch {
                 // 1) Reuse a live connection → ONLINE without a socket probe.
-                val hasLiveConnection = connections.any { (sessionId, mgr) ->
+                val hasLiveConnection = connectionRegistry.sshEntries().any { (sessionId, mgr) ->
                     mgr.isConnected && tabManager.getTab(sessionId)?.server?.id == server.id
                 }
                 if (hasLiveConnection) {
@@ -835,7 +797,7 @@ class SessionOrchestrator(
                 // UUID/restore correctness, which onResume refreshes anyway.
                 if (isInBackground) { kotlinx.coroutines.delay(15_000); continue }
                 try {
-                    val remote = fetchSessionsCached(serverIdOf(sessionId), sshManager)
+                    val remote = fetchSessionsCached(connectionRegistry.serverIdOf(sessionId), sshManager)
                     val entry = remote?.firstOrNull { it.tmuxSessionName == tmuxName }
                     // Prefer the LIVE pane's running Claude pid over the server's
                     // sessions.json record. The server entry is seeded with the
@@ -1040,7 +1002,7 @@ class SessionOrchestrator(
                         try {
                             // Missing connection (mid-reconnect) skips the round;
                             // the old `?: break` killed the loop permanently.
-                            val sshSession = liveServerSession(serverId)
+                            val sshSession = connectionRegistry.liveServerSession(serverId)
                             if (sshSession == null) {
                                 kotlinx.coroutines.delay(15_000)
                                 continue
@@ -1063,7 +1025,7 @@ class SessionOrchestrator(
                             // a tab mid-teardown (entry already cleared by
                             // disconnectSession, tab not yet removed) must not
                             // be re-added as a permanent stale map entry.
-                            val ids = sessionIdsOnServer(serverId).filter { connections.containsKey(it) }
+                            val ids = connectionRegistry.sessionIdsOnServer(serverId).filter { connectionRegistry.containsSsh(it) }
                             _latencies.update { it + ids.associateWith { avg } }
                         } catch (_: Exception) {}
                     }
@@ -1237,7 +1199,7 @@ else:
             // on the shared long-lived session, one per retry.
             var ch: com.jcraft.jsch.ChannelExec? = null
             try {
-                val sshSession = liveServerSession(w.serverId)
+                val sshSession = connectionRegistry.liveServerSession(w.serverId)
                 if (sshSession == null) {
                     // No live connection right now (mid-reconnect). Keep probing
                     // — the shared watcher rides ANY session's connection, so it
@@ -1592,7 +1554,7 @@ else:
             var ch: com.jcraft.jsch.ChannelExec? = null
             var watchdog: kotlinx.coroutines.Job? = null
             try {
-                val sshSession = liveServerSession(d.serverId)
+                val sshSession = connectionRegistry.liveServerSession(d.serverId)
                 if (sshSession == null) {
                     kotlinx.coroutines.delay(5_000)
                     continue
@@ -1740,7 +1702,7 @@ else:
             attachSessionRuntime(sessionId, session.tmuxSessionName)
             // Persist session for app-restart and server-reboot recovery.
             sessionStorage?.upsert(SessionStorage.fromClaudeSession(session))
-            connections[sessionId]?.let { conn ->
+            connectionRegistry.ssh(sessionId)?.let { conn ->
                 reconnectScope.launch {
                     ensureRestoreService(conn)
                     pushSessionsToServer(conn, server.id)
@@ -1810,7 +1772,7 @@ else:
      * the SSH round-trip runs on [reconnectScope].
      */
     fun kickRedraw(sessionId: String, cols: Int, rows: Int) {
-        val conn = connections[sessionId] ?: return
+        val conn = connectionRegistry.ssh(sessionId) ?: return
         if (cols <= 1 || rows <= 0) return
         FileLogger.log("TermGeom", "kickRedraw $sessionId requested ${cols}x${rows}")
         // Sync pty geometry to the current view first (no-op if unchanged) —
@@ -1965,7 +1927,7 @@ else:
         val tab = tabManager.getTab(sessionId) ?: return
         val stream = synchronized(transcriptLock) {
             val s = transcriptStreams.getOrPut(sessionId) {
-                TranscriptStream(tab.server, tab.folder, reconnectScope, liveSession = { connections[sessionId]?.getSession() }, isBackground = { isInBackground }, isActiveTab = { tabManager.activeTabId.value == sessionId }, daemonActive = { serverStreamDaemons[tab.server.id]?.live == true })
+                TranscriptStream(tab.server, tab.folder, reconnectScope, liveSession = { connectionRegistry.ssh(sessionId)?.getSession() }, isBackground = { isInBackground }, isActiveTab = { tabManager.activeTabId.value == sessionId }, daemonActive = { serverStreamDaemons[tab.server.id]?.live == true })
             }
             startContextTokenCollector(sessionId, s)
             s
@@ -1978,7 +1940,7 @@ else:
             ?: return kotlinx.coroutines.flow.MutableStateFlow(emptyList())
         val stream = synchronized(transcriptLock) {
             val s = transcriptStreams.getOrPut(sessionId) {
-                TranscriptStream(tab.server, tab.folder, reconnectScope, liveSession = { connections[sessionId]?.getSession() }, isBackground = { isInBackground }, isActiveTab = { tabManager.activeTabId.value == sessionId }, daemonActive = { serverStreamDaemons[tab.server.id]?.live == true })
+                TranscriptStream(tab.server, tab.folder, reconnectScope, liveSession = { connectionRegistry.ssh(sessionId)?.getSession() }, isBackground = { isInBackground }, isActiveTab = { tabManager.activeTabId.value == sessionId }, daemonActive = { serverStreamDaemons[tab.server.id]?.live == true })
             }
             // Derive the ctx-window % from this stream's token usage. Inside the
             // lock so it binds to the exact stream instance and stays atomic with
@@ -2001,7 +1963,7 @@ else:
         // on every call, each one potentially restarting the stream and blanking
         // the transcript for several seconds while the new SSH tail reconnected.
         val alreadyConfirmed = uuid != null && confirmedUuids[sessionId] == uuid
-        val sshMan = connections[sessionId]
+        val sshMan = connectionRegistry.ssh(sessionId)
         if (!alreadyConfirmed && sshMan != null && sshMan.isConnected) {
             reconnectScope.launch {
                 try {
@@ -2040,7 +2002,7 @@ else:
             ?: return kotlinx.coroutines.flow.MutableStateFlow(null)
         val stream = synchronized(transcriptLock) {
             transcriptStreams.getOrPut(sessionId) {
-                TranscriptStream(tab.server, tab.folder, reconnectScope, liveSession = { connections[sessionId]?.getSession() }, isBackground = { isInBackground }, isActiveTab = { tabManager.activeTabId.value == sessionId }, daemonActive = { serverStreamDaemons[tab.server.id]?.live == true })
+                TranscriptStream(tab.server, tab.folder, reconnectScope, liveSession = { connectionRegistry.ssh(sessionId)?.getSession() }, isBackground = { isInBackground }, isActiveTab = { tabManager.activeTabId.value == sessionId }, daemonActive = { serverStreamDaemons[tab.server.id]?.live == true })
             }
         }
         return stream.status
@@ -2067,7 +2029,7 @@ else:
                     cwd = tab.folder,
                     claudeSessionIdProvider = { tabManager.getTab(sessionId)?.claudeSessionId },
                     scope = reconnectScope,
-                    liveSession = { connections[sessionId]?.getSession() },
+                    liveSession = { connectionRegistry.ssh(sessionId)?.getSession() },
                     isBackground = { isInBackground },
                 )
             }
@@ -2187,7 +2149,7 @@ else:
             // was already counted by maybeCountTsEarlyDeath.
             reconnectScope.launch {
                 kotlinx.coroutines.delay(TS_EARLY_DEATH_MS)
-                if (lastConnectAt[sessionId] == connectEpoch && connections[sessionId]?.isConnected == true) {
+                if (lastConnectAt[sessionId] == connectEpoch && connectionRegistry.ssh(sessionId)?.isConnected == true) {
                     tailscaleCooldownUntil.remove(server.id)
                     tailscaleFailStreak.remove(server.id)
                 }
@@ -2204,7 +2166,7 @@ else:
         if (tsEffective) {
             reconnectScope.launch {
                 try {
-                    val sshSession = connections[sessionId]?.getSession() ?: return@launch
+                    val sshSession = connectionRegistry.ssh(sessionId)?.getSession() ?: return@launch
                     val start = System.currentTimeMillis()
                     execReadWithWatchdog(sshSession, "echo pong", totalMs = 3_000)
                     FileLogger.log(TAG, "TS pre-attach RTT for $sessionId: ${System.currentTimeMillis() - start}ms")
@@ -2303,8 +2265,8 @@ else:
         isNewTmuxSession: Boolean,
         checkClosedElsewhere: Boolean = false,
     ) {
-        val sshManager = SshManager(serverStorage, transportPool = transportPool(session.server.id))
-        connections[session.id] = sshManager
+        val sshManager = SshManager(serverStorage, transportPool = connectionRegistry.transportPool(session.server.id))
+        connectionRegistry.putSsh(session.id, sshManager)
 
         // Track last output time for burst detection
         var lastOutputTime = 0L
@@ -2424,7 +2386,7 @@ else:
         setConnectionLabel(session.id, sshEffective, session.server, "SSH")
         try {
             // Gate the handshake per server — see connectGates.
-            connectGate(session.server.id).withPermit {
+            connectionRegistry.connectGate(session.server.id).withPermit {
                 sshManager.connect(
                     sshEffective,
                     onOutput = { data -> emit(data) },
@@ -2710,11 +2672,11 @@ else:
 
                 try {
                     // Clean up old connection
-                    connections[session.id]?.disconnect()
-                    connections.remove(session.id)
+                    connectionRegistry.ssh(session.id)?.disconnect()
+                    connectionRegistry.removeSsh(session.id)
 
-                    val sshManager = SshManager(serverStorage, transportPool = transportPool(session.server.id))
-                    connections[session.id] = sshManager
+                    val sshManager = SshManager(serverStorage, transportPool = connectionRegistry.transportPool(session.server.id))
+                    connectionRegistry.putSsh(session.id, sshManager)
 
                     val reEffective = resolveTransport(session.server)
                     setConnectionLabel(session.id, reEffective, session.server, "SSH")
@@ -2723,7 +2685,7 @@ else:
                         // sessions at once and each fires attempt-1 with zero
                         // backoff — without the gate that's a 21-way concurrent
                         // KEX storm on a just-recovered weak link.
-                        connectGate(session.server.id).withPermit {
+                        connectionRegistry.connectGate(session.server.id).withPermit {
                             sshManager.connect(
                                 reEffective,
                                 onOutput = { data -> emit(data) },
@@ -2856,7 +2818,7 @@ else:
 
         // Store mosh as connection (wrap in a pseudo SshManager interface won't work,
         // so store separately and handle sendInput/sendBytes via mosh)
-        moshConnections[session.id] = moshManager
+        connectionRegistry.putMosh(session.id, moshManager)
         setConnectionLabel(session.id, effectiveServer, session.server, "Mosh")
         FileLogger.log(TAG, "Mosh connected for ${session.id}")
     }
@@ -2909,13 +2871,13 @@ else:
     fun sendInput(sessionId: String, data: String) {
         promptDetector.onUserInput(sessionId)
         // Try mosh first, then SSH
-        val mosh = moshConnections[sessionId]
+        val mosh = connectionRegistry.mosh(sessionId)
         if (mosh != null && mosh.isConnected) {
             updateActivity(sessionId, SessionActivity.WORKING)
             mosh.sendInput(data)
             return
         }
-        val conn = connections[sessionId]
+        val conn = connectionRegistry.ssh(sessionId)
         if (conn == null || !conn.isConnected) {
             queueInput(sessionId, data)
             return
@@ -2926,13 +2888,13 @@ else:
 
     fun sendBytes(sessionId: String, data: ByteArray) {
         promptDetector.onUserInput(sessionId)
-        val mosh = moshConnections[sessionId]
+        val mosh = connectionRegistry.mosh(sessionId)
         if (mosh != null && mosh.isConnected) {
             updateActivity(sessionId, SessionActivity.WORKING)
             mosh.sendBytes(data)
             return
         }
-        val conn = connections[sessionId]
+        val conn = connectionRegistry.ssh(sessionId)
         if (conn == null || !conn.isConnected) { warnNoConnection(sessionId); return }
         updateActivity(sessionId, SessionActivity.WORKING)
         conn.sendBytes(data)
@@ -2960,7 +2922,7 @@ else:
         val queue = pendingInputs.remove(sessionId) ?: return
         _pendingCounts.update { it - sessionId }
         if (queue.isEmpty()) return
-        val conn = connections[sessionId] ?: return
+        val conn = connectionRegistry.ssh(sessionId) ?: return
         reconnectScope.launch {
             for (input in queue) {
                 conn.sendInput(input)
@@ -2979,7 +2941,7 @@ else:
         // Remember the active-view size as a global fallback for sessions that
         // (re)connect while backgrounded. Guard against transient 0-size layout passes.
         if (cols > 1 && rows > 0) lastActiveViewSize = cols to rows
-        connections[sessionId]?.resize(cols, rows)
+        connectionRegistry.ssh(sessionId)?.resize(cols, rows)
     }
 
     /** Best-known pty size for [sessionId]: its own remembered size, else the last
@@ -2988,7 +2950,7 @@ else:
         terminalSizes[sessionId] ?: lastActiveViewSize ?: (80 to 24)
 
     fun sendClaudeCommand(sessionId: String, command: String) {
-        val conn = connections[sessionId]
+        val conn = connectionRegistry.ssh(sessionId)
         if (conn == null || !conn.isConnected) {
             queueInput(sessionId, command)
             return
@@ -3070,7 +3032,7 @@ else:
             scrollMutex(sessionId).withLock {
                 try {
                     kotlinx.coroutines.withContext(Dispatchers.IO) {
-                        val sshSession = connections[sessionId]?.getSession() ?: return@withContext
+                        val sshSession = connectionRegistry.ssh(sessionId)?.getSession() ?: return@withContext
                         val escaped = tmuxName.replace("'", "'\\''")
                         val key = if (up) "page-up" else "page-down"
                         val cmd = "tmux copy-mode -e -t '$escaped'; tmux send-keys -t '$escaped' -X $key"
@@ -3105,7 +3067,7 @@ else:
         var lastException: Exception? = null
 
         while (System.currentTimeMillis() < deadline) {
-            val c = connections[sessionId]
+            val c = connectionRegistry.ssh(sessionId)
             if (c != null && c.isConnected) {
                 try {
                     val remoteDir = "/tmp/claude-uploads"
@@ -3150,8 +3112,8 @@ else:
         confirmedUuids.remove(sessionId)
 
         // Clean up old connection
-        connections[sessionId]?.disconnect()
-        connections.remove(sessionId)
+        connectionRegistry.ssh(sessionId)?.disconnect()
+        connectionRegistry.removeSsh(sessionId)
 
         tabManager.updateTabStatus(sessionId, SessionStatus.CONNECTING)
 
@@ -3312,10 +3274,10 @@ else:
         lastNotifiedEpochSec.remove(sessionId)
         lastNotifiedAssistantId.remove(sessionId)
         setHookActive(sessionId, false)
-        connections[sessionId]?.disconnect()
-        connections.remove(sessionId)
-        moshConnections[sessionId]?.disconnect()
-        moshConnections.remove(sessionId)
+        connectionRegistry.ssh(sessionId)?.disconnect()
+        connectionRegistry.removeSsh(sessionId)
+        connectionRegistry.mosh(sessionId)?.disconnect()
+        connectionRegistry.removeMosh(sessionId)
         synchronized(bufferLock) { outputBuffers.remove(sessionId) }
         synchronized(transcriptLock) {
             transcriptStreams.remove(sessionId)?.let { stream ->
@@ -3359,12 +3321,12 @@ else:
     }
 
     suspend fun disconnectAll() {
-        connections.values.forEach { it.disconnect() }
-        connections.clear()
+        connectionRegistry.allSsh().forEach { it.disconnect() }
+        connectionRegistry.clearSsh()
         synchronized(bufferLock) { outputBuffers.clear() }
     }
 
-    fun getConnection(sessionId: String): SshManager? = connections[sessionId]
+    fun getConnection(sessionId: String): SshManager? = connectionRegistry.ssh(sessionId)
 
     /**
      * Restart the Claude Code process for [sessionId] while KEEPING the
@@ -3381,7 +3343,7 @@ else:
             FileLogger.log(TAG, "restartClaude: no claudeSessionId for $sessionId — cannot resume")
             return
         }
-        val sshSession = connections[sessionId]?.getSession()
+        val sshSession = connectionRegistry.ssh(sessionId)?.getSession()
         if (sshSession == null) {
             FileLogger.log(TAG, "restartClaude: no live connection for $sessionId")
             return
@@ -3402,7 +3364,7 @@ else:
     suspend fun renameTmuxSession(sessionId: String, oldName: String, newName: String) {
         withContext(Dispatchers.IO) {
             try {
-                val sshSession = connections[sessionId]?.getSession() ?: return@withContext
+                val sshSession = connectionRegistry.ssh(sessionId)?.getSession() ?: return@withContext
                 com.clauderemote.connection.TmuxManager.renameSession(sshSession, oldName, newName)
                 FileLogger.log(TAG, "Tmux renamed: $oldName → $newName")
                 // Persist the new tmux name + re-sync server snapshot so the
@@ -3411,7 +3373,7 @@ else:
                 if (tab != null && sessionStorage != null) {
                     val updated = tab.copy(tmuxSessionName = newName)
                     sessionStorage.upsert(SessionStorage.fromClaudeSession(updated))
-                    connections[sessionId]?.let { pushSessionsToServer(it, tab.server.id) }
+                    connectionRegistry.ssh(sessionId)?.let { pushSessionsToServer(it, tab.server.id) }
                 }
             } catch (e: Exception) {
                 FileLogger.error(TAG, "Tmux rename failed", e)
@@ -3711,7 +3673,7 @@ DTIMER_EOF
     private val installedRestoreServers = mutableSetOf<String>()
 
     private suspend fun ensureRestoreService(sshManager: SshManager) {
-        val serverId = tabManager.tabs.value.firstOrNull { connections[it.id] === sshManager }?.server?.id
+        val serverId = tabManager.tabs.value.firstOrNull { connectionRegistry.ssh(it.id) === sshManager }?.server?.id
         if (serverId != null) {
             synchronized(installedRestoreServers) {
                 if (!installedRestoreServers.add(serverId)) return
@@ -3884,7 +3846,7 @@ DTIMER_EOF
      */
     suspend fun downloadFile(sessionId: String, remotePath: String): ByteArray? = withContext(Dispatchers.IO) {
         try {
-            val conn = connections[sessionId] ?: return@withContext null
+            val conn = connectionRegistry.ssh(sessionId) ?: return@withContext null
             val sshSession = conn.getSession() ?: return@withContext null
             val sftp = sshSession.openChannel("sftp") as com.jcraft.jsch.ChannelSftp
             sftp.connect(5000)
