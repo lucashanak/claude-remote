@@ -10,7 +10,7 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 
-private const val TAG = "UsageService"
+private const val TAG = "SessionOrchestrator"
 
 /**
  * 5h/week usage percents + reset minutes + usage tokens + per-server ccusage

@@ -11,7 +11,7 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
-private const val TAG = "ServerHealthService"
+private const val TAG = "SessionOrchestrator"
 
 /**
  * Server reachability health (launcher dot) + per-server SSH latency polling.
