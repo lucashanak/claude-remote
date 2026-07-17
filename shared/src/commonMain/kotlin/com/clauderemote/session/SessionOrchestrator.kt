@@ -53,6 +53,17 @@ class SessionOrchestrator(
 ) {
     private val connectionRegistry = ConnectionRegistry(serverStorage, tabManager)
 
+    // Shared background scope for all per-session/per-server loops. Declared
+    // early so collaborator services can take it by constructor injection.
+    private val reconnectScope = kotlinx.coroutines.CoroutineScope(
+        kotlinx.coroutines.Dispatchers.IO + kotlinx.coroutines.SupervisorJob()
+    )
+
+    // Server reachability health + per-server latency polling.
+    private val serverHealthService = com.clauderemote.session.service.ServerHealthService(
+        reconnectScope, connectionRegistry, tabManager, { isInBackground }
+    )
+
     // Per-session transcript streams (JSONL tail readers).
     private val transcriptStreams = mutableMapOf<String, TranscriptStream>()
     private val transcriptLock = Any()
@@ -176,9 +187,8 @@ class SessionOrchestrator(
     private val sawWorkSinceAttach = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
     private val contextTokenCollectors = java.util.concurrent.ConcurrentHashMap<String, kotlinx.coroutines.Job>()
 
-    // Per-session SSH latency (ms)
-    private val _latencies = kotlinx.coroutines.flow.MutableStateFlow<Map<String, Long>>(emptyMap())
-    val latencies: kotlinx.coroutines.flow.StateFlow<Map<String, Long>> = _latencies
+    // Per-session SSH latency (ms) — owned by serverHealthService.
+    val latencies: kotlinx.coroutines.flow.StateFlow<Map<String, Long>> get() = serverHealthService.latencies
 
     // Per-session git status of the working directory (branch + dirty/ahead/behind).
     // Absence of a sessionId key means "not a git repo" — UI shows no chip.
@@ -190,12 +200,8 @@ class SessionOrchestrator(
     private val _pendingCounts = kotlinx.coroutines.flow.MutableStateFlow<Map<String, Int>>(emptyMap())
     val pendingCounts: kotlinx.coroutines.flow.StateFlow<Map<String, Int>> = _pendingCounts
 
-    // Per-server reachability for the launcher health dot. Keyed by server id.
-    // Separate from the serialized SshServer model (mirrors gitStatuses etc.).
-    private val _serverHealth = kotlinx.coroutines.flow.MutableStateFlow<Map<String, ServerHealth>>(emptyMap())
-    val serverHealth: kotlinx.coroutines.flow.StateFlow<Map<String, ServerHealth>> = _serverHealth
-    // Debounce: last probe time per server id, so pull-to-refresh spam doesn't storm.
-    private val lastServerProbeAt = java.util.concurrent.ConcurrentHashMap<String, Long>()
+    // Per-server reachability for the launcher health dot — owned by serverHealthService.
+    val serverHealth: kotlinx.coroutines.flow.StateFlow<Map<String, ServerHealth>> get() = serverHealthService.serverHealth
 
     // When APPROVAL_NEEDED was last asserted per session — used to protect a
     // fresh screen-detected approval from being clobbered by a stale statusline
@@ -366,7 +372,6 @@ class SessionOrchestrator(
     // ConcurrentHashMap + compute(): every session's attach/reconnect touches
     // its server's entry, overlapping with disconnects during a reconnect storm.
     private val usagePollingJobs = java.util.concurrent.ConcurrentHashMap<String, kotlinx.coroutines.Job>()
-    private val latencyPollingJobs = java.util.concurrent.ConcurrentHashMap<String, kotlinx.coroutines.Job>()
 
     /**
      * SHARED per-server Stop-hook watcher. All sessions on a server tail the
@@ -505,7 +510,7 @@ class SessionOrchestrator(
             // Per-server loops: idempotent, first session on the server starts
             // them, later sessions just register/reuse.
             startServerUsagePolling(serverId)
-            startServerLatencyPolling(serverId)
+            serverHealthService.startServerLatencyPolling(serverId)
             startNotifyWatcher(sessionId, tmuxSessionName, serverId)
         }
         startGitStatusPolling(sessionId)
@@ -675,67 +680,11 @@ class SessionOrchestrator(
         }
     }
 
-    /**
-     * Probe reachability of each [servers] entry and publish to [serverHealth]
-     * (keyed by server id). Off the UI thread, time-bounded, and debounced.
-     * Branches per server:
-     *  - A live, connected SSH session already exists for the server →
-     *    [ServerHealth.ONLINE] immediately (no redundant socket probe).
-     *  - [SshServer.useCloudflareProxy] → [ServerHealth.UNKNOWN] (a raw TCP
-     *    probe to a Cloudflare-tunneled host is misleading; don't show false
-     *    OFFLINE).
-     *  - Otherwise → [ServerHealth.CHECKING], then a 2.5s TCP connect on
-     *    Dispatchers.IO; success → ONLINE, any failure/timeout → OFFLINE.
-     * Skipped entirely while [isInBackground]; per-server debounced to ~5s.
-     */
     /** Remove a deleted server's health entry so no stale state leaks. */
-    fun pruneServerHealth(serverId: String) {
-        _serverHealth.update { it - serverId }
-        lastServerProbeAt.remove(serverId)
-    }
+    fun pruneServerHealth(serverId: String) = serverHealthService.pruneServerHealth(serverId)
 
-    fun probeServers(servers: List<SshServer>, force: Boolean = false) {
-        if (isInBackground) return
-        val now = System.currentTimeMillis()
-        for (server in servers) {
-            val last = lastServerProbeAt[server.id] ?: 0L
-            if (!force && now - last < 5_000L) continue
-            lastServerProbeAt[server.id] = now
-            reconnectScope.launch {
-                // 1) Reuse a live connection → ONLINE without a socket probe.
-                val hasLiveConnection = connectionRegistry.sshEntries().any { (sessionId, mgr) ->
-                    mgr.isConnected && tabManager.getTab(sessionId)?.server?.id == server.id
-                }
-                if (hasLiveConnection) {
-                    _serverHealth.update { it + (server.id to ServerHealth.ONLINE) }
-                    return@launch
-                }
-                // 2) Cloudflare-tunneled host → a raw TCP probe is misleading.
-                if (server.useCloudflareProxy) {
-                    _serverHealth.update { it + (server.id to ServerHealth.UNKNOWN) }
-                    return@launch
-                }
-                // 3) Raw TCP connect, time-bounded, off the UI thread.
-                _serverHealth.update { if (it[server.id] == null) it + (server.id to ServerHealth.CHECKING) else it }
-                val reachable = withContext(Dispatchers.IO) {
-                    val socket = java.net.Socket()
-                    try {
-                        socket.connect(java.net.InetSocketAddress(server.host, server.port), 2500)
-                        true
-                    } catch (e: kotlinx.coroutines.CancellationException) {
-                        throw e
-                    } catch (_: Exception) {
-                        false
-                    } finally {
-                        try { socket.close() } catch (_: Exception) {}
-                    }
-                }
-                _serverHealth.update {
-                    it + (server.id to if (reachable) ServerHealth.ONLINE else ServerHealth.OFFLINE)
-                }
-            }
-        }
-    }
+    fun probeServers(servers: List<SshServer>, force: Boolean = false) =
+        serverHealthService.probeServers(servers, force)
 
     /**
      * Parse the multi-line output of the git probe. Line 1 is the branch
@@ -983,54 +932,6 @@ class SessionOrchestrator(
                 if (out.isEmpty() || out == "null" || !out.matches(Regex("^[0-9a-f-]{36}$"))) null else out
             } catch (e: Exception) {
                 null
-            }
-        }
-    }
-
-    private fun startServerLatencyPolling(serverId: String) {
-        // Idempotent per server: every session on a server shares the physical
-        // link, so 21 per-session `echo pong`s measured the same RTT 21×. One
-        // probe per server, fanned out to all its sessions for display.
-        // compute() = atomic check-and-launch (see startServerUsagePolling).
-        latencyPollingJobs.compute(serverId) { _, existing ->
-            if (existing?.isActive == true) return@compute existing
-            reconnectScope.launch {
-                kotlinx.coroutines.delay(3000)
-                val recentLatencies = mutableListOf<Long>()
-                while (isActive) {
-                    if (!isInBackground) {
-                        try {
-                            // Missing connection (mid-reconnect) skips the round;
-                            // the old `?: break` killed the loop permanently.
-                            val sshSession = connectionRegistry.liveServerSession(serverId)
-                            if (sshSession == null) {
-                                kotlinx.coroutines.delay(15_000)
-                                continue
-                            }
-                            val latency = kotlin.run {
-                                val start = System.currentTimeMillis()
-                                execReadWithWatchdog(sshSession, "echo pong", totalMs = 10_000)
-                                System.currentTimeMillis() - start
-                            }
-                            recentLatencies.add(latency)
-                            if (recentLatencies.size > 5) recentLatencies.removeAt(0)
-                            val avg = recentLatencies.average().toLong()
-                            // Logged (not just published to the UI StateFlow) so
-                            // remote-shipped logs carry an RTT trail — the
-                            // signal that tells direct-LAN (~ms) apart from a
-                            // DERP relay hop (tens-hundreds of ms) without
-                            // needing tailscale CLI access on either end.
-                            FileLogger.log(TAG, "Latency for server $serverId: ${latency}ms (avg ${avg}ms)")
-                            // Fan out only to sessions with a live connection —
-                            // a tab mid-teardown (entry already cleared by
-                            // disconnectSession, tab not yet removed) must not
-                            // be re-added as a permanent stale map entry.
-                            val ids = connectionRegistry.sessionIdsOnServer(serverId).filter { connectionRegistry.containsSsh(it) }
-                            _latencies.update { it + ids.associateWith { avg } }
-                        } catch (_: Exception) {}
-                    }
-                    kotlinx.coroutines.delay(15_000) // every 15s
-                }
             }
         }
     }
@@ -1853,10 +1754,6 @@ else:
             FileLogger.log("TermGeom", "kickRedraw $sessionId tmux probe failed: ${e.message}")
         }
     }
-
-    private val reconnectScope = kotlinx.coroutines.CoroutineScope(
-        kotlinx.coroutines.Dispatchers.IO + kotlinx.coroutines.SupervisorJob()
-    )
 
     /**
      * Lazy transcript stream for a session. First access opens an SSH `tail -F`
@@ -3264,7 +3161,7 @@ else:
             }
             if (lastOnServer) {
                 usagePollingJobs.remove(serverId)?.cancel()
-                latencyPollingJobs.remove(serverId)?.cancel()
+                serverHealthService.stopLatencyPolling(serverId)
             }
         }
         lastNeedsInputAt.remove(sessionId)
@@ -3306,7 +3203,7 @@ else:
         // Usage maps are keyed by server (account-wide), so don't clear them on
         // a single session's disconnect — other sessions on that server still
         // want the values.
-        _latencies.update { it - sessionId }
+        serverHealthService.clearSession(sessionId)
         _gitStatuses.update { it - sessionId }
         _pendingCounts.update { it - sessionId }
         tabManager.removeTab(sessionId)
