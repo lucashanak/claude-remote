@@ -5,8 +5,6 @@ import com.clauderemote.connection.SshSessionHelper
 import com.jcraft.jsch.ChannelExec
 import com.jcraft.jsch.Session
 import com.clauderemote.model.*
-import com.clauderemote.session.status.RemoteSessionStatus
-import com.clauderemote.session.status.SessionStatusPoller
 import com.clauderemote.session.transcript.TranscriptEntry
 import com.clauderemote.session.service.ConnectionRegistry
 import com.clauderemote.session.service.execReadWithWatchdog
@@ -77,9 +75,12 @@ class SessionOrchestrator(
         sessionStorage, ::readRealSessionId,
     )
 
-    // Per-session OMC state pollers (active skill + subagent count).
-    private val statusPollers = mutableMapOf<String, SessionStatusPoller>()
-    private val statusLock = Any()
+    // Per-session activity state + per-session OMC remote-status pollers.
+    private val statusService = com.clauderemote.session.service.StatusService(
+        reconnectScope, connectionRegistry, tabManager, { isInBackground },
+        { id -> transcriptService.markWorkSeen(id) },
+        { id -> gitStatusService.probeOnIdle(id) },
+    )
 
     // Per-session terminal output buffer (ring buffer, capped at MAX_BUFFER)
     private val outputBuffers = mutableMapOf<String, StringBuilder>()
@@ -95,14 +96,14 @@ class SessionOrchestrator(
             // The onStateChange callback will overwrite this on the next state
             // change (e.g. WORKING), so it self-clears automatically.
             if (det.type == PromptType.APPROVAL_NEEDED || det.type == PromptType.PERMISSION_PROMPT) {
-                updateActivity(det.sessionId, SessionActivity.APPROVAL_NEEDED)
+                statusService.updateActivity(det.sessionId, SessionActivity.APPROVAL_NEEDED)
             }
         }
         onStateChange = { sessionId, state ->
             when (state) {
-                ClaudeState.WORKING -> updateActivity(sessionId, SessionActivity.WORKING)
-                ClaudeState.IDLE -> updateActivity(sessionId, SessionActivity.WAITING_FOR_INPUT)
-                ClaudeState.APPROVAL -> updateActivity(sessionId, SessionActivity.APPROVAL_NEEDED)
+                ClaudeState.WORKING -> statusService.updateActivity(sessionId, SessionActivity.WORKING)
+                ClaudeState.IDLE -> statusService.updateActivity(sessionId, SessionActivity.WAITING_FOR_INPUT)
+                ClaudeState.APPROVAL -> statusService.updateActivity(sessionId, SessionActivity.APPROVAL_NEEDED)
                 ClaudeState.UNKNOWN -> {} // keep last known activity
             }
         }
@@ -137,9 +138,8 @@ class SessionOrchestrator(
         get() = promptDetector.fullScreenReader
         set(value) { promptDetector.fullScreenReader = value }
 
-    // Per-session activity state (for health indicator dots)
-    private val _sessionActivities = kotlinx.coroutines.flow.MutableStateFlow<Map<String, SessionActivity>>(emptyMap())
-    val sessionActivities: kotlinx.coroutines.flow.StateFlow<Map<String, SessionActivity>> = _sessionActivities
+    // Per-session activity state (for health indicator dots) — owned by statusService.
+    val sessionActivities: kotlinx.coroutines.flow.StateFlow<Map<String, SessionActivity>> get() = statusService.sessionActivities
 
     // Human-readable "how am I connected" label per session, e.g. "Tailscale · Mosh"
     // or "Cloudflare · SSH". Surfaced as a chip in the chat status bar so the
@@ -192,27 +192,6 @@ class SessionOrchestrator(
 
     // Per-server reachability for the launcher health dot — owned by serverHealthService.
     val serverHealth: kotlinx.coroutines.flow.StateFlow<Map<String, ServerHealth>> get() = serverHealthService.serverHealth
-
-    // When APPROVAL_NEEDED was last asserted per session — used to protect a
-    // fresh screen-detected approval from being clobbered by a stale statusline
-    // WORKING render (see the grace check in emit()). Refreshed every ~3s by
-    // the detector's APPROVAL re-check while the dialog is on screen.
-    private val lastApprovalAt = java.util.concurrent.ConcurrentHashMap<String, Long>()
-
-    private fun updateActivity(sessionId: String, activity: SessionActivity) {
-        if (activity == SessionActivity.WORKING) transcriptService.markWorkSeen(sessionId)
-        if (activity == SessionActivity.APPROVAL_NEEDED) {
-            lastApprovalAt[sessionId] = System.currentTimeMillis()
-        }
-        val previous = _sessionActivities.value[sessionId]
-        _sessionActivities.update { it + (sessionId to activity) }
-        // Refresh git status when the session goes idle (e.g. a command just
-        // finished and may have changed the branch/dirty state). Debounced
-        // against the 90s loop via lastGitProbeAt. Off-thread; never blocks.
-        if (activity == SessionActivity.WAITING_FOR_INPUT && previous != SessionActivity.WAITING_FOR_INPUT) {
-            gitStatusService.probeOnIdle(sessionId)
-        }
-    }
 
     /** Dispatch [onClaudeNeedsInput] no more than once per [notifyDebounceMs] per
      *  session — protects against rapid duplicate fires from the Stop-hook stream
@@ -978,7 +957,7 @@ else:
                         eventKey = markerEpochSec?.let { "stop#$markerTmux#$it" },
                         body = body,
                     )
-                    updateActivity(sessionId, SessionActivity.WAITING_FOR_INPUT)
+                    statusService.updateActivity(sessionId, SessionActivity.WAITING_FOR_INPUT)
                 }
             } catch (e: Exception) {
                 FileLogger.error(TAG, "Notify watcher failed for server ${w.serverId}: ${e.message}", e)
@@ -1059,7 +1038,7 @@ else:
             serverStorage.updateServer(server.withRecentFolder(folder))
             tabManager.updateTabStatus(sessionId, SessionStatus.ACTIVE)
             FileLogger.log(TAG, "Session active: $sessionId")
-            updateActivity(sessionId, SessionActivity.WAITING_FOR_INPUT)
+            statusService.updateActivity(sessionId, SessionActivity.WAITING_FOR_INPUT)
             onSessionActive?.invoke(session)
             attachSessionRuntime(sessionId, session.tmuxSessionName)
             // Persist session for app-restart and server-reboot recovery.
@@ -1093,8 +1072,8 @@ else:
         // "needs attention" badge (#55) that never clears.
         val previousId = tabManager.activeTabId.value
         if (previousId != null && previousId != id &&
-            _sessionActivities.value[previousId] == SessionActivity.APPROVAL_NEEDED) {
-            updateActivity(previousId, SessionActivity.WAITING_FOR_INPUT)
+            statusService.currentActivity(previousId) == SessionActivity.APPROVAL_NEEDED) {
+            statusService.updateActivity(previousId, SessionActivity.WAITING_FOR_INPUT)
         }
         tabManager.switchTab(id)
         promptDetector.onUserInput(id)
@@ -1260,30 +1239,7 @@ else:
      * Polls two small state files via SSH stat+cat every ~5 s; idle traffic
      * stays under ~50 B/s. Cached per session and cleaned up on disconnect.
      */
-    fun remoteStatusFlow(sessionId: String): kotlinx.coroutines.flow.StateFlow<RemoteSessionStatus> {
-        val tab = tabManager.getTab(sessionId)
-            ?: return kotlinx.coroutines.flow.MutableStateFlow(RemoteSessionStatus())
-        val poller = synchronized(statusLock) {
-            // Only ONE tab's status is rendered at a time (the active Chat
-            // view). Stop the others here instead of leaking them: visiting all
-            // 21 tabs used to leave 21 pollers alive — each opening SSH execs
-            // every 5 s, in the background too. A stopped poller restarts
-            // lazily the next time its tab becomes active.
-            statusPollers.forEach { (id, p) -> if (id != sessionId) p.stop() }
-            statusPollers.getOrPut(sessionId) {
-                SessionStatusPoller(
-                    server = tab.server,
-                    cwd = tab.folder,
-                    claudeSessionIdProvider = { tabManager.getTab(sessionId)?.claudeSessionId },
-                    scope = reconnectScope,
-                    liveSession = { connectionRegistry.ssh(sessionId)?.getSession() },
-                    isBackground = { isInBackground },
-                )
-            }
-        }
-        poller.start()
-        return poller.status
-    }
+    fun remoteStatusFlow(sessionId: String) = statusService.remoteStatusFlow(sessionId)
 
     /**
      * Resolve a server's configured [ServerTransport] into the EFFECTIVE server
@@ -1552,7 +1508,7 @@ else:
                 // screen and the OMC statusline shows no elapsed time while it waits.
                 // A genuine WORKING result from the statusline may still override APPROVAL.
                 if (next == SessionActivity.WAITING_FOR_INPUT &&
-                    _sessionActivities.value[session.id] == SessionActivity.APPROVAL_NEEDED) return@let
+                    statusService.currentActivity(session.id) == SessionActivity.APPROVAL_NEEDED) return@let
                 // Grace: a WORKING statusline within 8s of APPROVAL being asserted
                 // is more likely a STALE render flowing back through the buffer
                 // (kickRedraw / replay re-printing an old "thinking" segment) than
@@ -1561,9 +1517,9 @@ else:
                 // a genuine resume still takes over within a beat of the dialog
                 // actually closing.
                 if (next == SessionActivity.WORKING &&
-                    _sessionActivities.value[session.id] == SessionActivity.APPROVAL_NEEDED &&
-                    System.currentTimeMillis() - (lastApprovalAt[session.id] ?: 0L) < 8_000L) return@let
-                updateActivity(session.id, next)
+                    statusService.currentActivity(session.id) == SessionActivity.APPROVAL_NEEDED &&
+                    System.currentTimeMillis() - statusService.lastApprovalAtMs(session.id) < 8_000L) return@let
+                statusService.updateActivity(session.id, next)
             }
             // ctx % is derived from the transcript (startContextTokenCollector),
             // not scraped. We still read the statusline's `ctx:NN%` here, but
@@ -1601,7 +1557,7 @@ else:
                         maybeCountTsEarlyDeath(session)
                         // Auto-reconnect with tmux reattach
                         tabManager.updateTabStatus(session.id, SessionStatus.DISCONNECTED)
-                        updateActivity(session.id, SessionActivity.DISCONNECTED)
+                        statusService.updateActivity(session.id, SessionActivity.DISCONNECTED)
                         reconnectScope.launch {
                             autoReconnect(session, ::emit)
                         }
@@ -1931,7 +1887,7 @@ else:
                     }
 
                     tabManager.updateTabStatus(session.id, SessionStatus.ACTIVE)
-                    updateActivity(session.id, SessionActivity.WAITING_FOR_INPUT)
+                    statusService.updateActivity(session.id, SessionActivity.WAITING_FOR_INPUT)
                     onSessionActive?.invoke(session)
                     // Restart ALL per-session loops, not just watcher+refresh —
                     // usage/git/latency pollers may have died during the outage.
@@ -2080,7 +2036,7 @@ else:
         // Try mosh first, then SSH
         val mosh = connectionRegistry.mosh(sessionId)
         if (mosh != null && mosh.isConnected) {
-            updateActivity(sessionId, SessionActivity.WORKING)
+            statusService.updateActivity(sessionId, SessionActivity.WORKING)
             mosh.sendInput(data)
             return
         }
@@ -2089,7 +2045,7 @@ else:
             queueInput(sessionId, data)
             return
         }
-        updateActivity(sessionId, SessionActivity.WORKING)
+        statusService.updateActivity(sessionId, SessionActivity.WORKING)
         conn.sendInput(data)
     }
 
@@ -2097,13 +2053,13 @@ else:
         promptDetector.onUserInput(sessionId)
         val mosh = connectionRegistry.mosh(sessionId)
         if (mosh != null && mosh.isConnected) {
-            updateActivity(sessionId, SessionActivity.WORKING)
+            statusService.updateActivity(sessionId, SessionActivity.WORKING)
             mosh.sendBytes(data)
             return
         }
         val conn = connectionRegistry.ssh(sessionId)
         if (conn == null || !conn.isConnected) { warnNoConnection(sessionId); return }
-        updateActivity(sessionId, SessionActivity.WORKING)
+        statusService.updateActivity(sessionId, SessionActivity.WORKING)
         conn.sendBytes(data)
     }
 
@@ -2164,7 +2120,7 @@ else:
         }
         FileLogger.log(TAG, "sendClaudeCommand: ${command.length} bytes to $sessionId")
         promptDetector.onUserInput(sessionId)
-        updateActivity(sessionId, SessionActivity.WORKING)
+        statusService.updateActivity(sessionId, SessionActivity.WORKING)
         conn.sendInput(command)
     }
 
@@ -2342,7 +2298,7 @@ else:
             // this; reconnectSession (restore + manual) was missing it. The real
             // working/idle state is then driven by the statusline parse in emit()
             // as soon as output flows.
-            updateActivity(sessionId, SessionActivity.WAITING_FOR_INPUT)
+            statusService.updateActivity(sessionId, SessionActivity.WAITING_FOR_INPUT)
             onSessionActive?.invoke(session)
             // Restart ALL per-session loops (usage/git/latency pollers included
             // — they may have died during the outage), not just watcher+refresh.
@@ -2353,7 +2309,7 @@ else:
         } catch (e: Exception) {
             FileLogger.error(TAG, "Reconnect failed", e)
             tabManager.updateTabStatus(sessionId, SessionStatus.ERROR)
-            updateActivity(sessionId, SessionActivity.DISCONNECTED)
+            statusService.updateActivity(sessionId, SessionActivity.DISCONNECTED)
             // Re-arm: a failed manual/restore/network-callback reconnect must
             // not strand the tab in ERROR — keep retrying with capped backoff
             // until it connects or the user closes the tab.
@@ -2474,16 +2430,14 @@ else:
         connectionRegistry.removeMosh(sessionId)
         synchronized(bufferLock) { outputBuffers.remove(sessionId) }
         transcriptService.dispose(sessionId)
-        synchronized(statusLock) {
-            statusPollers.remove(sessionId)?.stop()
-        }
+        statusService.stopPoller(sessionId)
         promptDetector.removeSession(sessionId)
         pendingInputs.remove(sessionId)
         terminalSizes.remove(sessionId)
         lastConnectAt.remove(sessionId)
         lastConnectTsEffective.remove(sessionId)
         transcriptService.clearConfirmedUuid(sessionId)
-        _sessionActivities.update { it - sessionId }
+        statusService.clearActivity(sessionId)
         _connectionLabels.update { it - sessionId }
         transcriptService.clearContextPercent(sessionId)
         // Usage maps are keyed by server (account-wide), so don't clear them on
@@ -3001,7 +2955,7 @@ DTIMER_EOF
             synchronized(bufferLock) { outputBuffers[session.id] = StringBuilder() }
             tabManager.addTab(session)
             tabManager.updateTabStatus(session.id, SessionStatus.DISCONNECTED)
-            updateActivity(session.id, SessionActivity.DISCONNECTED)
+            statusService.updateActivity(session.id, SessionActivity.DISCONNECTED)
         }
         FileLogger.log(TAG, "Restored ${rehydrated.size} persisted sessions to tabs")
         return rehydrated
