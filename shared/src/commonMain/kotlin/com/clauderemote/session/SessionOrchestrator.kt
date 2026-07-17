@@ -598,6 +598,11 @@ class SessionOrchestrator(
     private val reconnectingSessionIds = mutableSetOf<String>()
     // Last known terminal dimensions per session — used to re-send SIGWINCH after reconnect
     private val terminalSizes = mutableMapOf<String, Pair<Int, Int>>()
+    // The most recent ACTIVE-view terminal size. All sessions render in the same
+    // on-screen emulator, so this is the right size for any session whose own
+    // size isn't known yet (e.g. reconnected while backgrounded) — avoids the
+    // jsch 80x24 default that leaves tmux panes not filling the window.
+    @Volatile private var lastActiveViewSize: Pair<Int, Int>? = null
     // Sessions whose claudeSessionId has been confirmed by at least one server-side
     // probe (pid-probe or sessions.json reconcile). Once confirmed, transcriptFlow()
     // skips the one-shot kick-probe — firing it on every call caused repeated
@@ -2463,7 +2468,9 @@ else:
                         reconnectScope.launch {
                             autoReconnect(session, ::emit)
                         }
-                    }
+                    },
+                    initialCols = effectiveSize(session.id).first,
+                    initialRows = effectiveSize(session.id).second,
                 )
             }
         } catch (e: Exception) {
@@ -2493,11 +2500,12 @@ else:
         sendTmuxCommand(sshManager, session, isNewTmuxSession, checkClosedElsewhere)
         promptDetector.suppressFor(3000) // suppress during tmux screen redraw
 
-        // Apply saved terminal dimensions — TerminalView won't fire onResize
-        // because its size hasn't changed, but the new SSH channel defaults to 80x24.
-        terminalSizes[session.id]?.let { (cols, rows) ->
-            sshManager.resize(cols, rows)
-        }
+        // Apply the effective terminal dimensions — TerminalView won't fire
+        // onResize when its size hasn't changed, and a session that (re)connected
+        // while backgrounded has no remembered size of its own. effectiveSize()
+        // falls back to the last active-view size so the pane always fills the window.
+        val (cols, rows) = effectiveSize(session.id)
+        sshManager.resize(cols, rows)
     }
 
     private suspend fun sendTmuxCommand(
@@ -2755,7 +2763,9 @@ else:
                                     maybeCountTsEarlyDeath(session)
                                     tabManager.updateTabStatus(session.id, SessionStatus.DISCONNECTED)
                                     reconnectScope.launch { autoReconnect(session, emit) }
-                                }
+                                },
+                                initialCols = effectiveSize(session.id).first,
+                                initialRows = effectiveSize(session.id).second,
                             )
                         }
                     } catch (e: Exception) {
@@ -2772,11 +2782,13 @@ else:
                     sendTmuxCommand(sshManager, session, false, checkClosedElsewhere = true)
                     promptDetector.suppressFor(3000) // suppress during tmux screen redraw after reconnect
 
-                    // Re-send terminal dimensions — the new SshManager defaults
-                    // to 80x24 but the TerminalView hasn't changed size, so
-                    // onResize won't fire.  Without this, tmux renders at 80x24
-                    // leaving a gap below the content.
-                    terminalSizes[session.id]?.let { (cols, rows) ->
+                    // Re-send terminal dimensions — the TerminalView hasn't
+                    // changed size so onResize won't fire. A session reconnecting
+                    // while backgrounded has no remembered size of its own, so use
+                    // effectiveSize() (last active-view size fallback) to always
+                    // apply a correct size and avoid tmux rendering at 80x24.
+                    run {
+                        val (cols, rows) = effectiveSize(session.id)
                         kotlinx.coroutines.delay(200) // let tmux attach settle
                         sshManager.resize(cols, rows)
                     }
@@ -2996,8 +3008,16 @@ else:
 
     fun resize(sessionId: String, cols: Int, rows: Int) {
         terminalSizes[sessionId] = cols to rows
+        // Remember the active-view size as a global fallback for sessions that
+        // (re)connect while backgrounded. Guard against transient 0-size layout passes.
+        if (cols > 1 && rows > 0) lastActiveViewSize = cols to rows
         connections[sessionId]?.resize(cols, rows)
     }
+
+    /** Best-known pty size for [sessionId]: its own remembered size, else the last
+     *  active-view size, else the classic 80x24 default. */
+    private fun effectiveSize(sessionId: String): Pair<Int, Int> =
+        terminalSizes[sessionId] ?: lastActiveViewSize ?: (80 to 24)
 
     fun sendClaudeCommand(sessionId: String, command: String) {
         val conn = connections[sessionId]

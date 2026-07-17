@@ -54,7 +54,9 @@ class SshManager(
     suspend fun connect(
         server: SshServer,
         onOutput: (String) -> Unit,
-        onConnectionLost: () -> Unit
+        onConnectionLost: () -> Unit,
+        initialCols: Int = 80,
+        initialRows: Int = 24,
     ): Session = withContext(Dispatchers.IO) {
         disconnected = false
         this@SshManager.onConnectionLost = onConnectionLost
@@ -135,6 +137,11 @@ class SshManager(
         try {
             ch = sess.openChannel("shell") as ChannelShell
             ch.setPtyType("xterm-256color")
+            // Open the pty at the real terminal size. Without this jsch defaults
+            // to 80x24, which leaves tmux panes not filling the window for any
+            // session that (re)connected while backgrounded (its onResize never
+            // fired, so no post-attach resize corrected it).
+            ch.setPtySize(initialCols, initialRows, initialCols * 8, initialRows * 16)
             inputStream = ch.inputStream
             outputStream = ch.outputStream
             ch.connect(connectTimeout)
@@ -147,6 +154,8 @@ class SshManager(
             throw e
         }
         channel = ch
+        // Keep the resize no-op check consistent with the pty size we opened at.
+        lastCols = initialCols; lastRows = initialRows
         FileLogger.log(TAG, "Shell channel opened")
 
         // Read loop — delivers SSH data immediately to onOutput
