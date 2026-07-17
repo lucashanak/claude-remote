@@ -69,6 +69,12 @@ class SessionOrchestrator(
         reconnectScope, connectionRegistry, tabManager, { isInBackground }
     )
 
+    // 5h/week usage percents + reset minutes + usage tokens + ccusage polling.
+    private val usageService = com.clauderemote.session.service.UsageService(
+        reconnectScope, connectionRegistry, tabManager, { isInBackground },
+        { s, w -> onUsageUpdate?.invoke(s, w) }
+    )
+
     // Per-session transcript streams (JSONL tail readers).
     private val transcriptStreams = mutableMapOf<String, TranscriptStream>()
     private val transcriptLock = Any()
@@ -317,9 +323,8 @@ class SessionOrchestrator(
         _contextPercents.update { it + (sessionId to percent) }
     }
 
-    // Last parsed usage tokens (for dashboard)
-    private val _usageTokens = MutableStateFlow<CostCalculator.UsageTokens?>(null)
-    val usageTokens: StateFlow<CostCalculator.UsageTokens?> = _usageTokens
+    // Last parsed usage tokens (for dashboard) — owned by usageService.
+    val usageTokens: StateFlow<CostCalculator.UsageTokens?> get() = usageService.usageTokens
 
     // Terminal output callback — set by the platform (Android native terminal, Desktop JediTerm)
     var onTerminalOutput: ((sessionId: String, data: String) -> Unit)? = null
@@ -348,28 +353,14 @@ class SessionOrchestrator(
     // into a new empty session when tapped.
     var onSessionForgotten: ((serverId: String, tmuxSessionName: String) -> Unit)? = null
 
-    // Usage percentages parsed from the OMC statusline, keyed by SERVER id.
-    // 5h and weekly limits are account-wide, so every session on the same
-    // server shares them — switch tabs and the values stay put instead of
-    // resetting to '—' until the new tab fetches them itself.
-    private val _sessionUsagePercents = kotlinx.coroutines.flow.MutableStateFlow<Map<String, Int>>(emptyMap())
-    val sessionUsagePercents: kotlinx.coroutines.flow.StateFlow<Map<String, Int>> = _sessionUsagePercents
-    private val _weekUsagePercents = kotlinx.coroutines.flow.MutableStateFlow<Map<String, Int>>(emptyMap())
-    val weekUsagePercents: kotlinx.coroutines.flow.StateFlow<Map<String, Int>> = _weekUsagePercents
+    // Usage percentages parsed from the OMC statusline, keyed by SERVER id —
+    // owned by usageService.
+    val sessionUsagePercents: kotlinx.coroutines.flow.StateFlow<Map<String, Int>> get() = usageService.sessionUsagePercents
+    val weekUsagePercents: kotlinx.coroutines.flow.StateFlow<Map<String, Int>> get() = usageService.weekUsagePercents
 
-    // Time-to-reset (minutes) parsed from the OMC `(XhYm)` suffix.
-    private val _sessionResetMin = kotlinx.coroutines.flow.MutableStateFlow<Map<String, Int>>(emptyMap())
-    val sessionResetMin: kotlinx.coroutines.flow.StateFlow<Map<String, Int>> = _sessionResetMin
-    private val _weekResetMin = kotlinx.coroutines.flow.MutableStateFlow<Map<String, Int>>(emptyMap())
-    val weekResetMin: kotlinx.coroutines.flow.StateFlow<Map<String, Int>> = _weekResetMin
-
-    // Per-SERVER periodic polling jobs (keyed by server id). Usage (ccusage is
-    // account-wide) and latency (all sessions share the physical link) are
-    // identical for every session on a server — at 21 sessions on one box the
-    // old per-session polls did 21× the SSH work to fetch one value.
-    // ConcurrentHashMap + compute(): every session's attach/reconnect touches
-    // its server's entry, overlapping with disconnects during a reconnect storm.
-    private val usagePollingJobs = java.util.concurrent.ConcurrentHashMap<String, kotlinx.coroutines.Job>()
+    // Time-to-reset (minutes) parsed from the OMC `(XhYm)` suffix — owned by usageService.
+    val sessionResetMin: kotlinx.coroutines.flow.StateFlow<Map<String, Int>> get() = usageService.sessionResetMin
+    val weekResetMin: kotlinx.coroutines.flow.StateFlow<Map<String, Int>> get() = usageService.weekResetMin
 
     /**
      * SHARED per-server Stop-hook watcher. All sessions on a server tail the
@@ -505,7 +496,7 @@ class SessionOrchestrator(
         connectionRegistry.serverIdOf(sessionId)?.let { serverId ->
             // Per-server loops: idempotent, first session on the server starts
             // them, later sessions just register/reuse.
-            startServerUsagePolling(serverId)
+            usageService.startServerUsagePolling(serverId)
             serverHealthService.startServerLatencyPolling(serverId)
             startNotifyWatcher(sessionId, tmuxSessionName, serverId)
         }
@@ -582,42 +573,6 @@ class SessionOrchestrator(
         // Starlink-handover detection. JSch applies the new interval live.
         val keepAlive = if (background) 60_000 else 10_000
         connectionRegistry.setKeepAliveIntervalAll(keepAlive)
-    }
-
-    private fun startServerUsagePolling(serverId: String) {
-        // Idempotent: ccusage data is account-wide, one loop per server serves
-        // every session on it. Don't restart on reattach — the loop resolves a
-        // live connection fresh each tick, so it self-heals across reconnects.
-        // compute() makes check-and-launch atomic per key against a concurrent
-        // last-session teardown's remove()+cancel().
-        usagePollingJobs.compute(serverId) { _, existing ->
-            if (existing?.isActive == true) return@compute existing
-            reconnectScope.launch {
-                kotlinx.coroutines.delay(5000) // initial delay
-                while (isActive) {
-                    // Skip poll when app is in background — user can't see usage bar anyway.
-                    // A missing connection (mid-reconnect) just skips this round —
-                    // the old `?: break` exited the loop PERMANENTLY the first time
-                    // a reconnect briefly emptied the connections map, leaving the
-                    // chips dead until app restart.
-                    if (!isInBackground) {
-                        try {
-                            val sshSession = connectionRegistry.liveServerSession(serverId)
-                            if (sshSession != null) {
-                                // 60s budget: the first run may npm-install ccusage.
-                                val output = execReadWithWatchdog(
-                                    sshSession,
-                                    "which ccusage >/dev/null 2>&1 || npm install -g ccusage >/dev/null 2>&1; ccusage blocks --active --json --offline --no-color 2>/dev/null || echo '{}'",
-                                    totalMs = 60_000,
-                                )
-                                parseUsageJson(output)
-                            }
-                        } catch (_: Exception) {}
-                    }
-                    kotlinx.coroutines.delay(120_000) // poll every 2 min (was 30s)
-                }
-            }
-        }
     }
 
     /** Remove a deleted server's health entry so no stale state leaks. */
@@ -841,53 +796,6 @@ class SessionOrchestrator(
             } catch (e: Exception) {
                 null
             }
-        }
-    }
-
-    private fun parseUsageJson(json: String) {
-        try {
-            if (json.isBlank() || json.trim() == "{}") return
-            // Parse token counts from ccusage blocks JSON
-            // Sum all token types for real usage
-            val inputTokens = Regex("\"inputTokens\"\\s*:\\s*(\\d+)").find(json)
-                ?.groupValues?.get(1)?.toLongOrNull() ?: 0L
-            val outputTokens = Regex("\"outputTokens\"\\s*:\\s*(\\d+)").find(json)
-                ?.groupValues?.get(1)?.toLongOrNull() ?: 0L
-            val cacheCreation = Regex("\"cacheCreationInputTokens\"\\s*:\\s*(\\d+)").find(json)
-                ?.groupValues?.get(1)?.toLongOrNull() ?: 0L
-            val cacheRead = Regex("\"cacheReadInputTokens\"\\s*:\\s*(\\d+)").find(json)
-                ?.groupValues?.get(1)?.toLongOrNull() ?: 0L
-
-            val totalUsed = inputTokens + outputTokens + cacheCreation + cacheRead
-            if (totalUsed == 0L) return
-
-            // Store for dashboard
-            _usageTokens.value = CostCalculator.UsageTokens(
-                inputTokens = inputTokens,
-                outputTokens = outputTokens,
-                cacheCreationTokens = cacheCreation,
-                cacheReadTokens = cacheRead
-            )
-
-            // Parse remaining minutes from projection
-            val remaining = Regex("\"remainingMinutes\"\\s*:\\s*(\\d+)").find(json)
-                ?.groupValues?.get(1)?.toIntOrNull()
-
-            // Estimate percentage: remaining/300min (5h) = remaining fraction
-            val pct = if (remaining != null && remaining < 300) {
-                ((1.0 - remaining.toDouble() / 300.0) * 100).toInt().coerceIn(0, 100)
-            } else {
-                // Fallback: burn rate based
-                val burnRate = Regex("\"tokensPerMinute\"\\s*:\\s*([\\d.]+)").find(json)
-                    ?.groupValues?.get(1)?.toDoubleOrNull() ?: return
-                if (burnRate <= 0) return
-                val estimatedTotal = burnRate * 300 // 5h in minutes
-                ((totalUsed.toDouble() / estimatedTotal) * 100).toInt().coerceIn(0, 100)
-            }
-            FileLogger.log(TAG, "Usage: ${totalUsed} tokens, ${remaining}min remaining, ${pct}%")
-            onUsageUpdate?.invoke(pct, null)
-        } catch (e: Exception) {
-            FileLogger.error(TAG, "Usage parse failed: ${e.message}", e)
         }
     }
 
@@ -2165,24 +2073,7 @@ else:
             if (session.id in sawWorkSinceAttach) {
                 val usage = promptDetector.parseUsage(session.id, text)
                 if (usage != null) {
-                    // 5h / week limits are account-wide, so key them by SERVER,
-                    // not session — switching to another session on the same
-                    // server then keeps the values instead of resetting to "—"
-                    // until that session happens to fetch them itself.
-                    val serverId = session.server.id
-                    usage["session"]?.let { s ->
-                        _sessionUsagePercents.update { it + (serverId to s) }
-                    }
-                    usage["week"]?.let { w ->
-                        _weekUsagePercents.update { it + (serverId to w) }
-                    }
-                    usage["session_reset_min"]?.let { m ->
-                        _sessionResetMin.update { it + (serverId to m) }
-                    }
-                    usage["week_reset_min"]?.let { m ->
-                        _weekResetMin.update { it + (serverId to m) }
-                    }
-                    onUsageUpdate?.invoke(usage["session"], usage["week"])
+                    usageService.applyStatusline(session.server.id, usage)
                 }
             }
         }
@@ -3068,7 +2959,7 @@ else:
                 it.id != sessionId && it.server.id == serverId
             }
             if (lastOnServer) {
-                usagePollingJobs.remove(serverId)?.cancel()
+                usageService.stopPolling(serverId)
                 serverHealthService.stopLatencyPolling(serverId)
             }
         }
