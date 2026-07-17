@@ -82,43 +82,20 @@ class SessionOrchestrator(
         { id -> gitStatusService.probeOnIdle(id) },
     )
 
+    // Input-prompt detection, needs-input notifications, Stop-hook watcher,
+    // login flow, and the offline pending-input queue. Declared after the
+    // services it bridges to (statusService/transcriptService) exist.
+    private val notificationService = com.clauderemote.session.service.NotificationService(
+        reconnectScope, connectionRegistry, tabManager, { isInBackground },
+        { id, act -> statusService.updateActivity(id, act) },
+        { id -> transcriptService.lastAssistantEntry(id) },
+        { id -> transcriptService.streamOrNull(id) },
+        { sid, hint, active, body -> onClaudeNeedsInput?.invoke(sid, hint, active, body) },
+    )
+
     // Per-session terminal output buffer (ring buffer, capped at MAX_BUFFER)
     private val outputBuffers = mutableMapOf<String, StringBuilder>()
     private val bufferLock = Any()
-
-    // Prompt detection for notifications — quiescence-based, reads rendered screen state.
-    private val promptDetector = InputPromptDetector().apply {
-        onDetection = { det ->
-            val isActive = tabManager.activeTabId.value == det.sessionId
-            fireNeedsInput(det.sessionId, det.type.displayHint, isActive)
-            // Bridge prompt types that require explicit user approval to the
-            // APPROVAL_NEEDED activity so the y/n buttons visually emphasize.
-            // The onStateChange callback will overwrite this on the next state
-            // change (e.g. WORKING), so it self-clears automatically.
-            if (det.type == PromptType.APPROVAL_NEEDED || det.type == PromptType.PERMISSION_PROMPT) {
-                statusService.updateActivity(det.sessionId, SessionActivity.APPROVAL_NEEDED)
-            }
-        }
-        onStateChange = { sessionId, state ->
-            when (state) {
-                ClaudeState.WORKING -> statusService.updateActivity(sessionId, SessionActivity.WORKING)
-                ClaudeState.IDLE -> statusService.updateActivity(sessionId, SessionActivity.WAITING_FOR_INPUT)
-                ClaudeState.APPROVAL -> statusService.updateActivity(sessionId, SessionActivity.APPROVAL_NEEDED)
-                ClaudeState.UNKNOWN -> {} // keep last known activity
-            }
-        }
-        onLoginDetected = { sid, url ->
-            // SECURITY: never log the URL — it seams into the pasted auth code.
-            _loginFlow.update { cur ->
-                val next = if (url != null) com.clauderemote.model.LoginFlowState(sid, url)
-                else if (cur?.sessionId == sid) null else cur
-                if ((cur == null) != (next == null)) {
-                    FileLogger.log(TAG, "login flow ${if (next != null) "detected" else "cleared"} for $sid")
-                }
-                next
-            }
-        }
-    }
 
     /**
      * Platform-provided screen snapshot reader. Must marshal onto the thread that
@@ -126,8 +103,8 @@ class SessionOrchestrator(
      * to [InputPromptDetector.screenReader].
      */
     var screenReader: (suspend (sessionId: String) -> ScreenStateSnapshot?)?
-        get() = promptDetector.screenReader
-        set(value) { promptDetector.screenReader = value }
+        get() = notificationService.promptDetector.screenReader
+        set(value) { notificationService.promptDetector.screenReader = value }
 
     /**
      * Full de-wrapped visible screen text of the ACTIVE session, or null. Used only
@@ -135,8 +112,8 @@ class SessionOrchestrator(
      * Pass-through to [InputPromptDetector.fullScreenReader].
      */
     var fullScreenReader: (suspend (sessionId: String) -> String?)?
-        get() = promptDetector.fullScreenReader
-        set(value) { promptDetector.fullScreenReader = value }
+        get() = notificationService.promptDetector.fullScreenReader
+        set(value) { notificationService.promptDetector.fullScreenReader = value }
 
     // Per-session activity state (for health indicator dots) — owned by statusService.
     val sessionActivities: kotlinx.coroutines.flow.StateFlow<Map<String, SessionActivity>> get() = statusService.sessionActivities
@@ -167,14 +144,7 @@ class SessionOrchestrator(
     // (authoritative: flips to WAITING the instant Claude finishes, regardless
     // of which screen the user is on). The UI uses this to know it can trust
     // `activity` outright instead of falling back to a stale-WORKING timer.
-    private val _hookActiveSessions = kotlinx.coroutines.flow.MutableStateFlow<Set<String>>(emptySet())
-    val hookActiveSessions: kotlinx.coroutines.flow.StateFlow<Set<String>> = _hookActiveSessions
-
-    private fun setHookActive(sessionId: String, active: Boolean) {
-        if (active) promptDetector.markHookActive(sessionId)
-        else promptDetector.markHookInactive(sessionId)
-        _hookActiveSessions.update { if (active) it + sessionId else it - sessionId }
-    }
+    val hookActiveSessions: kotlinx.coroutines.flow.StateFlow<Set<String>> get() = notificationService.hookActiveSessions
 
     // Per-session context window usage (0-100) — owned by transcriptService.
     val contextPercents: kotlinx.coroutines.flow.StateFlow<Map<String, Int>> get() = transcriptService.contextPercents
@@ -185,64 +155,11 @@ class SessionOrchestrator(
     // Per-session git status of the working directory — owned by gitStatusService.
     val gitStatuses: kotlinx.coroutines.flow.StateFlow<Map<String, GitStatus>> get() = gitStatusService.gitStatuses
 
-    // Pending input queue per session (for offline queue feature)
-    private val pendingInputs = java.util.concurrent.ConcurrentHashMap<String, MutableList<String>>()
-    private val _pendingCounts = kotlinx.coroutines.flow.MutableStateFlow<Map<String, Int>>(emptyMap())
-    val pendingCounts: kotlinx.coroutines.flow.StateFlow<Map<String, Int>> = _pendingCounts
+    // Pending input queue per session (for offline queue feature) — owned by notificationService.
+    val pendingCounts: kotlinx.coroutines.flow.StateFlow<Map<String, Int>> get() = notificationService.pendingCounts
 
     // Per-server reachability for the launcher health dot — owned by serverHealthService.
     val serverHealth: kotlinx.coroutines.flow.StateFlow<Map<String, ServerHealth>> get() = serverHealthService.serverHealth
-
-    /** Dispatch [onClaudeNeedsInput] no more than once per [notifyDebounceMs] per
-     *  session — protects against rapid duplicate fires from the Stop-hook stream
-     *  and from the screen-state fallback firing on transient quiescence. */
-    private fun fireNeedsInput(
-        sessionId: String,
-        hint: String,
-        isActive: Boolean,
-        // Precise identity of the triggering event when the caller has one —
-        // the Stop-hook path passes "stop#<tmux>#<epoch>" so one completion
-        // maps to exactly one key regardless of transcript freshness.
-        eventKey: String? = null,
-        // Raw assistant text (markdown) for the just-finished turn, resolved by
-        // the Stop path after its atomic epoch claim wins; null for the other
-        // callers, in which case the platform falls back to the generic hint.
-        body: String? = null,
-    ) {
-        val now = System.currentTimeMillis()
-        // Dedup by the explicit event key when given, else by (hint + last
-        // assistant message). On reconnect the tmux buffer is replayed and the
-        // screen looks idle/approval again, and a flapping
-        // OMC statusline (WORKING→idle→WORKING around a prompt) re-raises the
-        // SAME alert — both re-fired a notification for an event the user already
-        // saw. Keying on the hint TOO lets a genuine APPROVAL after an
-        // INPUT_PROMPT on the same message still get through, while the same
-        // (hint, message) repeat is suppressed. Previously only INPUT_PROMPT was
-        // deduped, so APPROVAL/PERMISSION spammed on every flap.
-        // The check-and-update runs under a lock so non-epoch callers (APPROVAL
-        // etc.) can't race two coroutines through the same dedup slot; the
-        // platform callback is invoked OUTSIDE the lock (never hold a lock
-        // across a platform callback).
-        val key = eventKey ?: lastAssistantId(sessionId)?.let { "$hint#$it" }
-        val proceed = synchronized(lastNotifiedKey) {
-            if (key != null && lastNotifiedKey[sessionId] == key) {
-                FileLogger.log(TAG, "Suppressed needs-input for $sessionId (same event)")
-                false
-            } else {
-                val last = lastNeedsInputAt[sessionId] ?: 0L
-                if (now - last < notifyDebounceMs) {
-                    FileLogger.log(TAG, "Suppressed needs-input for $sessionId (debounce)")
-                    false
-                } else {
-                    lastNeedsInputAt[sessionId] = now
-                    if (key != null) lastNotifiedKey[sessionId] = key
-                    true
-                }
-            }
-        }
-        if (!proceed) return
-        onClaudeNeedsInput?.invoke(sessionId, hint, isActive, body)
-    }
 
     // Last parsed usage tokens (for dashboard) — owned by usageService.
     val usageTokens: StateFlow<CostCalculator.UsageTokens?> get() = usageService.usageTokens
@@ -283,21 +200,6 @@ class SessionOrchestrator(
     val sessionResetMin: kotlinx.coroutines.flow.StateFlow<Map<String, Int>> get() = usageService.sessionResetMin
     val weekResetMin: kotlinx.coroutines.flow.StateFlow<Map<String, Int>> get() = usageService.weekResetMin
 
-    /**
-     * SHARED per-server Stop-hook watcher. All sessions on a server tail the
-     * SAME /tmp/claude-notify, so one watcher per server replaces N identical
-     * long-lived tail -f channels (20 fewer at 21 sessions) and dispatches each
-     * marker to its owning session by the exact tmux-name token in the line.
-     */
-    private inner class ServerNotifyWatcher(val serverId: String) {
-        /** tmux session name → app session id, updated on attach/detach. */
-        val tmuxToSession = java.util.concurrent.ConcurrentHashMap<String, String>()
-        /** True while the tail channel is connected (hook-based detection active). */
-        @Volatile var live = false
-        var job: kotlinx.coroutines.Job? = null
-    }
-    private val serverNotifyWatchers = java.util.concurrent.ConcurrentHashMap<String, ServerNotifyWatcher>()
-
     // sessions.json is one file per SERVER; with N sessions each running the
     // 15 s reconcile loop, N−1 of the flock+cat fetches were redundant. Cache
     // the parsed snapshot per server with a TTL just under the loop period so
@@ -306,31 +208,6 @@ class SessionOrchestrator(
     private val sessionsJsonCache = java.util.concurrent.ConcurrentHashMap<String, SessionsSnapshot>()
     private val sessionsJsonMutex = Mutex()
 
-    /** Per-session timestamp of the last "needs input" dispatch, used to debounce
-     *  the Stop-hook fire stream — claude can emit several markers in quick
-     *  succession (model handoff, tool retries) and we don't want to vibrate
-     *  the phone for each one. */
-    private val lastNeedsInputAt = mutableMapOf<String, Long>()
-    /** Last "(hint)#(assistant-message-id)" we fired a notification for, per
-     *  session — dedups reconnect replays / statusline flaps re-notifying an
-     *  already-seen event (per prompt type). */
-    private val lastNotifiedKey = mutableMapOf<String, String>()
-    // Highest Stop-hook marker epoch (seconds) we've already NOTIFIED for a
-    // session. The watcher replays tail -n 25 on every reconnect and restarts
-    // every ~30-45 min; a completion is identified by its epoch, so we notify
-    // only for a STRICTLY NEWER epoch per session — replays (same/older epoch),
-    // the single-slot lastNotifiedKey overwrite, and the check-and-set race can
-    // no longer re-fire an already-notified completion. ConcurrentHashMap +
-    // the synchronized claim below make the check-and-set atomic.
-    private val lastNotifiedEpochSec = java.util.concurrent.ConcurrentHashMap<String, Long>()
-    // Assistant-message id sent in the last notification per session, so we never
-    // resend the previous round's message as a "new" completion body.
-    private val lastNotifiedAssistantId = java.util.concurrent.ConcurrentHashMap<String, String>()
-    private val notifyDebounceMs = 5_000L
-    /** A Stop-hook marker older than this (skew-corrected) is dropped as stale —
-     *  it's a buffered replay from a network/HyperOS freeze, not a fresh
-     *  completion the user is waiting on. */
-    private val notifyStaleMs = 120_000L
     // Per-session pollers that read ~/.claude/sessions/<pid>.json on the
     // server to capture the *real* claude session_id — which can drift from
     // the UUID we passed via --session-id when the user invokes /resume,
@@ -355,13 +232,12 @@ class SessionOrchestrator(
     private val _reconnectStatus = kotlinx.coroutines.flow.MutableStateFlow<Map<String, ReconnectInfo>>(emptyMap())
     val reconnectStatus: kotlinx.coroutines.flow.StateFlow<Map<String, ReconnectInfo>> = _reconnectStatus
 
-    // Active Claude `/login` OAuth flow detected on the current screen, or null.
-    // Fed by InputPromptDetector.onLoginDetected. The URL is never logged.
-    private val _loginFlow = kotlinx.coroutines.flow.MutableStateFlow<com.clauderemote.model.LoginFlowState?>(null)
-    val loginFlow: kotlinx.coroutines.flow.StateFlow<com.clauderemote.model.LoginFlowState?> = _loginFlow
+    // Active Claude `/login` OAuth flow detected on the current screen, or null —
+    // owned by notificationService (fed by InputPromptDetector.onLoginDetected).
+    val loginFlow: kotlinx.coroutines.flow.StateFlow<com.clauderemote.model.LoginFlowState?> get() = notificationService.loginFlow
 
     /** Clear the login card for [sessionId] (user submitted the code or cancelled). */
-    fun clearLoginFlow(sessionId: String) { _loginFlow.update { if (it?.sessionId == sessionId) null else it } }
+    fun clearLoginFlow(sessionId: String) = notificationService.clearLoginFlow(sessionId)
 
     /**
      * Arm (idempotently) the persistent reconnect loop for [sessionId].
@@ -419,7 +295,7 @@ class SessionOrchestrator(
             // them, later sessions just register/reuse.
             usageService.startServerUsagePolling(serverId)
             serverHealthService.startServerLatencyPolling(serverId)
-            startNotifyWatcher(sessionId, tmuxSessionName, serverId)
+            notificationService.startNotifyWatcher(sessionId, tmuxSessionName, serverId)
         }
         gitStatusService.startGitStatusPolling(sessionId)
         connectionRegistry.ssh(sessionId)?.let { conn ->
@@ -713,270 +589,6 @@ class SessionOrchestrator(
         }
     }
 
-    // ---- Claude Code Stop-hook integration ----
-
-    /**
-     * Shell command run via SSH exec to ensure `~/.claude/settings.json` on the
-     * remote server contains a `Stop` hook that appends to `/tmp/claude-notify`.
-     * Uses `python3` for safe JSON merge (preserves all existing content).
-     * Idempotent — checks for our marker string before adding.
-     */
-    private val ENSURE_HOOK_COMMAND = """
-        python3 -c "
-import json, os
-p = os.path.expanduser('~/.claude/settings.json')
-d = {}
-if os.path.exists(p):
-    with open(p) as f: d = json.load(f)
-hooks = d.setdefault('hooks', {})
-stop = hooks.setdefault('Stop', [])
-marker = 'claude-remote-notify'
-cmd = \"echo claude-remote-notify \$(tmux display-message -p '#S' 2>/dev/null || echo unknown) \$(date +%s) >> /tmp/claude-notify\"
-want = {'matcher': '', 'hooks': [{'type': 'command', 'command': cmd}]}
-def has_marker(e):
-    if not isinstance(e, dict): return False
-    if marker in str(e.get('command', '')): return True
-    for h in e.get('hooks') or []:
-        if isinstance(h, dict) and marker in str(h.get('command', '')): return True
-    return False
-canonical_ok = any(e == want for e in stop if isinstance(e, dict))
-stale = [e for e in stop if has_marker(e) and e != want]
-if canonical_ok and not stale:
-    print('HOOK_EXISTS')
-else:
-    hooks['Stop'] = [e for e in stop if not has_marker(e)] + [want]
-    os.makedirs(os.path.dirname(p), exist_ok=True)
-    with open(p, 'w') as f: json.dump(d, f, indent=2)
-    print('HOOK_FIXED')
-" 2>&1 || echo 'HOOK_FAILED'
-    """.trimIndent()
-
-    /**
-     * Ensure the Claude Code `Stop` hook is present on the remote server. Runs
-     * a one-shot SSH exec. Safe to call multiple times — the script is
-     * idempotent. Failures are logged but non-fatal (screen-scraping fallback
-     * still works).
-     */
-    private suspend fun ensureStopHook(sshManager: SshManager) {
-        try {
-            val result = kotlinx.coroutines.withContext(Dispatchers.IO) {
-                val sshSession = sshManager.getSession() ?: return@withContext "NO_SESSION"
-                val ch = sshSession.openChannel("exec") as com.jcraft.jsch.ChannelExec
-                ch.setCommand(ENSURE_HOOK_COMMAND)
-                ch.inputStream = null
-                val input = ch.inputStream
-                ch.connect(10_000)
-                val out = input.bufferedReader().readText().trim()
-                ch.disconnect()
-                out
-            }
-            FileLogger.log(TAG, "Stop hook setup: $result")
-        } catch (e: Exception) {
-            FileLogger.error(TAG, "Stop hook setup failed: ${e.message}", e)
-        }
-    }
-
-    /**
-     * Register [sessionId] with the SHARED per-server Stop-hook watcher and
-     * make sure that watcher is running. The watcher holds ONE `tail -f
-     * /tmp/claude-notify` exec channel per server (all sessions share the
-     * file) and dispatches each marker to the owning session by tmux name,
-     * firing [onClaudeNeedsInput]. Registered sessions are marked hook-active
-     * in the detector so screen-state polling is skipped.
-     *
-     * If the watcher channel drops (SSH reconnect), screen-state fallback
-     * resumes automatically via [markHookInactive]; on reconnect the last 25
-     * marker lines are replayed (stale-filtered + deduped) so completions
-     * that happened during the gap still notify.
-     */
-    private fun startNotifyWatcher(sessionId: String, tmuxName: String, serverId: String) {
-        while (true) {
-            val w = serverNotifyWatchers.getOrPut(serverId) { ServerNotifyWatcher(serverId) }
-            val registered = synchronized(w) {
-                // Whole register sequence under the watcher's monitor, and
-                // re-checked against the map: a concurrent last-session
-                // disconnect may have just emptied + removed this instance —
-                // registering into the removed orphan would leave the session
-                // served by a watcher nobody can ever cancel (and a later
-                // attach would mint a SECOND tail on the same file).
-                if (serverNotifyWatchers[serverId] !== w) return@synchronized false
-                // Re-point this session's registration (a relaunched tab may
-                // have a new tmux name — drop the stale mapping first).
-                w.tmuxToSession.entries.removeAll { it.value == sessionId && it.key != tmuxName }
-                w.tmuxToSession[tmuxName] = sessionId
-                // Watcher already tailing → hook detection is live for this
-                // session now. Under the monitor so it can't interleave with
-                // the connect fan-out and miss the one-shot activation.
-                if (w.live) setHookActive(sessionId, true)
-                if (w.job?.isActive != true) {
-                    w.job = reconnectScope.launch { runServerNotifyWatcher(w) }
-                }
-                true
-            }
-            if (registered) return
-        }
-    }
-
-    private suspend fun runServerNotifyWatcher(w: ServerNotifyWatcher) = kotlinx.coroutines.coroutineScope {
-        // Retry loop: the exec channel can die silently (mobile networks,
-        // HyperOS battery management kill the socket without dropping the
-        // main SSH channel). Previously the watcher exited permanently and
-        // hook-based detection was gone until a FULL transport reconnect —
-        // background sessions then had no detection path at all.
-        var attempt = 0
-        while (isActive && w.tmuxToSession.isNotEmpty()) {
-            // Hoisted so the finally can ALWAYS disconnect it — if connect() or
-            // readLine() throws, a channel declared inside the try would leak
-            // on the shared long-lived session, one per retry.
-            var ch: com.jcraft.jsch.ChannelExec? = null
-            try {
-                val sshSession = connectionRegistry.liveServerSession(w.serverId)
-                if (sshSession == null) {
-                    // No live connection right now (mid-reconnect). Keep probing
-                    // — the shared watcher rides ANY session's connection, so it
-                    // resumes as soon as the first tab on this server is back.
-                    kotlinx.coroutines.delay(5_000)
-                    continue
-                }
-                ch = sshSession.openChannel("exec") as com.jcraft.jsch.ChannelExec
-                // Emit the server clock first (learns phone↔server skew), then
-                // tail INCLUDING the last 25 lines: markers appended while the
-                // watcher was down (channel drop + retry backoff) used to be
-                // lost forever — a completion during a reconnect window never
-                // notified. The stale filter + marker-epoch dedup below make
-                // replaying the recent backlog safe.
-                ch.setCommand("echo claude-remote-clock \$(date +%s); touch /tmp/claude-notify && tail -n 25 -f /tmp/claude-notify")
-                ch.inputStream = null
-                val reader = ch.inputStream.bufferedReader()
-                ch.connect(5000)
-
-                // Under the monitor so a session registering right now can't
-                // slip between `live = true` and the fan-out and miss both.
-                synchronized(w) {
-                    w.live = true
-                    w.tmuxToSession.values.forEach { setHookActive(it, true) }
-                }
-                attempt = 0
-                // Offset (ms) between this device's clock and the server's,
-                // learned from the "claude-remote-clock <epoch>" line the
-                // channel emits first (echo runs before tail, so it always
-                // precedes any marker). Lets us reject stale markers by AGE
-                // despite clock skew.
-                var clockSkewMs: Long? = null
-                FileLogger.log(TAG, "Notify watcher started for server ${w.serverId} (${w.tmuxToSession.size} sessions)")
-
-                while (isActive && ch.isConnected) {
-                    val line = kotlinx.coroutines.withContext(Dispatchers.IO) {
-                        reader.readLine()
-                    } ?: break
-                    // Server clock probe (emitted once, first): learn skew.
-                    if (line.startsWith("claude-remote-clock")) {
-                        line.trim().split(Regex("\\s+")).getOrNull(1)?.toLongOrNull()?.let { serverEpochSec ->
-                            clockSkewMs = System.currentTimeMillis() - serverEpochSec * 1000L
-                        }
-                        continue
-                    }
-                    if (!line.startsWith("claude-remote-notify")) continue
-                    // EXACT tmux-session match. The marker line is
-                    // "claude-remote-notify <#S> <epoch>" and ALL sessions
-                    // share /tmp/claude-notify, so a substring match cross-
-                    // fired between sessions whose names are prefixes of each
-                    // other (e.g. "cashy" matched "cashy-test"). Dispatch on the
-                    // second whitespace token exactly.
-                    val parts = line.trim().split(Regex("\\s+"))
-                    val markerTmux = parts.getOrNull(1) ?: continue
-                    val sessionId = w.tmuxToSession[markerTmux] ?: continue
-                    // Reject STALE completions. /tmp/claude-notify is append-only
-                    // and we now REPLAY the last 25 lines on every (re)connect;
-                    // plus on a mobile / HyperOS socket freeze the tail's
-                    // buffered bytes flush all at once when the phone wakes.
-                    // The marker carries the Stop hook's epoch — drop anything
-                    // older than notifyStaleMs (skew-corrected). Skew defaults to
-                    // 0 (NTP assumption) if the clock line was somehow lost:
-                    // fail-open would re-fire the whole replayed backlog.
-                    val markerEpochSec = parts.getOrNull(2)?.toLongOrNull()
-                    if (markerEpochSec != null) {
-                        val skew = clockSkewMs ?: 0L
-                        val ageMs = System.currentTimeMillis() - (markerEpochSec * 1000L + skew)
-                        if (ageMs > notifyStaleMs) {
-                            FileLogger.log(TAG, "Skipping stale Stop hook for $sessionId (age ${ageMs}ms): $line")
-                            continue
-                        }
-                    }
-                    FileLogger.log(TAG, "Stop hook fired for $sessionId: $line")
-                    // Atomic monotonic claim: only the FIRST observer of a
-                    // strictly-newer epoch proceeds; racing coroutines (watcher
-                    // restart) and tail-replays of same/older epochs bail here,
-                    // BEFORE the expensive body poll. This is now the primary
-                    // dedup for Stop events — fireNeedsInput's eventKey/debounce
-                    // stays as a secondary guard. Malformed lines (null epoch)
-                    // fall through to that guard unchanged.
-                    if (markerEpochSec != null) {
-                        val claimed = synchronized(lastNotifiedEpochSec) {
-                            val prev = lastNotifiedEpochSec[sessionId]
-                            if (prev != null && markerEpochSec <= prev) false
-                            else { lastNotifiedEpochSec[sessionId] = markerEpochSec; true }
-                        }
-                        if (!claimed) {
-                            FileLogger.log(TAG, "Suppressed duplicate/stale Stop hook for $sessionId (epoch $markerEpochSec <= last notified)")
-                            continue
-                        }
-                    }
-                    // Resolve the notification body from the just-finished turn.
-                    // Poll the transcript until it advances PAST the message we
-                    // sent last time (lastNotifiedAssistantId) — on a slow/
-                    // background socket the new turn may not be parsed for a
-                    // moment, and sending the prior turn's text is exactly the
-                    // "previous round's message" bug. If it doesn't advance in
-                    // time, send NO body (null) and let the platform fall back
-                    // to the generic hint. Cap total latency ~3 s so a genuinely
-                    // fresh alert isn't delayed waiting on a frozen socket.
-                    val stream = transcriptService.streamOrNull(sessionId)
-                    var body: String? = null
-                    if (stream != null) {
-                        val prevId = lastNotifiedAssistantId[sessionId]
-                        kotlinx.coroutines.withTimeoutOrNull(3_000) {
-                            while (true) {
-                                reconnectScope.launch { stream.pollNow() }.join()
-                                val entry = transcriptService.lastAssistantEntry(sessionId)
-                                if (entry != null && entry.id != prevId) { body = entry.text; break }
-                                kotlinx.coroutines.delay(400)
-                            }
-                        }
-                        body?.let { transcriptService.lastAssistantEntry(sessionId)?.let { e -> lastNotifiedAssistantId[sessionId] = e.id } }
-                    }
-                    val isActiveTab = tabManager.activeTabId.value == sessionId
-                    // Dedup on the MARKER itself — (tmux, epoch) identifies one
-                    // completion. Replays of an already-notified marker are
-                    // suppressed exactly, and a NEW completion can never be
-                    // swallowed because the transcript hadn't caught up (the
-                    // old lastAssistantId-based key was stale precisely when
-                    // the network was slow).
-                    fireNeedsInput(
-                        sessionId, "Claude is ready for input", isActiveTab,
-                        eventKey = markerEpochSec?.let { "stop#$markerTmux#$it" },
-                        body = body,
-                    )
-                    statusService.updateActivity(sessionId, SessionActivity.WAITING_FOR_INPUT)
-                }
-            } catch (e: Exception) {
-                FileLogger.error(TAG, "Notify watcher failed for server ${w.serverId}: ${e.message}", e)
-            } finally {
-                try { ch?.disconnect() } catch (_: Exception) {}
-                synchronized(w) {
-                    w.live = false
-                    w.tmuxToSession.values.forEach { setHookActive(it, false) }
-                }
-            }
-            if (!isActive || w.tmuxToSession.isEmpty()) break
-            attempt++
-            val backoffMs = (5_000L * attempt).coerceAtMost(30_000L)
-            FileLogger.log(TAG, "Notify watcher retrying for server ${w.serverId} in ${backoffMs}ms (attempt $attempt)")
-            kotlinx.coroutines.delay(backoffMs)
-        }
-        FileLogger.log(TAG, "Notify watcher stopped for server ${w.serverId}")
-    }
-
     suspend fun launchSession(
         server: SshServer,
         folder: String,
@@ -1076,7 +688,7 @@ else:
             statusService.updateActivity(previousId, SessionActivity.WAITING_FOR_INPUT)
         }
         tabManager.switchTab(id)
-        promptDetector.onUserInput(id)
+        notificationService.promptDetector.onUserInput(id)
         // Re-verify the Claude session UUID whenever we (re)enter a session.
         // While this tab was in the background Claude may have rotated its
         // session id (/clear, /compact, /resume) — leaving confirmedUuids
@@ -1091,7 +703,7 @@ else:
             val len = buf.length
             if (len > 2048) buf.substring(len - 2048) else buf.toString()
         }
-        promptDetector.suppressFor(2000)
+        notificationService.promptDetector.suppressFor(2000)
         onTabSwitched?.invoke(id, tail)
     }
 
@@ -1218,10 +830,6 @@ else:
      */
     fun recentMessages(sessionId: String, limit: Int = 10): List<Pair<String, String>> =
         transcriptService.recentMessages(sessionId, limit)
-
-    /** Id of the most recent assistant message — used to dedup notifications. */
-    private fun lastAssistantId(sessionId: String): String? =
-        transcriptService.lastAssistantEntry(sessionId)?.id
 
     fun transcriptFlow(sessionId: String): kotlinx.coroutines.flow.StateFlow<List<TranscriptEntry>> =
         transcriptService.transcriptFlow(sessionId)
@@ -1473,7 +1081,7 @@ else:
             // never armed and the idle check silently never ran (missed
             // notification). The call is cheap (buffer append + timer reset);
             // reconnect false-positives are covered by suppressFor().
-            promptDetector.onOutput(session.id, text)
+            notificationService.promptDetector.onOutput(session.id, text)
 
             // Skip the remaining expensive processing during data bursts
             // (tmux attach/scrollback).
@@ -1496,13 +1104,13 @@ else:
             // statusline remains the ground truth for all other cases. This is the
             // continuous source that keeps the status dot/badge honest and was
             // missing for hook-active sessions in chat view.
-            promptDetector.parseClaudeWorking(session.id)?.let { working ->
+            notificationService.promptDetector.parseClaudeWorking(session.id)?.let { working ->
                 val next = if (working) SessionActivity.WORKING else SessionActivity.WAITING_FOR_INPUT
                 // Claude actively working → a new turn started; re-arm the
                 // notify latch so the next idle/approval can notify again
                 // even if the user never typed in this app (dismissed the
                 // notification, answered from another client, …).
-                if (working) promptDetector.onClaudeWorking(session.id)
+                if (working) notificationService.promptDetector.onClaudeWorking(session.id)
                 // FIX 3: when the statusline says "not working" (→ WAITING_FOR_INPUT),
                 // do NOT overwrite APPROVAL_NEEDED — the permission dialog is still on
                 // screen and the OMC statusline shows no elapsed time while it waits.
@@ -1532,13 +1140,13 @@ else:
                 // the live token count. Calibrating off a stale scrollback pct
                 // (e.g. 5% paired with 180k live tokens) would mis-snap the
                 // window to 1M and stick the chip wrong for the whole session.
-                transcriptService.calibrateWindow(session.id, promptDetector.parseContextPercent(session.id, text))
+                transcriptService.calibrateWindow(session.id, notificationService.promptDetector.parseContextPercent(session.id, text))
             }
             // 5h / week usage are account-level (not in the transcript) so they
             // stay scraped from the OMC statusline — but only once the session
             // has actually worked, so we don't surface stale scrollback values.
             if (transcriptService.hasSeenWork(session.id)) {
-                val usage = promptDetector.parseUsage(session.id, text)
+                val usage = notificationService.promptDetector.parseUsage(session.id, text)
                 if (usage != null) {
                     usageService.applyStatusline(session.server.id, usage)
                 }
@@ -1584,14 +1192,14 @@ else:
 
         // Ensure Claude Code's Stop hook is configured → enables hook-based
         // idle detection (fast, reliable) instead of screen-state polling.
-        ensureStopHook(sshManager)
+        notificationService.ensureStopHook(sshManager)
         // Install/refresh the transcript stream daemon script (one shared
         // delta channel per server instead of per-session polling).
         transcriptService.ensureStreamd(sshManager)
 
         // Tmux
         sendTmuxCommand(sshManager, session, isNewTmuxSession, checkClosedElsewhere)
-        promptDetector.suppressFor(3000) // suppress during tmux screen redraw
+        notificationService.promptDetector.suppressFor(3000) // suppress during tmux screen redraw
 
         // Apply the effective terminal dimensions — TerminalView won't fire
         // onResize when its size hasn't changed, and a session that (re)connected
@@ -1873,7 +1481,7 @@ else:
                     sshManager.sendInput("\u0003\n") // Ctrl-C + Enter to clear
                     kotlinx.coroutines.delay(100)
                     sendTmuxCommand(sshManager, session, false, checkClosedElsewhere = true)
-                    promptDetector.suppressFor(3000) // suppress during tmux screen redraw after reconnect
+                    notificationService.promptDetector.suppressFor(3000) // suppress during tmux screen redraw after reconnect
 
                     // Re-send terminal dimensions — the TerminalView hasn't
                     // changed size so onResize won't fire. A session reconnecting
@@ -1959,7 +1567,7 @@ else:
             if (isActive) {
                 onTerminalOutput?.invoke(session.id, text)
             }
-            promptDetector.onOutput(session.id, text)
+            notificationService.promptDetector.onOutput(session.id, text)
         }
 
         val success = moshManager.connect(
@@ -2032,7 +1640,7 @@ else:
     }
 
     fun sendInput(sessionId: String, data: String) {
-        promptDetector.onUserInput(sessionId)
+        notificationService.promptDetector.onUserInput(sessionId)
         // Try mosh first, then SSH
         val mosh = connectionRegistry.mosh(sessionId)
         if (mosh != null && mosh.isConnected) {
@@ -2050,7 +1658,7 @@ else:
     }
 
     fun sendBytes(sessionId: String, data: ByteArray) {
-        promptDetector.onUserInput(sessionId)
+        notificationService.promptDetector.onUserInput(sessionId)
         val mosh = connectionRegistry.mosh(sessionId)
         if (mosh != null && mosh.isConnected) {
             statusService.updateActivity(sessionId, SessionActivity.WORKING)
@@ -2066,24 +1674,18 @@ else:
     // ---- Offline input queue ----
 
     private fun queueInput(sessionId: String, data: String) {
-        val queue = pendingInputs.getOrPut(sessionId) { mutableListOf() }
-        queue.add(data)
-        _pendingCounts.update { it + (sessionId to queue.size) }
-        val msg = "\r\n\u001B[33mQueued (${queue.size} pending) — will send on reconnect\u001B[0m\r\n"
+        val size = notificationService.enqueue(sessionId, data)
+        val msg = "\r\n\u001B[33mQueued ($size pending) — will send on reconnect\u001B[0m\r\n"
         appendToBuffer(sessionId, msg)
         if (tabManager.activeTabId.value == sessionId) {
             onTerminalOutput?.invoke(sessionId, msg)
         }
     }
 
-    fun clearPendingInputs(sessionId: String) {
-        pendingInputs.remove(sessionId)
-        _pendingCounts.update { it - sessionId }
-    }
+    fun clearPendingInputs(sessionId: String) = notificationService.clearPendingInputs(sessionId)
 
     private fun flushPendingInputs(sessionId: String) {
-        val queue = pendingInputs.remove(sessionId) ?: return
-        _pendingCounts.update { it - sessionId }
+        val queue = notificationService.drain(sessionId) ?: return
         if (queue.isEmpty()) return
         val conn = connectionRegistry.ssh(sessionId) ?: return
         reconnectScope.launch {
@@ -2119,7 +1721,7 @@ else:
             return
         }
         FileLogger.log(TAG, "sendClaudeCommand: ${command.length} bytes to $sessionId")
-        promptDetector.onUserInput(sessionId)
+        notificationService.promptDetector.onUserInput(sessionId)
         statusService.updateActivity(sessionId, SessionActivity.WORKING)
         conn.sendInput(command)
     }
@@ -2265,7 +1867,7 @@ else:
         // A reconnected session has a running Claude that may already be idle
         // waiting for input — bypass the brand-new-session startup guard so
         // the first idle after restore can notify.
-        promptDetector.markInteracted(sessionId)
+        notificationService.promptDetector.markInteracted(sessionId)
 
         // Invalidate the confirmed UUID so the next transcriptFlow() call fires
         // a fresh kick-probe. If claude restarted with a new session UUID during
@@ -2397,18 +1999,7 @@ else:
         val serverId = tabManager.getTab(sessionId)?.server?.id
         if (serverId != null) {
             transcriptService.unregisterStreamWatch(serverId, sessionId)
-            serverNotifyWatchers[serverId]?.let { w ->
-                synchronized(w) {
-                    w.tmuxToSession.entries.removeAll { it.value == sessionId }
-                    // Conditional remove(key, value): only cancel if this exact
-                    // instance is still the registered watcher AND nobody
-                    // re-registered between the removeAll and here (both are
-                    // under w's monitor, matching startNotifyWatcher).
-                    if (w.tmuxToSession.isEmpty() && serverNotifyWatchers.remove(serverId, w)) {
-                        w.job?.cancel()
-                    }
-                }
-            }
+            notificationService.unregisterNotifyWatcher(serverId, sessionId)
             val lastOnServer = tabManager.tabs.value.none {
                 it.id != sessionId && it.server.id == serverId
             }
@@ -2417,13 +2008,8 @@ else:
                 serverHealthService.stopLatencyPolling(serverId)
             }
         }
-        lastNeedsInputAt.remove(sessionId)
-        lastNotifiedKey.remove(sessionId)
-        // Only on permanent forget — NOT on transient disconnect/reconnect, or
-        // a tail replay after reconnect would re-fire an already-notified epoch.
-        lastNotifiedEpochSec.remove(sessionId)
-        lastNotifiedAssistantId.remove(sessionId)
-        setHookActive(sessionId, false)
+        notificationService.clearNotifyDedup(sessionId)
+        notificationService.setHookActive(sessionId, false)
         connectionRegistry.ssh(sessionId)?.disconnect()
         connectionRegistry.removeSsh(sessionId)
         connectionRegistry.mosh(sessionId)?.disconnect()
@@ -2431,8 +2017,8 @@ else:
         synchronized(bufferLock) { outputBuffers.remove(sessionId) }
         transcriptService.dispose(sessionId)
         statusService.stopPoller(sessionId)
-        promptDetector.removeSession(sessionId)
-        pendingInputs.remove(sessionId)
+        notificationService.promptDetector.removeSession(sessionId)
+        notificationService.removePendingInputs(sessionId)
         terminalSizes.remove(sessionId)
         lastConnectAt.remove(sessionId)
         lastConnectTsEffective.remove(sessionId)
@@ -2445,7 +2031,7 @@ else:
         // want the values.
         serverHealthService.clearSession(sessionId)
         gitStatusService.clearSession(sessionId)
-        _pendingCounts.update { it - sessionId }
+        notificationService.clearPendingCount(sessionId)
         tabManager.removeTab(sessionId)
         // After removal, the active tab may have shifted to another session.
         // Fire onTabSwitched so the platform terminal clears the now-stale
@@ -2490,7 +2076,7 @@ else:
         // The respawn kills+redraws the pane; suppress the prompt detector so it
         // doesn't misfire on the transient screen. UUID is unchanged, so the
         // transcript stream keeps tailing the same file across the restart.
-        promptDetector.suppressFor(5000)
+        notificationService.promptDetector.suppressFor(5000)
         try {
             execReadWithWatchdog(sshSession, cmd, totalMs = 15_000)
         } catch (e: Exception) {
