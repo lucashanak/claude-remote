@@ -832,8 +832,123 @@ private fun RichBody(
         content = text,
         colors = colors,
         typography = typography,
-        padding = padding
+        padding = padding,
+        components = com.mikepenz.markdown.compose.components.markdownComponents(
+            table = { model -> CRMarkdownTable(model) }
+        )
     )
+}
+
+/**
+ * Custom renderer for GitHub-style pipe tables: wraps cell text (no ellipsis) and
+ * is horizontally scrollable with fixed, aligned per-column widths so full text and
+ * all columns stay reachable on a narrow phone screen.
+ */
+@Composable
+private fun CRMarkdownTable(model: com.mikepenz.markdown.compose.components.MarkdownComponentModel) {
+    val c = CRTheme.colors
+    val raw = model.content.substring(model.node.startOffset, model.node.endOffset)
+
+    fun cleanCell(s: String): String {
+        var t = s.trim()
+        // unwrap `code`
+        t = t.replace(Regex("`([^`]+)`"), "$1")
+        // strip **bold**
+        t = t.replace(Regex("\\*\\*(.+?)\\*\\*"), "$1")
+        // strip *italic* (single star pairs)
+        t = t.replace(Regex("(?<!\\*)\\*(?!\\*)(.+?)(?<!\\*)\\*(?!\\*)"), "$1")
+        return t.trim()
+    }
+
+    fun splitRow(line: String): List<String> {
+        val parts = line.split("|").toMutableList()
+        if (parts.isNotEmpty() && parts.first().isBlank()) parts.removeAt(0)
+        if (parts.isNotEmpty() && parts.last().isBlank()) parts.removeAt(parts.size - 1)
+        return parts.map { it.trim() }
+    }
+
+    val sepRegex = Regex("^:?-{2,}:?$")
+    val lines = raw.lines().map { it.trim() }.filter { it.isNotBlank() }
+    val allRows = lines.map { splitRow(it) }
+    val sepIndex = allRows.indexOfFirst { row -> row.isNotEmpty() && row.all { sepRegex.matches(it) } }
+
+    val headerCells: List<String>
+    val bodyRows: List<List<String>>
+    if (sepIndex > 0) {
+        headerCells = allRows[sepIndex - 1]
+        bodyRows = allRows.drop(sepIndex + 1)
+    } else if (allRows.isNotEmpty()) {
+        headerCells = allRows[0]
+        bodyRows = allRows.drop(1)
+    } else {
+        headerCells = emptyList()
+        bodyRows = emptyList()
+    }
+
+    // Defensive fallback: nothing parseable -> plain monospace text.
+    if (headerCells.isEmpty()) {
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .background(c.surface2, RoundedCornerShape(4.dp))
+                .horizontalScroll(rememberScrollState())
+        ) {
+            Text(
+                raw,
+                modifier = Modifier.padding(horizontal = 8.dp, vertical = 6.dp),
+                style = CRType.mono,
+                color = c.text
+            )
+        }
+        return
+    }
+
+    val cleanedHeader = headerCells.map { cleanCell(it) }
+    val cleanedBody = bodyRows.map { row -> row.map { cleanCell(it) } }
+    val numCols = (listOf(cleanedHeader) + cleanedBody).maxOf { it.size }
+
+    fun cellAt(row: List<String>, i: Int): String = row.getOrElse(i) { "" }
+
+    val colWidths: List<androidx.compose.ui.unit.Dp> = (0 until numCols).map { i ->
+        val maxChars = (listOf(cleanedHeader) + cleanedBody).maxOf { cellAt(it, i).length }
+        ((maxChars.coerceIn(3, 30) * 7.5f).dp).coerceIn(48.dp, 240.dp)
+    }
+    val totalWidth = colWidths.fold(0.dp) { acc, w -> acc + w }
+    val cellStyle = CRType.bodyDim
+    val dividerColor = c.border.copy(alpha = 0.4f)
+
+    @Composable
+    fun TableRow(cells: List<String>, bold: Boolean, background: Color) {
+        Row(modifier = Modifier.width(totalWidth).background(background)) {
+            for (i in 0 until numCols) {
+                Text(
+                    cellAt(cells, i),
+                    modifier = Modifier
+                        .width(colWidths[i])
+                        .padding(horizontal = 8.dp, vertical = 6.dp),
+                    style = cellStyle,
+                    color = c.text,
+                    fontWeight = if (bold) FontWeight.Bold else null,
+                    softWrap = true
+                )
+            }
+        }
+    }
+
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .horizontalScroll(rememberScrollState())
+    ) {
+        Column(modifier = Modifier.width(totalWidth)) {
+            TableRow(cleanedHeader, bold = true, background = c.surface2)
+            Box(Modifier.width(totalWidth).height(1.dp).background(dividerColor))
+            for (row in cleanedBody) {
+                TableRow(row, bold = false, background = Color.Transparent)
+                Box(Modifier.width(totalWidth).height(1.dp).background(dividerColor))
+            }
+        }
+    }
 }
 
 @Composable
