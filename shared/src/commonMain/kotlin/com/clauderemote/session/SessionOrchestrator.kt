@@ -96,6 +96,13 @@ class SessionOrchestrator(
     // Per-session terminal output buffer (ring buffer) + pty size tracking.
     private val terminalIO = com.clauderemote.session.service.TerminalIOService(connectionRegistry)
 
+    // User input delivery (mosh-first, ssh-fallback), the offline pending-input
+    // queue, and the Claude slash-command control surface. Coordinator over the
+    // services above; declared after them since it composes them.
+    private val claudeControl = com.clauderemote.session.service.ClaudeControlService(
+        reconnectScope, connectionRegistry, tabManager, statusService, notificationService, terminalIO,
+    ) { sid, data -> onTerminalOutput?.invoke(sid, data) }
+
     /**
      * Platform-provided screen snapshot reader. Must marshal onto the thread that
      * owns the terminal emulator (main looper on Android, EDT on Swing). Pass-through
@@ -1491,7 +1498,7 @@ class SessionOrchestrator(
                     emit("\r\n\u001B[32mReconnected!\u001B[0m\r\n")
                     FileLogger.log(TAG, "Auto-reconnect succeeded for ${session.id}")
                     _reconnectStatus.update { it - session.id }
-                    flushPendingInputs(session.id)
+                    claudeControl.flushPendingInputs(session.id)
                     return
                 } catch (e: SessionClosedElsewhereException) {
                     FileLogger.log(TAG, "Auto-reconnect for ${session.id} aborted — closed on another device")
@@ -1598,143 +1605,29 @@ class SessionOrchestrator(
 
     fun clearBuffer(sessionId: String) = terminalIO.clearBuffer(sessionId)
 
-    private fun warnNoConnection(sessionId: String) {
-        val msg = "\r\n\u001B[31mNo connection — input dropped. Try reconnecting.\u001B[0m\r\n"
-        terminalIO.append(sessionId, msg)
-        if (tabManager.activeTabId.value == sessionId) {
-            onTerminalOutput?.invoke(sessionId, msg)
-        }
-    }
+    fun sendInput(sessionId: String, data: String) = claudeControl.sendInput(sessionId, data)
 
-    fun sendInput(sessionId: String, data: String) {
-        notificationService.promptDetector.onUserInput(sessionId)
-        // Try mosh first, then SSH
-        val mosh = connectionRegistry.mosh(sessionId)
-        if (mosh != null && mosh.isConnected) {
-            statusService.updateActivity(sessionId, SessionActivity.WORKING)
-            mosh.sendInput(data)
-            return
-        }
-        val conn = connectionRegistry.ssh(sessionId)
-        if (conn == null || !conn.isConnected) {
-            queueInput(sessionId, data)
-            return
-        }
-        statusService.updateActivity(sessionId, SessionActivity.WORKING)
-        conn.sendInput(data)
-    }
+    fun sendBytes(sessionId: String, data: ByteArray) = claudeControl.sendBytes(sessionId, data)
 
-    fun sendBytes(sessionId: String, data: ByteArray) {
-        notificationService.promptDetector.onUserInput(sessionId)
-        val mosh = connectionRegistry.mosh(sessionId)
-        if (mosh != null && mosh.isConnected) {
-            statusService.updateActivity(sessionId, SessionActivity.WORKING)
-            mosh.sendBytes(data)
-            return
-        }
-        val conn = connectionRegistry.ssh(sessionId)
-        if (conn == null || !conn.isConnected) { warnNoConnection(sessionId); return }
-        statusService.updateActivity(sessionId, SessionActivity.WORKING)
-        conn.sendBytes(data)
-    }
-
-    // ---- Offline input queue ----
-
-    private fun queueInput(sessionId: String, data: String) {
-        val size = notificationService.enqueue(sessionId, data)
-        val msg = "\r\n\u001B[33mQueued ($size pending) — will send on reconnect\u001B[0m\r\n"
-        terminalIO.append(sessionId, msg)
-        if (tabManager.activeTabId.value == sessionId) {
-            onTerminalOutput?.invoke(sessionId, msg)
-        }
-    }
-
-    fun clearPendingInputs(sessionId: String) = notificationService.clearPendingInputs(sessionId)
-
-    private fun flushPendingInputs(sessionId: String) {
-        val queue = notificationService.drain(sessionId) ?: return
-        if (queue.isEmpty()) return
-        val conn = connectionRegistry.ssh(sessionId) ?: return
-        reconnectScope.launch {
-            for (input in queue) {
-                conn.sendInput(input)
-                kotlinx.coroutines.delay(300) // small delay between queued messages
-            }
-            val msg = "\r\n\u001B[32mFlushed ${queue.size} queued message(s)\u001B[0m\r\n"
-            terminalIO.append(sessionId, msg)
-            if (tabManager.activeTabId.value == sessionId) {
-                onTerminalOutput?.invoke(sessionId, msg)
-            }
-        }
-    }
+    fun clearPendingInputs(sessionId: String) = claudeControl.clearPendingInputs(sessionId)
 
     fun resize(sessionId: String, cols: Int, rows: Int) = terminalIO.resize(sessionId, cols, rows)
 
-    fun sendClaudeCommand(sessionId: String, command: String) {
-        val conn = connectionRegistry.ssh(sessionId)
-        if (conn == null || !conn.isConnected) {
-            queueInput(sessionId, command)
-            return
-        }
-        FileLogger.log(TAG, "sendClaudeCommand: ${command.length} bytes to $sessionId")
-        notificationService.promptDetector.onUserInput(sessionId)
-        statusService.updateActivity(sessionId, SessionActivity.WORKING)
-        conn.sendInput(command)
-    }
+    fun sendClaudeCommand(sessionId: String, command: String) = claudeControl.sendClaudeCommand(sessionId, command)
 
-    fun switchModel(sessionId: String, model: ClaudeModel) {
-        reconnectScope.launch { sendSlashCommand(sessionId, ClaudeConfig.modelSwitchCommand(model)) }
-    }
+    fun switchModel(sessionId: String, model: ClaudeModel) = claudeControl.switchModel(sessionId, model)
 
-    fun switchModelForAllSessions(model: ClaudeModel) {
-        tabManager.tabs.value.forEach { switchModel(it.id, model) }
-    }
+    fun switchModelForAllSessions(model: ClaudeModel) = claudeControl.switchModelForAllSessions(model)
 
-    fun switchEffort(sessionId: String, effort: ClaudeEffort) {
-        reconnectScope.launch { sendSlashCommand(sessionId, ClaudeConfig.effortSwitchCommand(effort)) }
-    }
+    fun switchEffort(sessionId: String, effort: ClaudeEffort) = claudeControl.switchEffort(sessionId, effort)
 
-    fun switchEffortForAllSessions(effort: ClaudeEffort) {
-        tabManager.tabs.value.forEach { switchEffort(it.id, effort) }
-    }
+    fun switchEffortForAllSessions(effort: ClaudeEffort) = claudeControl.switchEffortForAllSessions(effort)
 
-    /**
-     * Type [command] as discrete keystrokes with small gaps, then Enter
-     * after a longer pause — mirrors the chat input's slash-command send
-     * path (TerminalScreen's PromptInputBar/ExpandedInput). Sending a slash
-     * command as one burst (whole string + \n in a single write) is detected
-     * by Claude's TUI as a paste: it lands as literal text in the prompt
-     * ("//model opus") instead of driving the interactive picker, so nothing
-     * actually switches. switchModel/switchEffort used to do exactly that.
-     */
-    private suspend fun sendSlashCommand(sessionId: String, command: String) {
-        for (ch in command) {
-            sendInput(sessionId, ch.toString())
-            kotlinx.coroutines.delay(15)
-        }
-        kotlinx.coroutines.delay(60)
-        sendInput(sessionId, "\r")
-    }
+    fun submitLoginCode(sessionId: String, code: String) = claudeControl.submitLoginCode(sessionId, code)
 
-    /** Submit a pasted /login auth code: send the code, then a separate Enter so
-     *  Claude's prompt doesn't treat code+CR as one paste (which won't submit). */
-    fun submitLoginCode(sessionId: String, code: String) {
-        reconnectScope.launch {
-            sendInput(sessionId, code)
-            kotlinx.coroutines.delay(120)
-            sendInput(sessionId, "\r")
-        }
-    }
+    fun sendLoginCommand(sessionId: String) = claudeControl.sendLoginCommand(sessionId)
 
-    /** Trigger Claude's /login flow on [sessionId] (types it char-by-char like a
-     *  real slash command so the TUI doesn't treat it as a paste). */
-    fun sendLoginCommand(sessionId: String) {
-        reconnectScope.launch { sendSlashCommand(sessionId, "/login") }
-    }
-
-    fun sendEscape(sessionId: String) {
-        sendInput(sessionId, ClaudeConfig.escapeSequence())
-    }
+    fun sendEscape(sessionId: String) = claudeControl.sendEscape(sessionId)
 
     /**
      * Scroll the tmux pane via copy-mode (NOT via stdin) so the agent's input
