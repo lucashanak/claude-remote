@@ -239,6 +239,8 @@ as before and it delegates to the services.
 | Service | Responsibility |
 |---------|----------------|
 | `ConnectionRegistry` | Per-session SSH/Mosh transports, per-server transport pools + connect gates, tab→server lookups. The seam every service uses to reach a live transport. |
+| `TransportResolver` | Tailscale/Cloudflare/direct transport selection (TTL cache, cooldown/fail-streak, early-death accounting) + connection-label state. |
+| `TmuxProbes` | Low-level tmux/shell primitives: `kickRedraw` + client refresh, pane-geometry probe, session/transcript existence probes, shell-prompt wait. |
 | `RemoteExec` (fn) | `execReadWithWatchdog` — one-shot exec with a hard wall-clock bound. |
 | `ServerHealthService` | Launcher reachability health + per-server latency polling. |
 | `GitStatusService` | Per-session git working-dir status (branch + dirty/ahead/behind). |
