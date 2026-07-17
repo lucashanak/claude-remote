@@ -93,9 +93,8 @@ class SessionOrchestrator(
         { sid, hint, active, body -> onClaudeNeedsInput?.invoke(sid, hint, active, body) },
     )
 
-    // Per-session terminal output buffer (ring buffer, capped at MAX_BUFFER)
-    private val outputBuffers = mutableMapOf<String, StringBuilder>()
-    private val bufferLock = Any()
+    // Per-session terminal output buffer (ring buffer) + pty size tracking.
+    private val terminalIO = com.clauderemote.session.service.TerminalIOService(connectionRegistry)
 
     /**
      * Platform-provided screen snapshot reader. Must marshal onto the thread that
@@ -311,13 +310,6 @@ class SessionOrchestrator(
 
     @Volatile private var isInBackground = false
     private val reconnectingSessionIds = mutableSetOf<String>()
-    // Last known terminal dimensions per session — used to re-send SIGWINCH after reconnect
-    private val terminalSizes = mutableMapOf<String, Pair<Int, Int>>()
-    // The most recent ACTIVE-view terminal size. All sessions render in the same
-    // on-screen emulator, so this is the right size for any session whose own
-    // size isn't known yet (e.g. reconnected while backgrounded) — avoids the
-    // jsch 80x24 default that leaves tmux panes not filling the window.
-    @Volatile private var lastActiveViewSize: Pair<Int, Int>? = null
     /**
      * Proactive teardown on a platform network-lost event (Android
      * ConnectivityManager). The interface our TCP connections rode is gone —
@@ -637,7 +629,7 @@ class SessionOrchestrator(
             claudeSessionId = claudeSessionId
         )
 
-        synchronized(bufferLock) { outputBuffers[sessionId] = StringBuilder() }
+        terminalIO.initBuffer(sessionId)
         tabManager.addTab(session)
         FileLogger.log(TAG, "Launching session: ${server.name} → $folder (${connectionType.name}, ${mode.name}, ${model.name})")
 
@@ -698,11 +690,7 @@ class SessionOrchestrator(
         // a08359c cleared this on reconnect but missed plain tab switches,
         // which is why the chat only refreshed after an app restart.
         transcriptService.clearConfirmedUuid(id)
-        val tail = synchronized(bufferLock) {
-            val buf = outputBuffers[id] ?: return@synchronized ""
-            val len = buf.length
-            if (len > 2048) buf.substring(len - 2048) else buf.toString()
-        }
+        val tail = terminalIO.bufferTail(id)
         notificationService.promptDetector.suppressFor(2000)
         onTabSwitched?.invoke(id, tail)
     }
@@ -1068,7 +1056,7 @@ class SessionOrchestrator(
         var burstMode = true // Start in burst mode (tmux attach sends lots of data)
 
         fun emit(text: String) {
-            appendToBuffer(session.id, text)
+            terminalIO.append(session.id, text)
             val isActive = tabManager.activeTabId.value == session.id
             if (isActive) {
                 onTerminalOutput?.invoke(session.id, text)
@@ -1170,8 +1158,8 @@ class SessionOrchestrator(
                             autoReconnect(session, ::emit)
                         }
                     },
-                    initialCols = effectiveSize(session.id).first,
-                    initialRows = effectiveSize(session.id).second,
+                    initialCols = terminalIO.effectiveSize(session.id).first,
+                    initialRows = terminalIO.effectiveSize(session.id).second,
                 )
             }
         } catch (e: Exception) {
@@ -1205,7 +1193,7 @@ class SessionOrchestrator(
         // onResize when its size hasn't changed, and a session that (re)connected
         // while backgrounded has no remembered size of its own. effectiveSize()
         // falls back to the last active-view size so the pane always fills the window.
-        val (cols, rows) = effectiveSize(session.id)
+        val (cols, rows) = terminalIO.effectiveSize(session.id)
         sshManager.resize(cols, rows)
     }
 
@@ -1465,8 +1453,8 @@ class SessionOrchestrator(
                                     tabManager.updateTabStatus(session.id, SessionStatus.DISCONNECTED)
                                     reconnectScope.launch { autoReconnect(session, emit) }
                                 },
-                                initialCols = effectiveSize(session.id).first,
-                                initialRows = effectiveSize(session.id).second,
+                                initialCols = terminalIO.effectiveSize(session.id).first,
+                                initialRows = terminalIO.effectiveSize(session.id).second,
                             )
                         }
                     } catch (e: Exception) {
@@ -1489,7 +1477,7 @@ class SessionOrchestrator(
                     // effectiveSize() (last active-view size fallback) to always
                     // apply a correct size and avoid tmux rendering at 80x24.
                     run {
-                        val (cols, rows) = effectiveSize(session.id)
+                        val (cols, rows) = terminalIO.effectiveSize(session.id)
                         kotlinx.coroutines.delay(200) // let tmux attach settle
                         sshManager.resize(cols, rows)
                     }
@@ -1539,7 +1527,7 @@ class SessionOrchestrator(
         if (effectiveServer.useCloudflareProxy) {
             FileLogger.log(TAG, "Mosh needs direct UDP — no reachable Tailscale path, falling back to SSH")
             val warning = "\r\n\u001B[33mMosh requires direct UDP — falling back to SSH (Cloudflare tunnel)\u001B[0m\r\n"
-            appendToBuffer(session.id, warning)
+            terminalIO.append(session.id, warning)
             onTerminalOutput?.invoke(session.id, warning)
             connectSsh(session, isNewTmuxSession)
             return
@@ -1562,7 +1550,7 @@ class SessionOrchestrator(
         }
 
         fun emit(text: String) {
-            appendToBuffer(session.id, text)
+            terminalIO.append(session.id, text)
             val isActive = tabManager.activeTabId.value == session.id
             if (isActive) {
                 onTerminalOutput?.invoke(session.id, text)
@@ -1602,38 +1590,17 @@ class SessionOrchestrator(
         val start = System.currentTimeMillis()
         val promptChars = setOf('$', '#', '>', '%')
         while (System.currentTimeMillis() - start < maxWait) {
-            val lastLine = synchronized(bufferLock) {
-                val buf = outputBuffers[sessionId]
-                if (buf == null || buf.isEmpty()) ""
-                else {
-                    val len = buf.length
-                    buf.substring(maxOf(0, len - 80)).trimEnd()
-                }
-            }
+            val lastLine = terminalIO.lastLine(sessionId)
             if (lastLine.isNotEmpty() && lastLine.any { it in promptChars }) return
             kotlinx.coroutines.delay(50)
         }
     }
 
-    private fun appendToBuffer(sessionId: String, data: String) {
-        synchronized(bufferLock) {
-            val buf = outputBuffers[sessionId] ?: return
-            buf.append(data)
-            if (buf.length > MAX_BUFFER) {
-                val tail = buf.substring(buf.length - MAX_BUFFER)
-                buf.clear()
-                buf.append(tail)
-            }
-        }
-    }
-
-    fun clearBuffer(sessionId: String) {
-        synchronized(bufferLock) { outputBuffers[sessionId]?.clear() }
-    }
+    fun clearBuffer(sessionId: String) = terminalIO.clearBuffer(sessionId)
 
     private fun warnNoConnection(sessionId: String) {
         val msg = "\r\n\u001B[31mNo connection — input dropped. Try reconnecting.\u001B[0m\r\n"
-        appendToBuffer(sessionId, msg)
+        terminalIO.append(sessionId, msg)
         if (tabManager.activeTabId.value == sessionId) {
             onTerminalOutput?.invoke(sessionId, msg)
         }
@@ -1676,7 +1643,7 @@ class SessionOrchestrator(
     private fun queueInput(sessionId: String, data: String) {
         val size = notificationService.enqueue(sessionId, data)
         val msg = "\r\n\u001B[33mQueued ($size pending) — will send on reconnect\u001B[0m\r\n"
-        appendToBuffer(sessionId, msg)
+        terminalIO.append(sessionId, msg)
         if (tabManager.activeTabId.value == sessionId) {
             onTerminalOutput?.invoke(sessionId, msg)
         }
@@ -1694,25 +1661,14 @@ class SessionOrchestrator(
                 kotlinx.coroutines.delay(300) // small delay between queued messages
             }
             val msg = "\r\n\u001B[32mFlushed ${queue.size} queued message(s)\u001B[0m\r\n"
-            appendToBuffer(sessionId, msg)
+            terminalIO.append(sessionId, msg)
             if (tabManager.activeTabId.value == sessionId) {
                 onTerminalOutput?.invoke(sessionId, msg)
             }
         }
     }
 
-    fun resize(sessionId: String, cols: Int, rows: Int) {
-        terminalSizes[sessionId] = cols to rows
-        // Remember the active-view size as a global fallback for sessions that
-        // (re)connect while backgrounded. Guard against transient 0-size layout passes.
-        if (cols > 1 && rows > 0) lastActiveViewSize = cols to rows
-        connectionRegistry.ssh(sessionId)?.resize(cols, rows)
-    }
-
-    /** Best-known pty size for [sessionId]: its own remembered size, else the last
-     *  active-view size, else the classic 80x24 default. */
-    private fun effectiveSize(sessionId: String): Pair<Int, Int> =
-        terminalSizes[sessionId] ?: lastActiveViewSize ?: (80 to 24)
+    fun resize(sessionId: String, cols: Int, rows: Int) = terminalIO.resize(sessionId, cols, rows)
 
     fun sendClaudeCommand(sessionId: String, command: String) {
         val conn = connectionRegistry.ssh(sessionId)
@@ -2014,12 +1970,12 @@ class SessionOrchestrator(
         connectionRegistry.removeSsh(sessionId)
         connectionRegistry.mosh(sessionId)?.disconnect()
         connectionRegistry.removeMosh(sessionId)
-        synchronized(bufferLock) { outputBuffers.remove(sessionId) }
+        terminalIO.removeBuffer(sessionId)
         transcriptService.dispose(sessionId)
         statusService.stopPoller(sessionId)
         notificationService.promptDetector.removeSession(sessionId)
         notificationService.removePendingInputs(sessionId)
-        terminalSizes.remove(sessionId)
+        terminalIO.clearSize(sessionId)
         lastConnectAt.remove(sessionId)
         lastConnectTsEffective.remove(sessionId)
         transcriptService.clearConfirmedUuid(sessionId)
@@ -2046,7 +2002,7 @@ class SessionOrchestrator(
     suspend fun disconnectAll() {
         connectionRegistry.allSsh().forEach { it.disconnect() }
         connectionRegistry.clearSsh()
-        synchronized(bufferLock) { outputBuffers.clear() }
+        terminalIO.clearAllBuffers()
     }
 
     fun getConnection(sessionId: String): SshManager? = connectionRegistry.ssh(sessionId)
@@ -2538,7 +2494,7 @@ DTIMER_EOF
             cs
         }
         rehydrated.forEach { session ->
-            synchronized(bufferLock) { outputBuffers[session.id] = StringBuilder() }
+            terminalIO.initBuffer(session.id)
             tabManager.addTab(session)
             tabManager.updateTabStatus(session.id, SessionStatus.DISCONNECTED)
             statusService.updateActivity(session.id, SessionActivity.DISCONNECTED)
@@ -2598,13 +2554,7 @@ DTIMER_EOF
         }
     }
 
-    fun getBuffer(sessionId: String): String {
-        synchronized(bufferLock) {
-            val buf = outputBuffers[sessionId] ?: return ""
-            val len = buf.length
-            return if (len > 2048) buf.substring(len - 2048) else buf.toString()
-        }
-    }
+    fun getBuffer(sessionId: String): String = terminalIO.getBuffer(sessionId)
 
     private fun generateId(): String {
         val bytes = Random.nextBytes(16)
@@ -2623,7 +2573,6 @@ DTIMER_EOF
 
     companion object {
         private const val TAG = "SessionOrchestrator"
-        private const val MAX_BUFFER = 64 * 1024 // 64KB per session
         /** Sentinel returned by [downloadFile] when the remote file exceeds [DOWNLOAD_SIZE_LIMIT]. */
         val DOWNLOAD_TOO_LARGE: ByteArray = ByteArray(0)
         private const val DOWNLOAD_SIZE_LIMIT = 50L * 1024 * 1024 // 50 MB
