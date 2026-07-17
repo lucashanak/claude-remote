@@ -103,6 +103,10 @@ class SessionOrchestrator(
         reconnectScope, connectionRegistry, tabManager, statusService, notificationService, terminalIO,
     ) { sid, data -> onTerminalOutput?.invoke(sid, data) }
 
+    private val remoteOps = com.clauderemote.session.service.RemoteOpsService(
+        reconnectScope, connectionRegistry, tabManager,
+    )
+
     /**
      * Platform-provided screen snapshot reader. Must marshal onto the thread that
      * owns the terminal emulator (main looper on Android, EDT on Swing). Pass-through
@@ -1363,40 +1367,7 @@ class SessionOrchestrator(
      * to the normal resume path rather than blocking the user.
      */
     suspend fun tmuxPaneMatchesCwd(server: SshServer, tmuxName: String, cwd: String): Boolean? =
-        withContext(Dispatchers.IO) {
-            try {
-                SshSessionHelper.withSession(server, timeout = 5000) { sess ->
-                    val escaped = tmuxName.replace("'", "'\\''")
-                    // `tmux has-session` first to avoid the display-message error noise
-                    // when the session doesn't exist.
-                    val checkCmd = "tmux has-session -t '$escaped' 2>/dev/null && " +
-                        "tmux display-message -p -t '$escaped' '#{pane_current_path}' 2>/dev/null " +
-                        "|| echo __NO_SESSION__"
-                    val ch = sess.openChannel("exec") as ChannelExec
-                    ch.setCommand(checkCmd)
-                    ch.inputStream = null
-                    val input = ch.inputStream
-                    ch.connect(4000)
-                    val out = try {
-                        input.bufferedReader().readText().trim()
-                    } finally {
-                        try { ch.disconnect() } catch (_: Throwable) {}
-                    }
-                    when {
-                        out == "__NO_SESSION__" || out.isEmpty() -> null
-                        else -> {
-                            // Normalise both paths: strip trailing slash, expand leading ~
-                            val panePath = out.trimEnd('/')
-                            val histPath = cwd.trimEnd('/')
-                            panePath == histPath
-                        }
-                    }
-                }
-            } catch (e: Exception) {
-                FileLogger.error(TAG, "tmuxPaneMatchesCwd probe failed for $tmuxName: ${e.message}", e)
-                null // fail-open
-            }
-        }
+        remoteOps.tmuxPaneMatchesCwd(server, tmuxName, cwd)
 
     private suspend fun autoReconnect(
         session: ClaudeSession,
@@ -1635,38 +1606,7 @@ class SessionOrchestrator(
      * Page-down at the bottom of history auto-exits copy-mode (back to live).
      * Runs off the UI thread on the IO scope.
      */
-    // Per-session mutex so rapid scroll taps queue rather than storm SSH MaxSessions.
-    private val scrollMutexes = mutableMapOf<String, Mutex>()
-    private fun scrollMutex(sessionId: String) =
-        synchronized(scrollMutexes) { scrollMutexes.getOrPut(sessionId) { Mutex() } }
-
-    fun tmuxScroll(sessionId: String, up: Boolean) {
-        val tmuxName = tabManager.getTab(sessionId)?.tmuxSessionName ?: return
-        reconnectScope.launch {
-            scrollMutex(sessionId).withLock {
-                try {
-                    kotlinx.coroutines.withContext(Dispatchers.IO) {
-                        val sshSession = connectionRegistry.ssh(sessionId)?.getSession() ?: return@withContext
-                        val escaped = tmuxName.replace("'", "'\\''")
-                        val key = if (up) "page-up" else "page-down"
-                        val cmd = "tmux copy-mode -e -t '$escaped'; tmux send-keys -t '$escaped' -X $key"
-                        val ch = sshSession.openChannel("exec") as com.jcraft.jsch.ChannelExec
-                        ch.setCommand(cmd)
-                        ch.inputStream = null
-                        val input = ch.inputStream
-                        try {
-                            ch.connect(1500)
-                            input.bufferedReader().readText()
-                        } finally {
-                            ch.disconnect()
-                        }
-                    }
-                } catch (e: Exception) {
-                    FileLogger.error(TAG, "tmuxScroll failed for $sessionId: ${e.message}", e)
-                }
-            }
-        }
-    }
+    fun tmuxScroll(sessionId: String, up: Boolean) = remoteOps.tmuxScroll(sessionId, up)
 
     /**
      * Upload a file to the remote server for the given session.
@@ -1676,30 +1616,8 @@ class SessionOrchestrator(
      * waits for it to finish.  Never kills the connection itself — that
      * was causing a cascade of 3 failed reconnects.
      */
-    suspend fun uploadFile(sessionId: String, bytes: ByteArray, fileName: String): String {
-        val deadline = System.currentTimeMillis() + 20_000L
-        var lastException: Exception? = null
-
-        while (System.currentTimeMillis() < deadline) {
-            val c = connectionRegistry.ssh(sessionId)
-            if (c != null && c.isConnected) {
-                try {
-                    val remoteDir = "/tmp/claude-uploads"
-                    val remotePath = c.uploadFile(bytes, remoteDir, fileName)
-                    FileLogger.log(TAG, "File uploaded: $remotePath (${bytes.size} bytes)")
-                    return remotePath
-                } catch (e: Exception) {
-                    lastException = e
-                    FileLogger.error(TAG, "Upload exec failed for $sessionId: ${e.message}", e)
-                    // Don't kill the connection — if transport is truly dead,
-                    // the read loop will detect it via ServerAliveInterval and
-                    // autoReconnect will handle recovery.
-                }
-            }
-            kotlinx.coroutines.delay(1000)
-        }
-        throw lastException ?: IllegalStateException("SSH not ready for $sessionId (upload timeout)")
-    }
+    suspend fun uploadFile(sessionId: String, bytes: ByteArray, fileName: String): String =
+        remoteOps.uploadFile(sessionId, bytes, fileName)
 
     /**
      * Reconnect a disconnected session. Reuses the same session config.
@@ -2416,36 +2334,8 @@ DTIMER_EOF
      * Download a file from the remote server via SFTP.
      * Returns the file bytes, or null on failure.
      */
-    suspend fun downloadFile(sessionId: String, remotePath: String): ByteArray? = withContext(Dispatchers.IO) {
-        try {
-            val conn = connectionRegistry.ssh(sessionId) ?: return@withContext null
-            val sshSession = conn.getSession() ?: return@withContext null
-            val sftp = sshSession.openChannel("sftp") as com.jcraft.jsch.ChannelSftp
-            sftp.connect(5000)
-            try {
-                val home = sftp.home ?: "~"
-                val resolved = when {
-                    remotePath == "~"              -> home
-                    remotePath.startsWith("~/")    -> home + remotePath.substring(1)
-                    remotePath.startsWith("/")     -> remotePath
-                    else                           -> "$home/$remotePath"
-                }
-                val attrs = sftp.lstat(resolved)
-                if (attrs.size > DOWNLOAD_SIZE_LIMIT) {
-                    FileLogger.log(TAG, "Download refused: $resolved is ${attrs.size} bytes (limit $DOWNLOAD_SIZE_LIMIT)")
-                    return@withContext DOWNLOAD_TOO_LARGE
-                }
-                val out = java.io.ByteArrayOutputStream()
-                sftp.get(resolved, out)
-                out.toByteArray()
-            } finally {
-                sftp.disconnect()
-            }
-        } catch (e: Exception) {
-            FileLogger.error(TAG, "Download file failed: $remotePath", e)
-            null
-        }
-    }
+    suspend fun downloadFile(sessionId: String, remotePath: String): ByteArray? =
+        remoteOps.downloadFile(sessionId, remotePath)
 
     fun getBuffer(sessionId: String): String = terminalIO.getBuffer(sessionId)
 
