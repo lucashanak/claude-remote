@@ -1142,7 +1142,12 @@ class SessionOrchestrator(
         etLocalPorts[session.id] = localPort
 
         // 3) tmux attach as the ET shell's startup command (mirrors connectMosh).
-        val tmuxCmd = if (isNewTmuxSession) {
+        //    Prefix with `clear`: ET types this line into a login shell, which
+        //    echoes it — over a slow link that echo lingers visibly until tmux
+        //    attaches and repaints. `clear` runs the instant Enter is read
+        //    (before tmux's network round-trip), wiping the echoed command so
+        //    it isn't left on screen.
+        val attachCmd = if (isNewTmuxSession) {
             ClaudeConfig.buildTmuxLaunchCommand(
                 tmuxSessionName = session.tmuxSessionName,
                 folder = session.folder,
@@ -1153,6 +1158,7 @@ class SessionOrchestrator(
             val escaped = session.tmuxSessionName.replace("'", "'\\''")
             "tmux set-option -g window-size latest 2>/dev/null; tmux set-option -g history-limit 100000 2>/dev/null; tmux attach-session -t '$escaped' 2>/dev/null || tmux new-session -A -s '$escaped' \\; set-option -g mouse on \\; set-option -g history-limit 100000"
         }
+        val tmuxCmd = "clear 2>/dev/null; $attachCmd"
 
         val (cols, rows) = terminalIO.effectiveSize(session.id)
         val etManager = com.clauderemote.connection.EtManager()
