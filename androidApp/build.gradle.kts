@@ -33,6 +33,13 @@ android {
     }
 
     packaging {
+        jniLibs {
+            // Extract native libs to disk (extractNativeLibs=true). The bundled
+            // mosh/et clients are executed as real files from nativeLibraryDir;
+            // with the modern default (libs mmap'd inside the APK) they aren't
+            // on disk and ProcessBuilder can't exec them.
+            useLegacyPackaging = true
+        }
         resources {
             excludes += "META-INF/versions/9/OSGI-INF/MANIFEST.MF"
         }

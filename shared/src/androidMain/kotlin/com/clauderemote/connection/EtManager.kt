@@ -1,5 +1,6 @@
 package com.clauderemote.connection
 
+import com.clauderemote.util.FileLogger
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -25,7 +26,11 @@ actual class EtManager {
         onDisconnect: () -> Unit
     ): Boolean = withContext(Dispatchers.IO) {
         try {
-            val etBinary = etBinaryPath ?: return@withContext false
+            val etBinary = etBinaryPath
+            if (etBinary == null) {
+                FileLogger.error("EtManager", "et binary not resolved (libet.so missing from nativeLibraryDir — extractNativeLibs?)")
+                return@withContext false
+            }
             // Patched client (patches/et-client.patch):
             //  --idpasskey skips the ssh bootstrap (the app already ran
             //    etterminal over its SSH-over-CF channel);
@@ -67,8 +72,10 @@ actual class EtManager {
                 proc.outputStream.write("$startupCommand\n".toByteArray())
                 proc.outputStream.flush()
             }
+            FileLogger.log("EtManager", "et client started (pty ${cols}x${rows}, port $port)")
             true
         } catch (e: Exception) {
+            FileLogger.error("EtManager", "et client failed to start", e)
             false
         }
     }
@@ -114,9 +121,8 @@ actual class EtManager {
         fun init(context: android.content.Context) {
             val nativeLibDir = context.applicationInfo.nativeLibraryDir
             val binary = java.io.File(nativeLibDir, "libet.so")
-            if (binary.exists() && binary.canExecute()) {
-                etBinaryPath = binary.absolutePath
-            }
+            etBinaryPath = if (binary.exists() && binary.canExecute()) binary.absolutePath else null
+            FileLogger.log("EtManager", "init: libet.so exists=${binary.exists()} canExec=${binary.canExecute()} dir=$nativeLibDir")
         }
     }
 }
