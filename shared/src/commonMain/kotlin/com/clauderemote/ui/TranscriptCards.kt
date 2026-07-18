@@ -10,6 +10,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.selection.SelectionContainer
@@ -33,6 +34,8 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.infiniteRepeatable
@@ -907,11 +910,95 @@ private fun CRMarkdownTable(model: com.mikepenz.markdown.compose.components.Mark
     val cleanedBody = bodyRows.map { row -> row.map { cleanCell(it) } }
     val numCols = (listOf(cleanedHeader) + cleanedBody).maxOf { it.size }
 
+    var expanded by remember { mutableStateOf(false) }
+
+    // Inline: tap to expand, drag to horizontally scroll. Compose disambiguates tap vs drag.
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable { expanded = true }
+    ) {
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .horizontalScroll(rememberScrollState())
+        ) {
+            TableGrid(
+                header = cleanedHeader,
+                body = cleanedBody,
+                numCols = numCols,
+                maxColWidth = 240.dp,
+            )
+        }
+        // Subtle hint that the table opens fullscreen when tapped.
+        Text(
+            "⤢",
+            modifier = Modifier
+                .align(Alignment.TopEnd)
+                .padding(4.dp),
+            style = CRType.bodyDim,
+            color = c.textDim
+        )
+    }
+
+    if (expanded) {
+        Dialog(
+            onDismissRequest = { expanded = false },
+            properties = DialogProperties(usePlatformDefaultWidth = false),
+        ) {
+            Surface(modifier = Modifier.fillMaxSize(), color = c.bg) {
+                Column(modifier = Modifier.fillMaxSize()) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(12.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text("Tabulka", style = CRType.cardTitle, color = c.text)
+                        Spacer(Modifier.weight(1f))
+                        Text(
+                            "✕",
+                            modifier = Modifier
+                                .clickable { expanded = false }
+                                .padding(8.dp),
+                            style = CRType.cardTitle,
+                            color = c.text
+                        )
+                    }
+                    Box(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .verticalScroll(rememberScrollState())
+                    ) {
+                        TableGrid(
+                            header = cleanedHeader,
+                            body = cleanedBody,
+                            numCols = numCols,
+                            maxColWidth = 520.dp,
+                            modifier = Modifier.horizontalScroll(rememberScrollState()),
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun TableGrid(
+    header: List<String>,
+    body: List<List<String>>,
+    numCols: Int,
+    maxColWidth: androidx.compose.ui.unit.Dp,
+    modifier: Modifier = Modifier,
+) {
+    val c = CRTheme.colors
+
     fun cellAt(row: List<String>, i: Int): String = row.getOrElse(i) { "" }
 
     val colWidths: List<androidx.compose.ui.unit.Dp> = (0 until numCols).map { i ->
-        val maxChars = (listOf(cleanedHeader) + cleanedBody).maxOf { cellAt(it, i).length }
-        ((maxChars.coerceIn(3, 30) * 7.5f).dp).coerceIn(48.dp, 240.dp)
+        val maxChars = (listOf(header) + body).maxOf { cellAt(it, i).length }
+        ((maxChars.coerceIn(3, 30) * 7.5f).dp).coerceIn(48.dp, maxColWidth)
     }
     val totalWidth = colWidths.fold(0.dp) { acc, w -> acc + w }
     val cellStyle = CRType.bodyDim
@@ -935,15 +1022,11 @@ private fun CRMarkdownTable(model: com.mikepenz.markdown.compose.components.Mark
         }
     }
 
-    Box(
-        modifier = Modifier
-            .fillMaxWidth()
-            .horizontalScroll(rememberScrollState())
-    ) {
+    Box(modifier = modifier) {
         Column(modifier = Modifier.width(totalWidth)) {
-            TableRow(cleanedHeader, bold = true, background = c.surface2)
+            TableRow(header, bold = true, background = c.surface2)
             Box(Modifier.width(totalWidth).height(1.dp).background(dividerColor))
-            for (row in cleanedBody) {
+            for (row in body) {
                 TableRow(row, bold = false, background = Color.Transparent)
                 Box(Modifier.width(totalWidth).height(1.dp).background(dividerColor))
             }
