@@ -84,7 +84,7 @@ jobs:
         with:
           path: androidApp/src/main/jniLibs/arm64-v8a/libet.so
           # Bump the suffix to force a rebuild when build-et.sh or the ET pin changes.
-          key: et-client-arm64-v7.0.0-1
+          key: et-client-arm64-v7.0.0-2
 
       - name: Install build dependencies
         if: steps.et-cache.outputs.cache-hit != 'true'

@@ -121,6 +121,15 @@ git submodule update --init --depth 1 \
     external/sanitizers-cmake \
     external/UniversalStacktrace
 
+# --- idpasskey injection: skip the ssh bootstrap ---
+# The app runs `etterminal` over its own in-process SSH-over-Cloudflare channel
+# and parses IDPASSKEY, then passes it via --idpasskey so the client connects
+# the data channel directly — Android has no ssh binary for ET to shell out to.
+# Idempotent: --check fails once already applied, so the apply is skipped.
+if git apply --check "$SCRIPT_DIR/patches/et-idpasskey.patch" 2>/dev/null; then
+    git apply "$SCRIPT_DIR/patches/et-idpasskey.patch"
+fi
+
 # --- Android portability shims (bionic lacks a few glibc bits ET assumes) ---
 # bionic defines no _PATH_TMP (Android has no /tmp), but ET's GetTempDirectory()
 # needs a default. The app passes --tmpdir (its own cache dir) at runtime, so
