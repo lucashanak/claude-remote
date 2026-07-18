@@ -40,11 +40,16 @@ actual class EtManager {
             //    remote shell renders into a 0x0 terminal and loops redrawing.
             //  --silent avoids the GetTempDirectory() log file (unwritable path
             //    on Android).
+            val logDir = etLogDir ?: run {
+                FileLogger.error("EtManager", "no writable et log dir — skipping ET")
+                return@withContext false
+            }
             val pb = ProcessBuilder(
                 etBinary,
                 "--pty",
                 "--pty-cols", cols.coerceAtLeast(1).toString(),
                 "--pty-rows", rows.coerceAtLeast(1).toString(),
+                "--logdir", logDir,
                 "--idpasskey", idpasskey,
                 "--host", host,
                 "--port", port.toString(),
@@ -116,13 +121,22 @@ actual class EtManager {
 
     companion object {
         var etBinaryPath: String? = null
+        // App-private, always-writable dir for et's log file. Without --logdir
+        // et defaults to /data/local/tmp (the _PATH_TMP shim), which an app
+        // cannot write → the client FATAL-aborts with EACCES before connecting.
+        var etLogDir: String? = null
 
         /** Initialize from Android Context — finds the bundled et client. */
         fun init(context: android.content.Context) {
             val nativeLibDir = context.applicationInfo.nativeLibraryDir
             val binary = java.io.File(nativeLibDir, "libet.so")
             etBinaryPath = if (binary.exists() && binary.canExecute()) binary.absolutePath else null
-            FileLogger.log("EtManager", "init: libet.so exists=${binary.exists()} canExec=${binary.canExecute()} dir=$nativeLibDir")
+            etLogDir = java.io.File(context.cacheDir, "et").apply {
+                // Clear stale (empty, --silent) per-launch log files from earlier runs.
+                listFiles()?.forEach { it.delete() }
+                mkdirs()
+            }.absolutePath
+            FileLogger.log("EtManager", "init: libet.so exists=${binary.exists()} canExec=${binary.canExecute()} dir=$nativeLibDir logdir=$etLogDir")
         }
     }
 }
