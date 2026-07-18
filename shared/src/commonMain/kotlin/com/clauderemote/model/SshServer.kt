@@ -36,6 +36,12 @@ data class SshServer(
     val password: String? = null,
     val privateKey: String? = null,
     val preferMosh: Boolean = false,
+    // Opt-in: reach the session through the Eternal Terminal client, which
+    // resumes over TCP so a Starlink egress-IP change (CF WebSocket drop +
+    // rebuild) becomes a seamless replay instead of a full tmux redraw. Rides
+    // the same CF/Tailscale transport; requires etserver on the server. Off by
+    // default — no behavior change until explicitly enabled per server.
+    val preferEternal: Boolean = false,
     val defaultFolder: String = "~",
     val recentFolders: List<String> = emptyList(),
     val defaultClaudeMode: ClaudeMode = ClaudeMode.NORMAL,

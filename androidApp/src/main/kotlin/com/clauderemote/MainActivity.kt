@@ -170,6 +170,7 @@ class MainActivity : FragmentActivity() {
         // Keep the Wear companion app's session list in sync (Data Layer).
         WearSync.start(applicationContext, tabManager, sessionOrchestrator)
         com.clauderemote.connection.MoshManager.init(this)
+        com.clauderemote.connection.EtManager.init(this)
         val sshKeyManager = com.clauderemote.connection.SshKeyManager(prefs)
 
         // Wire SSH output → native TerminalView.
