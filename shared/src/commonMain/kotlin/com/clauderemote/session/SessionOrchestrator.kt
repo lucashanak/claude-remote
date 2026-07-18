@@ -712,6 +712,7 @@ class SessionOrchestrator(
                     onOutput = { data -> emit(data) },
                     onConnectionLost = {
                         transportResolver.maybeCountTsEarlyDeath(session)
+                        transportResolver.maybeCountCfEarlyDeath(session)
                         // Auto-reconnect with tmux reattach
                         tabManager.updateTabStatus(session.id, SessionStatus.DISCONNECTED)
                         statusService.updateActivity(session.id, SessionActivity.DISCONNECTED)
@@ -886,8 +887,17 @@ class SessionOrchestrator(
                 // genuine outage, plus 0–500ms jitter against retry storms.
                 val base = if (attempt == 1) 0L
                            else (2000L shl (attempt - 2).coerceAtMost(5)).coerceAtMost(30_000L)
+                // Cloudflare has no transport to fall back to, so a CF
+                // connect-then-die storm can't be broken by switching paths the
+                // way the Tailscale brake does. Once CF is provably flapping,
+                // floor even attempt 1's zero backoff so the tight loop becomes
+                // a gentle escalating retry instead of a battery-draining
+                // connect→die spin. Zero until CF dies early twice in a row, so
+                // a genuine single handover still reconnects instantly.
+                val floor = transportResolver.cfEarlyDeathBackoffMs(session.server)
                 val jitter = kotlin.random.Random.nextLong(500)
-                if (base + jitter > 0) kotlinx.coroutines.delay(base + jitter)
+                val wait = maxOf(base, floor) + jitter
+                if (wait > 0) kotlinx.coroutines.delay(wait)
                 // Tab closed during the backoff — stop reconnecting it.
                 if (tabManager.getTab(session.id) == null) { _reconnectStatus.update { it - session.id }; return }
 
@@ -912,6 +922,7 @@ class SessionOrchestrator(
                                 onOutput = { data -> emit(data) },
                                 onConnectionLost = {
                                     transportResolver.maybeCountTsEarlyDeath(session)
+                                    transportResolver.maybeCountCfEarlyDeath(session)
                                     tabManager.updateTabStatus(session.id, SessionStatus.DISCONNECTED)
                                     reconnectScope.launch { autoReconnect(session, emit) }
                                 },

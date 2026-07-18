@@ -80,6 +80,10 @@ internal class TransportResolver(
         eff: com.clauderemote.model.SshServer,
     ): Boolean = server.hasTailscale && !eff.useCloudflareProxy && eff.host == server.tailscaleHost
 
+    private fun isCloudflareEffective(
+        eff: com.clauderemote.model.SshServer,
+    ): Boolean = eff.useCloudflareProxy
+
     /** Record a connect outcome so AUTO can avoid a dead Tailscale path. */
     fun noteConnectResult(
         server: com.clauderemote.model.SshServer,
@@ -124,7 +128,34 @@ internal class TransportResolver(
     private val TS_EARLY_DEATH_MS = 30_000L
     private val lastConnectAt = java.util.concurrent.ConcurrentHashMap<String, Long>()
     private val lastConnectTsEffective = java.util.concurrent.ConcurrentHashMap<String, Boolean>()
+    private val lastConnectCfEffective = java.util.concurrent.ConcurrentHashMap<String, Boolean>()
     @Volatile private var lastNetworkTeardownAt = 0L
+
+    // ── Cloudflare early-death brake ────────────────────────────────────
+    // The Tailscale brake above breaks its loop by SWITCHING transport
+    // (cooldown → fall back to Cloudflare). Cloudflare has nowhere to fall
+    // back to — it IS the last-resort path — so a CF connection that
+    // connects then dies almost instantly (the tmux-attach redraw burst
+    // PMTUD-blackholing the just-opened tunnel) had NO brake at all:
+    // autoReconnect's attempt-1 zero backoff refires immediately and the
+    // session spins connect→die→connect forever, draining the battery. We
+    // can't switch away, so instead we count these fast spin-deaths per
+    // server and hand autoReconnect a reconnect-delay FLOOR once CF is
+    // provably spinning — turning the tight loop into a gentle escalating
+    // retry while still reconnecting a genuine single handover instantly.
+    //
+    // ONLY a FAST death counts (< CF_SPIN_DEATH_MS): a connection that lived
+    // several seconds before dying is an occasional handover on an otherwise
+    // usable link, not a battery-draining spin — flooring it would make a
+    // link that drops every ~20 s but works between drops pay a needless
+    // reconnect delay every time. The streak self-heals via lazy time-decay
+    // (see cfEarlyDeathBackoffMs): once no spin-death has landed for
+    // CF_STREAK_DECAY_MS the flap is over and reconnects go instant again.
+    private val CF_SPIN_DEATH_MS = 8_000L
+    private val CF_STREAK_DECAY_MS = 30_000L
+    private val cfFailStreak = java.util.concurrent.ConcurrentHashMap<String, Int>()
+    private val CF_STRIKE_DEBOUNCE_MS = 1_000L
+    private val lastCfStrikeAt = java.util.concurrent.ConcurrentHashMap<String, Long>()
 
     /** Record a successful connect for early-death attribution. */
     fun recordConnectSuccess(sessionId: String, server: com.clauderemote.model.SshServer, eff: com.clauderemote.model.SshServer) {
@@ -132,6 +163,12 @@ internal class TransportResolver(
         lastConnectAt[sessionId] = connectEpoch
         val tsEffective = isTailscaleEffective(server, eff)
         lastConnectTsEffective[sessionId] = tsEffective
+        lastConnectCfEffective[sessionId] = isCloudflareEffective(eff)
+        // Note: the CF strike streak is NOT cleared here — it self-heals via
+        // lazy time-decay in cfEarlyDeathBackoffMs (no spin-death for
+        // CF_STREAK_DECAY_MS ⇒ reset). That decays even on a link that never
+        // reaches a full 30 s of uninterrupted uptime, which the delayed-
+        // confirm gate the TS path uses below would not.
         if (tsEffective) {
             // Clear the TS strike streak only once THIS connection proves it
             // survives past the early-death window — not at connect time (see
@@ -178,6 +215,59 @@ internal class TransportResolver(
         if (now - lastNetworkTeardownAt < 5_000) return
         FileLogger.log(TAG, "Tailscale transport died ${now - at}ms after connect for ${session.id}")
         recordTailscaleFailure(session.server)
+    }
+
+    /** One CF strike, fed by post-connect EARLY DEATHS on the Cloudflare path. */
+    private fun recordCloudflareEarlyDeath(server: com.clauderemote.model.SshServer) {
+        // Shells share a transport (SHELLS_PER_TRANSPORT), so one transport
+        // death fires onConnectionLost for several sessions within
+        // milliseconds. Debounce so a single death WAVE counts as one strike,
+        // not one-per-tab — else a multi-tab user driving through a genuine
+        // single handover would inflate the streak to the cap and eat the full
+        // 15 s floor on a link that has actually already recovered.
+        val now = System.currentTimeMillis()
+        if (now - (lastCfStrikeAt[server.id] ?: 0L) < CF_STRIKE_DEBOUNCE_MS) return
+        lastCfStrikeAt[server.id] = now
+        val streak = (cfFailStreak[server.id] ?: 0) + 1
+        cfFailStreak[server.id] = streak
+        FileLogger.log(TAG, "Cloudflare transport early-death for ${server.name} (strike $streak)")
+    }
+
+    /** From onConnectionLost: count a fresh-connection death on the CF path so
+     *  the next reconnect can back off — unless WE tore the transport down.
+     *  Only a FAST death (a spin) counts; a connection that lived several
+     *  seconds is a benign occasional handover, not a battery-draining loop. */
+    fun maybeCountCfEarlyDeath(session: ClaudeSession) {
+        val at = lastConnectAt[session.id] ?: return
+        if (lastConnectCfEffective[session.id] != true) return
+        val now = System.currentTimeMillis()
+        val lifetime = now - at
+        if (lifetime > TS_EARLY_DEATH_MS) return
+        if (now - lastNetworkTeardownAt < 5_000) return
+        // Log every attributable death with its timing (matches the TS path) —
+        // the ms-after-connect is what tells a redraw-burst kill (sub-second)
+        // apart from a genuine handover (seconds+) in the field logs.
+        FileLogger.log(TAG, "Cloudflare transport died ${lifetime}ms after connect for ${session.id}")
+        if (lifetime > CF_SPIN_DEATH_MS) return // lived a while ⇒ not a spin, don't floor
+        recordCloudflareEarlyDeath(session.server)
+    }
+
+    /** Reconnect-delay floor (ms) for the next attempt on this server's CF
+     *  path. Zero until CF has spin-died TWICE in a row — so a genuine single
+     *  handover still reconnects instantly — then escalates 1s→2s→4s→8s→15s
+     *  cap to defuse a connect→die spin. Lazily time-decays: once no spin-death
+     *  has landed for CF_STREAK_DECAY_MS the flap is deemed over and the streak
+     *  resets to zero, restoring instant reconnect even on a link that never
+     *  reaches a full uninterrupted uptime window. */
+    fun cfEarlyDeathBackoffMs(server: com.clauderemote.model.SshServer): Long {
+        val streak = cfFailStreak[server.id] ?: 0
+        if (streak < 2) return 0L
+        val lastStrike = lastCfStrikeAt[server.id] ?: 0L
+        if (System.currentTimeMillis() - lastStrike > CF_STREAK_DECAY_MS) {
+            cfFailStreak.remove(server.id)
+            return 0L
+        }
+        return (1000L shl (streak - 2).coerceAtMost(4)).coerceAtMost(15_000L)
     }
 
     suspend fun resolveTransport(server: com.clauderemote.model.SshServer): com.clauderemote.model.SshServer {
@@ -262,6 +352,7 @@ internal class TransportResolver(
     fun clearConnectData(sessionId: String) {
         lastConnectAt.remove(sessionId)
         lastConnectTsEffective.remove(sessionId)
+        lastConnectCfEffective.remove(sessionId)
     }
 
     /** Drop a disconnected session's connection label. */
