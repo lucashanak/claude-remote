@@ -1101,9 +1101,13 @@ class SessionOrchestrator(
                 effective,
                 onOutput = { },
                 onConnectionLost = {
-                    connectionRegistry.removeEt(session.id)?.let { et -> reconnectScope.launch { et.disconnect() } }
+                    // Carrier transport died (e.g. a Starlink IP change killed
+                    // the CF WebSocket). The et CLIENT process is still alive and
+                    // retrying its local port, so DON'T kill it — just rebuild the
+                    // carrier + the forward on the SAME local port and et resumes
+                    // its session on its own: no re-bootstrap, no tmux redraw.
                     tabManager.updateTabStatus(session.id, SessionStatus.DISCONNECTED)
-                    reconnectScope.launch { autoReconnect(session, ::emit) }
+                    reconnectScope.launch { reconnectEtCarrier(session, ::emit) }
                 },
                 initialCols = terminalIO.effectiveSize(session.id).first,
                 initialRows = terminalIO.effectiveSize(session.id).second,
@@ -1132,7 +1136,10 @@ class SessionOrchestrator(
         val idpasskey = bootstrap.substring(marker + 10, marker + 10 + 16 + 1 + 32)
 
         // 2) Forward a local port to etserver:2022 over the carrier tunnel.
+        //    Remember it so a carrier rebuild can re-forward the SAME port and
+        //    the still-running et client resumes without a new bootstrap.
         val localPort = jsch.setPortForwardingL(0, "127.0.0.1", 2022)
+        etLocalPorts[session.id] = localPort
 
         // 3) tmux attach as the ET shell's startup command (mirrors connectMosh).
         val tmuxCmd = if (isNewTmuxSession) {
@@ -1158,8 +1165,16 @@ class SessionOrchestrator(
             startupCommand = tmuxCmd,
             onOutput = { data -> emit(data) },
             onDisconnect = {
-                tabManager.updateTabStatus(session.id, SessionStatus.DISCONNECTED)
-                onSessionDisconnect?.invoke(session.id)
+                // The et CLIENT PROCESS exited (not just a transport blip that
+                // et would retry through) — a real failure. Tear it down and do
+                // a full reconnect (fresh bootstrap + new et), but only if this
+                // is still the live et for the session.
+                if (connectionRegistry.et(session.id) === etManager) {
+                    connectionRegistry.removeEt(session.id)
+                    etLocalPorts.remove(session.id)
+                    tabManager.updateTabStatus(session.id, SessionStatus.DISCONNECTED)
+                    reconnectScope.launch { autoReconnect(session, ::emit) }
+                }
             }
         )
         if (!ok) {
@@ -1174,6 +1189,78 @@ class SessionOrchestrator(
             connectionRegistry.ssh(session.id)?.disconnect()
             connectionRegistry.removeSsh(session.id)
             connectSsh(session, isNewTmuxSession, forceSsh = true)
+        }
+    }
+
+    // Per-ET-session local forward port + a re-entrancy guard, so a carrier
+    // rebuild can re-forward the SAME port (letting the live et client resume).
+    private val etLocalPorts = java.util.concurrent.ConcurrentHashMap<String, Int>()
+    private val etReconnecting = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
+
+    /**
+     * ET-native reconnect: the carrier transport dropped but the et client
+     * process is still alive and retrying its local port. Rebuild ONLY the
+     * carrier SSH + the local forward on the SAME port — et then resumes its
+     * session against etserver on its own (seamless replay, no bootstrap, no
+     * tmux redraw). Falls back to a full [autoReconnect] if there's no port to
+     * resume or the carrier can't be re-established.
+     */
+    private suspend fun reconnectEtCarrier(session: ClaudeSession, emit: (String) -> Unit) {
+        if (!etReconnecting.add(session.id)) return
+        try {
+            val localPort = etLocalPorts[session.id]
+            if (localPort == null || connectionRegistry.et(session.id) == null) {
+                reconnectScope.launch { autoReconnect(session, emit) }
+                return
+            }
+            val maxAttempts = 6
+            for (attempt in 1..maxAttempts) {
+                if (tabManager.getTab(session.id) == null) { _reconnectStatus.update { it - session.id }; return }
+                val base = if (attempt == 1) 0L
+                           else (2000L shl (attempt - 2).coerceAtMost(5)).coerceAtMost(30_000L)
+                if (base > 0) kotlinx.coroutines.delay(base + kotlin.random.Random.nextLong(500))
+                if (tabManager.getTab(session.id) == null) { _reconnectStatus.update { it - session.id }; return }
+                _reconnectStatus.update { it + (session.id to ReconnectInfo(attempt, maxAttempts, nextRetryAtMillis = null)) }
+                try {
+                    connectionRegistry.ssh(session.id)?.disconnect()
+                    connectionRegistry.removeSsh(session.id)
+                    val sshManager = SshManager(serverStorage, transportPool = connectionRegistry.transportPool(session.server.id))
+                    connectionRegistry.putSsh(session.id, sshManager)
+                    val effective = transportResolver.resolveTransport(session.server)
+                    transportResolver.setConnectionLabel(session.id, effective, session.server, "ET")
+                    connectionRegistry.connectGate(session.server.id).withPermit {
+                        sshManager.connect(
+                            effective,
+                            onOutput = { },
+                            onConnectionLost = {
+                                tabManager.updateTabStatus(session.id, SessionStatus.DISCONNECTED)
+                                reconnectScope.launch { reconnectEtCarrier(session, emit) }
+                            },
+                            initialCols = terminalIO.effectiveSize(session.id).first,
+                            initialRows = terminalIO.effectiveSize(session.id).second,
+                        )
+                    }
+                    transportResolver.noteConnectResult(session.server, effective, ok = true)
+                    val jsch = sshManager.getSession() ?: throw IllegalStateException("ET carrier not connected")
+                    // Re-forward the SAME local port — the running et client is
+                    // retrying it and resumes the moment the tunnel is back.
+                    jsch.setPortForwardingL(localPort, "127.0.0.1", 2022)
+                    tabManager.updateTabStatus(session.id, SessionStatus.ACTIVE)
+                    statusService.updateActivity(session.id, SessionActivity.WAITING_FOR_INPUT)
+                    onSessionActive?.invoke(session)
+                    attachSessionRuntime(session.id, session.tmuxSessionName)
+                    _reconnectStatus.update { it - session.id }
+                    FileLogger.log(TAG, "ET carrier rebuilt for ${session.id} (localPort=$localPort) — et resuming, no redraw")
+                    return
+                } catch (e: Exception) {
+                    FileLogger.error(TAG, "ET carrier reconnect attempt $attempt failed", e)
+                }
+            }
+            // Carrier couldn't be re-established — fall back to a full reconnect.
+            _reconnectStatus.update { it - session.id }
+            reconnectScope.launch { autoReconnect(session, emit) }
+        } finally {
+            etReconnecting.remove(session.id)
         }
     }
 
@@ -1348,6 +1435,8 @@ class SessionOrchestrator(
         notificationService.setHookActive(sessionId, false)
         connectionRegistry.et(sessionId)?.disconnect()
         connectionRegistry.removeEt(sessionId)
+        etLocalPorts.remove(sessionId)
+        etReconnecting.remove(sessionId)
         connectionRegistry.ssh(sessionId)?.disconnect()
         connectionRegistry.removeSsh(sessionId)
         connectionRegistry.mosh(sessionId)?.disconnect()
