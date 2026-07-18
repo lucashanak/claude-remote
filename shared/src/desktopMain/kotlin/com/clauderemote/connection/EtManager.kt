@@ -25,6 +25,8 @@ actual class EtManager {
         idpasskey: String,
         host: String,
         port: Int,
+        cols: Int,
+        rows: Int,
         startupCommand: String,
         onOutput: (String) -> Unit,
         onDisconnect: () -> Unit
@@ -32,6 +34,9 @@ actual class EtManager {
         try {
             val pb = ProcessBuilder(
                 "et",
+                "--pty",
+                "--pty-cols", cols.coerceAtLeast(1).toString(),
+                "--pty-rows", rows.coerceAtLeast(1).toString(),
                 "--idpasskey", idpasskey,
                 "--host", host,
                 "--port", port.toString(),
@@ -80,7 +85,15 @@ actual class EtManager {
     }
 
     actual fun resize(cols: Int, rows: Int) {
-        // System et manages its own SIGWINCH via the controlling TTY.
+        // In-band resize sentinel understood by the --pty wrapper (see
+        // patches/et-client.patch): ESC _ C R <cols>;<rows> BEL → TIOCSWINSZ.
+        if (cols < 1 || rows < 1) return
+        try {
+            process?.outputStream?.apply {
+                write("_CR$cols;$rows".toByteArray(Charsets.US_ASCII))
+                flush()
+            }
+        } catch (_: Exception) {}
     }
 
     actual suspend fun disconnect() {

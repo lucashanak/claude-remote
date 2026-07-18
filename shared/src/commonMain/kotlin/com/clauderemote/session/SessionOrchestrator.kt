@@ -609,6 +609,10 @@ class SessionOrchestrator(
         isNewTmuxSession: Boolean,
         checkClosedElsewhere: Boolean = false,
     ) {
+        // Opt-in Eternal Terminal path: a session that prefers ET runs its
+        // terminal through the ET client (resumes over TCP) rather than the raw
+        // SSH shell. connectEt reuses this same SSH connection as its carrier.
+        if (session.server.preferEternal) { connectEt(session, isNewTmuxSession); return }
         val sshManager = SshManager(serverStorage, transportPool = connectionRegistry.transportPool(session.server.id))
         connectionRegistry.putSsh(session.id, sshManager)
 
@@ -1055,6 +1059,124 @@ class SessionOrchestrator(
         FileLogger.log(TAG, "Mosh connected for ${session.id}")
     }
 
+    /**
+     * Opt-in Eternal Terminal path. ET resumes the session over TCP, so a
+     * Starlink egress-IP change (CF WebSocket drop + rebuild) becomes a
+     * seamless replay instead of a full tmux redraw.
+     *
+     * Flow (validated end-to-end on a desktop PoC): open a normal SSH
+     * connection over the resolved transport as the CARRIER; over it (a) run
+     * `etterminal` to register a session with etserver and parse its IDPASSKEY,
+     * and (b) forward a local port to etserver:2022. Then run the patched `et`
+     * client (--idpasskey skips ssh bootstrap, --pty gives it a controlling TTY
+     * under the pipe-based Process) against that local forward. ET's own
+     * resumable TCP rides the forward; on a carrier drop we rebuild it and ET
+     * replays.
+     *
+     * FIRST INTEGRATION (needs on-device validation): reconnect currently
+     * reuses the standard SSH autoReconnect, which rebuilds the carrier but
+     * still does a tmux attach. Making reconnect skip the redraw entirely and
+     * let ET replay is the follow-up; requires etserver on the server.
+     */
+    private suspend fun connectEt(session: ClaudeSession, isNewTmuxSession: Boolean) {
+        val effective = transportResolver.resolveTransport(session.server)
+        FileLogger.log(TAG, "Connecting via Eternal Terminal to ${session.server.name} (${effective.host})")
+
+        fun emit(text: String) {
+            terminalIO.append(session.id, text)
+            if (tabManager.activeTabId.value == session.id) onTerminalOutput?.invoke(session.id, text)
+            notificationService.promptDetector.onOutput(session.id, text)
+        }
+
+        // Carrier SSH connection — used only for bootstrap + the local forward.
+        // Its shell channel is unused; ET provides the terminal stream.
+        val sshManager = SshManager(serverStorage, transportPool = connectionRegistry.transportPool(session.server.id))
+        connectionRegistry.putSsh(session.id, sshManager)
+        transportResolver.setConnectionLabel(session.id, effective, session.server, "ET")
+        connectionRegistry.connectGate(session.server.id).withPermit {
+            sshManager.connect(
+                effective,
+                onOutput = { },
+                onConnectionLost = {
+                    connectionRegistry.removeEt(session.id)?.let { et -> reconnectScope.launch { et.disconnect() } }
+                    tabManager.updateTabStatus(session.id, SessionStatus.DISCONNECTED)
+                    reconnectScope.launch { autoReconnect(session, ::emit) }
+                },
+                initialCols = terminalIO.effectiveSize(session.id).first,
+                initialRows = terminalIO.effectiveSize(session.id).second,
+            )
+        }
+        transportResolver.noteConnectResult(session.server, effective, ok = true)
+        val jsch = sshManager.getSession()
+            ?: throw IllegalStateException("ET carrier SSH not connected")
+
+        // 1) Bootstrap: the client generates id+passkey, pipes them to etterminal
+        //    on the server, which registers the session and echoes IDPASSKEY.
+        val id = "XX" + randomAlphaNum(14)
+        val passkey = randomAlphaNum(32)
+        val bootstrap = execCapture(jsch, "echo '$id/${passkey}_xterm-256color' | etterminal --verbose=0 2>&1")
+        val marker = bootstrap.indexOf("IDPASSKEY:")
+        if (marker < 0 || marker + 10 + 49 > bootstrap.length) {
+            emit("\r\n[31mEternal Terminal bootstrap failed (is etserver installed on the server?).[0m\r\n")
+            throw IllegalStateException("etserver bootstrap failed: ${bootstrap.take(200)}")
+        }
+        val idpasskey = bootstrap.substring(marker + 10, marker + 10 + 16 + 1 + 32)
+
+        // 2) Forward a local port to etserver:2022 over the carrier tunnel.
+        val localPort = jsch.setPortForwardingL(0, "127.0.0.1", 2022)
+
+        // 3) tmux attach as the ET shell's startup command (mirrors connectMosh).
+        val tmuxCmd = if (isNewTmuxSession) {
+            ClaudeConfig.buildTmuxLaunchCommand(
+                tmuxSessionName = session.tmuxSessionName,
+                folder = session.folder,
+                mode = session.mode,
+                model = session.model
+            )
+        } else {
+            val escaped = session.tmuxSessionName.replace("'", "'\\''")
+            "tmux set-option -g window-size latest 2>/dev/null; tmux set-option -g history-limit 100000 2>/dev/null; tmux attach-session -t '$escaped' 2>/dev/null || tmux new-session -A -s '$escaped' \\; set-option -g mouse on \\; set-option -g history-limit 100000"
+        }
+
+        val (cols, rows) = terminalIO.effectiveSize(session.id)
+        val etManager = com.clauderemote.connection.EtManager()
+        val ok = etManager.connect(
+            idpasskey = idpasskey,
+            host = "127.0.0.1",
+            port = localPort,
+            cols = cols,
+            rows = rows,
+            startupCommand = tmuxCmd,
+            onOutput = { data -> emit(data) },
+            onDisconnect = {
+                tabManager.updateTabStatus(session.id, SessionStatus.DISCONNECTED)
+                onSessionDisconnect?.invoke(session.id)
+            }
+        )
+        if (!ok) {
+            emit("\r\n[31mEternal Terminal client failed to start.[0m\r\n")
+            throw IllegalStateException("EtManager.connect returned false")
+        }
+        connectionRegistry.putEt(session.id, etManager)
+        FileLogger.log(TAG, "Eternal Terminal connected for ${session.id} (localPort=$localPort)")
+    }
+
+    private fun randomAlphaNum(n: Int): String {
+        val chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
+        return buildString { repeat(n) { append(chars[kotlin.random.Random.nextInt(chars.length)]) } }
+    }
+
+    /** Run a command over a one-shot exec channel and return its stdout. */
+    private suspend fun execCapture(jsch: com.jcraft.jsch.Session, command: String): String =
+        kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+            val ch = jsch.openChannel("exec") as com.jcraft.jsch.ChannelExec
+            ch.setCommand(command)
+            ch.inputStream = null
+            val input = ch.inputStream
+            ch.connect(10000)
+            try { input.bufferedReader().readText() } finally { ch.disconnect() }
+        }
+
     fun clearBuffer(sessionId: String) = terminalIO.clearBuffer(sessionId)
 
     fun sendInput(sessionId: String, data: String) = claudeControl.sendInput(sessionId, data)
@@ -1208,6 +1330,8 @@ class SessionOrchestrator(
         }
         notificationService.clearNotifyDedup(sessionId)
         notificationService.setHookActive(sessionId, false)
+        connectionRegistry.et(sessionId)?.disconnect()
+        connectionRegistry.removeEt(sessionId)
         connectionRegistry.ssh(sessionId)?.disconnect()
         connectionRegistry.removeSsh(sessionId)
         connectionRegistry.mosh(sessionId)?.disconnect()

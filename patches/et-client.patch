@@ -1,0 +1,171 @@
+diff --git a/src/terminal/TerminalClientMain.cpp b/src/terminal/TerminalClientMain.cpp
+index 570bfe80..7450760e 100644
+--- a/src/terminal/TerminalClientMain.cpp
++++ b/src/terminal/TerminalClientMain.cpp
+@@ -81,7 +81,126 @@ ResolvedSshConfig resolveSshConfigHost(const string& hostAlias) {
+   return result;
+ }
+ 
++#ifndef WIN32
++#include <pty.h>
++#include <sys/ioctl.h>
++#include <sys/select.h>
++#include <sys/wait.h>
++// claude-remote: self-PTY wrapper. The app runs this client via a plain
++// pipe-based Process (Android has no controlling TTY and the app deliberately
++// ships no native forkpty). ET needs a real PTY (raw input forwarding + a valid
++// window size, else the remote shell renders into a 0x0 terminal and loops
++// redrawing its prompt). With --pty we forkpty ourselves: the child re-execs
++// the normal client WITH a controlling TTY, and the parent relays the PTY
++// master to/from the app's pipes. Resize arrives in-band on stdin as
++// ESC '_' 'C' 'R' <cols> ';' <rows> BEL (an APC string the app injects and we
++// strip) → TIOCSWINSZ on the master.
++static void cr_writeAll(int fd, const char* p, size_t n) {
++  while (n > 0) {
++    ssize_t w = write(fd, p, n);
++    if (w <= 0) { if (errno == EINTR) continue; return; }
++    p += w; n -= (size_t)w;
++  }
++}
++static int cr_pty_wrapper(int argc, char** argv) {
++  int cols = 80, rows = 24;
++  bool hasPty = false;
++  std::vector<char*> childArgs;
++  for (int i = 0; i < argc; i++) {
++    std::string a = argv[i];
++    if (a == "--pty") { hasPty = true; continue; }
++    if (a == "--pty-cols" && i + 1 < argc) { cols = atoi(argv[++i]); continue; }
++    if (a == "--pty-rows" && i + 1 < argc) { rows = atoi(argv[++i]); continue; }
++    childArgs.push_back(argv[i]);
++  }
++  if (!hasPty) return -1;  // normal mode — caller runs the client directly
++  childArgs.push_back(nullptr);
++
++  struct winsize ws;
++  memset(&ws, 0, sizeof(ws));
++  ws.ws_col = (unsigned short)cols;
++  ws.ws_row = (unsigned short)rows;
++  int master = -1;
++  pid_t pid = forkpty(&master, nullptr, nullptr, &ws);
++  if (pid < 0) { perror("forkpty"); return 1; }
++  if (pid == 0) {
++    execv("/proc/self/exe", childArgs.data());
++    execv(argv[0], childArgs.data());
++    perror("execv");
++    _exit(127);
++  }
++
++  // Parent: relay master <-> stdin/stdout, intercepting the resize sentinel.
++  const char SENT[4] = {'\x1b', '_', 'C', 'R'};
++  std::string in;  // stdin scan buffer (only grows while a sentinel is partial)
++  char buf[8192];
++  for (;;) {
++    fd_set fds;
++    FD_ZERO(&fds);
++    FD_SET(0, &fds);
++    FD_SET(master, &fds);
++    if (select(master + 1, &fds, nullptr, nullptr, nullptr) < 0) {
++      if (errno == EINTR) continue;
++      break;
++    }
++    if (FD_ISSET(master, &fds)) {
++      ssize_t n = read(master, buf, sizeof(buf));
++      if (n <= 0) break;
++      cr_writeAll(1, buf, (size_t)n);
++    }
++    if (FD_ISSET(0, &fds)) {
++      ssize_t n = read(0, buf, sizeof(buf));
++      if (n <= 0) { close(master); break; }
++      in.append(buf, (size_t)n);
++      // Extract any complete sentinels; forward everything else to the PTY.
++      size_t emitted = 0;
++      for (size_t i = 0; i + 4 <= in.size();) {
++        if (memcmp(in.data() + i, SENT, 4) == 0) {
++          size_t bel = in.find('\x07', i + 4);
++          if (bel == std::string::npos) break;  // partial — wait for more
++          // flush bytes before the sentinel
++          if (i > emitted) cr_writeAll(master, in.data() + emitted, i - emitted);
++          std::string payload = in.substr(i + 4, bel - (i + 4));
++          int c = 0, r = 0;
++          if (sscanf(payload.c_str(), "%d;%d", &c, &r) == 2 && c > 0 && r > 0) {
++            struct winsize nws;
++            memset(&nws, 0, sizeof(nws));
++            nws.ws_col = (unsigned short)c;
++            nws.ws_row = (unsigned short)r;
++            ioctl(master, TIOCSWINSZ, &nws);
++          }
++          i = emitted = bel + 1;
++        } else {
++          i++;
++        }
++      }
++      if (emitted < in.size()) {
++        // No trailing partial sentinel start? forward the rest, keep a small tail.
++        size_t keep = 0;
++        for (size_t k = 1; k < 4 && k <= in.size() - emitted; k++) {
++          if (memcmp(in.data() + in.size() - k, SENT, k) == 0) { keep = k; break; }
++        }
++        size_t flushEnd = in.size() - keep;
++        if (flushEnd > emitted) cr_writeAll(master, in.data() + emitted, flushEnd - emitted);
++        in.erase(0, flushEnd);
++      } else {
++        in.clear();
++      }
++    }
++  }
++  int status = 0;
++  waitpid(pid, &status, 0);
++  return WIFEXITED(status) ? WEXITSTATUS(status) : 1;
++}
++#endif
++
+ int main(int argc, char** argv) {
++#ifndef WIN32
++  {
++    int rc = cr_pty_wrapper(argc, argv);
++    if (rc >= 0) return rc;  // ran as the PTY parent; child did the real work
++  }
++#endif
+   WinsockContext context;
+   string tmpDir = GetTempDirectory();
+ 
+@@ -184,6 +303,10 @@ int main(int argc, char** argv) {
+         ("serverfifo",
+          "If set, communicate to etserver on the matching fifo name",
+          cxxopts::value<std::string>()->default_value(""))  //
++        ("idpasskey",
++         "Pre-obtained <id>/<passkey>; when set, skip the ssh bootstrap and "
++         "connect the data channel directly (the caller already ran etterminal)",
++         cxxopts::value<std::string>()->default_value(""))  //
+         ("ssh-option", "Options to pass down to `ssh -o`",
+          cxxopts::value<std::vector<std::string>>());
+ 
+@@ -433,11 +556,23 @@ int main(int argc, char** argv) {
+     }
+ 
+     auto subprocessUtils = make_shared<SubprocessUtils>();
+-    SshSetupHandler sshSetupHandler(subprocessUtils);
+-    pair<string, string> idpasskeypair = sshSetupHandler.SetupSsh(
+-        username, destinationHost, host_alias, destinationPort, jumphost,
+-        jServerFifo, result.count("x") > 0, result["verbose"].as<int>(),
+-        etterminal_path, serverFifo, ssh_options);
++    pair<string, string> idpasskeypair;
++    string injectedIdPasskey = result["idpasskey"].as<string>();
++    if (!injectedIdPasskey.empty()) {
++      // claude-remote: the app already ran etterminal over its own in-process
++      // SSH-over-Cloudflare channel and parsed IDPASSKEY, so skip the ssh
++      // bootstrap entirely (Android has no ssh binary) and connect the data
++      // channel directly with the pre-obtained credentials.
++      auto slash = injectedIdPasskey.find('/');
++      idpasskeypair = make_pair(injectedIdPasskey.substr(0, slash),
++                                injectedIdPasskey.substr(slash + 1));
++    } else {
++      SshSetupHandler sshSetupHandler(subprocessUtils);
++      idpasskeypair = sshSetupHandler.SetupSsh(
++          username, destinationHost, host_alias, destinationPort, jumphost,
++          jServerFifo, result.count("x") > 0, result["verbose"].as<int>(),
++          etterminal_path, serverFifo, ssh_options);
++    }
+ 
+     TerminalClient terminalClient(
+         clientSocket, clientPipeSocket, socketEndpoint, idpasskeypair.first,

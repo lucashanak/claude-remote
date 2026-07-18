@@ -18,23 +18,28 @@ actual class EtManager {
         idpasskey: String,
         host: String,
         port: Int,
+        cols: Int,
+        rows: Int,
         startupCommand: String,
         onOutput: (String) -> Unit,
         onDisconnect: () -> Unit
     ): Boolean = withContext(Dispatchers.IO) {
         try {
             val etBinary = etBinaryPath ?: return@withContext false
-            // Patched client: --idpasskey skips ssh bootstrap (the app already
-            // ran etterminal over its SSH-over-CF channel). --silent avoids the
-            // GetTempDirectory() log file, which may be unwritable on Android.
-            //
-            // CAVEAT (validate on-device): the ET client manipulates the local
-            // terminal (tcgetattr/raw mode, SIGWINCH). Under a plain pipe-based
-            // Process it has no controlling TTY; mosh-client tolerates this, but
-            // ET may need a PTY. If so, launch it through a PTY wrapper and drive
-            // resize() via TIOCSWINSZ instead of the no-op below.
+            // Patched client (patches/et-client.patch):
+            //  --idpasskey skips the ssh bootstrap (the app already ran
+            //    etterminal over its SSH-over-CF channel);
+            //  --pty makes the client forkpty itself so it runs with a real
+            //    controlling TTY under this plain pipe-based Process — ET needs
+            //    a PTY for input forwarding + a valid window size, else the
+            //    remote shell renders into a 0x0 terminal and loops redrawing.
+            //  --silent avoids the GetTempDirectory() log file (unwritable path
+            //    on Android).
             val pb = ProcessBuilder(
                 etBinary,
+                "--pty",
+                "--pty-cols", cols.coerceAtLeast(1).toString(),
+                "--pty-rows", rows.coerceAtLeast(1).toString(),
                 "--idpasskey", idpasskey,
                 "--host", host,
                 "--port", port.toString(),
@@ -83,8 +88,16 @@ actual class EtManager {
     }
 
     actual fun resize(cols: Int, rows: Int) {
-        // ET tracks the terminal size via SIGWINCH on its controlling TTY.
-        // Without a PTY there is no winsize to set; see the CAVEAT in connect().
+        // In-band resize sentinel understood by the --pty wrapper: it strips
+        // ESC _ C R <cols>;<rows> BEL from the input stream and applies
+        // TIOCSWINSZ to the PTY master (which ET then forwards to the server).
+        if (cols < 1 || rows < 1) return
+        try {
+            process?.outputStream?.apply {
+                write("_CR$cols;$rows".toByteArray(Charsets.US_ASCII))
+                flush()
+            }
+        } catch (_: Exception) {}
     }
 
     actual suspend fun disconnect() {

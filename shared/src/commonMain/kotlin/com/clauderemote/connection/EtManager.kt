@@ -32,6 +32,8 @@ expect class EtManager() {
         idpasskey: String,
         host: String,
         port: Int,
+        cols: Int,
+        rows: Int,
         startupCommand: String,
         onOutput: (String) -> Unit,
         onDisconnect: () -> Unit

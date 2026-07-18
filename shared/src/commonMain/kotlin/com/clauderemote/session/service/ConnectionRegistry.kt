@@ -1,5 +1,6 @@
 package com.clauderemote.session.service
 
+import com.clauderemote.connection.EtManager
 import com.clauderemote.connection.MoshManager
 import com.clauderemote.connection.ServerTransportPool
 import com.clauderemote.connection.SshManager
@@ -24,6 +25,9 @@ internal class ConnectionRegistry(
 ) {
     private val connections = java.util.concurrent.ConcurrentHashMap<String, SshManager>()
     private val moshConnections = mutableMapOf<String, MoshManager>()
+    // ET runs alongside an SSH carrier (bootstrap + local forward), so a
+    // preferEternal session has BOTH an entry here and in [connections].
+    private val etConnections = mutableMapOf<String, EtManager>()
 
     // Handshake gate per server — see SessionOrchestrator.connectSsh: caps
     // concurrent KEX/auth handshakes to a server at 3 so a herd reconnect
@@ -54,6 +58,11 @@ internal class ConnectionRegistry(
     fun mosh(sessionId: String): MoshManager? = moshConnections[sessionId]
     fun putMosh(sessionId: String, mgr: MoshManager) { moshConnections[sessionId] = mgr }
     fun removeMosh(sessionId: String): MoshManager? = moshConnections.remove(sessionId)
+
+    // --- Eternal Terminal transports ---
+    fun et(sessionId: String): EtManager? = etConnections[sessionId]
+    fun putEt(sessionId: String, mgr: EtManager) { etConnections[sessionId] = mgr }
+    fun removeEt(sessionId: String): EtManager? = etConnections.remove(sessionId)
 
     // --- per-server pools / gates ---
     fun connectGate(serverId: String): Semaphore =

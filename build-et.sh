@@ -121,13 +121,16 @@ git submodule update --init --depth 1 \
     external/sanitizers-cmake \
     external/UniversalStacktrace
 
-# --- idpasskey injection: skip the ssh bootstrap ---
-# The app runs `etterminal` over its own in-process SSH-over-Cloudflare channel
-# and parses IDPASSKEY, then passes it via --idpasskey so the client connects
-# the data channel directly — Android has no ssh binary for ET to shell out to.
+# --- ET client patch: --idpasskey (skip ssh bootstrap) + --pty (self-PTY) ---
+# 1. --idpasskey: the app runs `etterminal` over its own in-process SSH-over-
+#    Cloudflare channel and parses IDPASSKEY, then passes it so the client
+#    connects the data channel directly — Android has no ssh binary for ET.
+# 2. --pty: the client forkpty's itself so it runs with a real controlling TTY
+#    even when launched from the app's plain pipe-based Process (ET needs a PTY
+#    for input forwarding + a valid window size; plain pipes break the shell).
 # Idempotent: --check fails once already applied, so the apply is skipped.
-if git apply --check "$SCRIPT_DIR/patches/et-idpasskey.patch" 2>/dev/null; then
-    git apply "$SCRIPT_DIR/patches/et-idpasskey.patch"
+if git apply --check "$SCRIPT_DIR/patches/et-client.patch" 2>/dev/null; then
+    git apply "$SCRIPT_DIR/patches/et-client.patch"
 fi
 
 # --- Android portability shims (bionic lacks a few glibc bits ET assumes) ---

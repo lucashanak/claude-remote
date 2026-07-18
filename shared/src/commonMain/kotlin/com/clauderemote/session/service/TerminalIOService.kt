@@ -51,7 +51,9 @@ internal class TerminalIOService(private val registry: ConnectionRegistry) {
         // Remember the active-view size as a global fallback for sessions that
         // (re)connect while backgrounded. Guard against transient 0-size layout passes.
         if (cols > 1 && rows > 0) lastActiveViewSize = cols to rows
-        registry.ssh(sessionId)?.resize(cols, rows)
+        val et = registry.et(sessionId)
+        if (et != null && et.isConnected) et.resize(cols, rows)
+        else registry.ssh(sessionId)?.resize(cols, rows)
     }
 
     /** Best-known pty size for [sessionId]: its own remembered size, else the last

@@ -43,7 +43,13 @@ internal class ClaudeControlService(
 
     fun sendInput(sessionId: String, data: String) {
         notifications.promptDetector.onUserInput(sessionId)
-        // Try mosh first, then SSH
+        // Try ET, then mosh, then SSH.
+        val et = registry.et(sessionId)
+        if (et != null && et.isConnected) {
+            status.updateActivity(sessionId, SessionActivity.WORKING)
+            et.sendInput(data)
+            return
+        }
         val mosh = registry.mosh(sessionId)
         if (mosh != null && mosh.isConnected) {
             status.updateActivity(sessionId, SessionActivity.WORKING)
@@ -61,6 +67,12 @@ internal class ClaudeControlService(
 
     fun sendBytes(sessionId: String, data: ByteArray) {
         notifications.promptDetector.onUserInput(sessionId)
+        val et = registry.et(sessionId)
+        if (et != null && et.isConnected) {
+            status.updateActivity(sessionId, SessionActivity.WORKING)
+            et.sendBytes(data)
+            return
+        }
         val mosh = registry.mosh(sessionId)
         if (mosh != null && mosh.isConnected) {
             status.updateActivity(sessionId, SessionActivity.WORKING)
