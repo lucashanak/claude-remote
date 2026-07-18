@@ -124,10 +124,13 @@ cmake .. \
     ${ARCH:+-DCMAKE_OSX_ARCHITECTURES=$ARCH} \
     -DCMAKE_EXE_LINKER_FLAGS="$EXE_LINK"
 
-cmake --build . --target et -j"$NPROC"
+# TARGET env selects the CMake target (et | etserver | etterminal); the server
+# binaries are the same build, used by the on-server etserver auto-install.
+TARGET="${TARGET:-et}"
+cmake --build . --target "$TARGET" -j"$NPROC"
 
 mkdir -p "$(dirname "$OUT")"
-cp et "$OUT"
+cp "$TARGET" "$OUT"
 strip "$OUT" 2>/dev/null || true
 echo "=== Done: $OUT ==="
 file "$OUT"

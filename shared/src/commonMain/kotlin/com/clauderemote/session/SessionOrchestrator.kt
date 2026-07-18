@@ -1123,11 +1123,18 @@ class SessionOrchestrator(
         val jsch = sshManager.getSession()
             ?: throw IllegalStateException("ET carrier SSH not connected")
 
-        // 1) Bootstrap: the client generates id+passkey, pipes them to etterminal
-        //    on the server, which registers the session and echoes IDPASSKEY.
+        // 0) Ensure etserver is installed + running on the server (user-space,
+        //    downloaded from the release on first use — no root, no manual
+        //    setup). Returns the TCP port its client connections listen on.
+        val etPort = ensureEtServer(jsch)
+            ?: throw IllegalStateException("etserver unavailable on ${session.server.name}")
+
+        // 1) Bootstrap: the client generates id+passkey, pipes them to
+        //    ~/.claude-remote/etterminal, which registers the session with the
+        //    user etserver and echoes IDPASSKEY.
         val id = "XX" + randomAlphaNum(14)
         val passkey = randomAlphaNum(32)
-        val bootstrap = execCapture(jsch, "echo '$id/${passkey}_xterm-256color' | etterminal --verbose=0 2>&1")
+        val bootstrap = execCapture(jsch, "echo '$id/${passkey}_xterm-256color' | ~/.claude-remote/etterminal --serverfifo ~/.claude-remote/et.sock --verbose=0 2>&1")
         val marker = bootstrap.indexOf("IDPASSKEY:")
         if (marker < 0 || marker + 10 + 49 > bootstrap.length) {
             emit("\r\n[31mEternal Terminal bootstrap failed (is etserver installed on the server?).[0m\r\n")
@@ -1135,10 +1142,10 @@ class SessionOrchestrator(
         }
         val idpasskey = bootstrap.substring(marker + 10, marker + 10 + 16 + 1 + 32)
 
-        // 2) Forward a local port to etserver:2022 over the carrier tunnel.
-        //    Remember it so a carrier rebuild can re-forward the SAME port and
-        //    the still-running et client resumes without a new bootstrap.
-        val localPort = jsch.setPortForwardingL(0, "127.0.0.1", 2022)
+        // 2) Forward a local port to etserver's port over the carrier tunnel.
+        //    Remember the local port so a carrier rebuild can re-forward the
+        //    SAME one and the still-running et client resumes without a bootstrap.
+        val localPort = jsch.setPortForwardingL(0, "127.0.0.1", etPort)
         etLocalPorts[session.id] = localPort
 
         // 3) tmux attach as the ET shell's startup command (mirrors connectMosh).
@@ -1248,9 +1255,11 @@ class SessionOrchestrator(
                     }
                     transportResolver.noteConnectResult(session.server, effective, ok = true)
                     val jsch = sshManager.getSession() ?: throw IllegalStateException("ET carrier not connected")
-                    // Re-forward the SAME local port — the running et client is
-                    // retrying it and resumes the moment the tunnel is back.
-                    jsch.setPortForwardingL(localPort, "127.0.0.1", 2022)
+                    // Re-verify etserver is up (survives a server reboot) and
+                    // re-forward the SAME local port to it — the running et
+                    // client is retrying that port and resumes when it's back.
+                    val etPort = ensureEtServer(jsch) ?: throw IllegalStateException("etserver unavailable on reconnect")
+                    jsch.setPortForwardingL(localPort, "127.0.0.1", etPort)
                     tabManager.updateTabStatus(session.id, SessionStatus.ACTIVE)
                     statusService.updateActivity(session.id, SessionActivity.WAITING_FOR_INPUT)
                     onSessionActive?.invoke(session)
@@ -1285,6 +1294,44 @@ class SessionOrchestrator(
             ch.connect(10000)
             try { input.bufferedReader().readText() } finally { ch.disconnect() }
         }
+
+    // Server-side etserver auto-install. Downloads the static etserver +
+    // etterminal (built from the same ET pin as the client, so protocol-
+    // compatible) from the GitHub release into ~/.claude-remote and runs
+    // etserver as a plain user process — no root, no package manager, no server
+    // config. Idempotent via a version marker; reuses a running instance.
+    // Prints "ET_READY port=<P>" on success, or an ET_* marker to fall back.
+    private val ETSERVER_INSTALL = """
+        CR="${'$'}HOME/.claude-remote"; mkdir -p "${'$'}CR"
+        VER="claude-remote-etserver v7.0.0-1"
+        case "${'$'}(uname -m)" in x86_64) A=x64 ;; *) echo "ET_UNSUPPORTED_ARCH:${'$'}(uname -m)"; exit 0 ;; esac
+        if [ "${'$'}(cat "${'$'}CR/etserver.ver" 2>/dev/null)" != "${'$'}VER" ] || [ ! -x "${'$'}CR/etserver" ] || [ ! -x "${'$'}CR/etterminal" ]; then
+          for b in etserver etterminal; do
+            curl -fsSL --connect-timeout 10 --max-time 120 "https://github.com/lucashanak/claude-remote/releases/latest/download/${'$'}b-linux-${'$'}A" -o "${'$'}CR/${'$'}b.tmp" || { echo ET_DOWNLOAD_FAILED; exit 0; }
+            chmod +x "${'$'}CR/${'$'}b.tmp" && mv "${'$'}CR/${'$'}b.tmp" "${'$'}CR/${'$'}b"
+          done
+          echo "${'$'}VER" > "${'$'}CR/etserver.ver"
+        fi
+        if [ -f "${'$'}CR/etserver.port" ] && pgrep -f "${'$'}CR/etserver" >/dev/null 2>&1; then
+          PORT=${'$'}(cat "${'$'}CR/etserver.port")
+        else
+          PORT=2299
+          while ss -tln 2>/dev/null | grep -q ":${'$'}PORT "; do PORT=${'$'}((PORT+1)); done
+          rm -f "${'$'}CR/et.sock"
+          nohup "${'$'}CR/etserver" --port "${'$'}PORT" --serverfifo "${'$'}CR/et.sock" >"${'$'}CR/etserver.log" 2>&1 &
+          sleep 1; echo "${'$'}PORT" > "${'$'}CR/etserver.port"
+        fi
+        echo "ET_READY port=${'$'}PORT"
+    """.trimIndent()
+
+    /** Ensure etserver is installed + running on the server; return its port
+     *  (null → unsupported arch / no internet / start failed → SSH fallback). */
+    private suspend fun ensureEtServer(jsch: com.jcraft.jsch.Session): Int? {
+        val out = execCapture(jsch, ETSERVER_INSTALL)
+        val port = Regex("ET_READY port=(\\d+)").find(out)?.groupValues?.get(1)?.toIntOrNull()
+        if (port == null) FileLogger.log(TAG, "etserver not ready: ${out.trim().takeLast(200)}")
+        return port
+    }
 
     fun clearBuffer(sessionId: String) = terminalIO.clearBuffer(sessionId)
 
