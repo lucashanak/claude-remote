@@ -45,6 +45,7 @@ fun ServerEditDialog(
     var passwordVisible by remember { mutableStateOf(false) }
     var privateKey by remember { mutableStateOf(server?.privateKey ?: "") }
     var preferMosh by remember { mutableStateOf(server?.preferMosh ?: false) }
+    var preferEternal by remember { mutableStateOf(server?.preferEternal ?: false) }
     var defaultFolder by remember { mutableStateOf(server?.defaultFolder ?: "~") }
     var startupCommand by remember { mutableStateOf(server?.startupCommand ?: "") }
     var snippets by remember { mutableStateOf(server?.snippets ?: emptyList()) }
@@ -250,6 +251,25 @@ fun ServerEditDialog(
                             }
                         }
 
+                        // Prefer Eternal Terminal (resumes over TCP — survives Starlink IP changes)
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Checkbox(
+                                checked = preferEternal,
+                                onCheckedChange = { preferEternal = it },
+                                colors = CheckboxDefaults.colors(
+                                    checkedColor = c.accent,
+                                    uncheckedColor = c.border,
+                                )
+                            )
+                            Column {
+                                Text("Prefer Eternal Terminal (beta)", style = CRType.cardTitle, color = c.text)
+                                Text("Resumes over TCP — seamless across Starlink drops. Requires etserver on the server.", style = CRType.bodyDim, color = c.textDim)
+                            }
+                        }
+
                         // Cloudflare
                         Row(
                             verticalAlignment = Alignment.CenterVertically,
@@ -446,6 +466,7 @@ fun ServerEditDialog(
                         password = if (authMethod == AuthMethod.PASSWORD) password else null,
                         privateKey = if (authMethod == AuthMethod.KEY) privateKey else null,
                         preferMosh = preferMosh,
+                        preferEternal = preferEternal,
                         defaultFolder = defaultFolder.ifBlank { "~" },
                         recentFolders = server?.recentFolders ?: emptyList(),
                         defaultClaudeMode = server?.defaultClaudeMode ?: com.clauderemote.model.ClaudeMode.NORMAL,

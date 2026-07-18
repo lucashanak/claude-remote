@@ -608,11 +608,14 @@ class SessionOrchestrator(
         session: ClaudeSession,
         isNewTmuxSession: Boolean,
         checkClosedElsewhere: Boolean = false,
+        forceSsh: Boolean = false,
     ) {
         // Opt-in Eternal Terminal path: a session that prefers ET runs its
         // terminal through the ET client (resumes over TCP) rather than the raw
-        // SSH shell. connectEt reuses this same SSH connection as its carrier.
-        if (session.server.preferEternal) { connectEt(session, isNewTmuxSession); return }
+        // SSH shell. connectEt reuses this same SSH connection as its carrier,
+        // and calls back with forceSsh=true to fall back to plain SSH if the ET
+        // path can't be established (avoids recursing back into connectEt).
+        if (session.server.preferEternal && !forceSsh) { connectEt(session, isNewTmuxSession); return }
         val sshManager = SshManager(serverStorage, transportPool = connectionRegistry.transportPool(session.server.id))
         connectionRegistry.putSsh(session.id, sshManager)
 
@@ -1107,6 +1110,12 @@ class SessionOrchestrator(
             )
         }
         transportResolver.noteConnectResult(session.server, effective, ok = true)
+
+        // ET-specific setup can fail on a server without etserver (or a binary
+        // that won't exec). Fall back to a plain SSH session rather than
+        // stranding the tab in ERROR — the same graceful degradation connectMosh
+        // uses. forceSsh=true stops the dispatch recursing back into connectEt.
+        try {
         val jsch = sshManager.getSession()
             ?: throw IllegalStateException("ET carrier SSH not connected")
 
@@ -1159,6 +1168,13 @@ class SessionOrchestrator(
         }
         connectionRegistry.putEt(session.id, etManager)
         FileLogger.log(TAG, "Eternal Terminal connected for ${session.id} (localPort=$localPort)")
+        } catch (e: Exception) {
+            FileLogger.error(TAG, "Eternal Terminal path failed — falling back to SSH", e)
+            connectionRegistry.removeEt(session.id)?.disconnect()
+            connectionRegistry.ssh(session.id)?.disconnect()
+            connectionRegistry.removeSsh(session.id)
+            connectSsh(session, isNewTmuxSession, forceSsh = true)
+        }
     }
 
     private fun randomAlphaNum(n: Int): String {
