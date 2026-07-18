@@ -85,6 +85,17 @@ internal class ClaudeControlService(
         conn.sendBytes(data)
     }
 
+    /** The active input target for a session: ET, then mosh, then SSH (null if
+     *  none is connected). Keeps every send path routing to the same transport
+     *  as sendInput/sendBytes — an ET session's carrier SSH shell is idle, so a
+     *  send that goes there instead of to ET vanishes. */
+    private fun activeInput(sessionId: String): ((String) -> Unit)? {
+        registry.et(sessionId)?.let { if (it.isConnected) return it::sendInput }
+        registry.mosh(sessionId)?.let { if (it.isConnected) return it::sendInput }
+        registry.ssh(sessionId)?.let { if (it.isConnected) return it::sendInput }
+        return null
+    }
+
     // ---- Offline input queue ----
 
     private fun queueInput(sessionId: String, data: String) {
@@ -101,10 +112,10 @@ internal class ClaudeControlService(
     fun flushPendingInputs(sessionId: String) {
         val queue = notifications.drain(sessionId) ?: return
         if (queue.isEmpty()) return
-        val conn = registry.ssh(sessionId) ?: return
+        val send = activeInput(sessionId) ?: return
         scope.launch {
             for (input in queue) {
-                conn.sendInput(input)
+                send(input)
                 kotlinx.coroutines.delay(300) // small delay between queued messages
             }
             val msg = "\r\n\u001B[32mFlushed ${queue.size} queued message(s)\u001B[0m\r\n"
@@ -116,15 +127,15 @@ internal class ClaudeControlService(
     }
 
     fun sendClaudeCommand(sessionId: String, command: String) {
-        val conn = registry.ssh(sessionId)
-        if (conn == null || !conn.isConnected) {
+        val send = activeInput(sessionId)
+        if (send == null) {
             queueInput(sessionId, command)
             return
         }
         FileLogger.log(TAG, "sendClaudeCommand: ${command.length} bytes to $sessionId")
         notifications.promptDetector.onUserInput(sessionId)
         status.updateActivity(sessionId, SessionActivity.WORKING)
-        conn.sendInput(command)
+        send(command)
     }
 
     fun switchModel(sessionId: String, model: ClaudeModel) {
