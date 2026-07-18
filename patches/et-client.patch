@@ -1,13 +1,17 @@
 diff --git a/src/terminal/TerminalClientMain.cpp b/src/terminal/TerminalClientMain.cpp
-index 570bfe80..7450760e 100644
+index 570bfe80..4827ab58 100644
 --- a/src/terminal/TerminalClientMain.cpp
 +++ b/src/terminal/TerminalClientMain.cpp
-@@ -81,7 +81,126 @@ ResolvedSshConfig resolveSshConfigHost(const string& hostAlias) {
+@@ -81,7 +81,130 @@ ResolvedSshConfig resolveSshConfigHost(const string& hostAlias) {
    return result;
  }
  
 +#ifndef WIN32
++#if defined(__APPLE__)
++#include <util.h>   // forkpty() lives here on macOS/BSD, not <pty.h>
++#else
 +#include <pty.h>
++#endif
 +#include <sys/ioctl.h>
 +#include <sys/select.h>
 +#include <sys/wait.h>
@@ -129,7 +133,7 @@ index 570bfe80..7450760e 100644
    WinsockContext context;
    string tmpDir = GetTempDirectory();
  
-@@ -184,6 +303,10 @@ int main(int argc, char** argv) {
+@@ -184,6 +307,10 @@ int main(int argc, char** argv) {
          ("serverfifo",
           "If set, communicate to etserver on the matching fifo name",
           cxxopts::value<std::string>()->default_value(""))  //
@@ -140,7 +144,7 @@ index 570bfe80..7450760e 100644
          ("ssh-option", "Options to pass down to `ssh -o`",
           cxxopts::value<std::vector<std::string>>());
  
-@@ -433,11 +556,23 @@ int main(int argc, char** argv) {
+@@ -433,11 +560,23 @@ int main(int argc, char** argv) {
      }
  
      auto subprocessUtils = make_shared<SubprocessUtils>();
