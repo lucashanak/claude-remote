@@ -73,9 +73,12 @@ cd openssl
 if [ ! -f "$PREFIX/lib/libcrypto.a" ]; then
     if [ "$UNAME" = "Darwin" ]; then
         OSSL_TARGET=$([ "$ARCH" = "x86_64" ] && echo darwin64-x86_64 || echo darwin64-arm64)
-        ./Configure "$OSSL_TARGET" --prefix="$PREFIX" no-shared no-tests no-apps
+        ./Configure "$OSSL_TARGET" --prefix="$PREFIX" --libdir=lib no-shared no-tests no-apps
     else
-        ./config --prefix="$PREFIX" no-shared no-tests no-apps
+        # --libdir=lib forces $PREFIX/lib (not lib64) so find_package(OpenSSL)
+        # locates our static build via OPENSSL_ROOT_DIR — on a box WITHOUT
+        # system libssl-dev (e.g. the build container) it otherwise can't.
+        ./config --prefix="$PREFIX" --libdir=lib no-shared no-tests no-apps
     fi
     make -j1 install_sw
 fi
