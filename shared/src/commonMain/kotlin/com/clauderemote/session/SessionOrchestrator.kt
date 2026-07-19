@@ -47,6 +47,27 @@ class SessionOrchestrator(
         kotlinx.coroutines.Dispatchers.IO + kotlinx.coroutines.SupervisorJob()
     )
 
+    init {
+        // Data-usage snapshot every 60s so we can see where the bytes actually
+        // go (terminal is DECODED — compressed on the wire; transcript is the
+        // on-wire base64/gzip payload; appRx/Tx is the real app-wide traffic).
+        reconnectScope.launch {
+            var pTerm = 0L; var pTr = 0L; var pRx = 0L; var pTx = 0L
+            while (true) {
+                kotlinx.coroutines.delay(60_000) // throws on scope cancel → loop ends
+                val term = com.clauderemote.util.DataMeter.terminalBytes()
+                val tr = com.clauderemote.util.DataMeter.transcriptBytes()
+                val net = com.clauderemote.util.platformNetBytes()
+                val netStr = if (net != null) {
+                    val s = " | appRx=${(net.first - pRx) / 1024}KB appTx=${(net.second - pTx) / 1024}KB"
+                    pRx = net.first; pTx = net.second; s
+                } else ""
+                FileLogger.log(TAG, "data/60s: terminal=${(term - pTerm) / 1024}KB(decoded) transcript=${(tr - pTr) / 1024}KB(wire)$netStr")
+                pTerm = term; pTr = tr
+            }
+        }
+    }
+
     // Server reachability health + per-server latency polling.
     private val serverHealthService = com.clauderemote.session.service.ServerHealthService(
         reconnectScope, connectionRegistry, tabManager, { isInBackground }

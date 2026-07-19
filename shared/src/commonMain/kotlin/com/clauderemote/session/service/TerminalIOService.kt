@@ -23,6 +23,9 @@ internal class TerminalIOService(private val registry: ConnectionRegistry) {
     @Volatile private var lastActiveViewSize: Pair<Int, Int>? = null
 
     fun append(sessionId: String, data: String) {
+        // Single choke point for all terminal output (SSH shell / ET / mosh) —
+        // meter it (decoded bytes; the transport compresses on the wire).
+        com.clauderemote.util.DataMeter.addTerminal(data.length)
         synchronized(bufferLock) {
             val buf = outputBuffers[sessionId] ?: return
             buf.append(data)

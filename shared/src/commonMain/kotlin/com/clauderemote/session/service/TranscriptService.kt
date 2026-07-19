@@ -278,15 +278,17 @@ internal class TranscriptService(
     // python3 is missing or the channel dies.
 
     /** Marker doubles as the version gate — bump vN to force reinstall. */
-    private val STREAMD_MARKER = "claude-remote-streamd v2"
+    private val STREAMD_MARKER = "claude-remote-streamd v3"
 
     private val STREAMD_SCRIPT = """
         #!/usr/bin/env python3
-        # claude-remote-streamd v2 — single-channel transcript delta streamer.
+        # claude-remote-streamd v3 — single-channel transcript delta streamer.
         # stdin : {"op":"watch","id":..,"cwd":..,"uuid":..,"off":N}  (off<0 = from EOF)
         #         {"op":"unwatch","id":..}
-        # stdout: {"t":"hello","v":1} | {"t":"hb"} | {"t":"d","id":..,"u":..,"o":N,"b":b64}
-        import sys, os, json, time, base64, threading, glob, re
+        # stdout: {"t":"hello","v":1} | {"t":"hb"} | {"t":"d","id":..,"u":..,"o":N,"b":b64,"z":0|1}
+        #   z=1 ⇒ b is gzip-then-base64 (client sends "z":1 in its watch to opt in;
+        #   omitted/0 keeps the old raw-base64 format for back-compat).
+        import sys, os, json, time, base64, gzip, threading, glob, re
 
         watches = {}
         lock = threading.Lock()
@@ -327,6 +329,7 @@ internal class TranscriptService(
                             'path': resolve(c.get('cwd') or '~', c['uuid']),
                             'uuid': c['uuid'],
                             'off': int(c.get('off') or 0),
+                            'z': int(c.get('z') or 0),
                         }
                 elif op == 'unwatch':
                     with lock:
@@ -374,8 +377,12 @@ internal class TranscriptService(
                     chunk = chunk[first + 1:]   # drop the partial first line
                 w['off'] = new_off
                 if chunk:
-                    emit({'t': 'd', 'id': wid, 'u': w['uuid'], 'o': new_off,
-                          'b': base64.b64encode(chunk).decode()})
+                    if w['z']:
+                        emit({'t': 'd', 'id': wid, 'u': w['uuid'], 'o': new_off, 'z': 1,
+                              'b': base64.b64encode(gzip.compress(chunk)).decode()})
+                    else:
+                        emit({'t': 'd', 'id': wid, 'u': w['uuid'], 'o': new_off,
+                              'b': base64.b64encode(chunk).decode()})
             time.sleep(1.0)
     """.trimIndent()
 
@@ -451,6 +458,7 @@ internal class TranscriptService(
             "cwd" to JsonPrimitive(cwd),
             "uuid" to JsonPrimitive(uuid),
             "off" to JsonPrimitive(off),
+            "z" to JsonPrimitive(1), // opt into gzip-compressed deltas
         )).toString()
         sendStreamCmd(d, cmd)
     }
@@ -522,9 +530,16 @@ internal class TranscriptService(
                             val uuid = obj["u"]?.jsonPrimitive?.contentOrNull ?: continue
                             val off = obj["o"]?.jsonPrimitive?.longOrNull ?: continue
                             val b64 = obj["b"]?.jsonPrimitive?.contentOrNull ?: continue
+                            val gz = obj["z"]?.jsonPrimitive?.longOrNull == 1L
+                            // Meter the on-wire payload (base64, gzipped when z=1).
+                            com.clauderemote.util.DataMeter.addTranscript(b64.length)
                             val stream = synchronized(transcriptLock) { transcriptStreams[sid] } ?: continue
                             val text = try {
-                                String(java.util.Base64.getDecoder().decode(b64), Charsets.UTF_8)
+                                val raw = java.util.Base64.getDecoder().decode(b64)
+                                val bytes = if (gz)
+                                    java.util.zip.GZIPInputStream(raw.inputStream()).readBytes()
+                                else raw
+                                String(bytes, Charsets.UTF_8)
                             } catch (_: Exception) { continue }
                             // Sequential dispatch on this reader keeps per-
                             // session line order; dedup absorbs any overlap
