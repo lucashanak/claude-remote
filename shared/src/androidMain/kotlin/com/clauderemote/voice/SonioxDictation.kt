@@ -140,6 +140,11 @@ internal class SonioxDictation(
                 put("sample_rate", SAMPLE_RATE)
                 put("num_channels", 1)
                 put("language_hints", JSONArray(listOf("cs", "en")))
+                // Restrict output to ONLY Czech + English — suppresses accidental
+                // transcription in neighbouring Slavic languages (sk/pl/ru), which
+                // is a likely cause of the "Czech is inaccurate" reports. English
+                // stays allowed, so context.terms English terms are unaffected.
+                put("language_hints_strict", true)
                 // Keep endpoint detection on (drives running token
                 // finalization), but make it *less* trigger-happy: negative
                 // sensitivity waits longer, and we lift the server delay to
@@ -156,9 +161,9 @@ internal class SonioxDictation(
                 // nested JSONObject/JSONArray (a flat string 400s).
                 put("context", JSONObject().apply {
                     put("general", JSONArray().apply {
-                        put(JSONObject().put("key", "language").put("value", "Czech and English mixed"))
+                        put(JSONObject().put("key", "language").put("value", "Czech (primary)"))
                         put(JSONObject().put("key", "topic").put("value", "Software development, terminal work with the Claude Code CLI"))
-                        put(JSONObject().put("key", "instructions").put("value", "Speaker mixes Czech sentences with English technical and code terms and identifiers."))
+                        put(JSONObject().put("key", "instructions").put("value", "Speaker is a native Czech speaker; conversation is primarily in Czech, with occasional English software and technical terms embedded mid-sentence."))
                     })
                     put("terms", JSONArray(listOf(
                         "Claude", "Claude Code", "commit", "git", "ralph", "session", "tmux", "pull request",
