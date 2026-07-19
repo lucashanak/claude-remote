@@ -48,6 +48,13 @@ class SessionOrchestrator(
     )
 
     init {
+        // Route one-off SSH ops (scanRemoteSessions, status/transcript polls)
+        // onto an existing pooled transport instead of a fresh SSH-over-CF
+        // handshake each time — the dominant idle data drain.
+        com.clauderemote.connection.SshSessionHelper.liveSessionProvider = { server ->
+            connectionRegistry.pooledSession(server.id)
+        }
+
         // Data-usage snapshot every 60s so we can see where the bytes actually
         // go (terminal is DECODED — compressed on the wire; transcript is the
         // on-wire base64/gzip payload; appRx/Tx is the real app-wide traffic).

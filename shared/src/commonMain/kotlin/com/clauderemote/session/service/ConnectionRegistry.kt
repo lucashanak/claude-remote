@@ -74,6 +74,9 @@ internal class ConnectionRegistry(
     fun transportPoolCount(): Int = transportPools.size
     /** Total live TCP transports across all servers — the real connection count. */
     fun liveTransportCount(): Int = transportPools.values.sumOf { it.liveCount() }
+    /** A usable pooled session for [serverId] to run one-off execs on (reuse
+     *  instead of opening a fresh SSH-over-Cloudflare connection). Null if none. */
+    fun pooledSession(serverId: String): Session? = transportPools[serverId]?.anyUsableSession()
     fun teardownAllTransports() { transportPools.values.forEach { it.teardownAll() } }
 
     // --- tab → server lookups ---

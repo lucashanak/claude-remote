@@ -55,6 +55,11 @@ class ServerTransportPool(private val serverStorage: ServerStorage) {
      *  unlike the per-session SshManager count. For data-usage metering. */
     fun liveCount(): Int = transports.count { it.usable }
 
+    /** Any usable transport's session, for one-off execs (tmux listing, status
+     *  polls) that would otherwise open a fresh SSH-over-Cloudflare connection
+     *  every time — reuse the pooled transport instead. Null if none is live. */
+    fun anyUsableSession(): Session? = transports.firstOrNull { it.usable }?.session
+
     /**
      * Lease a connected transport for [server], connecting one if needed.
      * [lessee] identifies the holder for [release].

@@ -11,6 +11,16 @@ import com.jcraft.jsch.Session
  */
 object SshSessionHelper {
 
+    /**
+     * Optional hook to a live pooled session for a server. Set once at startup
+     * (→ ConnectionRegistry.pooledSession). When it returns a connected session,
+     * [withSession] runs the one-off op on THAT transport instead of opening a
+     * fresh SSH-over-Cloudflare connection — periodic polls (scanRemoteSessions,
+     * SessionStatusPoller, transcript poll) were each doing a full handshake
+     * every time, which dominated idle data usage.
+     */
+    @Volatile var liveSessionProvider: ((SshServer) -> Session?)? = null
+
     fun createSession(server: SshServer, timeout: Int = 10000): Session {
         val jsch = JSch()
         if (server.authMethod == AuthMethod.KEY && server.privateKey != null) {
@@ -44,6 +54,11 @@ object SshSessionHelper {
         timeout: Int = 10000,
         block: suspend (Session) -> T
     ): T {
+        // Reuse an existing pooled transport when the server already has one —
+        // no fresh handshake, and we must NOT disconnect it (it's shared).
+        val reuse = liveSessionProvider?.invoke(server)?.takeIf { it.isConnected }
+        if (reuse != null) return block(reuse)
+
         val sess = createSession(server, timeout)
         return try {
             kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {

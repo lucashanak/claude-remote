@@ -36,11 +36,11 @@ import java.util.concurrent.TimeUnit
  * latency — Soniox has to decode it — so it was dropped for lower latency.)
  * Gets word-by-word tokens back;
  * [onPartial] fires with the growing transcript, [onFinal] with the settled
- * text. It ends on [stop], on the server's `finished`, or after a client-side
- * 5 s silence timer — Soniox's `<end>` endpoint no longer ends it directly, so
- * a short mid-sentence pause doesn't cut the speaker off (the server's own
- * endpoint delay is capped at 3 s). Requires a Soniox key synced from the
- * phone ([SonioxKeyStore]) and RECORD_AUDIO.
+ * text. It ends on [stop], on the server's `finished`, or on Soniox's `<end>`
+ * endpoint. Sensitivity is tuned down server-side (`endpoint_sensitivity`
+ * −0.3, `max_endpoint_delay_ms` 3000 ≈ 3 s) so a short mid-sentence pause
+ * doesn't cut the speaker off. Requires a Soniox key synced from the phone
+ * ([SonioxKeyStore]) and RECORD_AUDIO.
  *
  * Unlike the phone port, mic capture starts the instant [start] is called (NOT
  * in onOpen): on a watch with no Wi-Fi the handshake can take seconds — so
@@ -69,13 +69,6 @@ internal class SonioxWatchStt(
     @Volatile private var stopped = false
     @Volatile private var captureThread: Thread? = null
     @Volatile private var finalFired = false
-    // Client-side silence timer. `enable_endpoint_detection` fires an `<end>`
-    // the moment the speaker pauses, which cuts a short mid-sentence breath
-    // off; instead we wait SILENCE_TIMEOUT_MS after the *last real word* and
-    // only then finalize. Rearmed on every non-control token (see onMessage),
-    // cancelled on manual stop / server `finished` / fire. Lives client-side
-    // (on [main]) because Soniox's own endpoint delay is capped at 3 s.
-    @Volatile private var silenceStop: Runnable? = null
     private val finalText = StringBuilder()
 
     // Outbound μ-law frames produced before the socket opened, flushed on
@@ -122,7 +115,6 @@ internal class SonioxWatchStt(
     fun stop() {
         if (stopped) return
         stopped = true
-        cancelSilenceTimer()
         // μ-law goes out inline on the capture loop, so the last chunk has
         // already been sent by the time this runs — no encoder tail to drain.
         // Just stop the loop and send the end-of-audio marker.
@@ -152,11 +144,10 @@ internal class SonioxWatchStt(
                 // is a likely cause of the "Czech is inaccurate" reports. English
                 // stays allowed, so context.terms English terms are unaffected.
                 put("language_hints_strict", true)
-                // Keep endpoint detection on (drives running token
-                // finalization), but make it *less* trigger-happy: negative
-                // sensitivity waits longer, and we lift the server delay to
-                // its 3 s ceiling. The full ~5 s pause tolerance is enforced
-                // client-side (silenceStop) since the server maxes at 3 s.
+                // Keep endpoint detection on (it ends the dictation), but
+                // make it *less* trigger-happy: negative sensitivity waits
+                // longer, and we lift the server delay to its 3 s ceiling so
+                // a short mid-sentence pause doesn't cut the speaker off.
                 // Docs recommend -0.3 for dictation; do NOT also send
                 // endpoint_latency_adjustment_level (it fights negative
                 // sensitivity).
@@ -194,18 +185,16 @@ internal class SonioxWatchStt(
             }
             val tokens = obj.optJSONArray("tokens")
             val provisional = StringBuilder()
-            var sawRealToken = false
+            var endpoint = false
             if (tokens != null) {
                 for (i in 0 until tokens.length()) {
                     val tok = tokens.optJSONObject(i) ?: continue
                     val t = tok.optString("text")
+                    // Control tokens ("<end>", "<fin>") aren't transcript text.
                     if (t.startsWith("<") && t.endsWith(">")) {
-                        // `<end>` no longer finalizes — the silence timer does.
+                        if (tok.optBoolean("is_final")) endpoint = true
                         continue
                     }
-                    // A real word arrived — the speaker isn't silent, so the
-                    // silence timer (below) gets rearmed.
-                    sawRealToken = true
                     if (tok.optBoolean("is_final")) {
                         synchronized(this@SonioxWatchStt) { finalText.append(t) }
                     } else {
@@ -215,9 +204,8 @@ internal class SonioxWatchStt(
             }
             val running = synchronized(this@SonioxWatchStt) { finalText.toString() } + provisional
             if (running.isNotBlank()) main.post { onPartial?.invoke(running.trim()) }
-            // Rearm the 5 s silence timer on every real word so a short pause
-            // doesn't finalize early; it fires only after 5 s with no new word.
-            if (sawRealToken) resetSilenceTimer(webSocket)
+            // Soniox's `<end>` endpoint finalizes the dictation.
+            if (endpoint) fireFinalOnce(webSocket)
             // Server-side end-of-stream still finalizes immediately.
             if (obj.optBoolean("finished")) fireFinalOnce(webSocket)
         }
@@ -233,7 +221,6 @@ internal class SonioxWatchStt(
         if (finalFired) return
         finalFired = true
         stopped = true
-        cancelSilenceTimer()
         captureThread?.interrupt()
         captureThread = null
         val settled = synchronized(this) { finalText.toString() }.trim()
@@ -243,24 +230,6 @@ internal class SonioxWatchStt(
         )
         main.post { onFinal(settled) }
         runCatching { webSocket.close(1000, null) }
-    }
-
-    /**
-     * (Re)arm the 5 s silence timer, counted from the last real word. Each new
-     * word cancels the pending fire and schedules a fresh one, so the dictation
-     * only ends after 5 s of actual silence.
-     */
-    private fun resetSilenceTimer(webSocket: WebSocket) {
-        silenceStop?.let { main.removeCallbacks(it) }
-        val runnable = Runnable { fireFinalOnce(webSocket) }
-        silenceStop = runnable
-        main.postDelayed(runnable, SILENCE_TIMEOUT_MS)
-    }
-
-    /** Cancel any pending silence fire (manual stop, finished, or after fire). */
-    private fun cancelSilenceTimer() {
-        silenceStop?.let { main.removeCallbacks(it) }
-        silenceStop = null
     }
 
     /**
@@ -399,9 +368,5 @@ internal class SonioxWatchStt(
         private const val FRAME_BYTES = 3200 // 100 ms @ 16 kHz mono 16-bit
         // ~10 s of μ-law frames — a generous ceiling on pre-open buffering.
         private const val MAX_BACKLOG_FRAMES = 150
-        // Client-side silence tolerance: end the dictation 5 s after the last
-        // word. Larger than the server's 3 s hard cap on max_endpoint_delay_ms,
-        // which is why the wait lives here.
-        private const val SILENCE_TIMEOUT_MS = 5000L
     }
 }
