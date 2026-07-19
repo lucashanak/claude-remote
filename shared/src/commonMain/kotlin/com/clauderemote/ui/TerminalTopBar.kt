@@ -199,7 +199,7 @@ internal fun CRTopBar(
             // squeezed below its content's natural width.
             Row(
                 modifier = Modifier
-                    .widthIn(max = 160.dp)
+                    .widthIn(max = 210.dp)
                     .horizontalScroll(rememberScrollState()),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
@@ -234,24 +234,15 @@ internal fun CRTopBar(
                 }
             }
 
-            // Terminal view toggle (Raw / Transcript)
+            // Terminal view toggle (Raw / Transcript) — a single button showing
+            // the CURRENT view; tapping flips it. Replaces the wider two-segment
+            // Segmented switch to free horizontal space. Accent color reads as
+            // active/tappable. Compact/control-bar toggles now live in the ⋮ menu.
             if (onTerminalViewChange != null) {
-                com.clauderemote.ui.components.Segmented(
-                    options = CRTerminalView.entries.toList(),
-                    selected = terminalView,
-                    onSelect = onTerminalViewChange,
-                    modifier = Modifier.padding(horizontal = 2.dp),
-                    label = { if (it == CRTerminalView.Raw) "Raw" else "Chat" },
-                )
-            }
-
-            // Compact toggle
-            TextButton(onClick = onToggleCompact) {
-                Text(if (compactMode) "Full" else "Min", style = CRType.bodyDim, color = c.textDim)
-            }
-            if (!compactMode) {
-                TextButton(onClick = onToggleControlBar) {
-                    Text(if (showControlBar) "Hide" else "Ctrl", style = CRType.bodyDim, color = c.textDim)
+                TextButton(onClick = {
+                    onTerminalViewChange(if (terminalView == CRTerminalView.Raw) CRTerminalView.Transcript else CRTerminalView.Raw)
+                }) {
+                    Text(if (terminalView == CRTerminalView.Raw) "Raw" else "Chat", color = c.accent, style = CRType.bodyDim)
                 }
             }
 

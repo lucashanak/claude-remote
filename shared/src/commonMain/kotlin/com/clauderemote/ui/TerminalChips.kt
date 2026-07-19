@@ -82,22 +82,22 @@ import kotlinx.coroutines.launch
 @Composable
 internal fun MiniBar(label: String, percent: Int) {
     val c = CRTheme.colors
-    Row(verticalAlignment = Alignment.CenterVertically) {
-        Text(label, style = CRType.monoTiny, color = c.textDim, modifier = Modifier.width(20.dp))
-        Box(
-            modifier = Modifier.width(40.dp).height(4.dp)
-                .background(c.surface2, CircleShape)
-        ) {
-            val pct = percent.coerceIn(0, 100)
-            val color = when {
-                pct < 50 -> c.ready
-                pct < 80 -> c.working
-                else -> c.disconnected
-            }
-            Box(modifier = Modifier.fillMaxHeight().fillMaxWidth(pct / 100f).background(color, CircleShape))
-        }
-        Text("${percent}%", style = CRType.monoTiny, color = c.textDim, modifier = Modifier.padding(start = 2.dp))
+    val pct = percent.coerceIn(0, 100)
+    // Color-code the number by threshold and drop the fixed-width bar entirely:
+    // on a phone the old 40dp bar clipped to a dot inside the metrics width
+    // ceiling and the trailing "NN%" was cut off. Compact text always fits.
+    val color = when {
+        pct < 50 -> c.ready
+        pct < 80 -> c.working
+        else -> c.disconnected
     }
+    Text(
+        "$label ${percent}%",
+        style = CRType.monoTiny,
+        color = color,
+        maxLines = 1,
+        softWrap = false,
+    )
 }
 
 /**

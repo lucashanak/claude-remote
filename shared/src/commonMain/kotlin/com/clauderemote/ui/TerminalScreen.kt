@@ -555,6 +555,19 @@ fun TerminalScreen(
                                         modifier = Modifier.size(32.dp), contentPadding = PaddingValues(0.dp)
                                     ) { Text("A+") }
                                 }
+                                // Top-bar density toggles — moved here out of the
+                                // always-visible bar to free horizontal space.
+                                HorizontalDivider(color = c.border, modifier = Modifier.padding(vertical = 4.dp))
+                                TextButton(onClick = { moreMenu = false; compactMode = !compactMode },
+                                    modifier = Modifier.fillMaxWidth()) {
+                                    Text(if (compactMode) "Show full bar" else "Minimize bar", color = c.text)
+                                }
+                                if (!compactMode) {
+                                    TextButton(onClick = { moreMenu = false; showControlBar = !showControlBar },
+                                        modifier = Modifier.fillMaxWidth()) {
+                                        Text(if (showControlBar) "Hide control bar" else "Show control bar", color = c.text)
+                                    }
+                                }
                                 if (activeSession != null) {
                                     HorizontalDivider(color = c.border, modifier = Modifier.padding(vertical = 4.dp))
                                     TextButton(onClick = {
