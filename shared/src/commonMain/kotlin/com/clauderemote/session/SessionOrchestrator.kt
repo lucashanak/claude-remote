@@ -845,17 +845,15 @@ class SessionOrchestrator(
                 throw SessionClosedElsewhereException()
             }
             val escaped = session.tmuxSessionName.replace("'", "'\\''")
-            // attach -d: detach ALL other clients on this session. Every
-            // reconnect/reattach opens a new `tmux attach` client and old ones
-            // linger (observed 15 zombie clients on one session). With
-            // `window-size latest` the pane follows whichever client was most
-            // recently active, so a stale 80x24 client periodically shrank the
-            // pane and left the terminal not filling the window — and it's why a
-            // kickRedraw resize of OUR client looked ineffective (tmux was
-            // showing a different client's size). -d guarantees a single client,
-            // so the pane always matches this view and resizes take effect.
+            // NOTE: attach WITHOUT -d so the same tmux session can be used from
+            // two devices at once. The "terminal not filling the window" bug
+            // (a stale 80x24 zombie client winning `window-size latest`) is
+            // fixed at the source instead: dropped-connection sshd sessions +
+            // their `tmux attach` clients are reaped server-side by sshd
+            // ClientAliveInterval (see ~/.claude-remote install / sshd_config),
+            // which -d would have papered over at the cost of multi-device.
             val command = if (tmuxExists) {
-                "tmux set-option -g window-size latest 2>/dev/null; tmux set-option -g history-limit 100000 2>/dev/null; tmux attach-session -d -t '$escaped'"
+                "tmux set-option -g window-size latest 2>/dev/null; tmux set-option -g history-limit 100000 2>/dev/null; tmux attach-session -t '$escaped'"
             } else if (session.claudeSessionId != null) {
                 // Resume only works if claude actually wrote a transcript file
                 // for this UUID. The transcript appears lazily — first user/
@@ -1079,7 +1077,7 @@ class SessionOrchestrator(
             )
         } else {
             val escaped = session.tmuxSessionName.replace("'", "'\\''")
-            "tmux set-option -g window-size latest 2>/dev/null; tmux set-option -g history-limit 100000 2>/dev/null; tmux attach-session -d -t '$escaped' 2>/dev/null || tmux new-session -A -s '$escaped' \\; set-option -g mouse on \\; set-option -g history-limit 100000"
+            "tmux set-option -g window-size latest 2>/dev/null; tmux set-option -g history-limit 100000 2>/dev/null; tmux attach-session -t '$escaped' 2>/dev/null || tmux new-session -A -s '$escaped' \\; set-option -g mouse on \\; set-option -g history-limit 100000"
         }
 
         fun emit(text: String) {
@@ -1216,7 +1214,7 @@ class SessionOrchestrator(
             )
         } else {
             val escaped = session.tmuxSessionName.replace("'", "'\\''")
-            "tmux set-option -g window-size latest 2>/dev/null; tmux set-option -g history-limit 100000 2>/dev/null; tmux attach-session -d -t '$escaped' 2>/dev/null || tmux new-session -A -s '$escaped' \\; set-option -g mouse on \\; set-option -g history-limit 100000"
+            "tmux set-option -g window-size latest 2>/dev/null; tmux set-option -g history-limit 100000 2>/dev/null; tmux attach-session -t '$escaped' 2>/dev/null || tmux new-session -A -s '$escaped' \\; set-option -g mouse on \\; set-option -g history-limit 100000"
         }
         val tmuxCmd = "clear 2>/dev/null; $attachCmd"
 
