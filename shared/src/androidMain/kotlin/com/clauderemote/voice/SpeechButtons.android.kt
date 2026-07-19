@@ -204,10 +204,16 @@ actual fun MicButton(
         // the input) re-injecting text into the field. onFinal bumps the
         // session so nothing after it can write.
         val mySession = sessionId.incrementAndGet()
+        // Silence tolerance read straight from prefs (same style as the rest of
+        // this file — no AppSettings dependency here), clamped to 1–10 s.
+        val silenceMs = context
+            .getSharedPreferences("claude_remote", Context.MODE_PRIVATE)
+            .getInt("dictation_silence_ms", 4000).coerceIn(1000, 10000)
         val dictation = SonioxDictation(
             context = context.applicationContext,
             apiKey = cfg.apiKey,
             continuous = false,
+            silenceMs = silenceMs,
             // Live word-by-word growth: each partial re-splices the running
             // transcript in at the cursor position.
             onPartial = { phrase ->

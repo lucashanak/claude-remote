@@ -34,6 +34,9 @@ data class WearSessionsPayload(
     // and speed the user chose there.
     val sonioxVoice: String = "Adrian",
     val ttsSpeedPct: Int = 100,
+    // Silence tolerance (ms) for on-watch dictation, mirrored from the phone.
+    // Trailing default keeps compat with older phone builds (ignoreUnknownKeys).
+    val dictationSilenceMs: Int = 4000,
 )
 
 /**
@@ -49,11 +52,14 @@ object SonioxKeyStore {
         private set
     @Volatile var ttsSpeedPct: Int = 100
         private set
+    @Volatile var dictationSilenceMs: Int = 4000
+        private set
 
-    fun update(key: String, voice: String = "Adrian", speedPct: Int = 100) {
+    fun update(key: String, voice: String = "Adrian", speedPct: Int = 100, silenceMs: Int = 4000) {
         if (key.isNotBlank()) apiKey = key
         if (voice.isNotBlank()) ttsVoice = voice
         if (speedPct in 25..400) ttsSpeedPct = speedPct
+        if (silenceMs in 1000..10000) dictationSilenceMs = silenceMs
     }
 }
 

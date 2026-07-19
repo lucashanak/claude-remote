@@ -71,6 +71,9 @@ actual fun WakeWordSettingsCard(settings: AppSettings) {
     var gcloudVoice by remember { mutableStateOf(settings.googleCloudVoice) }
     var sonioxKey by remember { mutableStateOf(settings.sonioxApiKey) }
     var sonioxVoice by remember { mutableStateOf(settings.sonioxTtsVoice) }
+    // Silence tolerance in whole seconds (persisted as ms) — how long a pause
+    // ends dictation. Mirrors the voice/speed pattern above.
+    var dictationSilenceSec by remember { mutableStateOf(settings.dictationSilenceMs / 1000) }
     var testing by remember { mutableStateOf(false) }
     var speechRatePct by remember { mutableStateOf(settings.ttsSpeechRatePct) }
     var pitchPct by remember { mutableStateOf(settings.ttsPitchPct) }
@@ -204,6 +207,24 @@ actual fun WakeWordSettingsCard(settings: AppSettings) {
                     "Vyžaduje Soniox API klíč (níže). Audio odchází Soniox.",
                 style = CRType.bodyDim, color = c.textDim,
             )
+            // Silence timer: valueRange 1..10 + steps=8 gives 10 discrete
+            // whole-second stops. Persisted as ms; also synced to the watch.
+            Column(modifier = Modifier.fillMaxWidth()) {
+                Text(
+                    "Konec diktování po pauze: $dictationSilenceSec s",
+                    style = CRType.bodyDim, color = c.textDim,
+                )
+                androidx.compose.material3.Slider(
+                    value = dictationSilenceSec.toFloat(),
+                    onValueChange = {
+                        val sec = Math.round(it)
+                        dictationSilenceSec = sec
+                        settings.dictationSilenceMs = sec * 1000
+                    },
+                    valueRange = 1f..10f,
+                    steps = 8,
+                )
+            }
         }
         // Soniox API key — shared by STT (streaming) and TTS. Shown whenever
         // either side uses Soniox.

@@ -67,6 +67,9 @@ internal class SonioxDictation(
     private val onError: (String) -> Unit,
     private val onListening: (() -> Unit)? = null,
     private val onPartial: ((String) -> Unit)? = null,
+    // Silence tolerance (ms) that ends single-shot dictation — user-set in
+    // Voice settings. Default 4 s; ignored in continuous (voice) mode.
+    private val silenceMs: Int = 4000,
 ) {
     private val http = OkHttpClient.Builder()
         .connectTimeout(15, TimeUnit.SECONDS)
@@ -96,7 +99,7 @@ internal class SonioxDictation(
     // generous NO_SPEECH_GUARD_MS (so a session that never produces a token —
     // noise, silence, a mic that heard nothing — always terminates instead of
     // hanging, which is exactly how the previous timer broke), then re-armed to
-    // DICTATION_SILENCE_MS on EVERY real word. So the countdown restarts from
+    // the user-set silenceMs on EVERY real word. So the countdown restarts from
     // the last word and a short mid-sentence pause doesn't cut you off. Never
     // depends on a token arriving to schedule the first fire.
     private val main = Handler(Looper.getMainLooper())
@@ -182,8 +185,11 @@ internal class SonioxDictation(
             // Arm the silence timer immediately (single-shot only) with the
             // long no-speech guard. Re-armed short on each real word below. This
             // up-front arm is what guarantees no hang even if zero tokens ever
-            // arrive.
-            if (!continuous) postOnMain { armSilence(webSocket, NO_SPEECH_GUARD_MS) }
+            // arrive. The guard must never be shorter than the (user-set)
+            // tolerance — otherwise a 10 s tolerance would be cut by the guard.
+            if (!continuous) postOnMain {
+                armSilence(webSocket, maxOf(NO_SPEECH_GUARD_MS, silenceMs.toLong() + 2000L))
+            }
         }
 
         override fun onMessage(webSocket: WebSocket, text: String) {
@@ -228,7 +234,7 @@ internal class SonioxDictation(
                 // timer does. Re-arm it (short) on every real word so a pause
                 // between words doesn't finalize early. The up-front arm in
                 // onOpen already guarantees termination if no word ever comes.
-                if (sawRealToken) postOnMain { armSilence(webSocket, DICTATION_SILENCE_MS) }
+                if (sawRealToken) postOnMain { armSilence(webSocket, silenceMs.toLong()) }
             }
             if (obj.optBoolean("finished")) fireFinalOnce(webSocket)
         }
@@ -376,9 +382,9 @@ internal class SonioxDictation(
         private const val MODEL = "stt-rt-v5"
         private const val SAMPLE_RATE = 16000
         private const val FRAME_BYTES = 3200 // 100 ms @ 16 kHz mono 16-bit
-        // Silence timer: short pause-between-words tolerance (re-armed on each
-        // word), and a long up-front guard so a token-less session still ends.
-        private const val DICTATION_SILENCE_MS = 4000L
+        // Silence timer: the pause-between-words tolerance is now the user-set
+        // `silenceMs` (re-armed on each word); this is only the long up-front
+        // guard so a token-less session still ends.
         private const val NO_SPEECH_GUARD_MS = 12000L
     }
 }

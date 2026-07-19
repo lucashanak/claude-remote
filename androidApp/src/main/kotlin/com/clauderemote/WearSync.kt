@@ -48,6 +48,9 @@ data class WearSessionsPayload(
     // Mirror the phone's TTS voice + reading speed to the watch.
     val sonioxVoice: String = "Adrian",
     val ttsSpeedPct: Int = 100,
+    // Silence tolerance (ms) for on-watch dictation — mirrored from the phone's
+    // Voice settings. New trailing field (defaulted) to stay wire-compatible.
+    val dictationSilenceMs: Int = 4000,
 )
 
 /**
@@ -157,8 +160,9 @@ object WearSync {
         val sonioxKey = prefs.getString("soniox_api_key", "").orEmpty()
         val sonioxVoice = prefs.getString("soniox_tts_voice", "Adrian").orEmpty().ifBlank { "Adrian" }
         val ttsSpeedPct = prefs.getInt("tts_speech_rate_pct", 100)
+        val dictationSilenceMs = prefs.getInt("dictation_silence_ms", 4000).coerceIn(1000, 10000)
         val payload = json.encodeToString<WearSessionsPayload>(
-            WearSessionsPayload(sessions, sonioxKey, sonioxVoice, ttsSpeedPct),
+            WearSessionsPayload(sessions, sonioxKey, sonioxVoice, ttsSpeedPct, dictationSilenceMs),
         )
         // No forced per-push timestamp field: letting the DataItem's bytes be
         // identical when nothing actually changed lets putDataItem's own

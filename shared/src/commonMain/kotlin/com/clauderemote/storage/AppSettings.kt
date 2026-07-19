@@ -232,6 +232,13 @@ class AppSettings(private val prefs: PlatformPreferences) {
         get() = prefs.getString("soniox_tts_voice", "Adrian")
         set(value) = prefs.putString("soniox_tts_voice", value.trim())
 
+    // How long a pause ends single-shot dictation (the silence timer, ms).
+    // Clamped to 1–10 s: below 1 s cuts you off mid-sentence, above 10 s just
+    // hangs. Synced to the watch alongside the Soniox voice/speed.
+    var dictationSilenceMs: Int
+        get() = prefs.getInt("dictation_silence_ms", 4000).coerceIn(1000, 10000)
+        set(value) = prefs.putInt("dictation_silence_ms", value.coerceIn(1000, 10000))
+
     // Voice activation (wake word) — opt-in, foreground-only. Reuses the STT
     // server: while idle + foregrounded it VAD-listens and opens the dialog
     // when the transcript contains [wakeWord]. Off by default (always-on mic).

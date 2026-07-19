@@ -73,7 +73,7 @@ internal class SonioxWatchStt(
 
     // Single-shot silence timer — ends dictation, NOT Soniox's <end>. Armed
     // once at onOpen with NO_SPEECH_GUARD_MS (so a token-less session can't
-    // hang), re-armed to DICTATION_SILENCE_MS on every real word.
+    // hang), re-armed to the phone-synced tolerance on every real word.
     @Volatile private var silenceStop: Runnable? = null
 
     // Outbound μ-law frames produced before the socket opened, flushed on
@@ -181,7 +181,10 @@ internal class SonioxWatchStt(
             // Arm the silence timer with the long no-speech guard the moment
             // the socket is ready — re-armed short on each real word below.
             // This guarantees the dictation always ends even if no token comes.
-            main.post { armSilence(webSocket, NO_SPEECH_GUARD_MS) }
+            // The guard must never be shorter than the (phone-synced) tolerance.
+            main.post {
+                armSilence(webSocket, maxOf(NO_SPEECH_GUARD_MS, SonioxKeyStore.dictationSilenceMs.toLong() + 2000L))
+            }
         }
 
         override fun onMessage(webSocket: WebSocket, text: String) {
@@ -217,7 +220,7 @@ internal class SonioxWatchStt(
             // <end> no longer finalizes — the silence timer does. Re-arm it
             // (short) on every real word; the up-front arm in onOpen guarantees
             // termination even with zero tokens.
-            if (sawRealToken) main.post { armSilence(webSocket, DICTATION_SILENCE_MS) }
+            if (sawRealToken) main.post { armSilence(webSocket, SonioxKeyStore.dictationSilenceMs.toLong()) }
             // Server-side end-of-stream still finalizes immediately.
             if (obj.optBoolean("finished")) fireFinalOnce(webSocket)
         }
@@ -392,9 +395,9 @@ internal class SonioxWatchStt(
         private const val MODEL = "stt-rt-v5"
         private const val SAMPLE_RATE = 16000
         private const val FRAME_BYTES = 3200 // 100 ms @ 16 kHz mono 16-bit
-        // Silence timer: pause-between-words tolerance (re-armed per word) and
-        // the long up-front guard that prevents a token-less hang.
-        private const val DICTATION_SILENCE_MS = 4000L
+        // Silence timer: the pause-between-words tolerance is now the phone-
+        // synced SonioxKeyStore.dictationSilenceMs (re-armed per word); this is
+        // only the long up-front guard that prevents a token-less hang.
         private const val NO_SPEECH_GUARD_MS = 12000L
         // ~10 s of μ-law frames — a generous ceiling on pre-open buffering.
         private const val MAX_BACKLOG_FRAMES = 150

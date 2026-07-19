@@ -31,7 +31,7 @@ class WearDataListenerService : WearableListenerService() {
             runCatching {
                 val json = DataMapItem.fromDataItem(event.dataItem).dataMap.getString(KEY_JSON) ?: return@runCatching
                 val payload = WEAR_JSON.decodeFromString<WearSessionsPayload>(json)
-                SonioxKeyStore.update(payload.sonioxApiKey, payload.sonioxVoice, payload.ttsSpeedPct)
+                SonioxKeyStore.update(payload.sonioxApiKey, payload.sonioxVoice, payload.ttsSpeedPct, payload.dictationSilenceMs)
                 val previousById = SessionRepository.sessions.value.associateBy { it.id }
                 SessionRepository.update(payload.sessions)
                 WearLog.i(this, TAG, "Updated repository with ${payload.sessions.size} sessions")
