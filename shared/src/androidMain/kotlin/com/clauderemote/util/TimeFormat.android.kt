@@ -11,3 +11,16 @@ actual fun isoToLocalTime(iso: String): String? = try {
 } catch (_: Throwable) {
     null
 }
+
+actual fun isoToEpochMillis(iso: String): Long? =
+    try {
+        // OffsetDateTime handles both a `+00:00` offset and a bare `Z`; the
+        // Instant fallback covers any bare-`Z` edge OffsetDateTime rejects.
+        java.time.OffsetDateTime.parse(iso).toInstant().toEpochMilli()
+    } catch (_: Exception) {
+        try {
+            Instant.parse(iso).toEpochMilli()
+        } catch (_: Exception) {
+            null
+        }
+    }

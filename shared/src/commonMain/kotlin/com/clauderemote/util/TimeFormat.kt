@@ -7,3 +7,10 @@ package com.clauderemote.util
  * UTC clock-time substring.
  */
 expect fun isoToLocalTime(iso: String): String?
+
+/**
+ * Parse an ISO-8601 UTC timestamp to epoch milliseconds. Returns null when the
+ * input doesn't parse. Used to convert rate-limit reset timestamps into a
+ * minutes-from-now countdown without pulling in kotlinx-datetime.
+ */
+expect fun isoToEpochMillis(iso: String): Long?

@@ -321,6 +321,7 @@ class SessionOrchestrator(
             // Per-server loops: idempotent, first session on the server starts
             // them, later sessions just register/reuse.
             usageService.startServerUsagePolling(serverId)
+            usageService.startServerRateLimitPolling(serverId)
             serverHealthService.startServerLatencyPolling(serverId)
             notificationService.startNotifyWatcher(sessionId, tmuxSessionName, serverId)
         }
