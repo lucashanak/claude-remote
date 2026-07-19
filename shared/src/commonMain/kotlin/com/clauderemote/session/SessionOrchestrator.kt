@@ -14,6 +14,7 @@ import com.clauderemote.storage.ServerStorage
 import com.clauderemote.storage.SessionStorage
 import com.clauderemote.util.FileLogger
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.withPermit
@@ -1433,66 +1434,79 @@ class SessionOrchestrator(
      * Reconnect a disconnected session. Reuses the same session config.
      */
     suspend fun reconnectSession(sessionId: String) {
+        // Single-flight per session across EVERY entry point (manual button,
+        // restoreAndReconnect's cold-start loop, the network-callback sweep,
+        // AND autoReconnect) — shares the same guard autoReconnect uses. Cold
+        // start fires restoreAndReconnect (onCreate) and reconnectDeadTabs
+        // (onResume, moments later) concurrently; without this, two calls for
+        // the SAME id raced on the same SshManager/registry entry — one call's
+        // disconnect()/putSsh() stepping on the other's in-flight connect —
+        // producing spurious "ET carrier SSH not connected" failures that only
+        // a manual retry (landing after the race window) would clear.
         synchronized(reconnectingSessionIds) {
-            if (sessionId in reconnectingSessionIds) {
-                FileLogger.log(TAG, "Skipping reconnectSession for $sessionId — autoReconnect already running")
+            if (!reconnectingSessionIds.add(sessionId)) {
+                FileLogger.log(TAG, "Skipping reconnectSession for $sessionId — already reconnecting")
                 return
             }
         }
-        val session = tabManager.getTab(sessionId) ?: return
-        FileLogger.log(TAG, "Reconnecting session $sessionId to ${session.server.name}")
-        // A reconnected session has a running Claude that may already be idle
-        // waiting for input — bypass the brand-new-session startup guard so
-        // the first idle after restore can notify.
-        notificationService.promptDetector.markInteracted(sessionId)
-
-        // Invalidate the confirmed UUID so the next transcriptFlow() call fires
-        // a fresh kick-probe. If claude restarted with a new session UUID during
-        // the outage (e.g. user ran /clear or /resume), the probe will adopt the
-        // new UUID. Without this, confirmedUuids retains the stale UUID forever
-        // and the transcript stream keeps tailing a non-existent .jsonl file.
-        transcriptService.clearConfirmedUuid(sessionId)
-
-        // Clean up old connection
-        connectionRegistry.ssh(sessionId)?.disconnect()
-        connectionRegistry.removeSsh(sessionId)
-
-        tabManager.updateTabStatus(sessionId, SessionStatus.CONNECTING)
-
         try {
-            // Keep the session's chosen connection type. reconnectSession used
-            // to hardcode SSH, so a MOSH session silently degraded to plain
-            // SSH after its first drop and never got its roaming resilience
-            // back — the exact scenario mosh exists for. connectMosh still
-            // falls back to SSH internally when no direct-UDP path exists.
-            if (session.connectionType == ConnectionType.MOSH) {
-                connectMosh(session, false)
-            } else {
-                connectSsh(session, false, checkClosedElsewhere = true) // attach to existing tmux
+            val session = tabManager.getTab(sessionId) ?: return
+            FileLogger.log(TAG, "Reconnecting session $sessionId to ${session.server.name}")
+            // A reconnected session has a running Claude that may already be idle
+            // waiting for input — bypass the brand-new-session startup guard so
+            // the first idle after restore can notify.
+            notificationService.promptDetector.markInteracted(sessionId)
+
+            // Invalidate the confirmed UUID so the next transcriptFlow() call fires
+            // a fresh kick-probe. If claude restarted with a new session UUID during
+            // the outage (e.g. user ran /clear or /resume), the probe will adopt the
+            // new UUID. Without this, confirmedUuids retains the stale UUID forever
+            // and the transcript stream keeps tailing a non-existent .jsonl file.
+            transcriptService.clearConfirmedUuid(sessionId)
+
+            // Clean up old connection
+            connectionRegistry.ssh(sessionId)?.disconnect()
+            connectionRegistry.removeSsh(sessionId)
+
+            tabManager.updateTabStatus(sessionId, SessionStatus.CONNECTING)
+
+            try {
+                // Keep the session's chosen connection type. reconnectSession used
+                // to hardcode SSH, so a MOSH session silently degraded to plain
+                // SSH after its first drop and never got its roaming resilience
+                // back — the exact scenario mosh exists for. connectMosh still
+                // falls back to SSH internally when no direct-UDP path exists.
+                if (session.connectionType == ConnectionType.MOSH) {
+                    connectMosh(session, false)
+                } else {
+                    connectSsh(session, false, checkClosedElsewhere = true) // attach to existing tmux
+                }
+                tabManager.updateTabStatus(sessionId, SessionStatus.ACTIVE)
+                // Clear the DISCONNECTED activity left over from restore/disconnect —
+                // otherwise the session shows "Offline" (badge + status + empty
+                // chips) even though it's connected. autoReconnect already does
+                // this; reconnectSession (restore + manual) was missing it. The real
+                // working/idle state is then driven by the statusline parse in emit()
+                // as soon as output flows.
+                statusService.updateActivity(sessionId, SessionActivity.WAITING_FOR_INPUT)
+                onSessionActive?.invoke(session)
+                // Restart ALL per-session loops (usage/git/latency pollers included
+                // — they may have died during the outage), not just watcher+refresh.
+                attachSessionRuntime(sessionId, session.tmuxSessionName)
+                FileLogger.log(TAG, "Reconnected: $sessionId")
+            } catch (e: SessionClosedElsewhereException) {
+                FileLogger.log(TAG, "reconnectSession($sessionId) aborted — closed on another device")
+            } catch (e: Exception) {
+                FileLogger.error(TAG, "Reconnect failed", e)
+                tabManager.updateTabStatus(sessionId, SessionStatus.ERROR)
+                statusService.updateActivity(sessionId, SessionActivity.DISCONNECTED)
+                // Re-arm: a failed manual/restore/network-callback reconnect must
+                // not strand the tab in ERROR — keep retrying with capped backoff
+                // until it connects or the user closes the tab.
+                armReconnectRetry(sessionId)
             }
-            tabManager.updateTabStatus(sessionId, SessionStatus.ACTIVE)
-            // Clear the DISCONNECTED activity left over from restore/disconnect —
-            // otherwise the session shows "Offline" (badge + status + empty
-            // chips) even though it's connected. autoReconnect already does
-            // this; reconnectSession (restore + manual) was missing it. The real
-            // working/idle state is then driven by the statusline parse in emit()
-            // as soon as output flows.
-            statusService.updateActivity(sessionId, SessionActivity.WAITING_FOR_INPUT)
-            onSessionActive?.invoke(session)
-            // Restart ALL per-session loops (usage/git/latency pollers included
-            // — they may have died during the outage), not just watcher+refresh.
-            attachSessionRuntime(sessionId, session.tmuxSessionName)
-            FileLogger.log(TAG, "Reconnected: $sessionId")
-        } catch (e: SessionClosedElsewhereException) {
-            FileLogger.log(TAG, "reconnectSession($sessionId) aborted — closed on another device")
-        } catch (e: Exception) {
-            FileLogger.error(TAG, "Reconnect failed", e)
-            tabManager.updateTabStatus(sessionId, SessionStatus.ERROR)
-            statusService.updateActivity(sessionId, SessionActivity.DISCONNECTED)
-            // Re-arm: a failed manual/restore/network-callback reconnect must
-            // not strand the tab in ERROR — keep retrying with capped backoff
-            // until it connects or the user closes the tab.
-            armReconnectRetry(sessionId)
+        } finally {
+            synchronized(reconnectingSessionIds) { reconnectingSessionIds.remove(sessionId) }
         }
     }
 
@@ -1623,10 +1637,17 @@ class SessionOrchestrator(
     fun restoreAndReconnect() {
         val restored = persistence.restorePersistedTabs()
         if (restored.isEmpty()) return
+        // Concurrent, not sequential: a strictly sequential loop over N restored
+        // tabs made the LAST tab wait N × (connect+attach) after a cold start —
+        // with 20+ tabs that's tens of seconds, long enough that an impatient
+        // user hit "Reconnect" on a tab whose turn just hadn't come up yet.
+        // Safe to parallelize: each server's connectGate (Semaphore(3)) already
+        // caps concurrent handshakes to that server, so this doesn't storm a
+        // just-recovered link — it only removes the ARTIFICIAL serialization
+        // across tabs/servers on top of that existing cap.
         reconnectScope.launch {
-            for (s in restored) {
-                try { reconnectSession(s.id) } catch (_: Exception) {}
-            }
+            restored.map { s -> async { try { reconnectSession(s.id) } catch (_: Exception) {} } }
+                .forEach { it.join() }
         }
     }
 

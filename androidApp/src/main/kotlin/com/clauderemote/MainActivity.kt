@@ -23,6 +23,7 @@ import com.clauderemote.util.FileLogger
 import com.clauderemote.util.UpdateInfo
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.GlobalScope
+import kotlinx.coroutines.async
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
@@ -453,6 +454,11 @@ class MainActivity : FragmentActivity() {
     // that piled stale connect attempts (5-10s timeouts each) onto the
     // half-dead link. One sweep at a time; a newer trigger replaces the wait.
     @Volatile private var reconnectSweepJob: kotlinx.coroutines.Job? = null
+    // Guards the check-and-launch below: onAvailable can fire from a binder
+    // thread while onResume fires on the main thread, so a plain @Volatile
+    // read-then-write race could let two bursty callbacks both see
+    // isActive==false and launch overlapping sweeps.
+    private val reconnectSweepLock = Any()
 
     private fun reconnectDeadTabs(reason: String) {
         // DISCONNECTED **and ERROR**: a failed reconnectSession leaves the tab
@@ -462,18 +468,25 @@ class MainActivity : FragmentActivity() {
                 it.status == com.clauderemote.model.SessionStatus.ERROR
         }
         if (dead.isEmpty()) return
-        if (reconnectSweepJob?.isActive == true) {
-            FileLogger.log("Network", "Reconnect sweep already running, skipping ($reason)")
-            return
-        }
-        FileLogger.log("Network", "Reconnect sweep ($reason): ${dead.size} dead tab(s)")
-        reconnectSweepJob = GlobalScope.launch(Dispatchers.IO) {
-            dead.forEach { session ->
-                try {
-                    sessionOrchestrator.reconnectSession(session.id)
-                } catch (_: Exception) {
-                    // reconnectSession re-arms its own persistent retry loop.
-                }
+        synchronized(reconnectSweepLock) {
+            if (reconnectSweepJob?.isActive == true) {
+                FileLogger.log("Network", "Reconnect sweep already running, skipping ($reason)")
+                return
+            }
+            FileLogger.log("Network", "Reconnect sweep ($reason): ${dead.size} dead tab(s)")
+            reconnectSweepJob = GlobalScope.launch(Dispatchers.IO) {
+                // Concurrent, not sequential — see restoreAndReconnect's comment.
+                // reconnectSession's own single-flight guard makes this safe even
+                // if another sweep/trigger is mid-flight for the same tab.
+                dead.map { session ->
+                    async {
+                        try {
+                            sessionOrchestrator.reconnectSession(session.id)
+                        } catch (_: Exception) {
+                            // reconnectSession re-arms its own persistent retry loop.
+                        }
+                    }
+                }.forEach { it.join() }
             }
         }
     }
@@ -481,28 +494,33 @@ class MainActivity : FragmentActivity() {
     private fun registerNetworkCallback() {
         try {
             val cm = getSystemService(CONNECTIVITY_SERVICE) as android.net.ConnectivityManager
-            val request = android.net.NetworkRequest.Builder()
-                .addCapability(android.net.NetworkCapabilities.NET_CAPABILITY_INTERNET)
-                .build()
-            cm.registerNetworkCallback(request, object : android.net.ConnectivityManager.NetworkCallback() {
-                // The network our sockets most recently rode. onLost fires for
-                // ANY registered network — losing an idle secondary (Wi-Fi off
-                // while we're on LTE) must not tear down healthy transports.
-                @Volatile private var lastAvailable: android.net.Network? = null
-
+            // registerDefaultNetworkCallback — NOT the generic NetworkRequest
+            // form — tracks only the network actually carrying our traffic.
+            // The old broad "any network with NET_CAPABILITY_INTERNET" request
+            // fired onAvailable/onLost for EVERY matching network, including a
+            // known Wi-Fi the OS silently validates in the background without
+            // ever making it the default route. That both spammed pointless
+            // reconnect sweeps AND — worse — could point "lastAvailable" at
+            // that non-default network, so when the REAL default actually
+            // dropped, onLost's "network != lastAvailable" check discarded it:
+            // no immediate teardown, just a silent wait for the ~20s keepalive
+            // to notice. With 2-3 known Wi-Fis plus cellular in range that was
+            // a frequent multi-second hiccup on every handover. The default
+            // callback only ever reports transitions of the actual default
+            // network, so there's no second network to get confused with.
+            cm.registerDefaultNetworkCallback(object : android.net.ConnectivityManager.NetworkCallback() {
                 override fun onAvailable(network: android.net.Network) {
-                    lastAvailable = network
-                    FileLogger.log("Network", "Network available, checking for dead sessions")
+                    FileLogger.log("Network", "Default network available, checking for dead sessions")
                     reconnectDeadTabs("onAvailable")
                 }
 
                 override fun onLost(network: android.net.Network) {
-                    if (network != lastAvailable) return
-                    // The interface our TCP rode is gone: proactively kill the
-                    // pooled transports instead of waiting ~20 s for keepalive
-                    // to notice — turns a Wi-Fi→LTE handover freeze into a
-                    // ~1 s blip (reconnect fires on the next onAvailable).
-                    FileLogger.log("Network", "Active network lost — tearing down transports")
+                    // Always about the default (that's the contract of this
+                    // callback variant) — proactively kill the pooled
+                    // transports instead of waiting ~20s for keepalive to
+                    // notice, turning a handover freeze into a ~1s blip
+                    // (reconnect fires on the next onAvailable).
+                    FileLogger.log("Network", "Default network lost — tearing down transports")
                     sessionOrchestrator.onNetworkLost()
                 }
             })
