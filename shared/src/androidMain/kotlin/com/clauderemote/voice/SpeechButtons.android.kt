@@ -88,6 +88,14 @@ actual fun MicButton(
         val len = v.text.length
         val before = v.text.substring(0, v.selection.min.coerceIn(0, len))
         val after = v.text.substring(v.selection.max.coerceIn(0, len))
+        // Fresh dictation: clear the stale marker from any PREVIOUS session.
+        // Otherwise, after you dictated + sent (field cleared to ""), lastEmitted
+        // still held the old sent text, so the guard below ("field != lastEmitted
+        // → bail") blocked EVERY new dictation's emits until the field happened to
+        // match again — dictation appeared to "just stop working" after a send.
+        // Late-callback protection now rests on the per-session id (see the
+        // sessionId bump in onPartial/onFinal), which is the correct mechanism.
+        lastEmitted = null
         return fun(phrase: String) {
             // SYNCHRONOUS late-callback guard: if the field no longer holds what
             // we last dictated, the user has moved on — they sent (input
