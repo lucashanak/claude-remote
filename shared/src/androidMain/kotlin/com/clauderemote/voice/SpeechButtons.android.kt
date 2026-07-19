@@ -88,7 +88,17 @@ actual fun MicButton(
         val len = v.text.length
         val before = v.text.substring(0, v.selection.min.coerceIn(0, len))
         val after = v.text.substring(v.selection.max.coerceIn(0, len))
-        return { phrase ->
+        return fun(phrase: String) {
+            // SYNCHRONOUS late-callback guard: if the field no longer holds what
+            // we last dictated, the user has moved on — they sent (input
+            // cleared), tapped the X, or edited by hand — so a trailing final/
+            // partial must NOT re-inject text. The LaunchedEffect(value.text)
+            // cancel below is async and loses the race with a recognizer's
+            // onResults (which fires precisely on stopListening()); this check
+            // reads the live field value and closes that gap. Without it, a
+            // final arriving just after Send re-populated the box, so the
+            // message looked unsent and had to be sent again.
+            if (lastEmitted != null && valueState.value.text != lastEmitted) return
             val head = appendDictated(before, phrase)
             val next = head + after
             lastEmitted = next
