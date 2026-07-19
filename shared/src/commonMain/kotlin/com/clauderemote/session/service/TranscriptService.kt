@@ -524,7 +524,7 @@ internal class TranscriptService(
                             FileLogger.log(TAG, "streamd live for server ${d.serverId} (${d.specs.size} watches)")
                             d.specs.keys.forEach { sendWatch(d, it) }
                         }
-                        "hb" -> {}
+                        "hb" -> { com.clauderemote.util.DataMeter.addPoll(11) }
                         "d" -> {
                             val sid = obj["id"]?.jsonPrimitive?.contentOrNull ?: continue
                             val uuid = obj["u"]?.jsonPrimitive?.contentOrNull ?: continue

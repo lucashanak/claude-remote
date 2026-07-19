@@ -16,12 +16,18 @@ import java.util.concurrent.atomic.AtomicLong
 object DataMeter {
     private val terminal = AtomicLong()
     private val transcript = AtomicLong()
+    private val poll = AtomicLong()
 
     fun addTerminal(n: Int) { if (n > 0) terminal.addAndGet(n.toLong()) }
     fun addTranscript(n: Int) { if (n > 0) transcript.addAndGet(n.toLong()) }
+    /** Periodic poller payloads (latency echo, usage scrape, streamd heartbeat)
+     *  — payload proxy only; the real cost includes SSH channel/keepalive
+     *  framing which isn't visible here, so a large residual = that framing. */
+    fun addPoll(n: Int) { if (n > 0) poll.addAndGet(n.toLong()) }
 
     fun terminalBytes(): Long = terminal.get()
     fun transcriptBytes(): Long = transcript.get()
+    fun pollBytes(): Long = poll.get()
 }
 
 /** App-wide (rx, tx) byte counters, or null if the platform doesn't expose them. */

@@ -52,18 +52,31 @@ class SessionOrchestrator(
         // go (terminal is DECODED — compressed on the wire; transcript is the
         // on-wire base64/gzip payload; appRx/Tx is the real app-wide traffic).
         reconnectScope.launch {
-            var pTerm = 0L; var pTr = 0L; var pRx = 0L; var pTx = 0L
+            var pTerm = 0L; var pTr = 0L; var pPoll = 0L; var pRx = 0L; var pTx = 0L
             while (true) {
                 kotlinx.coroutines.delay(60_000) // throws on scope cancel → loop ends
                 val term = com.clauderemote.util.DataMeter.terminalBytes()
                 val tr = com.clauderemote.util.DataMeter.transcriptBytes()
+                val pl = com.clauderemote.util.DataMeter.pollBytes()
                 val net = com.clauderemote.util.platformNetBytes()
+                val dTerm = (term - pTerm) / 1024; val dTr = (tr - pTr) / 1024; val dPoll = (pl - pPoll) / 1024
+                // Session/transport counts so we can see if the residual scales
+                // per-tab (→ per-connection keepalive/heartbeat) and whether it's ET.
+                val tabs = tabManager.tabs.value
+                val sessions = tabs.size
+                val etCount = tabs.count { connectionRegistry.et(it.id) != null }
+                val transports = connectionRegistry.allSsh().count { it.isConnected }
+                val mode = if (isInBackground) "bg" else "fg"
                 val netStr = if (net != null) {
-                    val s = " | appRx=${(net.first - pRx) / 1024}KB appTx=${(net.second - pTx) / 1024}KB"
-                    pRx = net.first; pTx = net.second; s
+                    val dRx = (net.first - pRx) / 1024; val dTx = (net.second - pTx) / 1024
+                    pRx = net.first; pTx = net.second
+                    // Residual = real traffic not attributed to counted content —
+                    // i.e. SSH/ET/CF keepalives + channel framing.
+                    val residual = (dRx + dTx) - dTerm - dTr - dPoll
+                    " | appRx=${dRx}KB appTx=${dTx}KB overhead≈${residual}KB"
                 } else ""
-                FileLogger.log(TAG, "data/60s: terminal=${(term - pTerm) / 1024}KB(decoded) transcript=${(tr - pTr) / 1024}KB(wire)$netStr")
-                pTerm = term; pTr = tr
+                FileLogger.log(TAG, "data/60s: $mode sessions=$sessions(et=$etCount) tx=$transports | content term=${dTerm}KB tr=${dTr}KB poll=${dPoll}KB$netStr")
+                pTerm = term; pTr = tr; pPoll = pl
             }
         }
     }
