@@ -51,6 +51,10 @@ class ServerTransportPool(private val serverStorage: ServerStorage) {
     private val transports = java.util.concurrent.CopyOnWriteArrayList<Transport>()
     private val mutex = Mutex()
 
+    /** Number of live (usable) TCP transports — the real connection count,
+     *  unlike the per-session SshManager count. For data-usage metering. */
+    fun liveCount(): Int = transports.count { it.usable }
+
     /**
      * Lease a connected transport for [server], connecting one if needed.
      * [lessee] identifies the holder for [release].

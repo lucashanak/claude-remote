@@ -65,7 +65,9 @@ class SessionOrchestrator(
                 val tabs = tabManager.tabs.value
                 val sessions = tabs.size
                 val etCount = tabs.count { connectionRegistry.et(it.id) != null }
-                val transports = connectionRegistry.allSsh().count { it.isConnected }
+                // REAL TCP connection count (pooled), not the per-session
+                // SshManager count — tells us if pooling is collapsing sessions.
+                val conn = connectionRegistry.liveTransportCount()
                 val mode = if (isInBackground) "bg" else "fg"
                 val netStr = if (net != null) {
                     val dRx = (net.first - pRx) / 1024; val dTx = (net.second - pTx) / 1024
@@ -75,7 +77,7 @@ class SessionOrchestrator(
                     val residual = (dRx + dTx) - dTerm - dTr - dPoll
                     " | appRx=${dRx}KB appTx=${dTx}KB overhead≈${residual}KB"
                 } else ""
-                FileLogger.log(TAG, "data/60s: $mode sessions=$sessions(et=$etCount) tx=$transports | content term=${dTerm}KB tr=${dTr}KB poll=${dPoll}KB$netStr")
+                FileLogger.log(TAG, "data/60s: $mode sessions=$sessions(et=$etCount) conn=$conn | content term=${dTerm}KB tr=${dTr}KB poll=${dPoll}KB$netStr")
                 pTerm = term; pTr = tr; pPoll = pl
             }
         }

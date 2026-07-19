@@ -72,6 +72,8 @@ internal class ConnectionRegistry(
         transportPools.getOrPut(serverId) { ServerTransportPool(serverStorage) }
 
     fun transportPoolCount(): Int = transportPools.size
+    /** Total live TCP transports across all servers — the real connection count. */
+    fun liveTransportCount(): Int = transportPools.values.sumOf { it.liveCount() }
     fun teardownAllTransports() { transportPools.values.forEach { it.teardownAll() } }
 
     // --- tab → server lookups ---
