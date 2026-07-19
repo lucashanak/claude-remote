@@ -47,6 +47,15 @@ class CloudflareProxy(
         timeout: Int
     ) {
         FileLogger.log(TAG, "Connecting to Cloudflare tunnel: wss://$hostname/")
+        // DIAGNOSTIC (data-usage hunt): who opens this connection? Log the
+        // app-frame call chain so we can pin the periodic fresh-connection churn.
+        run {
+            val frames = Throwable().stackTrace
+                .filter { it.className.startsWith("com.clauderemote") }
+                .take(8)
+                .joinToString(" <- ") { "${it.className.substringAfterLast('.')}.${it.methodName}" }
+            FileLogger.log(TAG, "cf-open-by: $frames")
+        }
 
         // MUST be HTTP/1.1 — Cloudflare negotiates HTTP/2 via ALPN,
         // but WebSocket upgrade (101 Switching Protocols) only works over HTTP/1.1.
