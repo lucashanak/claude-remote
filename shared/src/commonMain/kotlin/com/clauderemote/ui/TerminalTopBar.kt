@@ -203,14 +203,19 @@ internal fun CRTopBar(
                     .horizontalScroll(rememberScrollState()),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                // Git status chip (branch + dirty/ahead/behind) — only for git repos
-                if (gitStatus != null) {
-                    GitChip(gitStatus)
-                }
-
-                // Active model chip
-                if (activeSession != null) {
-                    ModelChip(activeSession.model)
+                // Usage mini bars FIRST — this is the metric the user most wants
+                // always visible. The cluster is width-capped + horizontally
+                // scrollable, so whatever comes last scrolls off when cramped;
+                // a long git branch used to push the usage off-screen entirely
+                // (visible on a `main` session, gone on `ci/supabase-auto-migrate`).
+                // Order = priority: usage, then latency, model, and git branch
+                // last (widest + most variable → it's the one that scrolls away).
+                if (contextPercent != null || sessionUsagePercent != null || weekUsagePercent != null) {
+                    Column(verticalArrangement = Arrangement.spacedBy(1.dp), modifier = Modifier.padding(horizontal = 4.dp)) {
+                        if (contextPercent != null) MiniBar("Ctx", contextPercent)
+                        if (sessionUsagePercent != null) MiniBar("5h", sessionUsagePercent)
+                        if (weekUsagePercent != null) MiniBar("Wk", weekUsagePercent)
+                    }
                 }
 
                 // Latency
@@ -224,13 +229,16 @@ internal fun CRTopBar(
                         modifier = Modifier.padding(horizontal = 4.dp))
                 }
 
-                // Usage mini bars
-                if (contextPercent != null || sessionUsagePercent != null || weekUsagePercent != null) {
-                    Column(verticalArrangement = Arrangement.spacedBy(1.dp), modifier = Modifier.padding(horizontal = 4.dp)) {
-                        if (contextPercent != null) MiniBar("Ctx", contextPercent)
-                        if (sessionUsagePercent != null) MiniBar("5h", sessionUsagePercent)
-                        if (weekUsagePercent != null) MiniBar("Wk", weekUsagePercent)
-                    }
+                // Active model chip
+                if (activeSession != null) {
+                    ModelChip(activeSession.model)
+                }
+
+                // Git status chip (branch + dirty/ahead/behind) — only for git
+                // repos. LAST: the branch name is the widest, most variable chip,
+                // so it's the one that scrolls off when the cluster is cramped.
+                if (gitStatus != null) {
+                    GitChip(gitStatus)
                 }
             }
 
