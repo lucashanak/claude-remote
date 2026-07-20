@@ -837,7 +837,36 @@ private fun RichBody(
         typography = typography,
         padding = padding,
         components = com.mikepenz.markdown.compose.components.markdownComponents(
-            table = { model -> CRMarkdownTable(model) }
+            table = { model -> CRMarkdownTable(model) },
+            blockQuote = { model ->
+                // The library's default block-quote renderer only shows the
+                // FIRST paragraph of a multi-paragraph quote — the rest of a
+                // quoted email/message silently vanished (only the greeting
+                // line showed). Render the full quote ourselves: strip the '>'
+                // markers and run the inner text back through Markdown() (so
+                // paragraphs, emphasis, etc. are preserved) behind a left
+                // accent bar. Stripping the markers means `inner` is no longer
+                // a quote, so this doesn't recurse.
+                val raw = model.content.substring(model.node.startOffset, model.node.endOffset)
+                val inner = raw.lineSequence()
+                    .map { it.replace(Regex("^\\s*>\\s?"), "") }
+                    .joinToString("\n")
+                    .trim()
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(vertical = 2.dp)
+                        .leftAccentBar(c.border.copy(alpha = 0.5f), 2.dp)
+                        .padding(start = 10.dp)
+                ) {
+                    Markdown(
+                        content = inner,
+                        colors = colors,
+                        typography = typography,
+                        padding = padding,
+                    )
+                }
+            }
         )
     )
 }
