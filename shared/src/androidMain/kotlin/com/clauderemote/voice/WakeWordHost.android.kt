@@ -14,12 +14,21 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ColumnScope
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.SegmentedButton
+import androidx.compose.material3.SegmentedButtonDefaults
+import androidx.compose.material3.SingleChoiceSegmentedButtonRow
 import androidx.compose.material3.Text
+import androidx.compose.ui.Alignment
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
@@ -174,65 +183,99 @@ actual fun WakeWordSettingsCard(settings: AppSettings) {
             .padding(horizontal = 16.dp, vertical = 8.dp)
             .background(c.surface, RoundedCornerShape(m.cardRadius))
             .border(1.dp, c.border, RoundedCornerShape(m.cardRadius))
-            .padding(16.dp),
-        verticalArrangement = Arrangement.spacedBy(8.dp),
+            .padding(20.dp),
+        verticalArrangement = Arrangement.spacedBy(20.dp),
     ) {
-        // ── STT (engine picker) ──────────────────────────────────────
-        Text("Rozpoznávání řeči (STT)", style = CRType.cardTitle, color = c.text)
-        ModelDropdown(
-            label = "Engine",
-            options = listOf(
-                SttEngine.SYSTEM.displayName,
-                SttEngine.SERVER.displayName,
-                SttEngine.SONIOX.displayName,
-            ),
-            selected = sttEngine.displayName,
-            onSelect = { name ->
-                val picked = SttEngine.entries.firstOrNull { it.displayName == name } ?: SttEngine.SYSTEM
-                sttEngine = picked; settings.sttEngine = picked
-            },
-        )
-        if (sttEngine == SttEngine.SYSTEM) {
-            Text(
-                "Google rozpoznávání přes Android. Na zařízeních bez české " +
-                    "podpory v systému (např. HyperOS) se použije systémový " +
-                    "Google hlasový dialog — stejný, co jede v Gboardu.",
-                style = CRType.bodyDim, color = c.textDim,
+        // ══ Rozpoznávání řeči (STT) ══════════════════════════════════
+        SettingsSection("Rozpoznávání řeči (STT)") {
+            ModelDropdown(
+                label = "Engine",
+                options = listOf(
+                    SttEngine.SYSTEM.displayName,
+                    SttEngine.SERVER.displayName,
+                    SttEngine.SONIOX.displayName,
+                ),
+                selected = sttEngine.displayName,
+                onSelect = { name ->
+                    val picked = SttEngine.entries.firstOrNull { it.displayName == name } ?: SttEngine.SYSTEM
+                    sttEngine = picked; settings.sttEngine = picked
+                },
             )
-        }
-        if (sttEngine == SttEngine.SONIOX) {
-            Text(
-                "Streamovaný přepis přes Soniox — slova naskakují průběžně, " +
-                    "sub-200ms, zvládá česko-anglický mix v jedné větě. " +
-                    "Vyžaduje Soniox API klíč (níže). Audio odchází Soniox.",
-                style = CRType.bodyDim, color = c.textDim,
-            )
-            // Silence timer: valueRange 1..10 + steps=8 gives 10 discrete
-            // whole-second stops. Persisted as ms; also synced to the watch.
-            Column(modifier = Modifier.fillMaxWidth()) {
+            if (sttEngine == SttEngine.SYSTEM) {
                 Text(
-                    "Konec diktování po pauze: $dictationSilenceSec s",
+                    "Google rozpoznávání přes Android. Na zařízeních bez české " +
+                        "podpory v systému (např. HyperOS) se použije systémový " +
+                        "Google hlasový dialog — stejný, co jede v Gboardu.",
                     style = CRType.bodyDim, color = c.textDim,
                 )
-                androidx.compose.material3.Slider(
-                    value = dictationSilenceSec.toFloat(),
-                    onValueChange = {
-                        val sec = Math.round(it)
-                        dictationSilenceSec = sec
-                        settings.dictationSilenceMs = sec * 1000
-                    },
-                    valueRange = 1f..10f,
-                    steps = 8,
+            }
+            if (sttEngine == SttEngine.SONIOX) {
+                Text(
+                    "Streamovaný přepis přes Soniox — slova naskakují průběžně, " +
+                        "sub-200ms, zvládá česko-anglický mix v jedné větě. " +
+                        "Vyžaduje Soniox API klíč (níže). Audio odchází Soniox.",
+                    style = CRType.bodyDim, color = c.textDim,
+                )
+                // Silence timer: valueRange 1..10 + steps=8 gives 10 discrete
+                // whole-second stops. Persisted as ms; also synced to the watch.
+                SubLabel("Diktování")
+                Column(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalArrangement = Arrangement.spacedBy(2.dp),
+                ) {
+                    Text(
+                        "Konec diktování po pauze: $dictationSilenceSec s",
+                        style = CRType.bodyDim, color = c.text,
+                    )
+                    Text(
+                        "Jak dlouhé ticho ukončí diktování a odešle větu.",
+                        style = CRType.bodyDim, color = c.textDim,
+                    )
+                    androidx.compose.material3.Slider(
+                        value = dictationSilenceSec.toFloat(),
+                        onValueChange = {
+                            val sec = Math.round(it)
+                            dictationSilenceSec = sec
+                            settings.dictationSilenceMs = sec * 1000
+                        },
+                        valueRange = 1f..10f,
+                        steps = 8,
+                    )
+                }
+            }
+            // Soniox API key — shared by STT (streaming) and TTS. Shown whenever
+            // either side uses Soniox.
+            if (sttEngine == SttEngine.SONIOX || ttsEngine == TtsEngine.SONIOX) {
+                androidx.compose.material3.OutlinedTextField(
+                    value = sonioxKey,
+                    onValueChange = { sonioxKey = it; settings.sonioxApiKey = it },
+                    label = { Text("Soniox API klíč") },
+                    singleLine = true,
+                    visualTransformation = androidx.compose.ui.text.input.PasswordVisualTransformation(),
+                    keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(
+                        keyboardType = androidx.compose.ui.text.input.KeyboardType.Password,
+                    ),
+                    modifier = Modifier.fillMaxWidth(),
                 )
             }
-        }
-        // Soniox API key — shared by STT (streaming) and TTS. Shown whenever
-        // either side uses Soniox.
-        if (sttEngine == SttEngine.SONIOX || ttsEngine == TtsEngine.SONIOX) {
+
+            // Server — sdílené pro STT / TTS / aktivaci. URL + klíč vždy viditelné.
+            SubLabel("Vlastní server (sdílí STT, TTS i aktivaci)")
             androidx.compose.material3.OutlinedTextField(
-                value = sonioxKey,
-                onValueChange = { sonioxKey = it; settings.sonioxApiKey = it },
-                label = { Text("Soniox API klíč") },
+                value = serverUrl,
+                onValueChange = {
+                    serverUrl = it; settings.sttServerUrl = it
+                    catalog = emptyList()
+                    voicesCatalog = emptyList()
+                },
+                label = { Text("URL serveru (https://…/api/v1)") },
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth(),
+            )
+            androidx.compose.material3.OutlinedTextField(
+                value = apiKey,
+                onValueChange = { apiKey = it; settings.sttServerApiKey = it },
+                label = { Text("API klíč (nepovinný)") },
                 singleLine = true,
                 visualTransformation = androidx.compose.ui.text.input.PasswordVisualTransformation(),
                 keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(
@@ -240,151 +283,318 @@ actual fun WakeWordSettingsCard(settings: AppSettings) {
                 ),
                 modifier = Modifier.fillMaxWidth(),
             )
-        }
-
-        // Server — sdílené pro STT / TTS / aktivaci. URL + klíč vždy viditelné.
-        androidx.compose.material3.OutlinedTextField(
-            value = serverUrl,
-            onValueChange = {
-                serverUrl = it; settings.sttServerUrl = it
-                catalog = emptyList()
-                voicesCatalog = emptyList()
-            },
-            label = { Text("URL serveru (https://…/api/v1)") },
-            singleLine = true,
-            modifier = Modifier.fillMaxWidth(),
-        )
-        androidx.compose.material3.OutlinedTextField(
-            value = apiKey,
-            onValueChange = { apiKey = it; settings.sttServerApiKey = it },
-            label = { Text("API klíč (nepovinný)") },
-            singleLine = true,
-            visualTransformation = androidx.compose.ui.text.input.PasswordVisualTransformation(),
-            keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(
-                keyboardType = androidx.compose.ui.text.input.KeyboardType.Password,
-            ),
-            modifier = Modifier.fillMaxWidth(),
-        )
-        if (sttEngine == SttEngine.SERVER) {
-            androidx.compose.material3.OutlinedTextField(
-                value = serverModel,
-                onValueChange = { serverModel = it; settings.sttServerModel = it },
-                label = { Text("STT model") },
-                singleLine = true,
-                modifier = Modifier.fillMaxWidth(),
-            )
-            if (serverUrl.isNotBlank()) {
-                Button(
-                    onClick = {
-                        loadingCatalog = true
-                        scope.launch {
-                            try {
-                                val result = ServerCatalog.fetchModels(serverUrl, settings.sttServerApiKey)
-                                catalog = result
-                                if (result.isEmpty()) {
-                                    Toast.makeText(context, "Server vrátil prázdný seznam modelů.", Toast.LENGTH_LONG).show()
+            if (sttEngine == SttEngine.SERVER) {
+                androidx.compose.material3.OutlinedTextField(
+                    value = serverModel,
+                    onValueChange = { serverModel = it; settings.sttServerModel = it },
+                    label = { Text("STT model") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                if (serverUrl.isNotBlank()) {
+                    Button(
+                        onClick = {
+                            loadingCatalog = true
+                            scope.launch {
+                                try {
+                                    val result = ServerCatalog.fetchModels(serverUrl, settings.sttServerApiKey)
+                                    catalog = result
+                                    if (result.isEmpty()) {
+                                        Toast.makeText(context, "Server vrátil prázdný seznam modelů.", Toast.LENGTH_LONG).show()
+                                    }
+                                } catch (e: Throwable) {
+                                    Toast.makeText(context, "Modely: ${e.message ?: "neznámá chyba"}", Toast.LENGTH_LONG).show()
+                                } finally {
+                                    loadingCatalog = false
                                 }
-                            } catch (e: Throwable) {
-                                Toast.makeText(context, "Modely: ${e.message ?: "neznámá chyba"}", Toast.LENGTH_LONG).show()
-                            } finally {
-                                loadingCatalog = false
                             }
-                        }
-                    },
-                    enabled = !loadingCatalog,
-                    colors = ButtonDefaults.buttonColors(containerColor = c.accent, contentColor = c.accentInk),
-                ) {
-                    Text(
-                        if (loadingCatalog) "Načítám…"
-                        else if (catalog.isEmpty()) "Načíst modely ze serveru"
-                        else "Obnovit modely (${catalog.size})"
-                    )
-                }
-                if (catalog.isNotEmpty()) {
-                    ModelDropdown(
-                        label = "STT model",
-                        options = catalog.filter { ServerCatalog.isStt(it) }.map { it.id },
-                        selected = serverModel,
-                        onSelect = { serverModel = it; settings.sttServerModel = it },
-                    )
+                        },
+                        enabled = !loadingCatalog,
+                        colors = ButtonDefaults.buttonColors(containerColor = c.accent, contentColor = c.accentInk),
+                    ) {
+                        Text(
+                            if (loadingCatalog) "Načítám…"
+                            else if (catalog.isEmpty()) "Načíst modely ze serveru"
+                            else "Obnovit modely (${catalog.size})"
+                        )
+                    }
+                    if (catalog.isNotEmpty()) {
+                        ModelDropdown(
+                            label = "STT model",
+                            options = catalog.filter { ServerCatalog.isStt(it) }.map { it.id },
+                            selected = serverModel,
+                            onSelect = { serverModel = it; settings.sttServerModel = it },
+                        )
+                    }
                 }
             }
-        }
 
-        Button(
-            onClick = { runSttTest() },
-            enabled = !sttTesting,
-            colors = ButtonDefaults.buttonColors(containerColor = c.accent, contentColor = c.accentInk),
-        ) {
-            Text(if (sttTesting) "Poslouchám…" else "🎤 Otestovat rozpoznávání")
-        }
-        if (sttTestResult.isNotBlank()) {
-            Text("Rozpoznáno: \"$sttTestResult\"", style = CRType.bodyDim, color = c.text)
+            Button(
+                onClick = { runSttTest() },
+                enabled = !sttTesting,
+                modifier = Modifier.fillMaxWidth(),
+                colors = ButtonDefaults.buttonColors(containerColor = c.accent, contentColor = c.accentInk),
+            ) {
+                Text(if (sttTesting) "Poslouchám…" else "🎤 Otestovat rozpoznávání")
+            }
+            if (sttTestResult.isNotBlank()) {
+                Text("Rozpoznáno: \"$sttTestResult\"", style = CRType.bodyDim, color = c.text)
+            }
         }
 
         androidx.compose.material3.HorizontalDivider(color = c.border)
 
-        // ── Voice activation (wake word) ─────────────────────────────
-        androidx.compose.foundation.layout.Row(
-            modifier = Modifier.fillMaxWidth(),
-            verticalAlignment = androidx.compose.ui.Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.SpaceBetween,
-        ) {
-            Column(modifier = Modifier.weight(1f)) {
-                Text("Aktivace hlasem", style = CRType.cardTitle, color = c.text)
-                Text(
-                    "Spustí dialog vyslovením klíčového slova. On-device " +
-                        "(Porcupine) — offline, zvuk nikam neodchází. Jen když " +
-                        "je appka vepředu.",
-                    style = CRType.bodyDim, color = c.textDim,
+        // ══ Aktivace hlasem (wake word) ══════════════════════════════
+        SettingsSection(
+            title = "Aktivace hlasem",
+            description = "Spustí dialog vyslovením klíčového slova. On-device " +
+                "(Porcupine) — offline, zvuk nikam neodchází. Jen když " +
+                "je appka vepředu.",
+            trailing = {
+                androidx.compose.material3.Switch(
+                    checked = wakeEnabled,
+                    onCheckedChange = { wakeEnabled = it; settings.wakeWordEnabled = it },
                 )
-            }
-            androidx.compose.material3.Switch(
-                checked = wakeEnabled,
-                onCheckedChange = { wakeEnabled = it; settings.wakeWordEnabled = it },
-            )
-        }
-        if (wakeEnabled) {
-            val serverLabel = "Server (Whisper)"
-            val sherpaLabel = "On-device (sherpa, bez účtu)"
-            val porcupineLabel = "Porcupine (on-device)"
-            ModelDropdown(
-                label = "Engine aktivace",
-                options = listOf(serverLabel, sherpaLabel, porcupineLabel),
-                selected = when (wakeEngine) {
-                    "PORCUPINE" -> porcupineLabel
-                    "SHERPA" -> sherpaLabel
-                    else -> serverLabel
-                },
-                onSelect = { name ->
-                    val picked = when (name) {
-                        porcupineLabel -> "PORCUPINE"
-                        sherpaLabel -> "SHERPA"
-                        else -> "SERVER"
+            },
+        ) {
+            if (wakeEnabled) {
+                val serverLabel = "Server (Whisper)"
+                val sherpaLabel = "On-device (sherpa, bez účtu)"
+                val porcupineLabel = "Porcupine (on-device)"
+                ModelDropdown(
+                    label = "Engine aktivace",
+                    options = listOf(serverLabel, sherpaLabel, porcupineLabel),
+                    selected = when (wakeEngine) {
+                        "PORCUPINE" -> porcupineLabel
+                        "SHERPA" -> sherpaLabel
+                        else -> serverLabel
+                    },
+                    onSelect = { name ->
+                        val picked = when (name) {
+                            porcupineLabel -> "PORCUPINE"
+                            sherpaLabel -> "SHERPA"
+                            else -> "SERVER"
+                        }
+                        wakeEngine = picked; settings.wakeEngine = picked
+                    },
+                )
+                when (wakeEngine) {
+                    "SHERPA" -> {
+                        ModelDropdown(
+                            label = "Klíčové slovo",
+                            options = SherpaKws.KEYWORDS.keys.toList(),
+                            selected = sherpaKeyword,
+                            onSelect = { sherpaKeyword = it; settings.sherpaKeyword = it },
+                        )
+                        Text(
+                            "On-device, offline, bez účtu — model je v appce. Vyslov " +
+                                "slovo anglicky. Mikrofon naslouchá průběžně (baterie), " +
+                                "ale zvuk nikam neodchází.",
+                            style = CRType.bodyDim, color = c.textDim,
+                        )
                     }
-                    wakeEngine = picked; settings.wakeEngine = picked
+                    "PORCUPINE" -> {
+                        androidx.compose.material3.OutlinedTextField(
+                            value = porcupineKey,
+                            onValueChange = { porcupineKey = it; settings.porcupineAccessKey = it },
+                            label = { Text("Picovoice AccessKey (z console.picovoice.ai)") },
+                            singleLine = true,
+                            visualTransformation = androidx.compose.ui.text.input.PasswordVisualTransformation(),
+                            keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(
+                                keyboardType = androidx.compose.ui.text.input.KeyboardType.Password,
+                            ),
+                            modifier = Modifier.fillMaxWidth(),
+                        )
+                        ModelDropdown(
+                            label = "Klíčové slovo",
+                            options = listOf(
+                                "JARVIS", "COMPUTER", "BUMBLEBEE", "PORCUPINE", "PICOVOICE",
+                                "ALEXA", "TERMINATOR", "BLUEBERRY", "GRASSHOPPER",
+                            ),
+                            selected = porcupineKeyword,
+                            onSelect = { porcupineKeyword = it; settings.porcupineKeyword = it },
+                        )
+                        Text(
+                            "On-device, offline. Vyslov slovo anglicky. Vlastní " +
+                                "„Hey Claude“ jde natrénovat (.ppn). Pozn.: registrace " +
+                                "Picovoice může chtít firemní e-mail.",
+                            style = CRType.bodyDim, color = c.textDim,
+                        )
+                    }
+                    else -> {
+                        androidx.compose.material3.OutlinedTextField(
+                            value = wakePhrase,
+                            onValueChange = { wakePhrase = it; settings.wakeWord = it },
+                            label = { Text("Aktivační fráze (např. claude / hej claude)") },
+                            singleLine = true,
+                            modifier = Modifier.fillMaxWidth(),
+                        )
+                        Text(
+                            "Poslouchá přes STT server (vyžaduje nastavenou adresu). " +
+                                "Funguje v češtině, ale mikrofon posílá každou větu na " +
+                                "server (baterie/data).",
+                            style = CRType.bodyDim, color = c.textDim,
+                        )
+                    }
+                }
+            }
+        }
+
+        androidx.compose.material3.HorizontalDivider(color = c.border)
+
+        // ══ Předčítání (TTS) ═════════════════════════════════════════
+        SettingsSection("Předčítání (TTS)") {
+            ModelDropdown(
+                label = "Engine",
+                options = TtsEngine.entries.map { it.displayName },
+                selected = ttsEngine.displayName,
+                onSelect = { name ->
+                    val picked = TtsEngine.entries.firstOrNull { it.displayName == name } ?: TtsEngine.SERVER
+                    ttsEngine = picked; settings.ttsEngine = picked
                 },
             )
-            when (wakeEngine) {
-                "SHERPA" -> {
-                    ModelDropdown(
-                        label = "Klíčové slovo",
-                        options = SherpaKws.KEYWORDS.keys.toList(),
-                        selected = sherpaKeyword,
-                        onSelect = { sherpaKeyword = it; settings.sherpaKeyword = it },
-                    )
+
+            // Reading speed — applies to every engine.
+            PercentSlider(
+                label = "Rychlost čtení",
+                valuePct = speechRatePct,
+                range = 50..300,
+                onChange = { speechRatePct = it; settings.ttsSpeechRatePct = it },
+            )
+
+            when (ttsEngine) {
+                TtsEngine.SYSTEM -> {
                     Text(
-                        "On-device, offline, bez účtu — model je v appce. Vyslov " +
-                            "slovo anglicky. Mikrofon naslouchá průběžně (baterie), " +
-                            "ale zvuk nikam neodchází.",
+                        "Google TTS přímo v zařízení — rychlé, zdarma, offline. " +
+                            "Vynutí engine „com.google.android.tts“ (na HyperOS bývá výchozí " +
+                            "Xiaomi). Vyžaduje nainstalovaný hlas cs-CZ " +
+                            "(Nastavení Androidu → Řeč → Text na řeč).",
                         style = CRType.bodyDim, color = c.textDim,
                     )
+                    PercentSlider(
+                        label = "Výška hlasu",
+                        valuePct = pitchPct,
+                        range = 50..200,
+                        onChange = { pitchPct = it; settings.ttsPitchPct = it },
+                    )
+                    if (systemVoices.isNotEmpty()) {
+                        ModelDropdown(
+                            label = "Hlas zařízení",
+                            options = listOf("(výchozí)") + systemVoices,
+                            selected = systemVoice.ifBlank { "(výchozí)" },
+                            onSelect = {
+                                val v = if (it == "(výchozí)") "" else it
+                                systemVoice = v; settings.ttsSystemVoice = v
+                            },
+                        )
+                    }
+                    Button(
+                        onClick = {
+                            loadingSystemVoices = true
+                            SystemTtsVoices.load(
+                                context,
+                                onResult = { names ->
+                                    loadingSystemVoices = false
+                                    systemVoices = names
+                                    if (names.isEmpty()) {
+                                        Toast.makeText(context, "Zařízení nehlásí žádný český hlas.", Toast.LENGTH_LONG).show()
+                                    }
+                                },
+                                onError = { msg ->
+                                    loadingSystemVoices = false
+                                    Toast.makeText(context, "Hlasy zařízení: $msg", Toast.LENGTH_LONG).show()
+                                },
+                            )
+                        },
+                        enabled = !loadingSystemVoices,
+                        colors = ButtonDefaults.buttonColors(containerColor = c.accent, contentColor = c.accentInk),
+                    ) {
+                        Text(
+                            if (loadingSystemVoices) "Načítám…"
+                            else if (systemVoices.isEmpty()) "Načíst hlasy zařízení"
+                            else "Obnovit hlasy (${systemVoices.size})"
+                        )
+                    }
                 }
-                "PORCUPINE" -> {
+
+                TtsEngine.SERVER -> {
+                    Text(
+                        "Předčítání přes stejný server (Piper rychlý CZ, nebo XTTS " +
+                            "pomalejší ale bilingvní — voice „xtts:default“).",
+                        style = CRType.bodyDim, color = c.textDim,
+                    )
+                    if (catalog.isNotEmpty()) {
+                        ModelDropdown(
+                            label = "TTS model",
+                            options = catalog.filter { ServerCatalog.isTts(it) }.map { it.id },
+                            selected = ttsModel,
+                            onSelect = { ttsModel = it; settings.ttsServerModel = it },
+                        )
+                    } else {
+                        androidx.compose.material3.OutlinedTextField(
+                            value = ttsModel,
+                            onValueChange = { ttsModel = it; settings.ttsServerModel = it },
+                            label = { Text("TTS model (např. tts-1)") },
+                            singleLine = true,
+                            modifier = Modifier.fillMaxWidth(),
+                        )
+                    }
+                    if (voicesCatalog.isNotEmpty()) {
+                        ModelDropdown(
+                            label = "Hlas (voice)",
+                            options = voicesCatalog,
+                            selected = ttsVoice,
+                            onSelect = { ttsVoice = it; settings.ttsServerVoice = it },
+                        )
+                    } else {
+                        androidx.compose.material3.OutlinedTextField(
+                            value = ttsVoice,
+                            onValueChange = { ttsVoice = it; settings.ttsServerVoice = it },
+                            label = { Text("Hlas (voice) — např. cs_CZ-jirka-medium nebo xtts:default") },
+                            singleLine = true,
+                            modifier = Modifier.fillMaxWidth(),
+                        )
+                    }
+                    if (serverUrl.isNotBlank()) {
+                        Button(
+                            onClick = {
+                                loadingVoices = true
+                                scope.launch {
+                                    try {
+                                        val result = ServerCatalog.fetchVoices(serverUrl, settings.sttServerApiKey)
+                                        voicesCatalog = result
+                                        if (result.isEmpty()) {
+                                            Toast.makeText(context, "Server vrátil prázdný seznam hlasů.", Toast.LENGTH_LONG).show()
+                                        }
+                                    } catch (e: Throwable) {
+                                        Toast.makeText(context, "Hlasy: ${e.message ?: "neznámá chyba"}", Toast.LENGTH_LONG).show()
+                                    } finally {
+                                        loadingVoices = false
+                                    }
+                                }
+                            },
+                            enabled = !loadingVoices,
+                            colors = ButtonDefaults.buttonColors(containerColor = c.accent, contentColor = c.accentInk),
+                        ) {
+                            Text(
+                                if (loadingVoices) "Načítám hlasy…"
+                                else if (voicesCatalog.isEmpty()) "Načíst hlasy ze serveru"
+                                else "Obnovit seznam hlasů (${voicesCatalog.size})"
+                            )
+                        }
+                    }
+                }
+
+                TtsEngine.GOOGLE_CLOUD -> {
+                    Text(
+                        "Google Cloud Text-to-Speech — nejlepší kvalita, rychlé. " +
+                            "Vyžaduje API klíč (projekt + billing) a text odchází Googlu.",
+                        style = CRType.bodyDim, color = c.textDim,
+                    )
                     androidx.compose.material3.OutlinedTextField(
-                        value = porcupineKey,
-                        onValueChange = { porcupineKey = it; settings.porcupineAccessKey = it },
-                        label = { Text("Picovoice AccessKey (z console.picovoice.ai)") },
+                        value = gcloudKey,
+                        onValueChange = { gcloudKey = it; settings.googleCloudApiKey = it },
+                        label = { Text("Google Cloud API klíč") },
                         singleLine = true,
                         visualTransformation = androidx.compose.ui.text.input.PasswordVisualTransformation(),
                         keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(
@@ -393,194 +603,94 @@ actual fun WakeWordSettingsCard(settings: AppSettings) {
                         modifier = Modifier.fillMaxWidth(),
                     )
                     ModelDropdown(
-                        label = "Klíčové slovo",
-                        options = listOf(
-                            "JARVIS", "COMPUTER", "BUMBLEBEE", "PORCUPINE", "PICOVOICE",
-                            "ALEXA", "TERMINATOR", "BLUEBERRY", "GRASSHOPPER",
-                        ),
-                        selected = porcupineKeyword,
-                        onSelect = { porcupineKeyword = it; settings.porcupineKeyword = it },
+                        label = "Hlas (přednastavené)",
+                        options = listOf("cs-CZ-Wavenet-A", "cs-CZ-Standard-A"),
+                        selected = gcloudVoice,
+                        onSelect = { gcloudVoice = it; settings.googleCloudVoice = it },
                     )
-                    Text(
-                        "On-device, offline. Vyslov slovo anglicky. Vlastní " +
-                            "„Hey Claude“ jde natrénovat (.ppn). Pozn.: registrace " +
-                            "Picovoice může chtít firemní e-mail.",
-                        style = CRType.bodyDim, color = c.textDim,
-                    )
-                }
-                else -> {
                     androidx.compose.material3.OutlinedTextField(
-                        value = wakePhrase,
-                        onValueChange = { wakePhrase = it; settings.wakeWord = it },
-                        label = { Text("Aktivační fráze (např. claude / hej claude)") },
+                        value = gcloudVoice,
+                        onValueChange = { gcloudVoice = it; settings.googleCloudVoice = it },
+                        label = { Text("Hlas (nebo zadej jiný z Google katalogu)") },
                         singleLine = true,
                         modifier = Modifier.fillMaxWidth(),
                     )
+                }
+
+                TtsEngine.SONIOX -> {
                     Text(
-                        "Poslouchá přes STT server (vyžaduje nastavenou adresu). " +
-                            "Funguje v češtině, ale mikrofon posílá každou větu na " +
-                            "server (baterie/data).",
+                        "Soniox TTS — jeden hlas mluví libovolným z 60+ jazyků " +
+                            "(vč. češtiny). Vyžaduje Soniox API klíč (nahoře u STT). " +
+                            "Text odchází Soniox.",
                         style = CRType.bodyDim, color = c.textDim,
                     )
+                    ModelDropdown(
+                        label = "Hlas",
+                        options = SONIOX_VOICES,
+                        selected = sonioxVoice,
+                        onSelect = { sonioxVoice = it; settings.sonioxTtsVoice = it },
+                    )
                 }
+            }
+
+            Button(
+                onClick = {
+                    testing = true
+                    speakRouted(
+                        context,
+                        "Toto je test hlasu. Otevři pull request a smergni branch do mainu.",
+                        onFinish = { testing = false },
+                        onError = { msg ->
+                            testing = false
+                            Toast.makeText(context, "Test: $msg", Toast.LENGTH_LONG).show()
+                        },
+                    )
+                },
+                enabled = !testing,
+                modifier = Modifier.fillMaxWidth(),
+                colors = ButtonDefaults.buttonColors(containerColor = c.accent, contentColor = c.accentInk),
+            ) {
+                Text(if (testing) "Přehrávám…" else "🔊 Otestovat hlas")
             }
         }
 
         androidx.compose.material3.HorizontalDivider(color = c.border)
 
-        // ── TTS (engine picker) ──────────────────────────────────────
-        Text("Předčítání (TTS)", style = CRType.cardTitle, color = c.text)
-        ModelDropdown(
-            label = "Engine",
-            options = TtsEngine.entries.map { it.displayName },
-            selected = ttsEngine.displayName,
-            onSelect = { name ->
-                val picked = TtsEngine.entries.firstOrNull { it.displayName == name } ?: TtsEngine.SERVER
-                ttsEngine = picked; settings.ttsEngine = picked
+        // ══ LLM shrnutí zpráv (hodinky) ══════════════════════════════
+        // Own OpenAI-compatible endpoint (separate from the STT/TTS server):
+        // condenses lastMessage to one sentence for the watch notification.
+        SettingsSection(
+            title = "LLM shrnutí zpráv (hodinky)",
+            description = "Když session čeká na vstup nebo schválení, telefon shrne " +
+                "poslední zprávu do jedné věty a pošle ji na hodinky jako " +
+                "text notifikace. Vyžaduje OpenAI-compatible server.",
+            trailing = {
+                androidx.compose.material3.Switch(
+                    checked = llmSummaryEnabled,
+                    onCheckedChange = { llmSummaryEnabled = it; settings.llmSummaryEnabled = it },
+                )
             },
-        )
-
-        // Reading speed — applies to every engine.
-        PercentSlider(
-            label = "Rychlost čtení",
-            valuePct = speechRatePct,
-            range = 50..300,
-            onChange = { speechRatePct = it; settings.ttsSpeechRatePct = it },
-        )
-
-        when (ttsEngine) {
-            TtsEngine.SYSTEM -> {
-                Text(
-                    "Google TTS přímo v zařízení — rychlé, zdarma, offline. " +
-                        "Vynutí engine „com.google.android.tts“ (na HyperOS bývá výchozí " +
-                        "Xiaomi). Vyžaduje nainstalovaný hlas cs-CZ " +
-                        "(Nastavení Androidu → Řeč → Text na řeč).",
-                    style = CRType.bodyDim, color = c.textDim,
-                )
-                PercentSlider(
-                    label = "Výška hlasu",
-                    valuePct = pitchPct,
-                    range = 50..200,
-                    onChange = { pitchPct = it; settings.ttsPitchPct = it },
-                )
-                if (systemVoices.isNotEmpty()) {
-                    ModelDropdown(
-                        label = "Hlas zařízení",
-                        options = listOf("(výchozí)") + systemVoices,
-                        selected = systemVoice.ifBlank { "(výchozí)" },
-                        onSelect = {
-                            val v = if (it == "(výchozí)") "" else it
-                            systemVoice = v; settings.ttsSystemVoice = v
-                        },
-                    )
-                }
-                Button(
-                    onClick = {
-                        loadingSystemVoices = true
-                        SystemTtsVoices.load(
-                            context,
-                            onResult = { names ->
-                                loadingSystemVoices = false
-                                systemVoices = names
-                                if (names.isEmpty()) {
-                                    Toast.makeText(context, "Zařízení nehlásí žádný český hlas.", Toast.LENGTH_LONG).show()
-                                }
-                            },
-                            onError = { msg ->
-                                loadingSystemVoices = false
-                                Toast.makeText(context, "Hlasy zařízení: $msg", Toast.LENGTH_LONG).show()
-                            },
-                        )
+        ) {
+            if (llmSummaryEnabled) {
+                androidx.compose.material3.OutlinedTextField(
+                    value = llmSummaryUrl,
+                    onValueChange = {
+                        llmSummaryUrl = it; settings.llmSummaryUrl = it
+                        llmModels = emptyList()
                     },
-                    enabled = !loadingSystemVoices,
-                    colors = ButtonDefaults.buttonColors(containerColor = c.accent, contentColor = c.accentInk),
-                ) {
-                    Text(
-                        if (loadingSystemVoices) "Načítám…"
-                        else if (systemVoices.isEmpty()) "Načíst hlasy zařízení"
-                        else "Obnovit hlasy (${systemVoices.size})"
-                    )
-                }
-            }
-
-            TtsEngine.SERVER -> {
-                Text(
-                    "Předčítání přes stejný server (Piper rychlý CZ, nebo XTTS " +
-                        "pomalejší ale bilingvní — voice „xtts:default“).",
-                    style = CRType.bodyDim, color = c.textDim,
-                )
-                if (catalog.isNotEmpty()) {
-                    ModelDropdown(
-                        label = "TTS model",
-                        options = catalog.filter { ServerCatalog.isTts(it) }.map { it.id },
-                        selected = ttsModel,
-                        onSelect = { ttsModel = it; settings.ttsServerModel = it },
-                    )
-                } else {
-                    androidx.compose.material3.OutlinedTextField(
-                        value = ttsModel,
-                        onValueChange = { ttsModel = it; settings.ttsServerModel = it },
-                        label = { Text("TTS model (např. tts-1)") },
-                        singleLine = true,
-                        modifier = Modifier.fillMaxWidth(),
-                    )
-                }
-                if (voicesCatalog.isNotEmpty()) {
-                    ModelDropdown(
-                        label = "Hlas (voice)",
-                        options = voicesCatalog,
-                        selected = ttsVoice,
-                        onSelect = { ttsVoice = it; settings.ttsServerVoice = it },
-                    )
-                } else {
-                    androidx.compose.material3.OutlinedTextField(
-                        value = ttsVoice,
-                        onValueChange = { ttsVoice = it; settings.ttsServerVoice = it },
-                        label = { Text("Hlas (voice) — např. cs_CZ-jirka-medium nebo xtts:default") },
-                        singleLine = true,
-                        modifier = Modifier.fillMaxWidth(),
-                    )
-                }
-                if (serverUrl.isNotBlank()) {
-                    Button(
-                        onClick = {
-                            loadingVoices = true
-                            scope.launch {
-                                try {
-                                    val result = ServerCatalog.fetchVoices(serverUrl, settings.sttServerApiKey)
-                                    voicesCatalog = result
-                                    if (result.isEmpty()) {
-                                        Toast.makeText(context, "Server vrátil prázdný seznam hlasů.", Toast.LENGTH_LONG).show()
-                                    }
-                                } catch (e: Throwable) {
-                                    Toast.makeText(context, "Hlasy: ${e.message ?: "neznámá chyba"}", Toast.LENGTH_LONG).show()
-                                } finally {
-                                    loadingVoices = false
-                                }
-                            }
-                        },
-                        enabled = !loadingVoices,
-                        colors = ButtonDefaults.buttonColors(containerColor = c.accent, contentColor = c.accentInk),
-                    ) {
-                        Text(
-                            if (loadingVoices) "Načítám hlasy…"
-                            else if (voicesCatalog.isEmpty()) "Načíst hlasy ze serveru"
-                            else "Obnovit seznam hlasů (${voicesCatalog.size})"
-                        )
-                    }
-                }
-            }
-
-            TtsEngine.GOOGLE_CLOUD -> {
-                Text(
-                    "Google Cloud Text-to-Speech — nejlepší kvalita, rychlé. " +
-                        "Vyžaduje API klíč (projekt + billing) a text odchází Googlu.",
-                    style = CRType.bodyDim, color = c.textDim,
+                    // Open WebUI native API — doménový root (BEZ /openai, BEZ /v1);
+                    // appka připojí /api/chat/completions a /api/models sama.
+                    label = { Text("LLM server URL (např. https://ai.hanaktech.org)") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
                 )
                 androidx.compose.material3.OutlinedTextField(
-                    value = gcloudKey,
-                    onValueChange = { gcloudKey = it; settings.googleCloudApiKey = it },
-                    label = { Text("Google Cloud API klíč") },
+                    value = llmSummaryKey,
+                    onValueChange = {
+                        llmSummaryKey = it; settings.llmSummaryApiKey = it
+                        llmModels = emptyList()
+                    },
+                    label = { Text("API klíč") },
                     singleLine = true,
                     visualTransformation = androidx.compose.ui.text.input.PasswordVisualTransformation(),
                     keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(
@@ -588,187 +698,153 @@ actual fun WakeWordSettingsCard(settings: AppSettings) {
                     ),
                     modifier = Modifier.fillMaxWidth(),
                 )
-                ModelDropdown(
-                    label = "Hlas (přednastavené)",
-                    options = listOf("cs-CZ-Wavenet-A", "cs-CZ-Standard-A"),
-                    selected = gcloudVoice,
-                    onSelect = { gcloudVoice = it; settings.googleCloudVoice = it },
-                )
+                // "Načíst modely" doubles as a connection test (GET /api/models).
+                // When it fills the dropdown the user picks from it; the free-text
+                // field stays as a fallback so a model can always be typed by hand.
+                Button(
+                    onClick = {
+                        loadingLlmModels = true
+                        scope.launch {
+                            try {
+                                val result = MessageSummarizer.fetchModels(llmSummaryUrl, settings.llmSummaryApiKey)
+                                llmModels = result
+                                if (result.isEmpty()) {
+                                    Toast.makeText(context, "Server vrátil prázdný seznam modelů.", Toast.LENGTH_LONG).show()
+                                }
+                            } catch (e: Throwable) {
+                                Toast.makeText(context, "Modely: ${e.message ?: "nepodařilo se načíst"}", Toast.LENGTH_LONG).show()
+                            } finally {
+                                loadingLlmModels = false
+                            }
+                        }
+                    },
+                    enabled = !loadingLlmModels && llmSummaryUrl.isNotBlank() && llmSummaryKey.isNotBlank(),
+                    colors = ButtonDefaults.buttonColors(containerColor = c.accent, contentColor = c.accentInk),
+                ) {
+                    Text(
+                        if (loadingLlmModels) "Načítám…"
+                        else if (llmModels.isEmpty()) "Načíst modely"
+                        else "Obnovit modely (${llmModels.size})"
+                    )
+                }
+                if (llmModels.isNotEmpty()) {
+                    ModelDropdown(
+                        label = "Model",
+                        options = llmModels,
+                        selected = llmSummaryModel,
+                        onSelect = { llmSummaryModel = it; settings.llmSummaryModel = it },
+                    )
+                }
                 androidx.compose.material3.OutlinedTextField(
-                    value = gcloudVoice,
-                    onValueChange = { gcloudVoice = it; settings.googleCloudVoice = it },
-                    label = { Text("Hlas (nebo zadej jiný z Google katalogu)") },
+                    value = llmSummaryModel,
+                    onValueChange = { llmSummaryModel = it; settings.llmSummaryModel = it },
+                    label = { Text("Model (nebo zadej ručně)") },
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth(),
                 )
-            }
-
-            TtsEngine.SONIOX -> {
-                Text(
-                    "Soniox TTS — jeden hlas mluví libovolným z 60+ jazyků " +
-                        "(vč. češtiny). Vyžaduje Soniox API klíč (nahoře u STT). " +
-                        "Text odchází Soniox.",
-                    style = CRType.bodyDim, color = c.textDim,
+                // Délka shrnutí — mapuje na system prompt + max_tokens v MessageSummarizer.
+                // Kódy ("SENTENCE"/"SHORT"/"PARAGRAPH") + fallback na SENTENCE beze změny.
+                val lengthOptions = listOf(
+                    "SENTENCE" to "Věta",
+                    "SHORT" to "Krátké",
+                    "PARAGRAPH" to "Odstavec",
                 )
-                ModelDropdown(
-                    label = "Hlas",
-                    options = SONIOX_VOICES,
-                    selected = sonioxVoice,
-                    onSelect = { sonioxVoice = it; settings.sonioxTtsVoice = it },
-                )
-            }
-        }
-
-        Button(
-            onClick = {
-                testing = true
-                speakRouted(
-                    context,
-                    "Toto je test hlasu. Otevři pull request a smergni branch do mainu.",
-                    onFinish = { testing = false },
-                    onError = { msg ->
-                        testing = false
-                        Toast.makeText(context, "Test: $msg", Toast.LENGTH_LONG).show()
-                    },
-                )
-            },
-            enabled = !testing,
-            colors = ButtonDefaults.buttonColors(containerColor = c.accent, contentColor = c.accentInk),
-        ) {
-            Text(if (testing) "Přehrávám…" else "🔊 Otestovat hlas")
-        }
-
-        androidx.compose.material3.HorizontalDivider(color = c.border)
-
-        // ── LLM shrnutí zpráv (hodinky) ──────────────────────────────
-        // Own OpenAI-compatible endpoint (separate from the STT/TTS server):
-        // condenses lastMessage to one sentence for the watch notification.
-        androidx.compose.foundation.layout.Row(
-            modifier = Modifier.fillMaxWidth(),
-            verticalAlignment = androidx.compose.ui.Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.SpaceBetween,
-        ) {
-            Column(modifier = Modifier.weight(1f)) {
-                Text("LLM shrnutí zpráv (hodinky)", style = CRType.cardTitle, color = c.text)
-                Text(
-                    "Když session čeká na vstup nebo schválení, telefon shrne " +
-                        "poslední zprávu do jedné věty a pošle ji na hodinky jako " +
-                        "text notifikace. Vyžaduje OpenAI-compatible server.",
-                    style = CRType.bodyDim, color = c.textDim,
-                )
-            }
-            androidx.compose.material3.Switch(
-                checked = llmSummaryEnabled,
-                onCheckedChange = { llmSummaryEnabled = it; settings.llmSummaryEnabled = it },
-            )
-        }
-        if (llmSummaryEnabled) {
-            androidx.compose.material3.OutlinedTextField(
-                value = llmSummaryUrl,
-                onValueChange = {
-                    llmSummaryUrl = it; settings.llmSummaryUrl = it
-                    llmModels = emptyList()
-                },
-                // Open WebUI native API — doménový root (BEZ /openai, BEZ /v1);
-                // appka připojí /api/chat/completions a /api/models sama.
-                label = { Text("LLM server URL (např. https://ai.hanaktech.org)") },
-                singleLine = true,
-                modifier = Modifier.fillMaxWidth(),
-            )
-            androidx.compose.material3.OutlinedTextField(
-                value = llmSummaryKey,
-                onValueChange = {
-                    llmSummaryKey = it; settings.llmSummaryApiKey = it
-                    llmModels = emptyList()
-                },
-                label = { Text("API klíč") },
-                singleLine = true,
-                visualTransformation = androidx.compose.ui.text.input.PasswordVisualTransformation(),
-                keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(
-                    keyboardType = androidx.compose.ui.text.input.KeyboardType.Password,
-                ),
-                modifier = Modifier.fillMaxWidth(),
-            )
-            // "Načíst modely" doubles as a connection test (GET /api/models).
-            // When it fills the dropdown the user picks from it; the free-text
-            // field stays as a fallback so a model can always be typed by hand.
-            Button(
-                onClick = {
-                    loadingLlmModels = true
-                    scope.launch {
-                        try {
-                            val result = MessageSummarizer.fetchModels(llmSummaryUrl, settings.llmSummaryApiKey)
-                            llmModels = result
-                            if (result.isEmpty()) {
-                                Toast.makeText(context, "Server vrátil prázdný seznam modelů.", Toast.LENGTH_LONG).show()
+                val currentLength = when (llmSummaryLength) {
+                    "SHORT" -> "SHORT"
+                    "PARAGRAPH" -> "PARAGRAPH"
+                    else -> "SENTENCE"
+                }
+                Column(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalArrangement = Arrangement.spacedBy(4.dp),
+                ) {
+                    Text("Délka shrnutí", style = CRType.bodyDim, color = c.textDim)
+                    SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth()) {
+                        lengthOptions.forEachIndexed { index, (code, label) ->
+                            SegmentedButton(
+                                selected = currentLength == code,
+                                onClick = {
+                                    llmSummaryLength = code; settings.llmSummaryLength = code
+                                },
+                                shape = SegmentedButtonDefaults.itemShape(
+                                    index = index,
+                                    count = lengthOptions.size,
+                                ),
+                            ) {
+                                Text(label)
                             }
-                        } catch (e: Throwable) {
-                            Toast.makeText(context, "Modely: ${e.message ?: "nepodařilo se načíst"}", Toast.LENGTH_LONG).show()
-                        } finally {
-                            loadingLlmModels = false
                         }
                     }
-                },
-                enabled = !loadingLlmModels && llmSummaryUrl.isNotBlank() && llmSummaryKey.isNotBlank(),
-                colors = ButtonDefaults.buttonColors(containerColor = c.accent, contentColor = c.accentInk),
-            ) {
-                Text(
-                    if (loadingLlmModels) "Načítám…"
-                    else if (llmModels.isEmpty()) "Načíst modely"
-                    else "Obnovit modely (${llmModels.size})"
-                )
-            }
-            if (llmModels.isNotEmpty()) {
-                ModelDropdown(
-                    label = "Model",
-                    options = llmModels,
-                    selected = llmSummaryModel,
-                    onSelect = { llmSummaryModel = it; settings.llmSummaryModel = it },
-                )
-            }
-            androidx.compose.material3.OutlinedTextField(
-                value = llmSummaryModel,
-                onValueChange = { llmSummaryModel = it; settings.llmSummaryModel = it },
-                label = { Text("Model (nebo zadej ručně)") },
-                singleLine = true,
-                modifier = Modifier.fillMaxWidth(),
-            )
-            // Délka shrnutí — mapuje na system prompt + max_tokens v MessageSummarizer.
-            val lengthSentence = "Věta"
-            val lengthShort = "Krátké"
-            val lengthParagraph = "Odstavec"
-            ModelDropdown(
-                label = "Délka shrnutí",
-                options = listOf(lengthSentence, lengthShort, lengthParagraph),
-                selected = when (llmSummaryLength) {
-                    "SHORT" -> lengthShort
-                    "PARAGRAPH" -> lengthParagraph
-                    else -> lengthSentence
-                },
-                onSelect = { name ->
-                    val picked = when (name) {
-                        lengthShort -> "SHORT"
-                        lengthParagraph -> "PARAGRAPH"
-                        else -> "SENTENCE"
-                    }
-                    llmSummaryLength = picked; settings.llmSummaryLength = picked
-                },
-            )
-            // Watch summary rides the master toggle above; this extends it to
-            // the phone's own "Claude needs input" notification.
-            androidx.compose.foundation.layout.Row(
-                modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = androidx.compose.ui.Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.SpaceBetween,
-            ) {
-                Text("Shrnovat i telefonní notifikace", style = CRType.bodyDim, color = c.text, modifier = Modifier.weight(1f))
-                androidx.compose.material3.Switch(
-                    checked = llmSummaryPhone,
-                    onCheckedChange = { llmSummaryPhone = it; settings.llmSummaryPhone = it },
-                )
+                }
+                // Watch summary rides the master toggle above; this extends it to
+                // the phone's own "Claude needs input" notification.
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                ) {
+                    Text("Shrnovat i telefonní notifikace", style = CRType.bodyDim, color = c.text, modifier = Modifier.weight(1f))
+                    androidx.compose.material3.Switch(
+                        checked = llmSummaryPhone,
+                        onCheckedChange = { llmSummaryPhone = it; settings.llmSummaryPhone = it },
+                    )
+                }
             }
         }
     }
+}
+
+/** Section scaffold: an accent-barred title (+ optional description and a
+ * trailing control such as a master Switch), then the section's controls with
+ * consistent vertical rhythm. Pure presentation — no logic. */
+@Composable
+private fun SettingsSection(
+    title: String,
+    description: String? = null,
+    trailing: (@Composable () -> Unit)? = null,
+    content: @Composable ColumnScope.() -> Unit,
+) {
+    val c = CRTheme.colors
+    Column(
+        modifier = Modifier.fillMaxWidth(),
+        verticalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.Top,
+            horizontalArrangement = Arrangement.SpaceBetween,
+        ) {
+            Row(
+                modifier = Modifier.weight(1f),
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
+                Box(
+                    modifier = Modifier
+                        .padding(top = 3.dp)
+                        .size(width = 3.dp, height = 14.dp)
+                        .background(c.accent, RoundedCornerShape(2.dp)),
+                )
+                Column(verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                    Text(title, style = CRType.cardTitle, color = c.text)
+                    if (description != null) {
+                        Text(description, style = CRType.bodyDim, color = c.textDim)
+                    }
+                }
+            }
+            if (trailing != null) {
+                Spacer(Modifier.width(12.dp))
+                trailing()
+            }
+        }
+        content()
+    }
+}
+
+/** Small-caps sub-heading that groups related fields inside a section. */
+@Composable
+private fun SubLabel(text: String) {
+    val c = CRTheme.colors
+    Text(text, style = CRType.sectionH, color = c.textDim)
 }
 
 @Composable
