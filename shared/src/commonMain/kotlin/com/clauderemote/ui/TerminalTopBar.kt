@@ -32,7 +32,6 @@ import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.KeyboardArrowLeft
 import androidx.compose.material.icons.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.Menu
-import androidx.compose.material.icons.filled.RecordVoiceOver
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -61,9 +60,6 @@ import com.clauderemote.session.CommandFetcher
 import com.clauderemote.session.SlashCommand
 import com.clauderemote.session.status.RemoteSessionStatus
 import com.clauderemote.session.transcript.TranscriptEntry
-import com.clauderemote.voice.MicButton
-import com.clauderemote.voice.VoiceModeScreen
-import com.clauderemote.voice.WakeWordListener
 import com.clauderemote.ui.components.CRCard
 import com.clauderemote.ui.components.CRStatus
 import com.clauderemote.ui.components.Pill

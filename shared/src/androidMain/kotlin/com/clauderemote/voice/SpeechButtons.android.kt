@@ -57,6 +57,8 @@ actual fun MicButton(
     onValueChange: (TextFieldValue) -> Unit,
     modifier: Modifier,
     tint: Color,
+    autoStartSignal: Int,
+    onListeningChange: (Boolean) -> Unit,
 ) {
     val context = LocalContext.current
     val srAvailable = SpeechRecognizer.isRecognitionAvailable(context)
@@ -407,6 +409,27 @@ actual fun MicButton(
     ) { granted ->
         if (granted && pendingStart) startListening()
         pendingStart = false
+    }
+
+    // Report the mic state upward so the caller can pause competing listeners
+    // (the wake word grabs the same mic) while a dictation is running.
+    val onListeningChangeState = rememberUpdatedState(onListeningChange)
+    LaunchedEffect(listening) { onListeningChangeState.value(listening) }
+
+    // Hands-free start: when the wake word bumps the signal, begin dictation
+    // exactly like a tap — request the mic permission if we don't have it yet.
+    // Guarded so a wake arriving mid-dictation can't restart on top of itself.
+    LaunchedEffect(autoStartSignal) {
+        if (autoStartSignal <= 0 || listening || pendingStart) return@LaunchedEffect
+        val granted = ContextCompat.checkSelfPermission(
+            context, Manifest.permission.RECORD_AUDIO
+        ) == PackageManager.PERMISSION_GRANTED
+        if (granted) {
+            startListening()
+        } else {
+            pendingStart = true
+            permissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+        }
     }
 
     IconButton(

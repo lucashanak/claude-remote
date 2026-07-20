@@ -13,6 +13,12 @@ import androidx.compose.ui.text.input.TextFieldValue
  * just after the inserted text.
  *
  * Renders nothing on platforms without STT support (currently desktop).
+ *
+ * [autoStartSignal] lets the wake word start dictation hands-free: whenever it
+ * changes to a fresh value > 0 the button begins listening exactly as if it had
+ * been tapped (unless a dictation is already running). [onListeningChange]
+ * reports the mic state so the caller can release competing listeners (the wake
+ * word) while dictating.
  */
 @Composable
 expect fun MicButton(
@@ -20,6 +26,8 @@ expect fun MicButton(
     onValueChange: (TextFieldValue) -> Unit,
     modifier: Modifier = Modifier,
     tint: Color = Color.Unspecified,
+    autoStartSignal: Int = 0,
+    onListeningChange: (Boolean) -> Unit = {},
 )
 
 /**

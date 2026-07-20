@@ -11,6 +11,8 @@ actual fun MicButton(
     onValueChange: (TextFieldValue) -> Unit,
     modifier: Modifier,
     tint: Color,
+    autoStartSignal: Int,
+    onListeningChange: (Boolean) -> Unit,
 ) {
     // No desktop STT yet. Speech support is Android-only for now.
 }

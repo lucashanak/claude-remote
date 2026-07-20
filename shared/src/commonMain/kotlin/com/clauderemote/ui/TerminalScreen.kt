@@ -32,7 +32,6 @@ import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.KeyboardArrowLeft
 import androidx.compose.material.icons.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.Menu
-import androidx.compose.material.icons.filled.RecordVoiceOver
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -61,9 +60,6 @@ import com.clauderemote.session.CommandFetcher
 import com.clauderemote.session.SlashCommand
 import com.clauderemote.session.status.RemoteSessionStatus
 import com.clauderemote.session.transcript.TranscriptEntry
-import com.clauderemote.voice.MicButton
-import com.clauderemote.voice.VoiceModeScreen
-import com.clauderemote.voice.WakeWordListener
 import com.clauderemote.ui.components.CRCard
 import com.clauderemote.ui.components.CRStatus
 import com.clauderemote.ui.components.Pill
@@ -243,14 +239,6 @@ fun TerminalScreen(
     var showPalette by remember { mutableStateOf(false) }
     var showSessionDrawer by remember { mutableStateOf(false) }
     var showExpanded by remember { mutableStateOf(false) }
-    var voiceModeActive by remember { mutableStateOf(false) }
-    val latestAssistant: TranscriptEntry.AssistantText? = remember(transcriptEntries) {
-        for (i in transcriptEntries.indices.reversed()) {
-            val e = transcriptEntries[i]
-            if (e is TranscriptEntry.AssistantText) return@remember e
-        }
-        null
-    }
 
     // Replay terminal buffer when switching back from transcript. Keyed on the
     // EFFECTIVE view so the #70 auto-switch to Raw also triggers a replay.
@@ -1216,7 +1204,6 @@ fun TerminalScreen(
                             onAttachFile = onAttachFile,
                             inputFocusRequester = inputFocusRequester,
                             onExpand = { showExpanded = true },
-                            onEnterVoiceMode = { voiceModeActive = true },
                         )
                     }
 
@@ -1322,31 +1309,8 @@ fun TerminalScreen(
                 onDismiss = { showExpanded = false },
             )
         }
-        // Voice-mode overlay sits on top of all the regular UI. Rendered as
-        // the last BoxWithConstraints child so it stacks above everything;
-        // VoiceModeScreen is a bottom panel, leaving the chat visible behind.
-        if (voiceModeActive) {
-            VoiceModeScreen(
-                onSend = { text ->
-                    if (text.isBlank()) return@VoiceModeScreen
-                    scope.launch {
-                        onSendCommand(text)
-                        kotlinx.coroutines.delay(40)
-                        onSendCommand("\r")
-                    }
-                },
-                latestAssistantId = latestAssistant?.id,
-                latestAssistantText = latestAssistant?.text,
-                onClose = { voiceModeActive = false },
-            )
-        }
-
-        // Foreground-only wake word: opens the dialog hands-free when enabled
-        // in settings. Paused while the dialog is already open.
-        WakeWordListener(
-            paused = voiceModeActive,
-            onWake = { voiceModeActive = true },
-        )
+        // Foreground-only wake word lives with the prompt input now (it starts
+        // dictation into that field), so it's wired up inside PromptInputBar.
     } // end BoxWithConstraints
 }
 

@@ -7,9 +7,8 @@ import com.clauderemote.model.TtsEngine
 /**
  * Reads the user's chosen STT engine directly from the same
  * SharedPreferences file [com.clauderemote.storage.PlatformPreferences]
- * uses, so MicButton / VoiceMode (which don't otherwise have an
- * AppSettings handle) can route to the right backend without extra
- * Compose plumbing.
+ * uses, so MicButton (which doesn't otherwise have an AppSettings
+ * handle) can route to the right backend without extra Compose plumbing.
  */
 /**
  * Strip a trailing `/v1` (and any trailing slashes) from a server base URL.
