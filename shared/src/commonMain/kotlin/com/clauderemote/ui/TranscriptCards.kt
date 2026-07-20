@@ -832,7 +832,7 @@ private fun RichBody(
         dividerColor = c.border.copy(alpha = 0.4f)
     )
     Markdown(
-        content = text,
+        content = remember(text) { taskListToGlyphs(text) },
         colors = colors,
         typography = typography,
         padding = padding,
@@ -1060,6 +1060,26 @@ private fun TableGrid(
                 Box(Modifier.width(totalWidth).height(1.dp).background(dividerColor))
             }
         }
+    }
+}
+
+// GitHub task-list items (`- [ ]` / `- [x]`) render as plain bullets in the
+// markdown lib — the checkbox marker is dropped, so done/todo is lost. Rewrite
+// them to a bullet carrying a checkbox glyph so the state stays visible. Skip
+// lines inside fenced code blocks (a `- [ ]` there is literal code, not a task).
+private val TASK_ITEM_REGEX = Regex("""^(\s*)[-*] \[([ xX])] (.*)$""")
+private fun taskListToGlyphs(text: String): String {
+    if (!text.contains("[ ]") && !text.contains("[x]") && !text.contains("[X]")) return text
+    var inFence = false
+    return text.lineSequence().joinToString("\n") { line ->
+        val trimmed = line.trimStart()
+        if (trimmed.startsWith("```") || trimmed.startsWith("~~~")) { inFence = !inFence; return@joinToString line }
+        if (inFence) return@joinToString line
+        TASK_ITEM_REGEX.matchEntire(line)?.let { m ->
+            val (indent, mark, rest) = m.destructured
+            val box = if (mark.equals("x", ignoreCase = true)) "☑" else "☐"
+            "$indent- $box $rest"
+        } ?: line
     }
 }
 
