@@ -42,6 +42,17 @@ internal class TmuxProbes(
         conn.resize(cols, rows)
         val tmuxName = tabManager.getTab(sessionId)?.tmuxSessionName
         scope.launch {
+            // LAST-DEVICE-PRIORITY sizing. `window-size latest` made the pane
+            // follow whichever client was most recently active — and stale
+            // clients (e.g. Eternal Terminal keeps its server-side shells alive
+            // across drops, so old 80x24 `tmux attach` clients pile up) kept
+            // stealing it and shrinking the pane, leaving the terminal not
+            // filling the window. Instead: switch to manual sizing and force the
+            // window to THIS view's size on every attach/redraw. Whoever opens
+            // or interacts with the session last sets its size; zombie clients
+            // can no longer override it. A genuine second live device just
+            // re-forces its own size next time it redraws.
+            if (tmuxName != null) forceWindowSize(conn, tmuxName, cols, rows)
             if (tmuxName != null) probeTmuxGeometry(conn, tmuxName, sessionId, cols, rows)
             val refreshed = tmuxName != null && refreshTmuxClient(conn, tmuxName)
             if (!refreshed) {
@@ -55,6 +66,35 @@ internal class TmuxProbes(
             }
         }
     }
+
+    /**
+     * Force [tmuxName]'s window to [cols]x[rows] — last-device-priority sizing.
+     * Switches the window to manual sizing (so tmux stops auto-tracking the
+     * most-recently-active client, which lets stale/zombie clients shrink the
+     * pane) and pins it to this view's size. Re-run on every attach/redraw, so
+     * the device the user is actually looking at always wins.
+     */
+    private suspend fun forceWindowSize(conn: SshManager, tmuxName: String, cols: Int, rows: Int): Boolean =
+        kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+            try {
+                val sshSession = conn.getSession() ?: return@withContext false
+                val escaped = tmuxName.replace("'", "'\\''")
+                val ch = sshSession.openChannel("exec") as com.jcraft.jsch.ChannelExec
+                ch.setCommand(
+                    "tmux set-option -w -t '$escaped' window-size manual 2>/dev/null; " +
+                        "tmux resize-window -t '$escaped' -x $cols -y $rows 2>/dev/null; echo OK"
+                )
+                ch.inputStream = null
+                val input = ch.inputStream
+                ch.connect(1500)
+                val out = input.bufferedReader().readText()
+                ch.disconnect()
+                out.contains("OK")
+            } catch (e: Exception) {
+                FileLogger.log(TAG, "resize-window failed for $tmuxName: ${e.message}")
+                false
+            }
+        }
 
     /**
      * Run `tmux refresh-client` for every client attached to [tmuxName] via a
