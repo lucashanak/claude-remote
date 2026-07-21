@@ -85,13 +85,13 @@ internal class SessionPersistenceService(
         DUNIT="${'$'}HOME/.config/systemd/user/claude-remote-drift.service"
         DTIMER="${'$'}HOME/.config/systemd/user/claude-remote-drift.timer"
         LOCK="${'$'}HOME/.claude-remote/sessions.lock"
-        MARKER="claude-remote-restore-v6"
+        MARKER="claude-remote-restore-v7"
         touch "${'$'}LOCK"
         echo "[${'$'}(date -u +%FT%TZ)] install: invoked by client" >> "${'$'}HOME/.claude-remote/install.log"
         if ! grep -q "${'$'}MARKER" "${'$'}SCRIPT" 2>/dev/null; then
             cat > "${'$'}SCRIPT" <<'RESTORE_EOF'
 #!/usr/bin/env bash
-# claude-remote-restore-v6 — recreates tmux+claude sessions from sessions.json (snapshot under flock)
+# claude-remote-restore-v7 — recreates tmux+claude sessions from sessions.json (snapshot under flock)
 set -u
 LOG="${'$'}HOME/.claude-remote/restore.log"
 exec >> "${'$'}LOG" 2>&1
@@ -104,6 +104,19 @@ if [ ! -f "${'$'}SESSIONS_FILE" ]; then
 fi
 touch "${'$'}LOCK"
 SNAP=${'$'}(flock -s "${'$'}LOCK" cat "${'$'}SESSIONS_FILE")
+# If the manifest was blanked (e.g. a drift tick during the previous shutdown),
+# fall back to the last non-empty backup so a reboot still restores sessions.
+if command -v jq >/dev/null 2>&1; then
+    SNAPLEN=${'$'}(echo "${'$'}SNAP" | jq 'length' 2>/dev/null || echo 0)
+    if [ "${'$'}{SNAPLEN:-0}" -eq 0 ] && [ -f "${'$'}SESSIONS_FILE.bak" ]; then
+        BAK=${'$'}(flock -s "${'$'}LOCK" cat "${'$'}SESSIONS_FILE.bak")
+        BAKLEN=${'$'}(echo "${'$'}BAK" | jq 'length' 2>/dev/null || echo 0)
+        if [ "${'$'}{BAKLEN:-0}" -gt 0 ]; then
+            echo "sessions.json empty — falling back to sessions.json.bak (${'$'}BAKLEN entries)"
+            SNAP="${'$'}BAK"
+        fi
+    fi
+fi
 command -v tmux >/dev/null 2>&1 || { echo "tmux not in PATH"; exit 1; }
 command -v claude >/dev/null 2>&1 || { echo "claude not in PATH"; exit 1; }
 HAVE_JQ=0
@@ -203,7 +216,7 @@ RESTORE_EOF
         if ! grep -q "${'$'}MARKER" "${'$'}DRIFT" 2>/dev/null; then
             cat > "${'$'}DRIFT" <<'DRIFT_EOF'
 #!/usr/bin/env bash
-# claude-remote-restore-v6 — drift daemon: reconciles sessions.json to mirror
+# claude-remote-restore-v7 — drift daemon: reconciles sessions.json to mirror
 # the LIVE claude-server-* tmux sessions every minute. Self-healing: re-adds
 # live sessions a misbehaving/old client truncated away, refreshes
 # claudeSessionId from claude's per-pid state files, preserves client-set
@@ -220,6 +233,15 @@ LOCK="${'$'}HOME/.claude-remote/sessions.lock"
 command -v tmux >/dev/null 2>&1 || { echo "no tmux"; exit 0; }
 command -v jq >/dev/null 2>&1 || { echo "no jq"; exit 0; }
 touch "${'$'}LOCK"
+
+# SHUTDOWN GUARD: during a reboot/shutdown systemd tears tmux down before the
+# machine halts, so a drift tick here would see LIVE=[] and blank sessions.json
+# — the exact file the next boot's restore.sh reads. Skip reconcile entirely
+# while the system is going down so the restore manifest survives the reboot.
+STATE=${'$'}(systemctl is-system-running 2>/dev/null || true)
+case "${'$'}STATE" in
+    stopping|offline) echo "system ${'$'}STATE — skip reconcile (preserve restore manifest)"; exit 0;;
+esac
 
 # Walk the tmux pane's process tree to find the claude process — pane_pid is
 # often bash (claude launched via a shell command / keepalive), so claude is a
@@ -281,9 +303,20 @@ echo "LIVE=${'$'}(echo "${'$'}LIVE" | jq -c 'map(.tmuxSessionName)')"
             | (${'$'}om[${'$'}l.tmuxSessionName]) as ${'$'}o
             | if ${'$'}o then ${'$'}o + (if ${'$'}l.claudeSessionId != null then {claudeSessionId:${'$'}l.claudeSessionId} else {} end)
               else ${'$'}l end)' 2>/dev/null)
+    NEWLEN=${'$'}(echo "${'$'}NEW" | jq 'length' 2>/dev/null || echo 0)
+    OLDLEN=${'$'}(echo "${'$'}OLD" | jq 'length // 0' 2>/dev/null || echo 0)
     if [ -n "${'$'}NEW" ] && [ "${'$'}NEW" != "${'$'}OLD" ]; then
-        echo "${'$'}NEW" > "${'$'}SF.tmp.${'$'}${'$'}" && mv "${'$'}SF.tmp.${'$'}${'$'}" "${'$'}SF"
-        echo "[${'$'}(date -u +%FT%TZ)] drift: reconciled ${'$'}(echo "${'$'}NEW" | jq length) live (was ${'$'}(echo "${'$'}OLD" | jq 'length // 0'))"
+        # NEVER replace a non-empty manifest with an empty one — a live tmux
+        # server that momentarily lists no claude-server-* sessions (crash,
+        # race, shutdown the STATE probe missed) must not destroy the restore
+        # manifest. Keep a rolling backup so restore can always fall back.
+        if [ "${'$'}NEWLEN" -eq 0 ] && [ "${'$'}OLDLEN" -gt 0 ]; then
+            echo "[${'$'}(date -u +%FT%TZ)] drift: refusing to blank non-empty manifest (${'$'}OLDLEN entries) — likely shutdown/tmux restart"
+        else
+            [ "${'$'}OLDLEN" -gt 0 ] && cp -f "${'$'}SF" "${'$'}SF.bak" 2>/dev/null || true
+            echo "${'$'}NEW" > "${'$'}SF.tmp.${'$'}${'$'}" && mv "${'$'}SF.tmp.${'$'}${'$'}" "${'$'}SF"
+            echo "[${'$'}(date -u +%FT%TZ)] drift: reconciled ${'$'}NEWLEN live (was ${'$'}OLDLEN)"
+        fi
     fi
 ) 9<>"${'$'}LOCK"
 DRIFT_EOF
