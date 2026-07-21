@@ -122,7 +122,14 @@ object TranscriptParser {
             t.startsWith("<user-prompt-submit-hook>") ||
             t.startsWith("<bash-input>") ||
             t.startsWith("<bash-stdout>") ||
-            t.startsWith("<bash-stderr>")
+            t.startsWith("<bash-stderr>") ||
+            // OMC inter-agent coordination: another Claude session's message is
+            // injected as a user turn ("Another Claude session sent a message:
+            // <teammate-message …>…" + a permission-laundering warning). Not
+            // typed by the human — it's agent plumbing, so it shouldn't render
+            // as a USER bubble in Chat. Match anywhere (the text is prefixed by
+            // the "Another Claude session…" wrapper, not the tag itself).
+            t.contains("<teammate-message")
     }
 
     private fun parseUser(obj: JsonObject, out: MutableList<TranscriptEntry>) {
