@@ -95,9 +95,18 @@ object ClaudeConfig {
         // claudeCmd already contains the single-quoted `cd '<folder>'`, so the
         // launch hung at the bash continuation prompt and Claude never started.
         fun sq(s: String) = "'" + s.replace("'", "'\\''") + "'"
+        // Anchor the tmux SERVER under the user systemd slice BEFORE creating a
+        // session: a raw SSH-exec'd `tmux new-session` otherwise parents the
+        // server under the ephemeral SSH login scope, so it dies when that scope
+        // is torn down. Starting claude-tmux.service first means `tmux new-session`
+        // attaches to the slice-anchored server instead of spawning one under the
+        // SSH scope. Best-effort (`|| true`): if the unit/`systemctl --user` is
+        // unavailable (no XDG_RUNTIME_DIR), we silently fall back to today's
+        // behavior rather than failing the launch.
         // Kill existing session with same name to avoid -A reattaching
         // and sending keystrokes into a running program
-        return "tmux kill-session -t ${sq(tmuxSessionName)} 2>/dev/null; " +
+        return "systemctl --user start claude-tmux.service 2>/dev/null || true; " +
+                "tmux kill-session -t ${sq(tmuxSessionName)} 2>/dev/null; " +
                 "tmux set-option -g history-limit 100000 2>/dev/null; " +
                 "tmux new-session -s ${sq(tmuxSessionName)} " +
                 "\\; set-option -g mouse on " +

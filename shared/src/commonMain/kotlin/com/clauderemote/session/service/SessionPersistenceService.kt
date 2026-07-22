@@ -85,38 +85,50 @@ internal class SessionPersistenceService(
         DUNIT="${'$'}HOME/.config/systemd/user/claude-remote-drift.service"
         DTIMER="${'$'}HOME/.config/systemd/user/claude-remote-drift.timer"
         LOCK="${'$'}HOME/.claude-remote/sessions.lock"
-        MARKER="claude-remote-restore-v8"
+        ANCHOR="${'$'}HOME/.config/systemd/user/claude-tmux.service"
+        MARKER="claude-remote-restore-v9"
         touch "${'$'}LOCK"
         echo "[${'$'}(date -u +%FT%TZ)] install: invoked by client" >> "${'$'}HOME/.claude-remote/install.log"
         if ! grep -q "${'$'}MARKER" "${'$'}SCRIPT" 2>/dev/null; then
+            echo "[${'$'}(date -u +%FT%TZ)] install: restore.sh missing ${'$'}MARKER — rewriting; prior marker line: ${'$'}(grep -m1 'claude-remote-restore-v' "${'$'}SCRIPT" 2>/dev/null || echo '<none/new file>')" >> "${'$'}HOME/.claude-remote/install.log"
             cat > "${'$'}SCRIPT" <<'RESTORE_EOF'
 #!/usr/bin/env bash
-# claude-remote-restore-v8 — recreates tmux+claude sessions from sessions.json (snapshot under flock)
+# marker-compat (do NOT remove): claude-remote-restore-v6 claude-remote-restore-v7 claude-remote-restore-v8 claude-remote-restore-v9
+# Makes any installed client's `grep -q ${'$'}MARKER` find its marker so it takes the
+# PRESENT no-op path and does NOT rewrite this file (reverting the fixes) nor run
+# the daemon-reload/enable reinstall that correlates with the tmux-server death.
+# claude-remote-restore-v9 — recreates tmux+claude sessions from sessions.json (snapshot under flock)
 set -u
 LOG="${'$'}HOME/.claude-remote/restore.log"
 exec >> "${'$'}LOG" 2>&1
 echo "----- ${'$'}(date -u +%FT%TZ) restore.sh start (pid=${'$'}${'$'}) -----"
-SESSIONS_FILE="${'$'}HOME/.claude-remote/sessions.json"
+# Start the anchored tmux server first (see claude-tmux.service) so every
+# session recreated below attaches to the lingering user-slice tmux server
+# rather than an ephemeral SSH scope that would kill it mid-life.
+systemctl --user start claude-tmux.service 2>/dev/null || true
 LOCK="${'$'}HOME/.claude-remote/sessions.lock"
-if [ ! -f "${'$'}SESSIONS_FILE" ]; then
-    echo "no sessions.json yet — client has not synced; nothing to restore"
+# Source of truth = server-owned sessions.restore.json. The client can (and
+# buggily does) blank sessions.json on reconnect; it never touches
+# sessions.restore.json, so restore/self-heal survive that. Prefer it, then
+# sessions.json, then the rolling backup — first non-empty wins.
+RESTORE_SRC="${'$'}HOME/.claude-remote/sessions.restore.json"
+SESSIONS_FILE="${'$'}HOME/.claude-remote/sessions.json"
+touch "${'$'}LOCK"
+SRC=""
+if command -v jq >/dev/null 2>&1; then
+    for f in "${'$'}RESTORE_SRC" "${'$'}SESSIONS_FILE" "${'$'}SESSIONS_FILE.bak"; do
+        [ -f "${'$'}f" ] || continue
+        n=${'$'}(flock -s "${'$'}LOCK" cat "${'$'}f" | jq 'length' 2>/dev/null || echo 0)
+        [ "${'$'}{n:-0}" -gt 0 ] && { SRC="${'$'}f"; break; }
+    done
+fi
+[ -n "${'$'}SRC" ] || SRC="${'$'}SESSIONS_FILE"
+if [ ! -f "${'$'}SRC" ]; then
+    echo "no restore manifest yet — nothing to restore"
     exit 0
 fi
-touch "${'$'}LOCK"
-SNAP=${'$'}(flock -s "${'$'}LOCK" cat "${'$'}SESSIONS_FILE")
-# If the manifest was blanked (e.g. a drift tick during the previous shutdown),
-# fall back to the last non-empty backup so a reboot still restores sessions.
-if command -v jq >/dev/null 2>&1; then
-    SNAPLEN=${'$'}(echo "${'$'}SNAP" | jq 'length' 2>/dev/null || echo 0)
-    if [ "${'$'}{SNAPLEN:-0}" -eq 0 ] && [ -f "${'$'}SESSIONS_FILE.bak" ]; then
-        BAK=${'$'}(flock -s "${'$'}LOCK" cat "${'$'}SESSIONS_FILE.bak")
-        BAKLEN=${'$'}(echo "${'$'}BAK" | jq 'length' 2>/dev/null || echo 0)
-        if [ "${'$'}{BAKLEN:-0}" -gt 0 ]; then
-            echo "sessions.json empty — falling back to sessions.json.bak (${'$'}BAKLEN entries)"
-            SNAP="${'$'}BAK"
-        fi
-    fi
-fi
+echo "restore source: ${'$'}SRC"
+SNAP=${'$'}(flock -s "${'$'}LOCK" cat "${'$'}SRC")
 command -v tmux >/dev/null 2>&1 || { echo "tmux not in PATH"; exit 1; }
 command -v claude >/dev/null 2>&1 || { echo "claude not in PATH"; exit 1; }
 HAVE_JQ=0
@@ -214,9 +226,14 @@ RESTORE_EOF
             echo "RESTORE_SCRIPT_PRESENT"
         fi
         if ! grep -q "${'$'}MARKER" "${'$'}DRIFT" 2>/dev/null; then
+            echo "[${'$'}(date -u +%FT%TZ)] install: drift.sh missing ${'$'}MARKER — rewriting; prior marker line: ${'$'}(grep -m1 'claude-remote-restore-v' "${'$'}DRIFT" 2>/dev/null || echo '<none/new file>')" >> "${'$'}HOME/.claude-remote/install.log"
             cat > "${'$'}DRIFT" <<'DRIFT_EOF'
 #!/usr/bin/env bash
-# claude-remote-restore-v8 — drift daemon: reconciles sessions.json to mirror
+# marker-compat (do NOT remove): claude-remote-restore-v6 claude-remote-restore-v7 claude-remote-restore-v8 claude-remote-restore-v9
+# Makes any installed client's `grep -q ${'$'}MARKER` find its marker so it takes the
+# PRESENT no-op path and does NOT rewrite this file (reverting the fixes) nor run
+# the daemon-reload/enable reinstall that correlates with the tmux-server death.
+# claude-remote-restore-v9 — drift daemon: reconciles sessions.json to mirror
 # the LIVE claude-server-* tmux sessions every minute. Self-healing: re-adds
 # live sessions a misbehaving/old client truncated away, refreshes
 # claudeSessionId from claude's per-pid state files, preserves client-set
@@ -228,8 +245,10 @@ set -u
 LOG="${'$'}HOME/.claude-remote/drift.log"
 exec >> "${'$'}LOG" 2>&1
 echo "----- ${'$'}(date -u +%FT%TZ) drift start -----"
-SF="${'$'}HOME/.claude-remote/sessions.json"
+SF="${'$'}HOME/.claude-remote/sessions.restore.json"   # server-owned source of truth (client never writes it)
+SF_APP="${'$'}HOME/.claude-remote/sessions.json"        # mirror the app/client reads (drift keeps it in sync)
 LOCK="${'$'}HOME/.claude-remote/sessions.lock"
+FORGOTTEN="${'$'}HOME/.claude-remote/forgotten"          # tombstones: tmux names a client explicitly closed
 command -v tmux >/dev/null 2>&1 || { echo "no tmux"; exit 0; }
 command -v jq >/dev/null 2>&1 || { echo "no jq"; exit 0; }
 touch "${'$'}LOCK"
@@ -293,47 +312,87 @@ echo "LIVE=${'$'}(echo "${'$'}LIVE" | jq -c 'map(.tmuxSessionName)')"
 (
     flock -x 9
     OLD="[]"; [ -f "${'$'}SF" ] && OLD=${'$'}(cat "${'$'}SF")
+    # Tombstones: one tmux name per line a client explicitly closed. Subtract
+    # them from the reconcile so a real close is honoured even if its
+    # sessions.json push failed, and (below) from the self-heal list so a
+    # forgotten session is never relaunched.
+    FORGET="[]"
+    if [ -f "${'$'}FORGOTTEN" ]; then
+        FORGET=${'$'}(grep -v '^[[:space:]]*${'$'}' "${'$'}FORGOTTEN" | jq -R . | jq -s . 2>/dev/null)
+        [ -n "${'$'}FORGET" ] || FORGET="[]"
+    fi
+    FGLEN=${'$'}(echo "${'$'}FORGET" | jq 'length' 2>/dev/null || echo 0)
     # Keep client metadata for sessions already in OLD (refresh only the live
-    # claudeSessionId); add live sessions missing from OLD; drop OLD entries
-    # whose tmux session is no longer live.
+    # claudeSessionId); add live sessions missing from OLD.
     # UNION reconcile — never DROP a manifest entry just because its tmux isn't
     # live right now (it may have crashed; self-heal below relaunches it).
     # Dropping it would let a client reading the shrunken manifest wrongly
     # "forget" the session. Keep every OLD entry (refresh its live sid), append
-    # live sessions not yet in the manifest. Entries leave only when a client
-    # explicitly removes them (a real close).
-    NEW=${'$'}(jq -n --argjson old "${'$'}OLD" --argjson live "${'$'}LIVE" '
-        (${'$'}live | map({key:.tmuxSessionName, value:.}) | from_entries) as ${'$'}lm
+    # live sessions not yet in the manifest, THEN subtract tombstoned names so
+    # an explicit close leaves the manifest for good.
+    NEW=${'$'}(jq -n --argjson old "${'$'}OLD" --argjson live "${'$'}LIVE" --argjson forget "${'$'}FORGET" '
+        ((${'$'}live | map({key:.tmuxSessionName, value:.}) | from_entries) as ${'$'}lm
         | (${'$'}old | map(.tmuxSessionName)) as ${'$'}on
         | (${'$'}old | map(. as ${'$'}o | (${'$'}lm[${'$'}o.tmuxSessionName]) as ${'$'}l
              | if ${'$'}l and (${'$'}l.claudeSessionId != null) then ${'$'}o + {claudeSessionId:${'$'}l.claudeSessionId} else ${'$'}o end))
-          + (${'$'}live | map(select(.tmuxSessionName as ${'$'}n | (${'$'}on | index(${'$'}n)) | not)))' 2>/dev/null)
+          + (${'$'}live | map(select(.tmuxSessionName as ${'$'}n | (${'$'}on | index(${'$'}n)) | not))))
+        | map(select(.tmuxSessionName as ${'$'}n | (${'$'}forget | index(${'$'}n)) | not))' 2>/dev/null)
     NEWLEN=${'$'}(echo "${'$'}NEW" | jq 'length' 2>/dev/null || echo 0)
     OLDLEN=${'$'}(echo "${'$'}OLD" | jq 'length // 0' 2>/dev/null || echo 0)
     if [ -n "${'$'}NEW" ] && [ "${'$'}NEW" != "${'$'}OLD" ]; then
         # NEVER replace a non-empty manifest with an empty one — a live tmux
         # server that momentarily lists no claude-server-* sessions (crash,
         # race, shutdown the STATE probe missed) must not destroy the restore
-        # manifest. Keep a rolling backup so restore can always fall back.
-        if [ "${'$'}NEWLEN" -eq 0 ] && [ "${'$'}OLDLEN" -gt 0 ]; then
+        # manifest. Exception: an empty result driven by tombstones (FGLEN>0)
+        # is a real "closed everything" and is allowed through, else a closed
+        # session would be resurrected on the next reboot.
+        if [ "${'$'}NEWLEN" -eq 0 ] && [ "${'$'}OLDLEN" -gt 0 ] && [ "${'$'}FGLEN" -eq 0 ]; then
             echo "[${'$'}(date -u +%FT%TZ)] drift: refusing to blank non-empty manifest (${'$'}OLDLEN entries) — likely shutdown/tmux restart"
         else
-            [ "${'$'}OLDLEN" -gt 0 ] && cp -f "${'$'}SF" "${'$'}SF.bak" 2>/dev/null || true
+            # Roll a backup of the prior manifest MINUS tombstones, so neither a
+            # bak-fallback in restore.sh nor a later tick can resurrect a session
+            # the user explicitly closed.
+            if [ "${'$'}OLDLEN" -gt 0 ]; then
+                echo "${'$'}OLD" | jq --argjson forget "${'$'}FORGET" 'map(select(.tmuxSessionName as ${'$'}n | (${'$'}forget | index(${'$'}n)) | not))' > "${'$'}SF.bak.tmp.${'$'}${'$'}" 2>/dev/null \
+                    && mv "${'$'}SF.bak.tmp.${'$'}${'$'}" "${'$'}SF.bak" || cp -f "${'$'}SF" "${'$'}SF.bak" 2>/dev/null || true
+            fi
             echo "${'$'}NEW" > "${'$'}SF.tmp.${'$'}${'$'}" && mv "${'$'}SF.tmp.${'$'}${'$'}" "${'$'}SF"
             echo "[${'$'}(date -u +%FT%TZ)] drift: reconciled ${'$'}NEWLEN live (was ${'$'}OLDLEN)"
         fi
     fi
+    # Tombstone self-clean: a forgotten name now absent from BOTH live tmux AND
+    # the written manifest has done its job — drop it so a future session
+    # reusing the same tmux name isn't blocked. Race-safe under this flock.
+    if [ -f "${'$'}FORGOTTEN" ] && [ -s "${'$'}FORGOTTEN" ]; then
+        MANIFEST="[]"; [ -f "${'$'}SF" ] && MANIFEST=${'$'}(cat "${'$'}SF")
+        KEEP=${'$'}(while IFS= read -r fn; do
+            [ -n "${'$'}fn" ] || continue
+            if tmux has-session -t "${'$'}fn" 2>/dev/null; then echo "${'$'}fn"; continue; fi
+            if echo "${'$'}MANIFEST" | jq -e --arg n "${'$'}fn" '[.[].tmuxSessionName] | index(${'$'}n)' >/dev/null 2>&1; then echo "${'$'}fn"; fi
+        done < "${'$'}FORGOTTEN")
+        if [ -n "${'$'}KEEP" ]; then printf '%s\n' "${'$'}KEEP" > "${'$'}FORGOTTEN.tmp.${'$'}${'$'}" && mv "${'$'}FORGOTTEN.tmp.${'$'}${'$'}" "${'$'}FORGOTTEN"; else : > "${'$'}FORGOTTEN"; fi
+    fi
 ) 9<>"${'$'}LOCK"
+
+# Mirror the server-owned source of truth to the app-facing sessions.json (the
+# client may have blanked/shrunk it on reconnect); keeps the app view correct
+# within 60s and re-expands a client that wrongly forgot sessions.
+if [ -f "${'$'}SF" ] && ! cmp -s "${'$'}SF" "${'$'}SF_APP" 2>/dev/null; then
+    cp -f "${'$'}SF" "${'$'}SF_APP" 2>/dev/null || true
+fi
 
 # SELF-HEAL: relaunch any manifest session whose tmux is gone (tmux-server
 # crash, OOM, stray kill) so it returns within 60s instead of staying dead
 # until a reboot. Critically this keeps tmux from ever sitting empty — an empty
 # server is exactly the signal that makes clients wrongly "forget" every
 # session and shrink the manifest. restore.sh is idempotent: skips live
-# sessions and missing folders.
+# sessions and missing folders. Tombstoned names are skipped so an explicit
+# close is never relaunched.
 if [ -f "${'$'}SF" ]; then
     MISSING=${'$'}(jq -r '.[].tmuxSessionName' "${'$'}SF" 2>/dev/null | while IFS= read -r n; do
-        [ -n "${'$'}n" ] && ! tmux has-session -t "${'$'}n" 2>/dev/null && echo "${'$'}n"; done)
+        [ -n "${'$'}n" ] || continue
+        grep -qxF "${'$'}n" "${'$'}FORGOTTEN" 2>/dev/null && continue
+        ! tmux has-session -t "${'$'}n" 2>/dev/null && echo "${'$'}n"; done)
     if [ -n "${'$'}MISSING" ]; then
         echo "[${'$'}(date -u +%FT%TZ)] drift: self-heal — relaunching missing: ${'$'}(echo ${'$'}MISSING | tr '\n' ' ')"
         bash "${'$'}HOME/.claude-remote/restore.sh" >/dev/null 2>&1 || true
@@ -342,6 +401,37 @@ fi
 DRIFT_EOF
             chmod +x "${'$'}DRIFT"
             echo "DRIFT_SCRIPT_INSTALLED"
+        fi
+        if ! grep -q "__anchor__" "${'$'}ANCHOR" 2>/dev/null; then
+            cat > "${'$'}ANCHOR" <<'ANCHOR_EOF'
+[Unit]
+# claude-remote-restore-v8 — persistent tmux server anchored to the lingering
+# user manager (user-1000.slice), NOT an ephemeral SSH login scope. Without
+# this the tmux server inherits the cgroup of whatever SSH session first ran
+# `tmux new-session`, and dies when that session's scope is torn down (the
+# root cause of the mid-life mass session death). Starting the server from
+# this user service pins it under user@.service for its whole life; every
+# later `tmux new-session` (restore.sh, client) attaches to it, so all panes
+# live under the user slice too.
+Description=Claude Remote — persistent tmux server (anchored to user slice)
+Before=claude-remote-restore.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+# `exec sleep infinity` keepalive session so the server never exits on its own
+# when the last real session closes.
+ExecStart=/usr/bin/tmux new-session -d -s __anchor__ sleep infinity
+ExecStop=/usr/bin/tmux kill-session -t __anchor__
+
+[Install]
+WantedBy=default.target
+ANCHOR_EOF
+            systemctl --user daemon-reload 2>/dev/null || true
+            systemctl --user enable claude-tmux.service 2>/dev/null || true
+            echo "ANCHOR_UNIT_INSTALLED"
+        else
+            echo "ANCHOR_UNIT_PRESENT"
         fi
         if ! grep -q "claude-remote-restore" "${'$'}UNIT" 2>/dev/null; then
             cat > "${'$'}UNIT" <<UNIT_EOF
@@ -363,7 +453,6 @@ UNIT_EOF
             loginctl enable-linger "${'$'}USER" 2>/dev/null || true
             echo "RESTORE_UNIT_INSTALLED"
         else
-            systemctl --user enable claude-remote-restore.service 2>/dev/null || true
             echo "RESTORE_UNIT_PRESENT"
         fi
         if [ ! -f "${'$'}DUNIT" ] || [ ! -f "${'$'}DTIMER" ]; then
@@ -717,6 +806,35 @@ DTIMER_EOF
                             pushSessionsToServer(cleanupConn, session.server.id)
                         } catch (e: Exception) {
                             FileLogger.error(TAG, "sessions.json push failed for ${session.server.id}: ${e.message}", e)
+                        }
+                        // Durable tombstone: also record the close in the server-side
+                        // `forgotten` file over this same cleanup connection. If the
+                        // sessions.json push above lost the merge race (or failed), the
+                        // drift daemon still drops this session from the restore manifest
+                        // and won't relaunch it — a close stays a close across reboot.
+                        // Written under the shared flock so it can't race the drift
+                        // daemon's tombstone self-clean.
+                        try {
+                            val ssh = cleanupConn.getSession()
+                            if (ssh != null) {
+                                val safeName = session.tmuxSessionName.replace("'", "")
+                                val ch = ssh.openChannel("exec") as com.jcraft.jsch.ChannelExec
+                                ch.setCommand(
+                                    "mkdir -p \"\$HOME/.claude-remote\"; " +
+                                    "L=\"\$HOME/.claude-remote/sessions.lock\"; touch \"\$L\"; " +
+                                    "flock -x \"\$L\" bash -c 'printf \"%s\\n\" \"\$0\" >> \"\$1\"' " +
+                                    "'$safeName' \"\$HOME/.claude-remote/forgotten\""
+                                )
+                                ch.inputStream = null
+                                ch.connect(5000)
+                                val deadline = System.currentTimeMillis() + 5000
+                                while (!ch.isClosed && System.currentTimeMillis() < deadline) {
+                                    kotlinx.coroutines.delay(50)
+                                }
+                                ch.disconnect()
+                            }
+                        } catch (e: Exception) {
+                            FileLogger.error(TAG, "forgotten tombstone write failed for $sessionId: ${e.message}", e)
                         }
                     }
                 } finally {

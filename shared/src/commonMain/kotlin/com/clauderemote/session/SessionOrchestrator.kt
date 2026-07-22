@@ -1148,6 +1148,14 @@ class SessionOrchestrator(
 
         // Carrier SSH connection — used only for bootstrap + the local forward.
         // Its shell channel is unused; ET provides the terminal stream.
+        // Only arm the carrier→reconnectEtCarrier callback AFTER bootstrap has
+        // produced a live et client + forwarded port (carrierReady flips true
+        // after putEt below). A drop DURING ensureEtServer/bootstrap must NOT
+        // trigger the ET-native resume — there is no et client to resume yet, and
+        // disconnecting the in-use carrier mid-setup would just race the in-flight
+        // bootstrap. Such a drop instead surfaces as a thrown exception → the
+        // catch below degrades to plain SSH.
+        val carrierReady = java.util.concurrent.atomic.AtomicBoolean(false)
         val sshManager = SshManager(serverStorage, transportPool = connectionRegistry.transportPool(session.server.id))
         connectionRegistry.putSsh(session.id, sshManager)
         transportResolver.setConnectionLabel(session.id, effective, session.server, "ET")
@@ -1156,13 +1164,15 @@ class SessionOrchestrator(
                 effective,
                 onOutput = { },
                 onConnectionLost = {
-                    // Carrier transport died (e.g. a Starlink IP change killed
-                    // the CF WebSocket). The et CLIENT process is still alive and
-                    // retrying its local port, so DON'T kill it — just rebuild the
-                    // carrier + the forward on the SAME local port and et resumes
-                    // its session on its own: no re-bootstrap, no tmux redraw.
-                    tabManager.updateTabStatus(session.id, SessionStatus.DISCONNECTED)
-                    reconnectScope.launch { reconnectEtCarrier(session, ::emit) }
+                    if (carrierReady.get()) {
+                        // Carrier transport died (e.g. a Starlink IP change killed
+                        // the CF WebSocket). The et CLIENT process is still alive and
+                        // retrying its local port, so DON'T kill it — just rebuild the
+                        // carrier + the forward on the SAME local port and et resumes
+                        // its session on its own: no re-bootstrap, no tmux redraw.
+                        tabManager.updateTabStatus(session.id, SessionStatus.DISCONNECTED)
+                        reconnectScope.launch { reconnectEtCarrier(session, ::emit) }
+                    }
                 },
                 initialCols = terminalIO.effectiveSize(session.id).first,
                 initialRows = terminalIO.effectiveSize(session.id).second,
@@ -1189,7 +1199,12 @@ class SessionOrchestrator(
         //    user etserver and echoes IDPASSKEY.
         val id = "XX" + randomAlphaNum(14)
         val passkey = randomAlphaNum(32)
-        val bootstrap = execCapture(jsch, "echo '$id/${passkey}_xterm-256color' | ~/.claude-remote/etterminal --serverfifo ~/.claude-remote/et.sock --verbose=0 2>&1")
+        // `timeout 8`: etterminal is a short-lived IPC helper (exits <1s) but
+        // BLOCKS forever on the fifo when the user etserver is wedged/absent, so
+        // cap it — a killed bootstrap surfaces as a failed parse below (→ SSH
+        // fallback), not an accumulating stuck process. id/passkey are
+        // alphanumeric (randomAlphaNum) so they need no quoting inside sh -c.
+        val bootstrap = execCapture(jsch, "timeout 8 sh -c 'echo $id/${passkey}_xterm-256color | ~/.claude-remote/etterminal --serverfifo ~/.claude-remote/et.sock --verbose=0 2>&1'")
         val marker = bootstrap.indexOf("IDPASSKEY:")
         if (marker < 0 || marker + 10 + 49 > bootstrap.length) {
             emit("\r\n[31mEternal Terminal bootstrap failed (is etserver installed on the server?).[0m\r\n")
@@ -1250,6 +1265,9 @@ class SessionOrchestrator(
             throw IllegalStateException("EtManager.connect returned false")
         }
         connectionRegistry.putEt(session.id, etManager)
+        // Bootstrap done: the et client + forwarded port now exist, so a carrier
+        // drop from here on is safe to resume via reconnectEtCarrier.
+        carrierReady.set(true)
         FileLogger.log(TAG, "Eternal Terminal connected for ${session.id} (localPort=$localPort)")
         } catch (e: Exception) {
             FileLogger.error(TAG, "Eternal Terminal path failed — falling back to SSH", e)
@@ -1260,10 +1278,11 @@ class SessionOrchestrator(
         }
     }
 
-    // Per-ET-session local forward port + a re-entrancy guard, so a carrier
-    // rebuild can re-forward the SAME port (letting the live et client resume).
+    // Per-ET-session local forward port, so a carrier rebuild can re-forward the
+    // SAME port (letting the live et client resume). Re-entrancy + mutual
+    // exclusion with the SSH reconnect paths is provided by the shared
+    // [reconnectingSessionIds] lock (see reconnectEtCarrier), not a separate set.
     private val etLocalPorts = java.util.concurrent.ConcurrentHashMap<String, Int>()
-    private val etReconnecting = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
 
     /**
      * ET-native reconnect: the carrier transport dropped but the et client
@@ -1274,11 +1293,30 @@ class SessionOrchestrator(
      * resume or the carrier can't be re-established.
      */
     private suspend fun reconnectEtCarrier(session: ClaudeSession, emit: (String) -> Unit) {
-        if (!etReconnecting.add(session.id)) return
+        // Share the SAME per-session reconnect lock as autoReconnect and
+        // reconnectSession. Previously this path used its own `etReconnecting`
+        // set, so a concurrent autoReconnect/reconnectSession could disconnect and
+        // null the SshManager this path had just built — getSession() then
+        // returned null mid-loop and we spun 6× re-racing. The shared lock makes
+        // carrier-reconnect and the SSH reconnect paths mutually exclusive, and
+        // also serves as this method's own re-entrancy guard (a carrier drop while
+        // it runs is skipped, exactly like the old set did).
+        synchronized(reconnectingSessionIds) {
+            if (!reconnectingSessionIds.add(session.id)) return
+        }
+        // When we degrade to a full autoReconnect we must RELEASE the shared lock
+        // first — autoReconnect re-acquires it, and would no-op if we still held it.
+        var handedOff = false
+        fun handOffToAutoReconnect() {
+            _reconnectStatus.update { it - session.id }
+            handedOff = true
+            synchronized(reconnectingSessionIds) { reconnectingSessionIds.remove(session.id) }
+            reconnectScope.launch { autoReconnect(session, emit) }
+        }
         try {
             val localPort = etLocalPorts[session.id]
             if (localPort == null || connectionRegistry.et(session.id) == null) {
-                reconnectScope.launch { autoReconnect(session, emit) }
+                handOffToAutoReconnect()
                 return
             }
             val maxAttempts = 6
@@ -1309,7 +1347,17 @@ class SessionOrchestrator(
                         )
                     }
                     transportResolver.noteConnectResult(session.server, effective, ok = true)
-                    val jsch = sshManager.getSession() ?: throw IllegalStateException("ET carrier not connected")
+                    val jsch = sshManager.getSession()
+                    if (jsch == null) {
+                        // STRUCTURAL failure, not a transient one: the carrier SSH is
+                        // already gone (e.g. torn down by another path). Retrying
+                        // wouldn't re-race any more since we now hold the shared lock,
+                        // but a null carrier means there's nothing to resume onto —
+                        // degrade to a full reconnect immediately instead of spinning.
+                        FileLogger.log(TAG, "ET carrier getSession null for ${session.id} — degrading to full reconnect")
+                        handOffToAutoReconnect()
+                        return
+                    }
                     // Re-verify etserver is up (survives a server reboot) and
                     // re-forward the SAME local port to it — the running et
                     // client is retrying that port and resumes when it's back.
@@ -1327,10 +1375,9 @@ class SessionOrchestrator(
                 }
             }
             // Carrier couldn't be re-established — fall back to a full reconnect.
-            _reconnectStatus.update { it - session.id }
-            reconnectScope.launch { autoReconnect(session, emit) }
+            handOffToAutoReconnect()
         } finally {
-            etReconnecting.remove(session.id)
+            if (!handedOff) synchronized(reconnectingSessionIds) { reconnectingSessionIds.remove(session.id) }
         }
     }
 
@@ -1339,15 +1386,28 @@ class SessionOrchestrator(
         return buildString { repeat(n) { append(chars[kotlin.random.Random.nextInt(chars.length)]) } }
     }
 
-    /** Run a command over a one-shot exec channel and return its stdout. */
+    /**
+     * Run a command over a one-shot exec channel and return its stdout.
+     * Bounded end-to-end (15s): only the channel CONNECT had a deadline before,
+     * so a remote command that produced no EOF (a wedged etserver leaving
+     * etterminal blocked on the fifo) parked the readText() forever and hung
+     * connectEt. withTimeout caps the whole op; runInterruptible converts that
+     * cancellation into a thread interrupt so the blocking read actually unblocks.
+     */
     private suspend fun execCapture(jsch: com.jcraft.jsch.Session, command: String): String =
         kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
-            val ch = jsch.openChannel("exec") as com.jcraft.jsch.ChannelExec
-            ch.setCommand(command)
-            ch.inputStream = null
-            val input = ch.inputStream
-            ch.connect(10000)
-            try { input.bufferedReader().readText() } finally { ch.disconnect() }
+            kotlinx.coroutines.withTimeout(15_000L) {
+                val ch = jsch.openChannel("exec") as com.jcraft.jsch.ChannelExec
+                ch.setCommand(command)
+                ch.inputStream = null
+                val input = ch.inputStream
+                ch.connect(10000)
+                try {
+                    kotlinx.coroutines.runInterruptible { input.bufferedReader().readText() }
+                } finally {
+                    try { ch.disconnect() } catch (_: Exception) {}
+                }
+            }
         }
 
     // Server-side etserver auto-install. Downloads the static etserver +
@@ -1367,9 +1427,26 @@ class SessionOrchestrator(
           done
           echo "${'$'}VER" > "${'$'}CR/etserver.ver"
         fi
+        # Reap stray etterminals: a healthy bootstrap helper lives <1s, so any
+        # older than 30s is one that wedged on the fifo (bad/absent etserver) —
+        # kill it so they don't accumulate.
+        for p in ${'$'}(pgrep -f "${'$'}CR/etterminal" 2>/dev/null); do
+          AGE=${'$'}(ps -o etimes= -p "${'$'}p" 2>/dev/null | tr -d ' ')
+          [ "${'$'}{AGE:-0}" -gt 30 ] 2>/dev/null && kill "${'$'}p" 2>/dev/null
+        done
+        NEED_START=1
         if [ -f "${'$'}CR/etserver.port" ] && pgrep -f "${'$'}CR/etserver" >/dev/null 2>&1; then
           PORT=${'$'}(cat "${'$'}CR/etserver.port")
-        else
+          # Reuse ONLY if the port actually LISTENS. A process that is alive but
+          # not accepting (wedged etserver) would otherwise be trusted forever,
+          # blocking every bootstrap on the fifo — restart it instead.
+          if ss -tln 2>/dev/null | grep -q ":${'$'}PORT "; then
+            NEED_START=0
+          else
+            pkill -f "${'$'}CR/etserver" 2>/dev/null; rm -f "${'$'}CR/et.sock"
+          fi
+        fi
+        if [ "${'$'}NEED_START" = 1 ]; then
           PORT=2299
           while ss -tln 2>/dev/null | grep -q ":${'$'}PORT "; do PORT=${'$'}((PORT+1)); done
           rm -f "${'$'}CR/et.sock"
@@ -1557,7 +1634,6 @@ class SessionOrchestrator(
         connectionRegistry.et(sessionId)?.disconnect()
         connectionRegistry.removeEt(sessionId)
         etLocalPorts.remove(sessionId)
-        etReconnecting.remove(sessionId)
         connectionRegistry.ssh(sessionId)?.disconnect()
         connectionRegistry.removeSsh(sessionId)
         connectionRegistry.mosh(sessionId)?.disconnect()
