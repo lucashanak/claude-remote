@@ -1434,22 +1434,31 @@ class SessionOrchestrator(
           AGE=${'$'}(ps -o etimes= -p "${'$'}p" 2>/dev/null | tr -d ' ')
           [ "${'$'}{AGE:-0}" -gt 30 ] 2>/dev/null && kill "${'$'}p" 2>/dev/null
         done
+        # Single-flight across concurrent SSH execs. Two sessions' first ET
+        # connect used to each run this and each start an etserver on a bumped
+        # port, both sharing one serverfifo → et.sock races away and every
+        # bootstrap fails ("No such file or directory"). flock serialises the
+        # check-and-start so exactly one instance is ever brought up.
+        exec 9>"${'$'}CR/etserver.lock"
+        flock 9
         NEED_START=1
         if [ -f "${'$'}CR/etserver.port" ] && pgrep -f "${'$'}CR/etserver" >/dev/null 2>&1; then
           PORT=${'$'}(cat "${'$'}CR/etserver.port")
-          # Reuse ONLY if the port actually LISTENS. A process that is alive but
-          # not accepting (wedged etserver) would otherwise be trusted forever,
-          # blocking every bootstrap on the fifo — restart it instead.
-          if ss -tln 2>/dev/null | grep -q ":${'$'}PORT "; then
+          # Reuse ONLY if the port LISTENS *and* the serverfifo socket exists. A
+          # process alive-but-not-accepting, OR one whose et.sock went missing
+          # (the field failure), would otherwise be trusted forever and block
+          # every bootstrap on the fifo — restart it instead.
+          if ss -tln 2>/dev/null | grep -q ":${'$'}PORT " && [ -S "${'$'}CR/et.sock" ]; then
             NEED_START=0
           else
             pkill -f "${'$'}CR/etserver" 2>/dev/null; rm -f "${'$'}CR/et.sock"
           fi
         fi
         if [ "${'$'}NEED_START" = 1 ]; then
+          # Kill any straggler etserver first so we can't end up with two.
+          pkill -f "${'$'}CR/etserver" 2>/dev/null; rm -f "${'$'}CR/et.sock"
           PORT=2299
           while ss -tln 2>/dev/null | grep -q ":${'$'}PORT "; do PORT=${'$'}((PORT+1)); done
-          rm -f "${'$'}CR/et.sock"
           nohup "${'$'}CR/etserver" --port "${'$'}PORT" --serverfifo "${'$'}CR/et.sock" >"${'$'}CR/etserver.log" 2>&1 &
           sleep 1; echo "${'$'}PORT" > "${'$'}CR/etserver.port"
         fi
@@ -1530,7 +1539,14 @@ class SessionOrchestrator(
             }
         }
         try {
-            val session = tabManager.getTab(sessionId) ?: return
+            val tab = tabManager.getTab(sessionId) ?: return
+            // Re-read the server config fresh from storage so a setting changed
+            // in Settings (e.g. "Prefer Eternal Terminal") takes effect on a
+            // normal reconnect instead of only after an app restart — a tab
+            // otherwise holds the snapshot of the server captured when it was
+            // created, so connectSsh's `session.server.preferEternal` dispatch
+            // (and MOSH/ET choice) would use the stale value.
+            val session = serverStorage.getServer(tab.server.id)?.let { tab.copy(server = it) } ?: tab
             FileLogger.log(TAG, "Reconnecting session $sessionId to ${session.server.name}")
             // A reconnected session has a running Claude that may already be idle
             // waiting for input — bypass the brand-new-session startup guard so
