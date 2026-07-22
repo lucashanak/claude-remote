@@ -85,13 +85,13 @@ internal class SessionPersistenceService(
         DUNIT="${'$'}HOME/.config/systemd/user/claude-remote-drift.service"
         DTIMER="${'$'}HOME/.config/systemd/user/claude-remote-drift.timer"
         LOCK="${'$'}HOME/.claude-remote/sessions.lock"
-        MARKER="claude-remote-restore-v7"
+        MARKER="claude-remote-restore-v8"
         touch "${'$'}LOCK"
         echo "[${'$'}(date -u +%FT%TZ)] install: invoked by client" >> "${'$'}HOME/.claude-remote/install.log"
         if ! grep -q "${'$'}MARKER" "${'$'}SCRIPT" 2>/dev/null; then
             cat > "${'$'}SCRIPT" <<'RESTORE_EOF'
 #!/usr/bin/env bash
-# claude-remote-restore-v7 — recreates tmux+claude sessions from sessions.json (snapshot under flock)
+# claude-remote-restore-v8 — recreates tmux+claude sessions from sessions.json (snapshot under flock)
 set -u
 LOG="${'$'}HOME/.claude-remote/restore.log"
 exec >> "${'$'}LOG" 2>&1
@@ -216,7 +216,7 @@ RESTORE_EOF
         if ! grep -q "${'$'}MARKER" "${'$'}DRIFT" 2>/dev/null; then
             cat > "${'$'}DRIFT" <<'DRIFT_EOF'
 #!/usr/bin/env bash
-# claude-remote-restore-v7 — drift daemon: reconciles sessions.json to mirror
+# claude-remote-restore-v8 — drift daemon: reconciles sessions.json to mirror
 # the LIVE claude-server-* tmux sessions every minute. Self-healing: re-adds
 # live sessions a misbehaving/old client truncated away, refreshes
 # claudeSessionId from claude's per-pid state files, preserves client-set
@@ -296,13 +296,18 @@ echo "LIVE=${'$'}(echo "${'$'}LIVE" | jq -c 'map(.tmuxSessionName)')"
     # Keep client metadata for sessions already in OLD (refresh only the live
     # claudeSessionId); add live sessions missing from OLD; drop OLD entries
     # whose tmux session is no longer live.
+    # UNION reconcile — never DROP a manifest entry just because its tmux isn't
+    # live right now (it may have crashed; self-heal below relaunches it).
+    # Dropping it would let a client reading the shrunken manifest wrongly
+    # "forget" the session. Keep every OLD entry (refresh its live sid), append
+    # live sessions not yet in the manifest. Entries leave only when a client
+    # explicitly removes them (a real close).
     NEW=${'$'}(jq -n --argjson old "${'$'}OLD" --argjson live "${'$'}LIVE" '
-        (${'$'}old | map({key:.tmuxSessionName, value:.}) | from_entries) as ${'$'}om
-        | ${'$'}live | map(
-            . as ${'$'}l
-            | (${'$'}om[${'$'}l.tmuxSessionName]) as ${'$'}o
-            | if ${'$'}o then ${'$'}o + (if ${'$'}l.claudeSessionId != null then {claudeSessionId:${'$'}l.claudeSessionId} else {} end)
-              else ${'$'}l end)' 2>/dev/null)
+        (${'$'}live | map({key:.tmuxSessionName, value:.}) | from_entries) as ${'$'}lm
+        | (${'$'}old | map(.tmuxSessionName)) as ${'$'}on
+        | (${'$'}old | map(. as ${'$'}o | (${'$'}lm[${'$'}o.tmuxSessionName]) as ${'$'}l
+             | if ${'$'}l and (${'$'}l.claudeSessionId != null) then ${'$'}o + {claudeSessionId:${'$'}l.claudeSessionId} else ${'$'}o end))
+          + (${'$'}live | map(select(.tmuxSessionName as ${'$'}n | (${'$'}on | index(${'$'}n)) | not)))' 2>/dev/null)
     NEWLEN=${'$'}(echo "${'$'}NEW" | jq 'length' 2>/dev/null || echo 0)
     OLDLEN=${'$'}(echo "${'$'}OLD" | jq 'length // 0' 2>/dev/null || echo 0)
     if [ -n "${'$'}NEW" ] && [ "${'$'}NEW" != "${'$'}OLD" ]; then
@@ -319,6 +324,21 @@ echo "LIVE=${'$'}(echo "${'$'}LIVE" | jq -c 'map(.tmuxSessionName)')"
         fi
     fi
 ) 9<>"${'$'}LOCK"
+
+# SELF-HEAL: relaunch any manifest session whose tmux is gone (tmux-server
+# crash, OOM, stray kill) so it returns within 60s instead of staying dead
+# until a reboot. Critically this keeps tmux from ever sitting empty — an empty
+# server is exactly the signal that makes clients wrongly "forget" every
+# session and shrink the manifest. restore.sh is idempotent: skips live
+# sessions and missing folders.
+if [ -f "${'$'}SF" ]; then
+    MISSING=${'$'}(jq -r '.[].tmuxSessionName' "${'$'}SF" 2>/dev/null | while IFS= read -r n; do
+        [ -n "${'$'}n" ] && ! tmux has-session -t "${'$'}n" 2>/dev/null && echo "${'$'}n"; done)
+    if [ -n "${'$'}MISSING" ]; then
+        echo "[${'$'}(date -u +%FT%TZ)] drift: self-heal — relaunching missing: ${'$'}(echo ${'$'}MISSING | tr '\n' ' ')"
+        bash "${'$'}HOME/.claude-remote/restore.sh" >/dev/null 2>&1 || true
+    fi
+fi
 DRIFT_EOF
             chmod +x "${'$'}DRIFT"
             echo "DRIFT_SCRIPT_INSTALLED"
