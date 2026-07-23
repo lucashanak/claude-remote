@@ -276,6 +276,17 @@ command -v tmux >/dev/null 2>&1 || { echo "no tmux"; exit 0; }
 command -v jq >/dev/null 2>&1 || { echo "no jq"; exit 0; }
 touch "${'$'}LOCK"
 
+# Enforce exit-empty=off every tick so ANY tmux server (however created) never
+# exits when sessions momentarily hit 0 (app churn/close) — server-side, no
+# dependency on the client build. This is the root fix for the mass churn
+# ("server exited unexpectedly").
+tmux set-option -g exit-empty off 2>/dev/null || true
+# Drop the internal keepalive __anchor__ if it lingers: with exit-empty=off the
+# server no longer needs it, and leaving it visible makes the app treat it as a
+# real session and churn it (kill/relaunch). Safe — exit-empty=off keeps the
+# server alive at 0 sessions.
+tmux kill-session -t __anchor__ 2>/dev/null || true
+
 # SHUTDOWN GUARD: during a reboot/shutdown systemd tears tmux down before the
 # machine halts, so a drift tick here would see LIVE=[] and blank sessions.json
 # — the exact file the next boot's restore.sh reads. Skip reconcile entirely
