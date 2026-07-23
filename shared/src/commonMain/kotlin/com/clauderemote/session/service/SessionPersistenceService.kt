@@ -319,12 +319,13 @@ echo "LIVE=${'$'}(echo "${'$'}LIVE" | jq -c 'map(.tmuxSessionName)')"
     # them from the reconcile so a real close is honoured even if its
     # sessions.json push failed, and (below) from the self-heal list so a
     # forgotten session is never relaunched.
+    # TOMBSTONE DISABLED (2026-07-23): the client fires forgetSession on a mere
+    # server-death ("closed on another device, forgetting locally"), so honoring
+    # ~/.claude-remote/forgotten let a whole-server outage wipe the manifest.
+    # Ignore tombstones until the CLIENT only forgets a genuine user-close — so
+    # never-blank/union is unconditional and a death can never shrink the SoT.
     FORGET="[]"
-    if [ -f "${'$'}FORGOTTEN" ]; then
-        FORGET=${'$'}(grep -v '^[[:space:]]*${'$'}' "${'$'}FORGOTTEN" | jq -R . | jq -s . 2>/dev/null)
-        [ -n "${'$'}FORGET" ] || FORGET="[]"
-    fi
-    FGLEN=${'$'}(echo "${'$'}FORGET" | jq 'length' 2>/dev/null || echo 0)
+    FGLEN=0
     # Keep client metadata for sessions already in OLD (refresh only the live
     # claudeSessionId); add live sessions missing from OLD.
     # UNION reconcile — never DROP a manifest entry just because its tmux isn't
@@ -394,7 +395,6 @@ fi
 if [ -f "${'$'}SF" ]; then
     MISSING=${'$'}(jq -r '.[].tmuxSessionName' "${'$'}SF" 2>/dev/null | while IFS= read -r n; do
         [ -n "${'$'}n" ] || continue
-        grep -qxF "${'$'}n" "${'$'}FORGOTTEN" 2>/dev/null && continue
         ! tmux has-session -t "${'$'}n" 2>/dev/null && echo "${'$'}n"; done)
     if [ -n "${'$'}MISSING" ]; then
         echo "[${'$'}(date -u +%FT%TZ)] drift: self-heal — relaunching missing: ${'$'}(echo ${'$'}MISSING | tr '\n' ' ')"
