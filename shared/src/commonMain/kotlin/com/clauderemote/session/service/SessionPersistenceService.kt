@@ -102,10 +102,13 @@ set -u
 LOG="${'$'}HOME/.claude-remote/restore.log"
 exec >> "${'$'}LOG" 2>&1
 echo "----- ${'$'}(date -u +%FT%TZ) restore.sh start (pid=${'$'}${'$'}) -----"
-# Start the anchored tmux server first (see claude-tmux.service) so every
-# session recreated below attaches to the lingering user-slice tmux server
-# rather than an ephemeral SSH scope that would kill it mid-life.
-systemctl --user start claude-tmux.service 2>/dev/null || true
+# Anchor the tmux server under the user slice: if none is running yet, create
+# it (with a keepalive __anchor__ session) via systemd-run --scope so the
+# forked server lives in user-1000.slice and survives SSH-session teardown
+# (the mid-life mass-death root cause). Sessions recreated below then attach to
+# that anchored server. If a server already exists this is a no-op.
+export XDG_RUNTIME_DIR="${'$'}{XDG_RUNTIME_DIR:-/run/user/${'$'}(id -u)}"
+tmux list-sessions >/dev/null 2>&1 || systemd-run --user --scope --quiet tmux new-session -d -s __anchor__ sleep infinity >/dev/null 2>&1 || true
 LOCK="${'$'}HOME/.claude-remote/sessions.lock"
 # Source of truth = server-owned sessions.restore.json. The client can (and
 # buggily does) blank sessions.json on reconnect; it never touches

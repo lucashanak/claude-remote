@@ -98,14 +98,17 @@ object ClaudeConfig {
         // Anchor the tmux SERVER under the user systemd slice BEFORE creating a
         // session: a raw SSH-exec'd `tmux new-session` otherwise parents the
         // server under the ephemeral SSH login scope, so it dies when that scope
-        // is torn down. Starting claude-tmux.service first means `tmux new-session`
-        // attaches to the slice-anchored server instead of spawning one under the
-        // SSH scope. Best-effort (`|| true`): if the unit/`systemctl --user` is
-        // unavailable (no XDG_RUNTIME_DIR), we silently fall back to today's
-        // behavior rather than failing the launch.
+        // is torn down (the mid-life mass-death root cause). If NO server is
+        // running yet, create it (with a keepalive __anchor__ session) via
+        // `systemd-run --user --scope`, which parents the forked tmux server
+        // under user-1000.slice so it survives this SSH session's teardown; the
+        // real session below then attaches to that anchored server. If a server
+        // already exists we attach as-is. Best-effort (`|| true`): if systemd-run
+        // is unavailable we silently fall back to today's behavior.
         // Kill existing session with same name to avoid -A reattaching
         // and sending keystrokes into a running program
-        return "systemctl --user start claude-tmux.service 2>/dev/null || true; " +
+        return "export XDG_RUNTIME_DIR=\${XDG_RUNTIME_DIR:-/run/user/\$(id -u)}; " +
+                "tmux list-sessions >/dev/null 2>&1 || systemd-run --user --scope --quiet tmux new-session -d -s __anchor__ sleep infinity >/dev/null 2>&1 || true; " +
                 "tmux kill-session -t ${sq(tmuxSessionName)} 2>/dev/null; " +
                 "tmux set-option -g history-limit 100000 2>/dev/null; " +
                 "tmux new-session -s ${sq(tmuxSessionName)} " +
