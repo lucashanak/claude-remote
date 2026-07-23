@@ -154,7 +154,7 @@ if [ "${'$'}HAVE_JQ" = "1" ]; then
         MODE=${'$'}(echo "${'$'}SNAP" | jq -r ".[${'$'}i].mode")
         MODEL=${'$'}(echo "${'$'}SNAP" | jq -r ".[${'$'}i].model")
         UUID=${'$'}(echo "${'$'}SNAP" | jq -r ".[${'$'}i].claudeSessionId // empty")
-        tmux has-session -t "${'$'}TMUX_NAME" 2>/dev/null && continue
+        tmux has-session -t="${'$'}TMUX_NAME" 2>/dev/null && continue
         FOLDER_EXP="${'$'}{FOLDER/#\~/${'$'}HOME}"
         case "${'$'}FOLDER_EXP" in /*) ;; *) FOLDER_EXP="${'$'}HOME/${'$'}FOLDER_EXP";; esac
         [ -d "${'$'}FOLDER_EXP" ] || { echo "skip ${'$'}TMUX_NAME — folder ${'$'}FOLDER_EXP missing"; continue; }
@@ -212,7 +212,7 @@ else
             *claudeSessionId*) UUID=${'$'}(parse_field claudeSessionId "${'$'}line");;
             *\}*)
                 if [ -n "${'$'}{TMUX_NAME:-}" ] && [ -n "${'$'}{FOLDER:-}" ]; then
-                    if ! tmux has-session -t "${'$'}TMUX_NAME" 2>/dev/null; then
+                    if ! tmux has-session -t="${'$'}TMUX_NAME" 2>/dev/null; then
                         FOLDER_EXP="${'$'}{FOLDER/#\~/${'$'}HOME}"
                         [ -d "${'$'}FOLDER_EXP" ] && {
                             CMD="claude --allow-dangerously-skip-permissions"
@@ -429,7 +429,7 @@ LIVE=${'$'}(echo "${'$'}LIVE" | jq -c 'map(.tmuxSessionName)')"
         MANIFEST="[]"; [ -f "${'$'}SF" ] && MANIFEST=${'$'}(cat "${'$'}SF")
         KEEP=${'$'}(while IFS= read -r fn; do
             [ -n "${'$'}fn" ] || continue
-            if tmux has-session -t "${'$'}fn" 2>/dev/null; then echo "${'$'}fn"; continue; fi
+            if tmux has-session -t="${'$'}fn" 2>/dev/null; then echo "${'$'}fn"; continue; fi
             if echo "${'$'}MANIFEST" | jq -e --arg n "${'$'}fn" '[.[].tmuxSessionName] | index(${'$'}n)' >/dev/null 2>&1; then echo "${'$'}fn"; fi
         done < "${'$'}FORGOTTEN")
         if [ -n "${'$'}KEEP" ]; then printf '%s\n' "${'$'}KEEP" > "${'$'}FORGOTTEN.tmp.${'$'}${'$'}" && mv "${'$'}FORGOTTEN.tmp.${'$'}${'$'}" "${'$'}FORGOTTEN"; else : > "${'$'}FORGOTTEN"; fi
@@ -454,7 +454,7 @@ if [ -f "${'$'}SF" ]; then
     MISSING=${'$'}(jq -r '.[].tmuxSessionName' "${'$'}SF" 2>/dev/null | while IFS= read -r n; do
         [ -n "${'$'}n" ] || continue
         [ -f "${'$'}FORGOTTEN" ] && grep -qxF "${'$'}n" "${'$'}FORGOTTEN" && continue
-        ! tmux has-session -t "${'$'}n" 2>/dev/null && echo "${'$'}n"; done)
+        ! tmux has-session -t="${'$'}n" 2>/dev/null && echo "${'$'}n"; done)
     if [ -n "${'$'}MISSING" ]; then
         echo "[${'$'}(date -u +%FT%TZ)] drift: self-heal — relaunching missing: ${'$'}(echo ${'$'}MISSING | tr '\n' ' ')"
         bash "${'$'}HOME/.claude-remote/restore.sh" >/dev/null 2>&1 || true
@@ -464,53 +464,39 @@ DRIFT_EOF
             chmod +x "${'$'}DRIFT"
             echo "DRIFT_SCRIPT_INSTALLED"
         fi
-        # An owning tmux service was tried and REMOVED: because it owned the
-        # server (server in its cgroup), its normal restart/stop lifecycle
-        # SIGTERM'd the cgroup and churned/killed the server every couple of
-        # minutes. Anchoring is done instead by `systemd-run --user --scope` in
-        # restore.sh / the client launch (server born in the user slice,
-        # survives SSH teardown), which needs no killable unit. Tear down any
-        # previously-installed owning service — DISABLE only, never stop/kill.
-        systemctl --user disable claude-tmux.service 2>/dev/null || true
-        rm -f "${'$'}ANCHOR" 2>/dev/null || true
-        if false; then
+        # Owning tmux-server service = the SINGLE creator of the tmux server.
+        # THE root cause of the mass "server exited unexpectedly" churn was a
+        # create-race: on a reconnect storm many paths (client launch / restore
+        # / drift) concurrently ran `tmux list-sessions || create`, collided on
+        # the socket, and the racing servers killed each other (~95 restarts in
+        # a day). Making ONE service own the server and keep it always-up
+        # (Restart=always) means `tmux list-sessions` always succeeds, so no
+        # other path ever creates a competing one — the race is gone. Type
+        # =forking + KillMode=process (a stop kills only the server, its child
+        # sessions die with it anyway — never a broad cgroup sweep); exit-empty
+        # off so it never quits at 0 sessions. ENABLE ONLY here — it starts at
+        # boot (Before restore.service) and Restart recovers mid-life deaths.
+        # Do NOT `start`/`restart` it on connect: starting while a server already
+        # exists makes the Type=forking probe find no new daemon and flap.
+        if ! grep -q "single owned tmux server" "${'$'}ANCHOR" 2>/dev/null; then
             cat > "${'$'}ANCHOR" <<'ANCHOR_EOF'
 [Unit]
-# claude-remote-restore-v9 — OWNS the tmux server and keeps it anchored to the
-# lingering user manager (user-1000.slice). Root cause of the recurring mid-life
-# mass death: nobody owned the server, so whoever connected first created it —
-# usually the app's raw SSH-exec `tmux new-session`, which parents it to that
-# connection's ephemeral session-XXXX.scope; when the SSH session ends, logind
-# tears the scope down and the whole server (all sessions) dies. This service
-# creates the server in ITS OWN cgroup (user slice), babysits it, and
-# Restart=always recreates it if it ever dies — so it is ALWAYS present +
-# anchored and clients only ever ATTACH (never create one under an SSH scope).
-Description=Claude Remote — persistent tmux server (owned + anchored to user slice)
+Description=Claude Remote — single owned tmux server (sole creator, always up)
 Before=claude-remote-restore.service
-
 [Service]
-# KillMode=none is CRITICAL: the default control-group kill means `systemctl
-# restart/stop` (or a daemon-reload-triggered restart) SIGTERMs the ENTIRE
-# cgroup — i.e. the tmux server and EVERY session. With none, stop runs only
-# ExecStop (drops just the __anchor__ keepalive) and leaves real sessions alive.
-KillMode=none
-# Create the keepalive __anchor__ (starts the server in this cgroup if none is
-# running, attaches if one exists), then block until the server goes away;
-# Restart=always then recreates it — anchored.
-ExecStart=/bin/sh -c 'tmux new-session -d -s __anchor__ sleep infinity 2>/dev/null || true; while tmux has-session -t __anchor__ 2>/dev/null; do sleep 5; done'
-ExecStop=/usr/bin/tmux kill-session -t __anchor__
+Type=forking
+ExecStart=/usr/bin/tmux new-session -d -s __anchor__ sleep infinity
+ExecStartPost=/usr/bin/tmux set-option -g exit-empty off
 Restart=always
-RestartSec=3
-
+RestartSec=2
+KillMode=process
 [Install]
 WantedBy=default.target
 ANCHOR_EOF
             systemctl --user daemon-reload 2>/dev/null || true
-            systemctl --user enable claude-tmux.service 2>/dev/null || true
             echo "ANCHOR_UNIT_INSTALLED"
-        else
-            echo "ANCHOR_UNIT_PRESENT"
         fi
+        systemctl --user enable claude-tmux.service 2>/dev/null || true
         if ! grep -q "claude-remote-restore" "${'$'}UNIT" 2>/dev/null; then
             cat > "${'$'}UNIT" <<UNIT_EOF
 [Unit]
