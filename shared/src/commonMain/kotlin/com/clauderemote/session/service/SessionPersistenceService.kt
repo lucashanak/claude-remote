@@ -86,18 +86,18 @@ internal class SessionPersistenceService(
         DTIMER="${'$'}HOME/.config/systemd/user/claude-remote-drift.timer"
         LOCK="${'$'}HOME/.claude-remote/sessions.lock"
         ANCHOR="${'$'}HOME/.config/systemd/user/claude-tmux.service"
-        MARKER="claude-remote-restore-v9"
+        MARKER="claude-remote-restore-v10"
         touch "${'$'}LOCK"
         echo "[${'$'}(date -u +%FT%TZ)] install: invoked by client" >> "${'$'}HOME/.claude-remote/install.log"
         if ! grep -q "${'$'}MARKER" "${'$'}SCRIPT" 2>/dev/null; then
             echo "[${'$'}(date -u +%FT%TZ)] install: restore.sh missing ${'$'}MARKER — rewriting; prior marker line: ${'$'}(grep -m1 'claude-remote-restore-v' "${'$'}SCRIPT" 2>/dev/null || echo '<none/new file>')" >> "${'$'}HOME/.claude-remote/install.log"
             cat > "${'$'}SCRIPT" <<'RESTORE_EOF'
 #!/usr/bin/env bash
-# marker-compat (do NOT remove): claude-remote-restore-v6 claude-remote-restore-v7 claude-remote-restore-v8 claude-remote-restore-v9
+# marker-compat (do NOT remove): claude-remote-restore-v6 claude-remote-restore-v7 claude-remote-restore-v8 claude-remote-restore-v9 claude-remote-restore-v10
 # Makes any installed client's `grep -q ${'$'}MARKER` find its marker so it takes the
 # PRESENT no-op path and does NOT rewrite this file (reverting the fixes) nor run
 # the daemon-reload/enable reinstall that correlates with the tmux-server death.
-# claude-remote-restore-v9 — recreates tmux+claude sessions from sessions.json (snapshot under flock)
+# claude-remote-restore-v10 — recreates tmux+claude sessions from sessions.json (snapshot under flock)
 set -u
 LOG="${'$'}HOME/.claude-remote/restore.log"
 exec >> "${'$'}LOG" 2>&1
@@ -232,11 +232,11 @@ RESTORE_EOF
             echo "[${'$'}(date -u +%FT%TZ)] install: drift.sh missing ${'$'}MARKER — rewriting; prior marker line: ${'$'}(grep -m1 'claude-remote-restore-v' "${'$'}DRIFT" 2>/dev/null || echo '<none/new file>')" >> "${'$'}HOME/.claude-remote/install.log"
             cat > "${'$'}DRIFT" <<'DRIFT_EOF'
 #!/usr/bin/env bash
-# marker-compat (do NOT remove): claude-remote-restore-v6 claude-remote-restore-v7 claude-remote-restore-v8 claude-remote-restore-v9
+# marker-compat (do NOT remove): claude-remote-restore-v6 claude-remote-restore-v7 claude-remote-restore-v8 claude-remote-restore-v9 claude-remote-restore-v10
 # Makes any installed client's `grep -q ${'$'}MARKER` find its marker so it takes the
 # PRESENT no-op path and does NOT rewrite this file (reverting the fixes) nor run
 # the daemon-reload/enable reinstall that correlates with the tmux-server death.
-# claude-remote-restore-v9 — drift daemon: reconciles sessions.json to mirror
+# claude-remote-restore-v10 — drift daemon: reconciles sessions.json to mirror
 # the LIVE claude-server-* tmux sessions every minute. Self-healing: re-adds
 # live sessions a misbehaving/old client truncated away, refreshes
 # claudeSessionId from claude's per-pid state files, preserves client-set
@@ -315,17 +315,22 @@ echo "LIVE=${'$'}(echo "${'$'}LIVE" | jq -c 'map(.tmuxSessionName)')"
 (
     flock -x 9
     OLD="[]"; [ -f "${'$'}SF" ] && OLD=${'$'}(cat "${'$'}SF")
-    # Tombstones: one tmux name per line a client explicitly closed. Subtract
-    # them from the reconcile so a real close is honoured even if its
-    # sessions.json push failed, and (below) from the self-heal list so a
-    # forgotten session is never relaunched.
-    # TOMBSTONE DISABLED (2026-07-23): the client fires forgetSession on a mere
-    # server-death ("closed on another device, forgetting locally"), so honoring
-    # ~/.claude-remote/forgotten let a whole-server outage wipe the manifest.
-    # Ignore tombstones until the CLIENT only forgets a genuine user-close — so
-    # never-blank/union is unconditional and a death can never shrink the SoT.
+    # Tombstones: one tmux name per line a client explicitly closed. Read them
+    # into a jq array. Subtract them from the reconcile so a real close is
+    # honoured even if its sessions.json push failed, and (below) from the
+    # self-heal list so a forgotten session is never relaunched.
+    # RE-ENABLED (v10): paired with the client-side forget-guard shipping in the
+    # same build — forgetSession now fires ONLY on a genuine user-close, not on a
+    # mere server-death, so honoring ~/.claude-remote/forgotten can no longer let
+    # a whole-server outage wipe the manifest. Re-enabling lets user-close work
+    # again and stops the manifest growing unbounded with dead entries.
     FORGET="[]"
     FGLEN=0
+    if [ -f "${'$'}FORGOTTEN" ] && [ -s "${'$'}FORGOTTEN" ]; then
+        FORGET=${'$'}(jq -R . "${'$'}FORGOTTEN" | jq -s 'map(select(length>0))' 2>/dev/null)
+        [ -n "${'$'}FORGET" ] || FORGET="[]"
+        FGLEN=${'$'}(echo "${'$'}FORGET" | jq 'length' 2>/dev/null || echo 0)
+    fi
     # Keep client metadata for sessions already in OLD (refresh only the live
     # claudeSessionId); add live sessions missing from OLD.
     # UNION reconcile — never DROP a manifest entry just because its tmux isn't
@@ -395,6 +400,7 @@ fi
 if [ -f "${'$'}SF" ]; then
     MISSING=${'$'}(jq -r '.[].tmuxSessionName' "${'$'}SF" 2>/dev/null | while IFS= read -r n; do
         [ -n "${'$'}n" ] || continue
+        [ -f "${'$'}FORGOTTEN" ] && grep -qxF "${'$'}n" "${'$'}FORGOTTEN" && continue
         ! tmux has-session -t "${'$'}n" 2>/dev/null && echo "${'$'}n"; done)
     if [ -n "${'$'}MISSING" ]; then
         echo "[${'$'}(date -u +%FT%TZ)] drift: self-heal — relaunching missing: ${'$'}(echo ${'$'}MISSING | tr '\n' ' ')"
@@ -723,17 +729,31 @@ DTIMER_EOF
                     "SF=\"\$D/sessions.json\"; INC=\"\$D/.sessions.incoming.\$\$\"; " +
                     "cat > \"\$INC\"; " +
                     "if command -v jq >/dev/null 2>&1; then " +
-                      "LIVE=\$(tmux list-sessions -F '#{session_name}' 2>/dev/null | jq -R . | jq -s . 2>/dev/null); " +
-                      "[ -n \"\$LIVE\" ] || LIVE='[]'; " +
-                      "( flock -x 9; " +
-                        "OLD='[]'; [ -f \"\$SF\" ] && OLD=\$(cat \"\$SF\"); " +
-                        "MERGED=\$(jq -n --slurpfile inc \"\$INC\" --argjson old \"\$OLD\" --argjson live \"\$LIVE\" '" +
-                          "(\$inc[0] // []) as \$incoming " +
-                          "| (\$incoming | map(.tmuxSessionName)) as \$names " +
-                          "| \$incoming + (\$old | map(. as \$e | select(((\$names | index(\$e.tmuxSessionName)) | not) and (\$live | index(\$e.tmuxSessionName)))))" +
-                        "' 2>/dev/null); " +
-                        "if [ -n \"\$MERGED\" ]; then printf '%s' \"\$MERGED\" > \"\$SF.tmp.\$\$\" && mv \"\$SF.tmp.\$\$\" \"\$SF\"; else cp \"\$INC\" \"\$SF\"; fi " +
-                      ") 9<>\"\$LOCK\"; " +
+                      // WHOLE-SERVER-DEATH GUARD: the merge below prunes any OLD peer
+                      // entry whose tmux name isn't in the LIVE set. If tmux itself
+                      // errors (server gone) or no claude-server-* sessions are live,
+                      // LIVE is effectively empty and the merge would drop EVERY other
+                      // client's sessions from the shared manifest. Skip the push
+                      // entirely so a transient server death can't shrink the source of
+                      // truth — the incoming client's sessions (also dead right now)
+                      // get re-pushed once the server is actually back up.
+                      "if ! tmux list-sessions >/dev/null 2>&1; then " +
+                        "echo \"[\$(date -u +%FT%TZ)] push(merge): tmux down — skip (preserve shared manifest)\" >> \"\$D/push.log\"; " +
+                      "elif [ \"\$(tmux list-sessions -F '#{session_name}' 2>/dev/null | grep -c '^claude-server-')\" -eq 0 ]; then " +
+                        "echo \"[\$(date -u +%FT%TZ)] push(merge): no live claude-server-* — skip (preserve shared manifest)\" >> \"\$D/push.log\"; " +
+                      "else " +
+                        "LIVE=\$(tmux list-sessions -F '#{session_name}' 2>/dev/null | jq -R . | jq -s . 2>/dev/null); " +
+                        "[ -n \"\$LIVE\" ] || LIVE='[]'; " +
+                        "( flock -x 9; " +
+                          "OLD='[]'; [ -f \"\$SF\" ] && OLD=\$(cat \"\$SF\"); " +
+                          "MERGED=\$(jq -n --slurpfile inc \"\$INC\" --argjson old \"\$OLD\" --argjson live \"\$LIVE\" '" +
+                            "(\$inc[0] // []) as \$incoming " +
+                            "| (\$incoming | map(.tmuxSessionName)) as \$names " +
+                            "| \$incoming + (\$old | map(. as \$e | select(((\$names | index(\$e.tmuxSessionName)) | not) and (\$live | index(\$e.tmuxSessionName)))))" +
+                          "' 2>/dev/null); " +
+                          "if [ -n \"\$MERGED\" ]; then printf '%s' \"\$MERGED\" > \"\$SF.tmp.\$\$\" && mv \"\$SF.tmp.\$\$\" \"\$SF\"; else cp \"\$INC\" \"\$SF\"; fi " +
+                        ") 9<>\"\$LOCK\"; " +
+                      "fi; " +
                     "else cp \"\$INC\" \"\$SF\"; fi; " +
                     "rm -f \"\$INC\"; " +
                     "echo \"[\$(date -u +%FT%TZ)] push(merge): ${payload.length} bytes for $safeServerId\" >> \"\$D/push.log\""

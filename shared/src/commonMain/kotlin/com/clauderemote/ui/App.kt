@@ -293,11 +293,31 @@ fun App(
                 //  • two CONSECUTIVE confirmed absences (strikes) are required
                 //    before forgetting, so a single half-broken scan (server
                 //    answered but tmux hiccupped) can't delete a tab.
+                //  • DEATH-SIGNATURE guard: on a WHOLE-server tmux death (the
+                //    tmux server process itself died) SSH still connects, so the
+                //    scan "succeeds" but returns ZERO sessions — momentarily ALL
+                //    of that server's tabs look absent at once. Without this
+                //    guard the prune would forget EVERY tab on that server (the
+                //    recurring mass session-loss bug). So a tab is only prunable
+                //    when its server's successful scan shows it is genuinely UP:
+                //    ≥1 OTHER live claude-server-* session still exists. If a
+                //    server's scan succeeded but its live claude-server-* set is
+                //    empty while local tabs remain, treat it as a whole-server
+                //    outage and prune nothing on that server this cycle.
+                val serversWithLiveClaudeSession: Set<String> =
+                    perServer.mapNotNull { (serverId, scanned) ->
+                        if (scanned != null &&
+                            scanned.any { it.tmuxSession.name.startsWith("claude-server-") }
+                        ) serverId else null
+                    }.toSet()
                 val confirmedAbsent = tabManager.tabs.value.filter { tab ->
                     val scanned = perServer[tab.server.id]
                     tab.status != SessionStatus.ACTIVE &&
                         tab.tmuxSessionName.isNotBlank() &&
                         scanned != null &&
+                        // Positive proof the server is up — skips the whole-server
+                        // outage case where scanned succeeded but is empty.
+                        serversWithLiveClaudeSession.contains(tab.server.id) &&
                         scanned.none { it.tmuxSession.name == tab.tmuxSessionName }
                 }
                 // Any tab NOT confirmed absent this round (present again, or

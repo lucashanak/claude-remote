@@ -840,10 +840,23 @@ class SessionOrchestrator(
                 // (checkClosedElsewhere=true); launchSession's attach/history-resume
                 // callers pass false since their target may legitimately be new
                 // to sessions.json.
-                FileLogger.log(TAG, "Tmux '${session.tmuxSessionName}' missing and no longer tracked server-side — closed on another device, forgetting locally")
-                sessionStorage?.remove(session.id)
-                disconnectSession(session.id)
-                throw SessionClosedElsewhereException()
+                //
+                // BUT "!tmuxExists && !stillTracked" is AMBIGUOUS: a WHOLE-server
+                // tmux death makes probeTmuxSession=false for EVERY session AND
+                // (with a wiped/empty manifest) stillTrackedOnServer=false too, so
+                // this branch used to forget every session on a transient
+                // server-wide outage (the repeated whole-server session loss).
+                // Gate on positive liveness: only treat it as closed-elsewhere
+                // when the tmux server is PROVABLY up with ≥1 OTHER live
+                // claude-server-* session. No live peers ⇒ whole-server outage ⇒
+                // fall through to the rebuild/--resume path instead of forgetting.
+                if (serverHasOtherLiveSession(sshManager, session.tmuxSessionName)) {
+                    FileLogger.log(TAG, "Tmux '${session.tmuxSessionName}' missing, untracked, and live peers exist — closed on another device, forgetting locally")
+                    sessionStorage?.remove(session.id)
+                    disconnectSession(session.id)
+                    throw SessionClosedElsewhereException()
+                }
+                FileLogger.log(TAG, "Tmux '${session.tmuxSessionName}' missing + untracked but NO live peer sessions — treating as whole-server outage, rebuilding/--resume instead of forgetting")
             }
             val escaped = session.tmuxSessionName.replace("'", "'\\''")
             // attach WITHOUT -d so the same tmux session works from two devices
@@ -898,6 +911,28 @@ class SessionOrchestrator(
             }
             FileLogger.log(TAG, "Attaching to tmux: $command")
             sshManager.sendInput(command + "\n")
+        }
+    }
+
+    /**
+     * True iff the tmux server is PROVABLY up with ≥1 OTHER live `claude-server-*`
+     * session besides [excludeTmuxName] (and the `__anchor__` keepalive). Used to
+     * disambiguate "one session was closed on another device" (peers still alive)
+     * from a WHOLE-server tmux death (list empty / server down / exec error) — the
+     * latter must NOT be treated as closed-elsewhere or a transient server-wide
+     * outage forgets every session. On ANY SSH/exec error returns false (unknown ⇒
+     * do NOT assume peers are alive). Exposed `internal` so App.kt can reuse the
+     * same liveness gate via the orchestrator.
+     */
+    internal suspend fun serverHasOtherLiveSession(sshManager: SshManager, excludeTmuxName: String): Boolean {
+        return try {
+            val jsch = sshManager.getSession() ?: return false
+            val out = execCapture(jsch, "tmux list-sessions -F '#{session_name}' 2>/dev/null")
+            out.lineSequence()
+                .map { it.trim() }
+                .any { it.startsWith("claude-server-") && it != excludeTmuxName && it != "__anchor__" }
+        } catch (e: Exception) {
+            false
         }
     }
 
@@ -1081,7 +1116,23 @@ class SessionOrchestrator(
             )
         } else {
             val escaped = session.tmuxSessionName.replace("'", "'\\''")
-            "tmux set-option -g window-size manual 2>/dev/null; tmux set-option -g history-limit 100000 2>/dev/null; tmux attach-session -t '$escaped' 2>/dev/null || tmux new-session -A -s '$escaped' \\; set-option -g mouse on \\; set-option -g history-limit 100000"
+            // On a MISS (server reboot / tmux death) do NOT `tmux new-session -A`:
+            // that (a) starts a BARE shell with no claude/--resume, and (b) parents
+            // the tmux SERVER under this ephemeral mosh login scope so it dies on
+            // teardown (the churn/mass-death root cause). Route the (re)create
+            // through buildTmuxLaunchCommand, which anchors the server via
+            // `systemd-run --user --scope` AND relaunches claude with --resume —
+            // mirroring the SSH reconnect path. Grouped with `{ …; }` so the whole
+            // relaunch (a `;`-separated sequence) is conditional on the attach miss.
+            val relaunch = ClaudeConfig.buildTmuxLaunchCommand(
+                tmuxSessionName = session.tmuxSessionName,
+                folder = session.folder,
+                mode = session.mode,
+                model = session.model,
+                claudeSessionId = session.claudeSessionId,
+                resume = true
+            )
+            "tmux set-option -g window-size manual 2>/dev/null; tmux set-option -g history-limit 100000 2>/dev/null; tmux attach-session -t '$escaped' 2>/dev/null || { $relaunch ; }"
         }
 
         fun emit(text: String) {
@@ -1193,6 +1244,9 @@ class SessionOrchestrator(
         //    setup). Returns the TCP port its client connections listen on.
         val etPort = ensureEtServer(jsch)
             ?: throw IllegalStateException("etserver unavailable on ${session.server.name}")
+        // Cache for carrier rebuilds (reconnectEtCarrier re-forwards this port
+        // without re-running the install script).
+        etServerPorts[session.server.id] = etPort
 
         // 1) Bootstrap: the client generates id+passkey, pipes them to
         //    ~/.claude-remote/etterminal, which registers the session with the
@@ -1233,7 +1287,21 @@ class SessionOrchestrator(
             )
         } else {
             val escaped = session.tmuxSessionName.replace("'", "'\\''")
-            "tmux set-option -g window-size manual 2>/dev/null; tmux set-option -g history-limit 100000 2>/dev/null; tmux attach-session -t '$escaped' 2>/dev/null || tmux new-session -A -s '$escaped' \\; set-option -g mouse on \\; set-option -g history-limit 100000"
+            // On a MISS do NOT `tmux new-session -A` (bare shell + tmux server
+            // parented under this ephemeral ET-carrier login scope → dies on
+            // teardown). Route the (re)create through buildTmuxLaunchCommand, which
+            // anchors the server via `systemd-run --user --scope` and relaunches
+            // claude with --resume, mirroring the SSH reconnect path. `{ …; }`
+            // keeps the whole `;`-separated relaunch conditional on the attach miss.
+            val relaunch = ClaudeConfig.buildTmuxLaunchCommand(
+                tmuxSessionName = session.tmuxSessionName,
+                folder = session.folder,
+                mode = session.mode,
+                model = session.model,
+                claudeSessionId = session.claudeSessionId,
+                resume = true
+            )
+            "tmux set-option -g window-size manual 2>/dev/null; tmux set-option -g history-limit 100000 2>/dev/null; tmux attach-session -t '$escaped' 2>/dev/null || { $relaunch ; }"
         }
         val tmuxCmd = "clear 2>/dev/null; $attachCmd"
 
@@ -1283,6 +1351,16 @@ class SessionOrchestrator(
     // exclusion with the SSH reconnect paths is provided by the shared
     // [reconnectingSessionIds] lock (see reconnectEtCarrier), not a separate set.
     private val etLocalPorts = java.util.concurrent.ConcurrentHashMap<String, Int>()
+
+    // Resolved etserver TCP port per SERVER id. etserver is one-per-server
+    // (shared across that server's ET sessions) and is anchored, so it almost
+    // always survives a carrier drop. Caching lets an ET carrier rebuild just
+    // re-forward the port instead of re-running the full install/readiness
+    // script on every attempt — the durable cure for the carrier reconnect
+    // stall. A stale entry (server reboot) self-heals: the forward then points
+    // at a dead port, et can't resume, its own onDisconnect fires a full
+    // connectEt which re-runs ensureEtServer and refreshes this cache.
+    private val etServerPorts = java.util.concurrent.ConcurrentHashMap<String, Int>()
 
     /**
      * ET-native reconnect: the carrier transport dropped but the et client
@@ -1358,11 +1436,29 @@ class SessionOrchestrator(
                         handOffToAutoReconnect()
                         return
                     }
-                    // Re-verify etserver is up (survives a server reboot) and
-                    // re-forward the SAME local port to it — the running et
+                    // Re-forward the SAME local port to etserver — the running et
                     // client is retrying that port and resumes when it's back.
-                    val etPort = ensureEtServer(jsch) ?: throw IllegalStateException("etserver unavailable on reconnect")
-                    jsch.setPortForwardingL(localPort, "127.0.0.1", etPort)
+                    // Prefer the cached etserver port: on a carrier drop the
+                    // anchored etserver is almost always still up, so a bare
+                    // re-forward (no install round-trip) is enough — re-running
+                    // ensureEtServer every attempt was the ~90s stall under the old
+                    // flock deadlock. Only fall back to the full install when there
+                    // is no cached port (server reboot) or the re-forward fails.
+                    val cachedPort = etServerPorts[session.server.id]
+                    var forwarded = false
+                    if (cachedPort != null) {
+                        try {
+                            jsch.setPortForwardingL(localPort, "127.0.0.1", cachedPort)
+                            forwarded = true
+                        } catch (e: Exception) {
+                            FileLogger.log(TAG, "ET re-forward on cached port $cachedPort failed for ${session.id} — re-running install")
+                        }
+                    }
+                    if (!forwarded) {
+                        val etPort = ensureEtServer(jsch) ?: throw IllegalStateException("etserver unavailable on reconnect")
+                        etServerPorts[session.server.id] = etPort
+                        jsch.setPortForwardingL(localPort, "127.0.0.1", etPort)
+                    }
                     tabManager.updateTabStatus(session.id, SessionStatus.ACTIVE)
                     statusService.updateActivity(session.id, SessionActivity.WAITING_FOR_INPUT)
                     onSessionActive?.invoke(session)
@@ -1434,13 +1530,26 @@ class SessionOrchestrator(
           AGE=${'$'}(ps -o etimes= -p "${'$'}p" 2>/dev/null | tr -d ' ')
           [ "${'$'}{AGE:-0}" -gt 30 ] 2>/dev/null && kill "${'$'}p" 2>/dev/null
         done
+        # Reap flock waiters stuck on the etserver lock from the pre-fix deadlock:
+        # the daemon used to INHERIT lock fd 9 and hold it for its whole life, so
+        # every later run's `flock 9` blocked forever (15+ leaked bash/flock). A
+        # healthy `flock -w 5` now exits in <5s, so any flock older than 30s is a
+        # legacy deadlocked waiter — kill it (own-process only; kill fails silently
+        # otherwise). Killing it unblocks its parent bash too.
+        for p in ${'$'}(pgrep -x flock 2>/dev/null); do
+          AGE=${'$'}(ps -o etimes= -p "${'$'}p" 2>/dev/null | tr -d ' ')
+          [ "${'$'}{AGE:-0}" -gt 30 ] 2>/dev/null && kill "${'$'}p" 2>/dev/null
+        done
         # Single-flight across concurrent SSH execs. Two sessions' first ET
         # connect used to each run this and each start an etserver on a bumped
         # port, both sharing one serverfifo → et.sock races away and every
         # bootstrap fails ("No such file or directory"). flock serialises the
-        # check-and-start so exactly one instance is ever brought up.
+        # check-and-start so exactly one instance is ever brought up. `-w 5`:
+        # bounded wait — NEVER block forever (the acute deadlock symptom). On
+        # timeout emit a marker and bail cleanly (→ SSH fallback), and because the
+        # flock process exits at 5s it can't accumulate as a stuck waiter.
         exec 9>"${'$'}CR/etserver.lock"
-        flock 9
+        flock -w 5 9 || { echo ET_LOCK_TIMEOUT; exit 0; }
         NEED_START=1
         if [ -f "${'$'}CR/etserver.port" ] && pgrep -f "${'$'}CR/etserver" >/dev/null 2>&1; then
           PORT=${'$'}(cat "${'$'}CR/etserver.port")
@@ -1459,8 +1568,22 @@ class SessionOrchestrator(
           pkill -f "${'$'}CR/etserver" 2>/dev/null; rm -f "${'$'}CR/et.sock"
           PORT=2299
           while ss -tln 2>/dev/null | grep -q ":${'$'}PORT "; do PORT=${'$'}((PORT+1)); done
-          nohup "${'$'}CR/etserver" --port "${'$'}PORT" --serverfifo "${'$'}CR/et.sock" >"${'$'}CR/etserver.log" 2>&1 &
-          sleep 1; echo "${'$'}PORT" > "${'$'}CR/etserver.port"
+          # Start the daemon ANCHORED under the user systemd slice (like the tmux
+          # server) so it survives THIS ephemeral SSH-exec scope's teardown, with
+          # the lock fd CLOSED (9>&-) and stdin detached (</dev/null). The `9>&-`
+          # is the core deadlock fix: the daemon must NOT inherit fd 9, or it holds
+          # the flock for its whole life and every later ensureEtServer blocks on
+          # `flock` → 15s timeout → ET always fell back to SSH and leaked stuck
+          # bash/flock. Fall back to `setsid nohup` when systemd-run is absent.
+          # Backgrounded (trailing &) so this script never blocks on the long-lived
+          # daemon; systemd-run --scope stays alive alongside etserver, so the `||`
+          # fallback only fires when systemd-run itself is unavailable.
+          systemd-run --user --scope --quiet "${'$'}CR/etserver" --port "${'$'}PORT" --serverfifo "${'$'}CR/et.sock" </dev/null >"${'$'}CR/etserver.log" 2>&1 9>&- ||
+            setsid nohup "${'$'}CR/etserver" --port "${'$'}PORT" --serverfifo "${'$'}CR/et.sock" </dev/null >"${'$'}CR/etserver.log" 2>&1 9>&- &
+          echo "${'$'}PORT" > "${'$'}CR/etserver.port"
+          # Wait for the serverfifo socket (up to ~6s) instead of a blind `sleep 1`
+          # — the et.sock race caused "No such file or directory" bootstraps.
+          for _ in ${'$'}(seq 1 30); do [ -S "${'$'}CR/et.sock" ] && break; sleep 0.2; done
         fi
         echo "ET_READY port=${'$'}PORT"
     """.trimIndent()
@@ -1468,7 +1591,15 @@ class SessionOrchestrator(
     /** Ensure etserver is installed + running on the server; return its port
      *  (null → unsupported arch / no internet / start failed → SSH fallback). */
     private suspend fun ensureEtServer(jsch: com.jcraft.jsch.Session): Int? {
-        val out = execCapture(jsch, ETSERVER_INSTALL)
+        // Wrap the whole install in a server-side `timeout 12`: execCapture's
+        // 15s client-side withTimeout + runInterruptible unblocks OUR read, but a
+        // wedged remote run (e.g. a still-blocked flock) could otherwise leave a
+        // forever-bash on the server. timeout 12 < the 15s client cap guarantees
+        // the server-side process is reaped BEFORE we give up, so nothing leaks.
+        // Single-quote-wrap for the outer login shell so the script reaches
+        // `sh -c` verbatim (its own `$…` expand in the inner sh, not out here).
+        val wrapped = "timeout 12 sh -c '" + ETSERVER_INSTALL.replace("'", "'\\''") + "'"
+        val out = execCapture(jsch, wrapped)
         val port = Regex("ET_READY port=(\\d+)").find(out)?.groupValues?.get(1)?.toIntOrNull()
         if (port == null) FileLogger.log(TAG, "etserver not ready: ${out.trim().takeLast(200)}")
         return port
