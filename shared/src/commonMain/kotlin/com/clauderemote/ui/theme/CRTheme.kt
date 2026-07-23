@@ -59,6 +59,9 @@ fun CRTheme(
                 onSurfaceVariant = colors.textDim,
                 outline = colors.border,
             ),
+            // Bundled default font (desktop) so no Material text resolves the
+            // system SansSerif family → no "Array is empty" font crash on launch.
+            typography = crTypography(),
         ) {
             content()
         }

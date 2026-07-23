@@ -38,7 +38,7 @@ fun ClaudeRemoteTheme(
 ) {
     MaterialTheme(
         colorScheme = if (darkTheme) DarkColorScheme else LightColorScheme,
-        typography = Typography(),
+        typography = crTypography(),
         content = content
     )
 }
