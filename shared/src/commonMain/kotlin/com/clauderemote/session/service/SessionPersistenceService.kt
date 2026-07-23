@@ -405,7 +405,16 @@ DRIFT_EOF
             chmod +x "${'$'}DRIFT"
             echo "DRIFT_SCRIPT_INSTALLED"
         fi
-        if ! grep -q "__anchor__" "${'$'}ANCHOR" 2>/dev/null; then
+        # An owning tmux service was tried and REMOVED: because it owned the
+        # server (server in its cgroup), its normal restart/stop lifecycle
+        # SIGTERM'd the cgroup and churned/killed the server every couple of
+        # minutes. Anchoring is done instead by `systemd-run --user --scope` in
+        # restore.sh / the client launch (server born in the user slice,
+        # survives SSH teardown), which needs no killable unit. Tear down any
+        # previously-installed owning service — DISABLE only, never stop/kill.
+        systemctl --user disable claude-tmux.service 2>/dev/null || true
+        rm -f "${'$'}ANCHOR" 2>/dev/null || true
+        if false; then
             cat > "${'$'}ANCHOR" <<'ANCHOR_EOF'
 [Unit]
 # claude-remote-restore-v9 — OWNS the tmux server and keeps it anchored to the
