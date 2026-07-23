@@ -169,11 +169,31 @@ class SshTtyConnector(
         queue.offer(CharArray(0)) // unblock any queue.poll() waiting in read()
     }
 
+    // Debounce for re-pinning tmux's `window-size manual` window after a live
+    // desktop window resize (see resize()).
+    @Volatile private var resizeKickTimer: javax.swing.Timer? = null
+
     override fun resize(termSize: com.jediterm.core.util.TermSize) {
         FileLogger.log("TermGeom", "resize cb ${termSize.columns}x${termSize.rows}")
         lastTermSize = termSize
-        tabManager.activeTabId.value?.let { id ->
-            sessionOrchestrator.resize(id, termSize.columns, termSize.rows)
+        val id = tabManager.activeTabId.value ?: return
+        sessionOrchestrator.resize(id, termSize.columns, termSize.rows)
+        // tmux runs the pane in `window-size manual` (last-device-priority), so
+        // the client/PTY resize above is IGNORED for the window — only
+        // resize-window (kickRedraw → forceWindowSize) re-pins it. Widening the
+        // desktop window therefore left the tmux window stuck at the attach-time
+        // width (often the phone's ~96 cols, the reported "terminal stays at
+        // mobile size" bug). Debounce a kick so the window grows to the new size
+        // once the drag settles.
+        val cols = termSize.columns
+        val rows = termSize.rows
+        if (cols > 1 && rows > 0) {
+            javax.swing.SwingUtilities.invokeLater {
+                resizeKickTimer?.stop()
+                resizeKickTimer = javax.swing.Timer(200) {
+                    sessionOrchestrator.kickRedraw(id, cols, rows)
+                }.also { it.isRepeats = false; it.start() }
+            }
         }
     }
 
