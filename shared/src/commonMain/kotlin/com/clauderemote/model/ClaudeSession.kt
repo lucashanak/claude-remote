@@ -91,7 +91,19 @@ object TmuxNameParser {
         val folderPart = folder.trimEnd('/').substringAfterLast('/').ifBlank { folder }
         val yolo = if (isYolo) "-yolo" else ""
         val aliasPart = if (alias.isNotBlank()) "--${alias.replace(" ", "-")}" else ""
-        return "claude-${serverName}-${folderPart}${yolo}${aliasPart}".take(64)
+        val prefix = "claude-${serverName}-"
+        val suffix = "${yolo}${aliasPart}"
+        // Never truncate inside the -yolo/--alias suffix. A cut alias fragment
+        // (e.g. "--mission-critical" clipped to "--mis") is re-parsed as the
+        // canonical alias on the next build(), mutating the name so it no longer
+        // matches the live tmux session — the client then CREATES a duplicate
+        // instead of reattaching. If length-bounding is needed, shorten ONLY the
+        // folder segment and keep the suffix intact. tmux tolerates long session
+        // names, so a suffix that alone overflows the budget is left uncut rather
+        // than corrupted (the old hard 64-cap was arbitrary).
+        val budget = 64 - prefix.length - suffix.length
+        val boundedFolder = if (budget in 1 until folderPart.length) folderPart.take(budget) else folderPart
+        return "${prefix}${boundedFolder}${suffix}"
     }
 
     data class Parsed(val folder: String, val isYolo: Boolean, val alias: String)
@@ -105,8 +117,12 @@ object TmuxNameParser {
             remainder = parts[0]
             parts[1].replace("-", " ")
         } else ""
-        // Extract yolo
-        val isYolo = remainder.endsWith("-yolo") || remainder.contains("-yolo")
+        // Extract yolo — anchored at the END only. The old `contains("-yolo")`
+        // fired on any folder with "-yolo" mid-string yet the strip regex is
+        // end-anchored, leaving isYolo=true with an unstripped folder (a
+        // round-trip break). Match what build() actually appends: a trailing
+        // "-yolo" (with optional legacy dedup digits).
+        val isYolo = Regex("-yolo\\d*$").containsMatchIn(remainder)
         remainder = remainder.replace(Regex("-yolo\\d*$"), "")
         val folder = remainder.ifBlank { "~" }
         return Parsed(folder, isYolo, alias)

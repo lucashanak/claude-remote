@@ -246,8 +246,22 @@ RESTORE_EOF
 # so the next reboot's restore service still rebuilds every live session.
 set -u
 LOG="${'$'}HOME/.claude-remote/drift.log"
-exec >> "${'$'}LOG" 2>&1
-echo "----- ${'$'}(date -u +%FT%TZ) drift start -----"
+# Buffer this tick's output; flush to the real log ONLY if something actually
+# happened (a reconcile/refuse/self-heal line, an early-exit notice, or a
+# stderr error made the buffer non-empty). The common no-op tick writes
+# NOTHING — this kills the ~60MB/day of per-tick "drift start"/"LIVE=" spam.
+# The header (start banner + live-session names) is held in HDR and prepended
+# only when the buffer is flushed, so a change tick still logs full context.
+TICKLOG=${'$'}(mktemp "${'$'}HOME/.claude-remote/.drift.tick.XXXXXX" 2>/dev/null || mktemp 2>/dev/null || echo "${'$'}LOG")
+flush_tick() {
+    if [ "${'$'}TICKLOG" != "${'$'}LOG" ]; then
+        [ -s "${'$'}TICKLOG" ] && { printf '%s\n' "${'$'}HDR"; cat "${'$'}TICKLOG"; } >> "${'$'}LOG"
+        rm -f "${'$'}TICKLOG"
+    fi
+}
+trap flush_tick EXIT
+exec >> "${'$'}TICKLOG" 2>&1
+HDR="----- ${'$'}(date -u +%FT%TZ) drift start -----"
 SF="${'$'}HOME/.claude-remote/sessions.restore.json"   # server-owned source of truth (client never writes it)
 SF_APP="${'$'}HOME/.claude-remote/sessions.json"        # mirror the app/client reads (drift keeps it in sync)
 LOCK="${'$'}HOME/.claude-remote/sessions.lock"
@@ -265,20 +279,32 @@ case "${'$'}STATE" in
     stopping|offline) echo "system ${'$'}STATE — skip reconcile (preserve restore manifest)"; exit 0;;
 esac
 
+# ONE process-tree snapshot instead of a recursive pgrep walk per session:
+# build a pid->comm map and a ppid->children map, then resolve each pane's
+# claude descendant by walking that in-memory tree. pgrep -P forked at every
+# tree level for every session (~5s CPU/tick over ~32 sessions); one `ps` plus
+# an in-shell walk gives byte-identical results with no per-level forks.
+declare -A DRIFT_COMM DRIFT_KIDS
+while read -r _p _pp _cm; do
+    DRIFT_COMM[${'$'}_p]=${'$'}_cm
+    DRIFT_KIDS[${'$'}_pp]="${'$'}{DRIFT_KIDS[${'$'}_pp]:-} ${'$'}_p"
+done < <(ps -eo pid=,ppid=,comm=)
+
 # Walk the tmux pane's process tree to find the claude process — pane_pid is
 # often bash (claude launched via a shell command / keepalive), so claude is a
-# descendant. Recursive descent finds the right pid.
+# descendant. Same depth-first, first-match descent as before, over the map.
 find_claude_descendant() {
-    local p=${'$'}1
-    if [ "${'$'}(ps -o comm= -p "${'$'}p" 2>/dev/null)" = "claude" ]; then echo "${'$'}p"; return 0; fi
-    local c r
-    for c in ${'$'}(pgrep -P "${'$'}p" 2>/dev/null); do
+    local p=${'$'}1 c r
+    if [ "${'$'}{DRIFT_COMM[${'$'}p]:-}" = "claude" ]; then echo "${'$'}p"; return 0; fi
+    for c in ${'$'}{DRIFT_KIDS[${'$'}p]:-}; do
         r=${'$'}(find_claude_descendant "${'$'}c"); [ -n "${'$'}r" ] && { echo "${'$'}r"; return 0; }
     done
 }
 
-# Ground-truth entry list from the live tmux sessions.
-LIVE="[]"
+# Ground-truth entry list from the live tmux sessions. Collect one tab-separated
+# row per session into a temp table, then build the whole LIVE JSON array in a
+# SINGLE jq pass (was one jq fork per session).
+LIVE_TBL=${'$'}(mktemp "${'$'}HOME/.claude-remote/.drift.live.XXXXXX" 2>/dev/null || mktemp 2>/dev/null)
 for s in ${'$'}(tmux list-sessions -F '#{session_name}' 2>/dev/null); do
     case "${'$'}s" in claude-server-*) ;; *) continue;; esac
     pane_pid=${'$'}(tmux list-panes -t "${'$'}s" -F '#{pane_pid}' 2>/dev/null | head -1)
@@ -307,11 +333,21 @@ for s in ${'$'}(tmux list-sessions -F '#{session_name}' 2>/dev/null); do
         fi
     fi
     case "${'$'}s" in *--*) alias="${'$'}{s##*--}";; *) alias="";; esac
-    LIVE=${'$'}(echo "${'$'}LIVE" | jq \
-        --arg n "${'$'}s" --arg f "${'$'}folder" --arg m "${'$'}mode" --arg md "${'$'}model" --arg a "${'$'}alias" --arg sid "${'$'}sid" \
-        '. + [{id:${'$'}n, serverId:"", folder:${'$'}f, mode:${'$'}m, model:${'$'}md, tmuxSessionName:${'$'}n, connectionType:"SSH", alias:${'$'}a, claudeSessionId:(if ${'$'}sid=="" then null else ${'$'}sid end), createdAt:0}]')
+    [ -n "${'$'}LIVE_TBL" ] && printf '%s\t%s\t%s\t%s\t%s\t%s\n' "${'$'}s" "${'$'}folder" "${'$'}mode" "${'$'}model" "${'$'}alias" "${'$'}sid" >> "${'$'}LIVE_TBL"
 done
-echo "LIVE=${'$'}(echo "${'$'}LIVE" | jq -c 'map(.tmuxSessionName)')"
+LIVE="[]"
+if [ -n "${'$'}LIVE_TBL" ]; then
+    LIVE=${'$'}(jq -R -s -c '
+        split("\n") | map(select(length>0)) | map(split("\t")) | map({
+            id: .[0], serverId: "", folder: .[1], mode: .[2], model: .[3],
+            tmuxSessionName: .[0], connectionType: "SSH", alias: .[4],
+            claudeSessionId: (if .[5]=="" then null else .[5] end), createdAt: 0
+        })' "${'$'}LIVE_TBL" 2>/dev/null)
+    rm -f "${'$'}LIVE_TBL"
+    [ -n "${'$'}LIVE" ] || LIVE="[]"
+fi
+HDR="${'$'}HDR
+LIVE=${'$'}(echo "${'$'}LIVE" | jq -c 'map(.tmuxSessionName)')"
 (
     flock -x 9
     OLD="[]"; [ -f "${'$'}SF" ] && OLD=${'$'}(cat "${'$'}SF")
