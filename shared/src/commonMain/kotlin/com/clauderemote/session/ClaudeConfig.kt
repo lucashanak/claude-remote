@@ -109,6 +109,9 @@ object ClaudeConfig {
         // and sending keystrokes into a running program
         return "export XDG_RUNTIME_DIR=\${XDG_RUNTIME_DIR:-/run/user/\$(id -u)}; " +
                 "tmux list-sessions >/dev/null 2>&1 || systemd-run --user --scope --quiet tmux new-session -d -s __anchor__ sleep infinity >/dev/null 2>&1 || true; " +
+                // exit-empty off: keep the server alive when a kill-session/recreate
+                // momentarily drops it to 0 sessions (else the whole server exits).
+                "tmux set-option -g exit-empty off 2>/dev/null || true; " +
                 "tmux kill-session -t ${sq(tmuxSessionName)} 2>/dev/null; " +
                 "tmux set-option -g history-limit 100000 2>/dev/null; " +
                 "tmux new-session -s ${sq(tmuxSessionName)} " +

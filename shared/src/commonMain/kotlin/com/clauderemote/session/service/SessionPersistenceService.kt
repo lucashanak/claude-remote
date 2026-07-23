@@ -109,6 +109,12 @@ echo "----- ${'$'}(date -u +%FT%TZ) restore.sh start (pid=${'$'}${'$'}) -----"
 # that anchored server. If a server already exists this is a no-op.
 export XDG_RUNTIME_DIR="${'$'}{XDG_RUNTIME_DIR:-/run/user/${'$'}(id -u)}"
 tmux list-sessions >/dev/null 2>&1 || systemd-run --user --scope --quiet tmux new-session -d -s __anchor__ sleep infinity >/dev/null 2>&1 || true
+# THE key fix: tmux default exit-empty=on makes the server exit the instant its
+# session count hits 0 — which the app's reconnect/close churn (kill-session +
+# recreate) transiently does, killing the whole server ("server exited
+# unexpectedly") and every session. Turn it off so the server is immortal;
+# sessions are killed/recreated within the SAME persistent server.
+tmux set-option -g exit-empty off 2>/dev/null || true
 LOCK="${'$'}HOME/.claude-remote/sessions.lock"
 # Source of truth = server-owned sessions.restore.json. The client can (and
 # buggily does) blank sessions.json on reconnect; it never touches
