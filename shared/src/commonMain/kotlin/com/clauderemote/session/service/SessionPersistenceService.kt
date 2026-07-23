@@ -408,24 +408,31 @@ DRIFT_EOF
         if ! grep -q "__anchor__" "${'$'}ANCHOR" 2>/dev/null; then
             cat > "${'$'}ANCHOR" <<'ANCHOR_EOF'
 [Unit]
-# claude-remote-restore-v8 — persistent tmux server anchored to the lingering
-# user manager (user-1000.slice), NOT an ephemeral SSH login scope. Without
-# this the tmux server inherits the cgroup of whatever SSH session first ran
-# `tmux new-session`, and dies when that session's scope is torn down (the
-# root cause of the mid-life mass session death). Starting the server from
-# this user service pins it under user@.service for its whole life; every
-# later `tmux new-session` (restore.sh, client) attaches to it, so all panes
-# live under the user slice too.
-Description=Claude Remote — persistent tmux server (anchored to user slice)
+# claude-remote-restore-v9 — OWNS the tmux server and keeps it anchored to the
+# lingering user manager (user-1000.slice). Root cause of the recurring mid-life
+# mass death: nobody owned the server, so whoever connected first created it —
+# usually the app's raw SSH-exec `tmux new-session`, which parents it to that
+# connection's ephemeral session-XXXX.scope; when the SSH session ends, logind
+# tears the scope down and the whole server (all sessions) dies. This service
+# creates the server in ITS OWN cgroup (user slice), babysits it, and
+# Restart=always recreates it if it ever dies — so it is ALWAYS present +
+# anchored and clients only ever ATTACH (never create one under an SSH scope).
+Description=Claude Remote — persistent tmux server (owned + anchored to user slice)
 Before=claude-remote-restore.service
 
 [Service]
-Type=oneshot
-RemainAfterExit=yes
-# `exec sleep infinity` keepalive session so the server never exits on its own
-# when the last real session closes.
-ExecStart=/usr/bin/tmux new-session -d -s __anchor__ sleep infinity
+# KillMode=none is CRITICAL: the default control-group kill means `systemctl
+# restart/stop` (or a daemon-reload-triggered restart) SIGTERMs the ENTIRE
+# cgroup — i.e. the tmux server and EVERY session. With none, stop runs only
+# ExecStop (drops just the __anchor__ keepalive) and leaves real sessions alive.
+KillMode=none
+# Create the keepalive __anchor__ (starts the server in this cgroup if none is
+# running, attaches if one exists), then block until the server goes away;
+# Restart=always then recreates it — anchored.
+ExecStart=/bin/sh -c 'tmux new-session -d -s __anchor__ sleep infinity 2>/dev/null || true; while tmux has-session -t __anchor__ 2>/dev/null; do sleep 5; done'
 ExecStop=/usr/bin/tmux kill-session -t __anchor__
+Restart=always
+RestartSec=3
 
 [Install]
 WantedBy=default.target
