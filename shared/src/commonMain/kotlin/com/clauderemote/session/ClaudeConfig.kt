@@ -135,21 +135,33 @@ object ClaudeConfig {
      */
     fun buildRestartCommand(
         tmuxSessionName: String,
+        folder: String,
         mode: ClaudeMode,
         model: ClaudeModel,
         claudeSessionId: String,
     ): String {
-        // Run claude via a LOGIN shell (bash -lc): the shell that respawn-pane
-        // spawns does NOT have ~/.local/bin (where claude lives) on PATH, so a
-        // bare `claude` was "command not found". A login shell sources ~/.profile
-        // which adds it. NO `cd`: respawn-pane keeps the pane's cwd (the project
-        // dir where claude was already running), so a relative `cd <folder>`
-        // (folder is relative-to-$HOME) would fail from inside that dir — which
-        // was the second half of the bug. claudeInvocation has no quotes, so the
-        // nesting is a single, clean level of '\'' escaping for send-keys.
-        val claudeCmd = claudeInvocation(mode, model, claudeSessionId, resume = true)
+        // Restart claude in place, KEEPING both the conversation AND the folder.
+        //
+        // `respawn-pane` restarts the pane's command in the pane's START
+        // directory (where new-session created it = $HOME for our launches), NOT
+        // the cwd claude was running in. So an earlier no-`cd` version restarted
+        // claude in $HOME — the wrong project — and `--resume <uuid>` (whose
+        // transcript is keyed by cwd, ~/.claude/projects/<encoded-cwd>/) then
+        // couldn't find the conversation. So we must re-`cd` to the folder.
+        //
+        // Reuse the PROVEN launch string (buildLaunchCommand → shellEscape,
+        // which correctly handles ~, ~/x, absolute and relative-to-$HOME and is
+        // injection-safe), prefixed with `cd "$HOME"` so the relative form
+        // resolves the same as at launch regardless of the respawn start dir.
+        // Run it via a LOGIN shell so ~/.profile puts ~/.local/bin (claude) on
+        // PATH — the respawn shell alone lacked it ("command not found").
+        //
+        // Quoting: `sq` is applied TWICE (once wrapping the inner for `bash -lc`,
+        // once wrapping that for `send-keys`) — verified across ~, ~/x, absolute,
+        // relative and embedded-quote folders.
+        val inner = "cd \"\$HOME\"; " + buildLaunchCommand(folder, mode, model, claudeSessionId, resume = true)
         fun sq(s: String) = "'" + s.replace("'", "'\\''") + "'"
-        val loginRun = "bash -lc ${sq(claudeCmd)}"
+        val loginRun = "bash -lc ${sq(inner)}"
         return "tmux respawn-pane -k -t ${sq(tmuxSessionName)} 2>/dev/null; " +
                 "sleep 0.4; " +
                 "tmux send-keys -t ${sq(tmuxSessionName)} ${sq(loginRun)} Enter"
