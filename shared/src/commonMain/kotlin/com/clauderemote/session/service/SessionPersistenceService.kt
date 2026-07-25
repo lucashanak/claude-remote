@@ -85,19 +85,18 @@ internal class SessionPersistenceService(
         DUNIT="${'$'}HOME/.config/systemd/user/claude-remote-drift.service"
         DTIMER="${'$'}HOME/.config/systemd/user/claude-remote-drift.timer"
         LOCK="${'$'}HOME/.claude-remote/sessions.lock"
-        ANCHOR="${'$'}HOME/.config/systemd/user/claude-tmux.service"
-        MARKER="claude-remote-restore-v10"
+        MARKER="claude-remote-restore-v11"
         touch "${'$'}LOCK"
         echo "[${'$'}(date -u +%FT%TZ)] install: invoked by client" >> "${'$'}HOME/.claude-remote/install.log"
         if ! grep -q "${'$'}MARKER" "${'$'}SCRIPT" 2>/dev/null; then
             echo "[${'$'}(date -u +%FT%TZ)] install: restore.sh missing ${'$'}MARKER — rewriting; prior marker line: ${'$'}(grep -m1 'claude-remote-restore-v' "${'$'}SCRIPT" 2>/dev/null || echo '<none/new file>')" >> "${'$'}HOME/.claude-remote/install.log"
             cat > "${'$'}SCRIPT" <<'RESTORE_EOF'
 #!/usr/bin/env bash
-# marker-compat (do NOT remove): claude-remote-restore-v6 claude-remote-restore-v7 claude-remote-restore-v8 claude-remote-restore-v9 claude-remote-restore-v10
+# marker-compat (do NOT remove): claude-remote-restore-v6 claude-remote-restore-v7 claude-remote-restore-v8 claude-remote-restore-v9 claude-remote-restore-v10 claude-remote-restore-v11
 # Makes any installed client's `grep -q ${'$'}MARKER` find its marker so it takes the
 # PRESENT no-op path and does NOT rewrite this file (reverting the fixes) nor run
 # the daemon-reload/enable reinstall that correlates with the tmux-server death.
-# claude-remote-restore-v10 — recreates tmux+claude sessions from sessions.json (snapshot under flock)
+# claude-remote-restore-v11 — recreates tmux+claude sessions from sessions.json (snapshot under flock)
 set -u
 LOG="${'$'}HOME/.claude-remote/restore.log"
 exec >> "${'$'}LOG" 2>&1
@@ -107,8 +106,19 @@ echo "----- ${'$'}(date -u +%FT%TZ) restore.sh start (pid=${'$'}${'$'}) -----"
 # forked server lives in user-1000.slice and survives SSH-session teardown
 # (the mid-life mass-death root cause). Sessions recreated below then attach to
 # that anchored server. If a server already exists this is a no-op.
+#   --unit=claude-tmux-server: a FIXED scope name. Two concurrent create
+#     attempts then collide at the systemd level (the loser exits "unit already
+#     exists") instead of each spawning a competing transient run-*.scope, and
+#     it stops the unbounded scope leak (11 leaked run-*.scope units holding
+#     ~150 processes had to be reaped by hand).
+#   --property=LimitCORE=infinity: the server deaths are tmux SIGSEGV
+#     (code=killed, status=11/SEGV) — let it dump a core for the backtrace.
+#     core_pattern is read-only in this LXC container, so the core lands as
+#     `core` in the tmux server's cwd.
+# Best-effort (`|| true`): an existing server or a failed systemd-run must never
+# break the launch.
 export XDG_RUNTIME_DIR="${'$'}{XDG_RUNTIME_DIR:-/run/user/${'$'}(id -u)}"
-tmux list-sessions >/dev/null 2>&1 || systemd-run --user --scope --quiet tmux new-session -d -s __anchor__ sleep infinity >/dev/null 2>&1 || true
+tmux list-sessions >/dev/null 2>&1 || systemd-run --user --scope --quiet --unit=claude-tmux-server --property=LimitCORE=infinity tmux new-session -d -s __anchor__ sleep infinity >/dev/null 2>&1 || true
 # THE key fix: tmux default exit-empty=on makes the server exit the instant its
 # session count hits 0 — which the app's reconnect/close churn (kill-session +
 # recreate) transiently does, killing the whole server ("server exited
@@ -238,11 +248,11 @@ RESTORE_EOF
             echo "[${'$'}(date -u +%FT%TZ)] install: drift.sh missing ${'$'}MARKER — rewriting; prior marker line: ${'$'}(grep -m1 'claude-remote-restore-v' "${'$'}DRIFT" 2>/dev/null || echo '<none/new file>')" >> "${'$'}HOME/.claude-remote/install.log"
             cat > "${'$'}DRIFT" <<'DRIFT_EOF'
 #!/usr/bin/env bash
-# marker-compat (do NOT remove): claude-remote-restore-v6 claude-remote-restore-v7 claude-remote-restore-v8 claude-remote-restore-v9 claude-remote-restore-v10
+# marker-compat (do NOT remove): claude-remote-restore-v6 claude-remote-restore-v7 claude-remote-restore-v8 claude-remote-restore-v9 claude-remote-restore-v10 claude-remote-restore-v11
 # Makes any installed client's `grep -q ${'$'}MARKER` find its marker so it takes the
 # PRESENT no-op path and does NOT rewrite this file (reverting the fixes) nor run
 # the daemon-reload/enable reinstall that correlates with the tmux-server death.
-# claude-remote-restore-v10 — drift daemon: reconciles sessions.json to mirror
+# claude-remote-restore-v11 — drift daemon: reconciles sessions.json to mirror
 # the LIVE claude-server-* tmux sessions every minute. Self-healing: re-adds
 # live sessions a misbehaving/old client truncated away, refreshes
 # claudeSessionId from claude's per-pid state files, preserves client-set
@@ -464,39 +474,30 @@ DRIFT_EOF
             chmod +x "${'$'}DRIFT"
             echo "DRIFT_SCRIPT_INSTALLED"
         fi
-        # Owning tmux-server service = the SINGLE creator of the tmux server.
-        # THE root cause of the mass "server exited unexpectedly" churn was a
-        # create-race: on a reconnect storm many paths (client launch / restore
-        # / drift) concurrently ran `tmux list-sessions || create`, collided on
-        # the socket, and the racing servers killed each other (~95 restarts in
-        # a day). Making ONE service own the server and keep it always-up
-        # (Restart=always) means `tmux list-sessions` always succeeds, so no
-        # other path ever creates a competing one — the race is gone. Type
-        # =forking + KillMode=process (a stop kills only the server, its child
-        # sessions die with it anyway — never a broad cgroup sweep); exit-empty
-        # off so it never quits at 0 sessions. ENABLE ONLY here — it starts at
-        # boot (Before restore.service) and Restart recovers mid-life deaths.
-        # Do NOT `start`/`restart` it on connect: starting while a server already
-        # exists makes the Type=forking probe find no new daemon and flap.
-        if ! grep -q "single owned tmux server" "${'$'}ANCHOR" 2>/dev/null; then
-            cat > "${'$'}ANCHOR" <<'ANCHOR_EOF'
-[Unit]
-Description=Claude Remote — single owned tmux server (sole creator, always up)
-Before=claude-remote-restore.service
-[Service]
-Type=forking
-ExecStart=/usr/bin/tmux new-session -d -s __anchor__ sleep infinity
-ExecStartPost=/usr/bin/tmux set-option -g exit-empty off
-Restart=always
-RestartSec=2
-KillMode=process
-[Install]
-WantedBy=default.target
-ANCHOR_EOF
+        # REMOVED (was: an OWNING claude-tmux.service that "ended a create-race").
+        # The create-race theory is refuted — a second `tmux new-session` on the
+        # same socket cannot kill a server, it just returns "duplicate session";
+        # the real cause of the deaths is a tmux SIGSEGV (code=killed,
+        # status=11/SEGV). And the unit was actively harmful: Type=forking on a
+        # daemonizing binary lost the main PID (MainPID=0, so Restart=always
+        # could never fire), its ExecStart/ExecStartPost failed whenever a server
+        # already existed or __anchor__ didn't (NRestarts=96 flap loop), it
+        # accumulated unrelated orphans under KillMode=none, and in the one state
+        # where it DID own the server a `systemctl restart` — reachable from this
+        # very install-on-connect path — would have killed every session.
+        #
+        # Clean up any previously-installed copy: disable + rm ONLY. Never
+        # stop/restart it — in the state where it owns the server a stop kills
+        # every session. Disabling keeps it from coming back after a boot; a
+        # still-running instance is harmless until then.
+        OWNED="${'$'}HOME/.config/systemd/user/claude-tmux.service"
+        if [ -e "${'$'}OWNED" ] || [ -d "${'$'}OWNED.d" ]; then
+            systemctl --user disable claude-tmux.service 2>/dev/null || true
+            rm -f "${'$'}OWNED"
+            rm -rf "${'$'}OWNED.d"
             systemctl --user daemon-reload 2>/dev/null || true
-            echo "ANCHOR_UNIT_INSTALLED"
+            echo "OWNED_UNIT_REMOVED"
         fi
-        systemctl --user enable claude-tmux.service 2>/dev/null || true
         if ! grep -q "claude-remote-restore" "${'$'}UNIT" 2>/dev/null; then
             cat > "${'$'}UNIT" <<UNIT_EOF
 [Unit]

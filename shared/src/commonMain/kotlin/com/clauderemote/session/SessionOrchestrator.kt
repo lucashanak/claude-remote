@@ -369,12 +369,24 @@ class SessionOrchestrator(
     private var logShipper: com.clauderemote.util.LogShipper? = null
 
     /**
+     * Stable per-installation id (AppSettings.installId), handed to us by the
+     * platform via [startLogShipping]. Names this device's tmux-client marker
+     * files so a reattach can drop OUR OWN stale client for a session without
+     * touching another device's — see TmuxProbes.singleClientPreamble. Falls
+     * back to a per-PROCESS id if the platform never called startLogShipping
+     * (then the marker only survives within this app run).
+     */
+    @Volatile private var deviceKey: String = "proc-" + Random.nextInt(1 shl 24).toString(16)
+
+    /**
      * Start shipping FileLogger output to the server (one remote file per
      * install id, `~/.claude-remote/logs/<appId>.log`). Rides whatever live
      * pooled connection exists; buffers while offline. Called once from
      * platform init after AppSettings is available.
      */
     fun startLogShipping(appId: String) {
+        // Same id doubles as this device's tmux-client marker key — see deviceKey.
+        deviceKey = appId
         if (logShipper != null) return
         logShipper = com.clauderemote.util.LogShipper(
             appId = appId,
@@ -445,7 +457,10 @@ class SessionOrchestrator(
                 // json. Shallowest = the top-level Claude, not a Task-tool
                 // subagent (those are deeper children with their own session
                 // files and would point the transcript at the wrong jsonl).
-                val cmd = "PID=\$(tmux list-panes -t '$escaped' -F '#{pane_pid}' 2>/dev/null | head -1); " +
+                // EXACT target ('=name'): plain -t prefix-matches, so this used to
+                // read the pane pid of a DIFFERENT session whose name starts with
+                // ours and pin the tab's transcript to the wrong conversation.
+                val cmd = "PID=\$(tmux list-panes -t '=$escaped' -F '#{pane_pid}' 2>/dev/null | head -1); " +
                     "[ -n \"\$PID\" ] || exit 1; " +
                     "PIDS=\$(ps -eo pid=,ppid= 2>/dev/null | awk -v root=\"\$PID\" '" +
                     "{ kids[\$2]=kids[\$2]\" \"\$1 } " +
@@ -811,6 +826,34 @@ class SessionOrchestrator(
         sshManager.resize(cols, rows)
     }
 
+    /**
+     * The `tmux attach-session` line every transport (SSH shell, mosh startup
+     * command, ET startup command) uses to reattach an EXISTING session.
+     *
+     * Everything in it is load-bearing:
+     *  - [TmuxProbes.singleClientPreamble] first: drop THIS device's previous
+     *    client for the session if it's still attached. A half-open SSH socket
+     *    (CF/Starlink) or an ET-preserved shell keeps the old `tmux attach`
+     *    alive, so without this a reconnect left TWO focused clients of
+     *    different sizes on one session, fighting over its layout — the resize
+     *    churn we believe SIGSEGVs tmux 3.3a and kills every session at once.
+     *    It is device-scoped (never `detach-client -a`), so two DIFFERENT
+     *    devices can still hold one client each.
+     *  - no `-d`: intentional multi-device attach keeps working.
+     *  - `window-size manual` + kickRedraw's `resize-window` (last-device
+     *    priority) instead of `latest`, so a stale 80x24 client can't shrink
+     *    the pane. See TmuxProbes.forceWindowSize.
+     *  - EXACT target `-t '=name'`: plain `-t` prefix-matches, which could
+     *    attach to a DIFFERENT session whose name merely starts with ours.
+     */
+    private fun buildAttachCommand(tmuxSessionName: String): String {
+        val escaped = tmuxSessionName.replace("'", "'\\''")
+        return tmuxProbes.singleClientPreamble(tmuxSessionName, deviceKey) +
+            "tmux set-option -g window-size manual 2>/dev/null; " +
+            "tmux set-option -g history-limit 100000 2>/dev/null; " +
+            "tmux attach-session -t '=$escaped'"
+    }
+
     private suspend fun sendTmuxCommand(
         sshManager: SshManager,
         session: ClaudeSession,
@@ -858,19 +901,10 @@ class SessionOrchestrator(
                 }
                 FileLogger.log(TAG, "Tmux '${session.tmuxSessionName}' missing + untracked but NO live peer sessions — treating as whole-server outage, rebuilding/--resume instead of forgetting")
             }
-            val escaped = session.tmuxSessionName.replace("'", "'\\''")
-            // attach WITHOUT -d so the same tmux session works from two devices
-            // at once. `window-size manual` (not `latest`): the pane no longer
-            // auto-follows the most-recently-active client, because stale
-            // clients — Eternal Terminal keeps its server-side shells alive
-            // across drops, so old 80x24 `tmux attach` clients accumulate — kept
-            // winning `latest` and shrinking the pane (terminal not filling the
-            // window). Instead kickRedraw force-sizes the window to the current
-            // view via `resize-window` on every attach/redraw (last-device
-            // priority); zombie clients can't override it. See TmuxProbes
-            // .forceWindowSize.
+            // See buildAttachCommand for the attach semantics (single client per
+            // device, no -d, manual window sizing, exact target).
             val command = if (tmuxExists) {
-                "tmux set-option -g window-size manual 2>/dev/null; tmux set-option -g history-limit 100000 2>/dev/null; tmux attach-session -t '$escaped'"
+                buildAttachCommand(session.tmuxSessionName)
             } else if (session.claudeSessionId != null) {
                 // Resume only works if claude actually wrote a transcript file
                 // for this UUID. The transcript appears lazily — first user/
@@ -1115,7 +1149,6 @@ class SessionOrchestrator(
                 model = session.model
             )
         } else {
-            val escaped = session.tmuxSessionName.replace("'", "'\\''")
             // On a MISS (server reboot / tmux death) do NOT `tmux new-session -A`:
             // that (a) starts a BARE shell with no claude/--resume, and (b) parents
             // the tmux SERVER under this ephemeral mosh login scope so it dies on
@@ -1132,7 +1165,7 @@ class SessionOrchestrator(
                 claudeSessionId = session.claudeSessionId,
                 resume = true
             )
-            "tmux set-option -g window-size manual 2>/dev/null; tmux set-option -g history-limit 100000 2>/dev/null; tmux attach-session -t '$escaped' 2>/dev/null || { $relaunch ; }"
+            "${buildAttachCommand(session.tmuxSessionName)} 2>/dev/null || { $relaunch ; }"
         }
 
         fun emit(text: String) {
@@ -1286,7 +1319,6 @@ class SessionOrchestrator(
                 model = session.model
             )
         } else {
-            val escaped = session.tmuxSessionName.replace("'", "'\\''")
             // On a MISS do NOT `tmux new-session -A` (bare shell + tmux server
             // parented under this ephemeral ET-carrier login scope → dies on
             // teardown). Route the (re)create through buildTmuxLaunchCommand, which
@@ -1301,7 +1333,7 @@ class SessionOrchestrator(
                 claudeSessionId = session.claudeSessionId,
                 resume = true
             )
-            "tmux set-option -g window-size manual 2>/dev/null; tmux set-option -g history-limit 100000 2>/dev/null; tmux attach-session -t '$escaped' 2>/dev/null || { $relaunch ; }"
+            "${buildAttachCommand(session.tmuxSessionName)} 2>/dev/null || { $relaunch ; }"
         }
         val tmuxCmd = "clear 2>/dev/null; $attachCmd"
 
@@ -1761,6 +1793,9 @@ class SessionOrchestrator(
         _reconnectStatus.update { it - sessionId }
         gitStatusService.stopPolling(sessionId)
         persistence.stopIdRefresh(sessionId)
+        // Cancel any debounced redraw + forget the pinned window size while the
+        // tab (and with it the tmux name) is still around.
+        tmuxProbes.dispose(sessionId, tabManager.getTab(sessionId)?.tmuxSessionName)
         // Per-SERVER loops (usage, latency, notify watcher) serve every session
         // on the server — tear them down only with the LAST one. The notify
         // registry entry for this session goes away either way.

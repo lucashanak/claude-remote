@@ -105,10 +105,17 @@ object ClaudeConfig {
         // real session below then attaches to that anchored server. If a server
         // already exists we attach as-is. Best-effort (`|| true`): if systemd-run
         // is unavailable we silently fall back to today's behavior.
+        //   --unit=claude-tmux-server: a FIXED scope name, so a second
+        //     concurrent create attempt fails cleanly at the systemd level
+        //     ("unit already exists") instead of spawning a competing transient
+        //     scope, and the unbounded run-*.scope leak stops (11 leaked scopes
+        //     holding ~150 processes had to be reaped by hand).
+        //   --property=LimitCORE=infinity: the server deaths are tmux SIGSEGV
+        //     (status=11/SEGV), so let it dump a core for the backtrace.
         // Kill existing session with same name to avoid -A reattaching
         // and sending keystrokes into a running program
         return "export XDG_RUNTIME_DIR=\${XDG_RUNTIME_DIR:-/run/user/\$(id -u)}; " +
-                "tmux list-sessions >/dev/null 2>&1 || systemd-run --user --scope --quiet tmux new-session -d -s __anchor__ sleep infinity >/dev/null 2>&1 || true; " +
+                "tmux list-sessions >/dev/null 2>&1 || systemd-run --user --scope --quiet --unit=claude-tmux-server --property=LimitCORE=infinity tmux new-session -d -s __anchor__ sleep infinity >/dev/null 2>&1 || true; " +
                 // exit-empty off: keep the server alive when a kill-session/recreate
                 // momentarily drops it to 0 sessions (else the whole server exits).
                 "tmux set-option -g exit-empty off 2>/dev/null || true; " +
