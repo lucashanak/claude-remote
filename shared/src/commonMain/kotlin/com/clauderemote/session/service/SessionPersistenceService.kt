@@ -309,6 +309,19 @@ tmux set-option -g exit-empty off 2>/dev/null || true
 # server alive at 0 sessions.
 tmux kill-session -t __anchor__ 2>/dev/null || true
 
+# CORE DUMPS, enforced on whatever server is actually live. Setting `ulimit -c`
+# in a script only helps if THAT script cold-starts the server; normally the
+# server already exists (created by the app's recovery command or another path)
+# and panes fork INSIDE it, inheriting ITS limits from whenever it was born — so
+# the live server measured `Max core file size 0` and the SIGSEGV deaths produced
+# no core to debug. prlimit fixes the running process directly, every tick, no
+# matter who created it. Cores land as ./core in the server cwd (core_pattern is
+# read-only in this LXC container).
+if command -v prlimit >/dev/null 2>&1; then
+    TSRV=${'$'}(tmux display -p '#{pid}' 2>/dev/null)
+    [ -n "${'$'}TSRV" ] && prlimit --pid "${'$'}TSRV" --core=unlimited 2>/dev/null || true
+fi
+
 # SHUTDOWN GUARD: during a reboot/shutdown systemd tears tmux down before the
 # machine halts, so a drift tick here would see LIVE=[] and blank sessions.json
 # — the exact file the next boot's restore.sh reads. Skip reconcile entirely
