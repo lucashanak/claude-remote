@@ -98,6 +98,12 @@ internal class SessionPersistenceService(
 # the daemon-reload/enable reinstall that correlates with the tmux-server death.
 # claude-remote-restore-v11 — recreates tmux+claude sessions from sessions.json (snapshot under flock)
 set -u
+# Any tmux server started from here (incl. auto-start by `tmux new-session`,
+# which does NOT inherit the anchor scope's LimitCORE) must be able to dump a
+# core: the deaths are tmux SIGSEGV and a backtrace is the only way past theory.
+# core_pattern is read-only in this LXC, so the core lands as ./core in cwd.
+ulimit -c unlimited 2>/dev/null || true
+cd "${'$'}HOME/.claude-remote/cores" 2>/dev/null || true
 LOG="${'$'}HOME/.claude-remote/restore.log"
 exec >> "${'$'}LOG" 2>&1
 echo "----- ${'$'}(date -u +%FT%TZ) restore.sh start (pid=${'$'}${'$'}) -----"
@@ -261,6 +267,12 @@ RESTORE_EOF
 # client is non-fatal — within 60s the snapshot is rebuilt from ground truth,
 # so the next reboot's restore service still rebuilds every live session.
 set -u
+# Any tmux server started from here (incl. auto-start by `tmux new-session`,
+# which does NOT inherit the anchor scope's LimitCORE) must be able to dump a
+# core: the deaths are tmux SIGSEGV and a backtrace is the only way past theory.
+# core_pattern is read-only in this LXC, so the core lands as ./core in cwd.
+ulimit -c unlimited 2>/dev/null || true
+cd "${'$'}HOME/.claude-remote/cores" 2>/dev/null || true
 LOG="${'$'}HOME/.claude-remote/drift.log"
 # Buffer this tick's output; flush to the real log ONLY if something actually
 # happened (a reconcile/refuse/self-heal line, an early-exit notice, or a
