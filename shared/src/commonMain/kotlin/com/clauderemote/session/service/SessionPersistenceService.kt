@@ -85,18 +85,18 @@ internal class SessionPersistenceService(
         DUNIT="${'$'}HOME/.config/systemd/user/claude-remote-drift.service"
         DTIMER="${'$'}HOME/.config/systemd/user/claude-remote-drift.timer"
         LOCK="${'$'}HOME/.claude-remote/sessions.lock"
-        MARKER="claude-remote-restore-v11"
+        MARKER="claude-remote-restore-v12"
         touch "${'$'}LOCK"
         echo "[${'$'}(date -u +%FT%TZ)] install: invoked by client" >> "${'$'}HOME/.claude-remote/install.log"
         if ! grep -q "${'$'}MARKER" "${'$'}SCRIPT" 2>/dev/null; then
             echo "[${'$'}(date -u +%FT%TZ)] install: restore.sh missing ${'$'}MARKER — rewriting; prior marker line: ${'$'}(grep -m1 'claude-remote-restore-v' "${'$'}SCRIPT" 2>/dev/null || echo '<none/new file>')" >> "${'$'}HOME/.claude-remote/install.log"
             cat > "${'$'}SCRIPT" <<'RESTORE_EOF'
 #!/usr/bin/env bash
-# marker-compat (do NOT remove): claude-remote-restore-v6 claude-remote-restore-v7 claude-remote-restore-v8 claude-remote-restore-v9 claude-remote-restore-v10 claude-remote-restore-v11
+# marker-compat (do NOT remove): claude-remote-restore-v6 claude-remote-restore-v7 claude-remote-restore-v8 claude-remote-restore-v9 claude-remote-restore-v10 claude-remote-restore-v11 claude-remote-restore-v12
 # Makes any installed client's `grep -q ${'$'}MARKER` find its marker so it takes the
 # PRESENT no-op path and does NOT rewrite this file (reverting the fixes) nor run
 # the daemon-reload/enable reinstall that correlates with the tmux-server death.
-# claude-remote-restore-v11 — recreates tmux+claude sessions from sessions.json (snapshot under flock)
+# claude-remote-restore-v12 — recreates tmux+claude sessions from sessions.json (snapshot under flock)
 set -u
 # Any tmux server started from here (incl. auto-start by `tmux new-session`,
 # which does NOT inherit the anchor scope's LimitCORE) must be able to dump a
@@ -141,7 +141,12 @@ SESSIONS_FILE="${'$'}HOME/.claude-remote/sessions.json"
 touch "${'$'}LOCK"
 SRC=""
 if command -v jq >/dev/null 2>&1; then
-    for f in "${'$'}RESTORE_SRC" "${'$'}SESSIONS_FILE" "${'$'}SESSIONS_FILE.bak"; do
+    # Precedence: server-owned SoT, then ITS OWN rolling backup (drift maintains
+    # ${'$'}RESTORE_SRC.bak — the old list read ${'$'}SESSIONS_FILE.bak, which NOTHING
+    # writes, so the maintained backup was unreachable), then the app-facing
+    # mirror, then its stale backup, then the high-water snapshot as a last
+    # resort (largest manifest ever seen — turns a wipe into a 5s recovery).
+    for f in "${'$'}RESTORE_SRC" "${'$'}RESTORE_SRC.bak" "${'$'}SESSIONS_FILE" "${'$'}SESSIONS_FILE.bak" "${'$'}HOME/.claude-remote/manifests/highwater.json"; do
         [ -f "${'$'}f" ] || continue
         n=${'$'}(flock -s "${'$'}LOCK" cat "${'$'}f" | jq 'length' 2>/dev/null || echo 0)
         [ "${'$'}{n:-0}" -gt 0 ] && { SRC="${'$'}f"; break; }
@@ -195,9 +200,16 @@ if [ "${'$'}HAVE_JQ" = "1" ]; then
         # that was launched but never used has nothing to resume. Falling back
         # to fresh `--session-id` keeps the UUID stable for next time.
         if [ -n "${'$'}UUID" ]; then
-            ENC=${'$'}(echo "${'$'}FOLDER_EXP" | sed 's|/|-|g')
+            # Claude Code encodes '/', '_' AND '.' as '-', so the old '/'-only
+            # sed missed every folder containing _ or . (e.g. ~/vscode_android):
+            # the transcript existed but restore logged "no transcript" and
+            # launched FRESH, orphaning the conversation on every reboot.
+            ENC=${'$'}(echo "${'$'}FOLDER_EXP" | sed 's|[/_.]|-|g')
             JSONL="${'$'}HOME/.claude/projects/${'$'}ENC/${'$'}UUID.jsonl"
-            if [ -f "${'$'}JSONL" ]; then
+            # UUIDs are globally unique: if the encoding guess still misses (it
+            # has changed before), find the transcript by UUID anywhere.
+            [ -f "${'$'}JSONL" ] || JSONL=${'$'}(ls "${'$'}HOME"/.claude/projects/*/"${'$'}UUID".jsonl 2>/dev/null | head -1)
+            if [ -n "${'$'}JSONL" ] && [ -f "${'$'}JSONL" ]; then
                 ARGS+=(--resume "${'$'}UUID")
             else
                 echo "no transcript at ${'$'}JSONL — launching fresh with --session-id ${'$'}UUID"
@@ -254,11 +266,11 @@ RESTORE_EOF
             echo "[${'$'}(date -u +%FT%TZ)] install: drift.sh missing ${'$'}MARKER — rewriting; prior marker line: ${'$'}(grep -m1 'claude-remote-restore-v' "${'$'}DRIFT" 2>/dev/null || echo '<none/new file>')" >> "${'$'}HOME/.claude-remote/install.log"
             cat > "${'$'}DRIFT" <<'DRIFT_EOF'
 #!/usr/bin/env bash
-# marker-compat (do NOT remove): claude-remote-restore-v6 claude-remote-restore-v7 claude-remote-restore-v8 claude-remote-restore-v9 claude-remote-restore-v10 claude-remote-restore-v11
+# marker-compat (do NOT remove): claude-remote-restore-v6 claude-remote-restore-v7 claude-remote-restore-v8 claude-remote-restore-v9 claude-remote-restore-v10 claude-remote-restore-v11 claude-remote-restore-v12
 # Makes any installed client's `grep -q ${'$'}MARKER` find its marker so it takes the
 # PRESENT no-op path and does NOT rewrite this file (reverting the fixes) nor run
 # the daemon-reload/enable reinstall that correlates with the tmux-server death.
-# claude-remote-restore-v11 — drift daemon: reconciles sessions.json to mirror
+# claude-remote-restore-v12 — drift daemon: reconciles sessions.json to mirror
 # the LIVE claude-server-* tmux sessions every minute. Self-healing: re-adds
 # live sessions a misbehaving/old client truncated away, refreshes
 # claudeSessionId from claude's per-pid state files, preserves client-set
@@ -310,13 +322,13 @@ tmux set-option -g exit-empty off 2>/dev/null || true
 tmux kill-session -t __anchor__ 2>/dev/null || true
 
 # CORE DUMPS, enforced on whatever server is actually live. Setting `ulimit -c`
-# in a script only helps if THAT script cold-starts the server; normally the
+# in this script only helps if THIS script cold-starts the server; normally the
 # server already exists (created by the app's recovery command or another path)
-# and panes fork INSIDE it, inheriting ITS limits from whenever it was born — so
-# the live server measured `Max core file size 0` and the SIGSEGV deaths produced
-# no core to debug. prlimit fixes the running process directly, every tick, no
+# and panes fork INSIDE it, inheriting ITS limits from whenever it was born —
+# so the live server was measured with `Max core file size 0` and the deaths
+# produced no core. prlimit fixes the running process directly, every tick, no
 # matter who created it. Cores land as ./core in the server cwd (core_pattern is
-# read-only in this LXC container).
+# read-only in this LXC). Also cover the claude processes themselves.
 if command -v prlimit >/dev/null 2>&1; then
     TSRV=${'$'}(tmux display -p '#{pid}' 2>/dev/null)
     [ -n "${'$'}TSRV" ] && prlimit --pid "${'$'}TSRV" --core=unlimited 2>/dev/null || true
@@ -381,7 +393,17 @@ for s in ${'$'}(tmux list-sessions -F '#{session_name}' 2>/dev/null); do
         psf="${'$'}HOME/.claude/sessions/${'$'}pid.json"
         if [ -f "${'$'}psf" ]; then
             v=${'$'}(jq -r .sessionId "${'$'}psf" 2>/dev/null)
-            [ -n "${'$'}v" ] && [ "${'$'}v" != "null" ] && sid="${'$'}v"
+            # claude >= 2.1.220 FORKS on --resume: it reports a BRAND NEW
+            # sessionId whose transcript is created lazily, so adopting it
+            # ratchets the manifest onto an empty conversation and orphans the
+            # real one for good (proven: server--CC 17b4feef -> 667a07bd, then
+            # "no transcript -> launching fresh" on every restore since).
+            # Only adopt an id that actually HAS a transcript on disk.
+            if [ -n "${'$'}v" ] && [ "${'$'}v" != "null" ] && [ "${'$'}v" != "${'$'}sid" ]; then
+                if ls "${'$'}HOME"/.claude/projects/*/"${'$'}v".jsonl >/dev/null 2>&1; then
+                    sid="${'$'}v"
+                fi
+            fi
         fi
     fi
     case "${'$'}s" in *--*) alias="${'$'}{s##*--}";; *) alias="";; esac
@@ -402,7 +424,20 @@ HDR="${'$'}HDR
 LIVE=${'$'}(echo "${'$'}LIVE" | jq -c 'map(.tmuxSessionName)')"
 (
     flock -x 9
+    CORRUPT=0
     OLD="[]"; [ -f "${'$'}SF" ] && OLD=${'$'}(cat "${'$'}SF")
+    # A truncated/0-byte ${'$'}SF (ENOSPC, unclean shutdown) makes the union jq below
+    # fail, NEW empty, and the `[ -n "${'$'}NEW" ]` guard then skips the write — every
+    # tick, forever: reconcile, self-heal and never-blank all silently dead. Fall
+    # back to the rolling backup instead of running on garbage.
+    if ! printf '%s' "${'$'}OLD" | jq -e 'type=="array"' >/dev/null 2>&1; then
+        echo "[${'$'}(date -u +%FT%TZ)] drift: manifest unreadable/corrupt — falling back to .bak"
+        OLD="[]"
+        if [ -f "${'$'}SF.bak" ] && jq -e 'type=="array"' "${'$'}SF.bak" >/dev/null 2>&1; then OLD=${'$'}(cat "${'$'}SF.bak"); fi
+        # Force the write even when NEW ends up equal to OLD: the file ON DISK is
+        # garbage, so "no change" must not mean "leave the corruption in place".
+        CORRUPT=1
+    fi
     # Tombstones: one tmux name per line a client explicitly closed. Read them
     # into a jq array. Subtract them from the reconcile so a real close is
     # honoured even if its sessions.json push failed, and (below) from the
@@ -447,7 +482,7 @@ LIVE=${'$'}(echo "${'$'}LIVE" | jq -c 'map(.tmuxSessionName)')"
         | map(select(.tmuxSessionName as ${'$'}n | (${'$'}forget | index(${'$'}n)) | not))' 2>/dev/null)
     NEWLEN=${'$'}(echo "${'$'}NEW" | jq 'length' 2>/dev/null || echo 0)
     OLDLEN=${'$'}(echo "${'$'}OLD" | jq 'length // 0' 2>/dev/null || echo 0)
-    if [ -n "${'$'}NEW" ] && [ "${'$'}NEW" != "${'$'}OLD" ]; then
+    if [ -n "${'$'}NEW" ] && { [ "${'$'}NEW" != "${'$'}OLD" ] || [ "${'$'}{CORRUPT:-0}" = "1" ]; }; then
         # NEVER replace a non-empty manifest with an empty one — a live tmux
         # server that momentarily lists no claude-server-* sessions (crash,
         # race, shutdown the STATE probe missed) must not destroy the restore
@@ -457,13 +492,32 @@ LIVE=${'$'}(echo "${'$'}LIVE" | jq -c 'map(.tmuxSessionName)')"
         if [ "${'$'}NEWLEN" -eq 0 ] && [ "${'$'}OLDLEN" -gt 0 ] && [ "${'$'}FGLEN" -eq 0 ]; then
             echo "[${'$'}(date -u +%FT%TZ)] drift: refusing to blank non-empty manifest (${'$'}OLDLEN entries) — likely shutdown/tmux restart"
         else
-            # Roll a backup of the prior manifest MINUS tombstones, so neither a
-            # bak-fallback in restore.sh nor a later tick can resurrect a session
-            # the user explicitly closed.
-            if [ "${'$'}OLDLEN" -gt 0 ]; then
-                echo "${'$'}OLD" | jq --argjson forget "${'$'}FORGET" 'map(select(.tmuxSessionName as ${'$'}n | (${'$'}forget | index(${'$'}n)) | not))' > "${'$'}SF.bak.tmp.${'$'}${'$'}" 2>/dev/null \
-                    && mv "${'$'}SF.bak.tmp.${'$'}${'$'}" "${'$'}SF.bak" || cp -f "${'$'}SF" "${'$'}SF.bak" 2>/dev/null || true
-            fi
+              # Roll an UNFILTERED backup. This used to strip tombstoned entries
+              # "so a .bak fallback can't resurrect a closed session" — which
+              # destroyed the only backup in the SAME tick as the damage: on
+              # 2026-07-27 the client mass-forgot 15 sessions and .bak was left
+              # holding 7, so no copy of the 23 existed to recover from.
+              # Resurrecting one closed session in an emergency is vastly cheaper
+              # than losing fifteen.
+              # NEVER roll a backup FROM a corrupt/empty primary — that would
+              # copy garbage over the last good copy (caught in testing: a
+              # truncated ${'$'}SF wiped the 25-entry .bak). Only back up a manifest
+              # that is itself valid.
+              if [ "${'$'}OLDLEN" -gt 0 ] && [ "${'$'}{CORRUPT:-0}" = "0" ] \
+                 && [ -s "${'$'}SF" ] && jq -e 'type=="array"' "${'$'}SF" >/dev/null 2>&1; then
+                  cp -f "${'$'}SF" "${'$'}SF.bak" 2>/dev/null || true
+              fi
+              # Durable snapshots: keep every DROP (the event you need to undo)
+              # and a high-water copy (the largest manifest ever seen).
+              # restore.sh falls back to highwater.json as a last resort.
+              MDIR="${'$'}HOME/.claude-remote/manifests"; mkdir -p "${'$'}MDIR" 2>/dev/null
+              if [ "${'$'}NEWLEN" -lt "${'$'}OLDLEN" ] && [ "${'$'}OLDLEN" -gt 0 ]; then
+                  cp -f "${'$'}SF" "${'$'}MDIR/${'$'}(date -u +%Y%m%dT%H%M%SZ)-drop-${'$'}OLDLEN-to-${'$'}NEWLEN.json" 2>/dev/null || true
+                  ls -1t "${'$'}MDIR"/*-drop-*.json 2>/dev/null | tail -n +51 | xargs -r rm -f 2>/dev/null || true
+              fi
+              HW=0
+              if [ -f "${'$'}MDIR/highwater.json" ]; then HW=${'$'}(jq 'length' "${'$'}MDIR/highwater.json" 2>/dev/null || echo 0); fi
+              if [ "${'$'}NEWLEN" -gt "${'$'}{HW:-0}" ]; then printf '%s' "${'$'}NEW" > "${'$'}MDIR/highwater.json" 2>/dev/null || true; fi
             echo "${'$'}NEW" > "${'$'}SF.tmp.${'$'}${'$'}" && mv "${'$'}SF.tmp.${'$'}${'$'}" "${'$'}SF"
             echo "[${'$'}(date -u +%FT%TZ)] drift: reconciled ${'$'}NEWLEN live (was ${'$'}OLDLEN)"
         fi
@@ -485,7 +539,10 @@ LIVE=${'$'}(echo "${'$'}LIVE" | jq -c 'map(.tmuxSessionName)')"
 # Mirror the server-owned source of truth to the app-facing sessions.json (the
 # client may have blanked/shrunk it on reconnect); keeps the app view correct
 # within 60s and re-expands a client that wrongly forgot sessions.
-if [ -f "${'$'}SF" ] && ! cmp -s "${'$'}SF" "${'$'}SF_APP" 2>/dev/null; then
+# Mirror ONLY a valid, non-empty manifest: an unguarded cp would copy a
+# truncated/empty ${'$'}SF over the app-facing file every tick and blank the app view.
+if [ -f "${'$'}SF" ] && [ -s "${'$'}SF" ] && jq -e 'length>0' "${'$'}SF" >/dev/null 2>&1 \
+   && ! cmp -s "${'$'}SF" "${'$'}SF_APP" 2>/dev/null; then
     cp -f "${'$'}SF" "${'$'}SF_APP" 2>/dev/null || true
 fi
 
