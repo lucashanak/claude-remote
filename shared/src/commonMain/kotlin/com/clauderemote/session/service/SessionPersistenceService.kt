@@ -394,6 +394,17 @@ LIVE=${'$'}(echo "${'$'}LIVE" | jq -c 'map(.tmuxSessionName)')"
         [ -n "${'$'}FORGET" ] || FORGET="[]"
         FGLEN=${'$'}(echo "${'$'}FORGET" | jq 'length' 2>/dev/null || echo 0)
     fi
+    # MASS-TOMBSTONE GUARD: a human closes sessions ONE AT A TIME. More than 2
+    # tombstones in a single tick means the CLIENT mass-forgot after an outage or
+    # a PARTIAL recovery — its own forget-guard only blocks the all-dead case,
+    # not "8 came back, 15 still missing" — which on 2026-07-27 silently cut the
+    # manifest 23 -> 8 and lost those sessions for good. Refuse to honour them
+    # and move the file aside as evidence so it cannot keep tripping.
+    if [ "${'$'}FGLEN" -gt 2 ]; then
+        echo "[${'$'}(date -u +%FT%TZ)] drift: REFUSING ${'$'}FGLEN tombstones at once (mass-forget after outage, not user closes) — moved aside"
+        mv -f "${'$'}FORGOTTEN" "${'$'}FORGOTTEN.rejected.${'$'}(date -u +%Y%m%dT%H%M%SZ)" 2>/dev/null || : > "${'$'}FORGOTTEN"
+        FORGET="[]"; FGLEN=0
+    fi
     # Keep client metadata for sessions already in OLD (refresh only the live
     # claudeSessionId); add live sessions missing from OLD.
     # UNION reconcile — never DROP a manifest entry just because its tmux isn't
