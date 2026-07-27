@@ -115,13 +115,33 @@ object ClaudeConfig {
         // Kill existing session with same name to avoid -A reattaching
         // and sending keystrokes into a running program
         return "export XDG_RUNTIME_DIR=\${XDG_RUNTIME_DIR:-/run/user/\$(id -u)}; " +
-                "tmux list-sessions >/dev/null 2>&1 || systemd-run --user --scope --quiet --unit=claude-tmux-server --property=LimitCORE=infinity tmux new-session -d -s __anchor__ sleep infinity >/dev/null 2>&1 || true; " +
+                // No --unit=<fixed name> and no --property=LimitCORE: a scope does
+                // NOT accept LimitCORE ("Unknown assignment"), which made the whole
+                // systemd-run fail, and a leftover unit of a fixed name makes it
+                // fail silently too — either way `|| true` then let the CALLER
+                // create the server in its own (possibly short-lived) cgroup.
+                "tmux list-sessions >/dev/null 2>&1 || systemd-run --user --scope --quiet tmux new-session -d -x 200 -y 50 -s __anchor__ sleep infinity >/dev/null 2>&1 || true; " +
                 // exit-empty off: keep the server alive when a kill-session/recreate
                 // momentarily drops it to 0 sessions (else the whole server exits).
                 "tmux set-option -g exit-empty off 2>/dev/null || true; " +
+                // CRASH GUARD — must run BEFORE new-session. Core dump (tmux 3.5a):
+                //   SIGSEGV clients_calculate_size() <- default_window_size()
+                //           <- spawn_window() <- cmd_new_session_exec()
+                // i.e. tmux crashed WHILE CREATING a session because it sized the new
+                // window from the ATTACHED CLIENTS and walked a stale one. A server
+                // that respawned after a crash starts with the default
+                // window-size=latest, so creating a session on it took exactly that
+                // path — which is why "creating a session" reliably killed the whole
+                // server and every session in it. `manual` is the ONE value whose
+                // default_window_size() branch never consults clients; pair it with an
+                // explicit default-size and pass -x/-y so the size never comes from a
+                // client. (Do NOT put window-size manual in ~/.tmux.conf — applied at
+                // server STARTUP it crashes tmux outright; it is only safe at runtime.)
+                "tmux set-option -g window-size manual 2>/dev/null || true; " +
+                "tmux set-option -g default-size 200x50 2>/dev/null || true; " +
                 "tmux kill-session -t ${sq(tmuxSessionName)} 2>/dev/null; " +
                 "tmux set-option -g history-limit 100000 2>/dev/null; " +
-                "tmux new-session -s ${sq(tmuxSessionName)} " +
+                "tmux new-session -x 200 -y 50 -s ${sq(tmuxSessionName)} " +
                 "\\; set-option -g mouse on " +
                 "\\; set-option -g history-limit 100000 " +
                 "\\; send-keys ${sq(claudeCmd)} Enter"

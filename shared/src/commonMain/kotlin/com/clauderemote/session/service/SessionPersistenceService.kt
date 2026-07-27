@@ -85,18 +85,18 @@ internal class SessionPersistenceService(
         DUNIT="${'$'}HOME/.config/systemd/user/claude-remote-drift.service"
         DTIMER="${'$'}HOME/.config/systemd/user/claude-remote-drift.timer"
         LOCK="${'$'}HOME/.claude-remote/sessions.lock"
-        MARKER="claude-remote-restore-v13"
+        MARKER="claude-remote-restore-v14"
         touch "${'$'}LOCK"
         echo "[${'$'}(date -u +%FT%TZ)] install: invoked by client" >> "${'$'}HOME/.claude-remote/install.log"
         if ! grep -q "${'$'}MARKER" "${'$'}SCRIPT" 2>/dev/null; then
             echo "[${'$'}(date -u +%FT%TZ)] install: restore.sh missing ${'$'}MARKER — rewriting; prior marker line: ${'$'}(grep -m1 'claude-remote-restore-v' "${'$'}SCRIPT" 2>/dev/null || echo '<none/new file>')" >> "${'$'}HOME/.claude-remote/install.log"
             cat > "${'$'}SCRIPT" <<'RESTORE_EOF'
 #!/usr/bin/env bash
-# marker-compat (do NOT remove): claude-remote-restore-v6 claude-remote-restore-v7 claude-remote-restore-v8 claude-remote-restore-v9 claude-remote-restore-v10 claude-remote-restore-v11 claude-remote-restore-v12 claude-remote-restore-v13
+# marker-compat (do NOT remove): claude-remote-restore-v6 claude-remote-restore-v7 claude-remote-restore-v8 claude-remote-restore-v9 claude-remote-restore-v10 claude-remote-restore-v11 claude-remote-restore-v12 claude-remote-restore-v13 claude-remote-restore-v14
 # Makes any installed client's `grep -q ${'$'}MARKER` find its marker so it takes the
 # PRESENT no-op path and does NOT rewrite this file (reverting the fixes) nor run
 # the daemon-reload/enable reinstall that correlates with the tmux-server death.
-# claude-remote-restore-v13 — recreates tmux+claude sessions from sessions.json (snapshot under flock)
+# claude-remote-restore-v14 — recreates tmux+claude sessions from sessions.json (snapshot under flock)
 set -u
 # Any tmux server started from here (incl. auto-start by `tmux new-session`,
 # which does NOT inherit the anchor scope's LimitCORE) must be able to dump a
@@ -112,15 +112,6 @@ echo "----- ${'$'}(date -u +%FT%TZ) restore.sh start (pid=${'$'}${'$'}) -----"
 # forked server lives in user-1000.slice and survives SSH-session teardown
 # (the mid-life mass-death root cause). Sessions recreated below then attach to
 # that anchored server. If a server already exists this is a no-op.
-#   --unit=claude-tmux-server: a FIXED scope name. Two concurrent create
-#     attempts then collide at the systemd level (the loser exits "unit already
-#     exists") instead of each spawning a competing transient run-*.scope, and
-#     it stops the unbounded scope leak (11 leaked run-*.scope units holding
-#     ~150 processes had to be reaped by hand).
-#   --property=LimitCORE=infinity: the server deaths are tmux SIGSEGV
-#     (code=killed, status=11/SEGV) — let it dump a core for the backtrace.
-#     core_pattern is read-only in this LXC container, so the core lands as
-#     `core` in the tmux server's cwd.
 # Best-effort (`|| true`): an existing server or a failed systemd-run must never
 # break the launch.
 export XDG_RUNTIME_DIR="${'$'}{XDG_RUNTIME_DIR:-/run/user/${'$'}(id -u)}"
@@ -131,8 +122,8 @@ if ! tmux list-sessions >/dev/null 2>&1; then
     # server instead. When the caller was claude-remote-drift.service (oneshot,
     # KillMode=control-group, no RemainAfterExit) the whole fleet died with the
     # tick. Verified: no claude-tmux-server.scope ever existed on this box.
-    systemd-run --user --scope --quiet --property=LimitCORE=infinity \
-        tmux new-session -d -s __anchor__ sleep infinity >/dev/null 2>&1 || true
+    systemd-run --user --scope --quiet \
+        tmux new-session -d -x 200 -y 50 -s __anchor__ sleep infinity >/dev/null 2>&1 || true
     for _ in ${'$'}(seq 1 25); do tmux list-sessions >/dev/null 2>&1 && break; sleep 0.2; done
     if ! tmux list-sessions >/dev/null 2>&1; then
         echo "no tmux server and could not create one in a transient scope — skipping restore (drift retries next tick)"
@@ -145,6 +136,18 @@ fi
 # unexpectedly") and every session. Turn it off so the server is immortal;
 # sessions are killed/recreated within the SAME persistent server.
 tmux set-option -g exit-empty off 2>/dev/null || true
+# CRASH FIX (core dump 2026-07-27 12:38, tmux 3.5a):
+#   SIGSEGV in clients_calculate_size() <- default_window_size() <- spawn_window()
+#   <- cmd_new_session_exec(), i.e. tmux crashed WHILE CREATING A SESSION because
+#   it was sizing the new window from the ATTACHED CLIENTS. A server that respawns
+#   after a crash starts with the DEFAULT `window-size latest`, so every
+#   new-session walked the (partly stale/zombie) client list — and self-heal
+#   creating ~22 sessions in a row turned that into a reliable crash loop: create
+#   sessions -> server SEGVs -> all sessions die -> next tick tries again.
+#   Pinning manual sizing + an explicit default-size makes default_window_size()
+#   take its manual branch and never consult clients at all.
+tmux set-option -g window-size manual 2>/dev/null || true
+tmux set-option -g default-size 200x50 2>/dev/null || true
 LOCK="${'$'}HOME/.claude-remote/sessions.lock"
 # Source of truth = server-owned sessions.restore.json. The client can (and
 # buggily does) blank sessions.json on reconnect; it never touches
@@ -236,7 +239,7 @@ if [ "${'$'}HAVE_JQ" = "1" ]; then
         # whole tmux session vanishing — matches app-created sessions, which
         # run claude via `send-keys` into a shell. Without this, a restored
         # session is fragile: it disappears the moment claude stops.
-        if tmux new-session -d -s "${'$'}TMUX_NAME" -c "${'$'}FOLDER_EXP" \
+        if tmux new-session -d -x 200 -y 50 -s "${'$'}TMUX_NAME" -c "${'$'}FOLDER_EXP" \
             "tmux set-option -g mouse on; tmux set-option -g history-limit 100000; ${'$'}CMD; exec bash -l"; then
             echo "Restored ${'$'}TMUX_NAME (${'$'}FOLDER_EXP) [uuid=${'$'}UUID]"
         else
@@ -259,7 +262,7 @@ else
                         [ -d "${'$'}FOLDER_EXP" ] && {
                             CMD="claude --allow-dangerously-skip-permissions"
                             [ -n "${'$'}{UUID:-}" ] && CMD="${'$'}CMD --resume ${'$'}UUID"
-                            tmux new-session -d -s "${'$'}TMUX_NAME" -c "${'$'}FOLDER_EXP" \
+                            tmux new-session -d -x 200 -y 50 -s "${'$'}TMUX_NAME" -c "${'$'}FOLDER_EXP" \
                                 "tmux set-option -g mouse on; tmux set-option -g history-limit 100000; ${'$'}CMD; exec bash -l"
                             echo "Restored ${'$'}TMUX_NAME"
                         }
@@ -280,11 +283,11 @@ RESTORE_EOF
             echo "[${'$'}(date -u +%FT%TZ)] install: drift.sh missing ${'$'}MARKER — rewriting; prior marker line: ${'$'}(grep -m1 'claude-remote-restore-v' "${'$'}DRIFT" 2>/dev/null || echo '<none/new file>')" >> "${'$'}HOME/.claude-remote/install.log"
             cat > "${'$'}DRIFT" <<'DRIFT_EOF'
 #!/usr/bin/env bash
-# marker-compat (do NOT remove): claude-remote-restore-v6 claude-remote-restore-v7 claude-remote-restore-v8 claude-remote-restore-v9 claude-remote-restore-v10 claude-remote-restore-v11 claude-remote-restore-v12 claude-remote-restore-v13
+# marker-compat (do NOT remove): claude-remote-restore-v6 claude-remote-restore-v7 claude-remote-restore-v8 claude-remote-restore-v9 claude-remote-restore-v10 claude-remote-restore-v11 claude-remote-restore-v12 claude-remote-restore-v13 claude-remote-restore-v14
 # Makes any installed client's `grep -q ${'$'}MARKER` find its marker so it takes the
 # PRESENT no-op path and does NOT rewrite this file (reverting the fixes) nor run
 # the daemon-reload/enable reinstall that correlates with the tmux-server death.
-# claude-remote-restore-v13 — drift daemon: reconciles sessions.json to mirror
+# claude-remote-restore-v14 — drift daemon: reconciles sessions.json to mirror
 # the LIVE claude-server-* tmux sessions every minute. Self-healing: re-adds
 # live sessions a misbehaving/old client truncated away, refreshes
 # claudeSessionId from claude's per-pid state files, preserves client-set
@@ -336,6 +339,17 @@ touch "${'$'}LOCK"
 # (watchdog: server born in .../claude-remote-drift.service, dead 12s later).
 if tmux list-sessions >/dev/null 2>&1; then
     tmux set-option -g exit-empty off 2>/dev/null || true
+    # THE CRASH FIX, enforced on whatever server is live (core dump 2026-07-27
+    # 12:38, tmux 3.5a): SIGSEGV in clients_calculate_size() <-
+    # default_window_size() <- spawn_window() <- cmd_new_session_exec(). tmux
+    # crashed WHILE CREATING A SESSION because it sized the new window from the
+    # ATTACHED CLIENTS and walked a stale one. A server that respawns after a
+    # crash starts with the DEFAULT window-size=latest, so EVERY new-session — the
+    # app's included, which passes no -x/-y — took that path. Pinning manual
+    # sizing + an explicit default-size makes default_window_size() use its manual
+    # branch and never consult clients, for every creator.
+    tmux set-option -g window-size manual 2>/dev/null || true
+    tmux set-option -g default-size 200x50 2>/dev/null || true
 fi
 # Drop the internal keepalive __anchor__ if it lingers: with exit-empty=off the
 # server no longer needs it, and leaving it visible makes the app treat it as a
@@ -590,7 +604,7 @@ if [ -f "${'$'}SF" ]; then
         # tears down the instant this tick ends — which is what killed the
         # freshly restored fleet, twice, 9-12s after it came back.
         if command -v systemd-run >/dev/null 2>&1; then
-            systemd-run --user --scope --quiet --property=LimitCORE=infinity \
+            systemd-run --user --scope --quiet \
                 bash "${'$'}HOME/.claude-remote/restore.sh" >/dev/null 2>&1 || true
         else
             bash "${'$'}HOME/.claude-remote/restore.sh" >/dev/null 2>&1 || true
