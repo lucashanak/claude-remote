@@ -942,11 +942,16 @@ private fun CRMarkdownTable(model: com.mikepenz.markdown.compose.components.Mark
     var expanded by remember { mutableStateOf(false) }
 
     // Inline: tap to expand, drag to horizontally scroll. Compose disambiguates tap vs drag.
-    Box(
+    // BoxWithConstraints (OUTSIDE the horizontalScroll — the scroll makes width
+    // unbounded) exposes the real available width so the grid can use wide
+    // columns on desktop instead of the phone-narrow 30-char/240dp cap that made
+    // desktop tables render as a cramped left sliver.
+    androidx.compose.foundation.layout.BoxWithConstraints(
         modifier = Modifier
             .fillMaxWidth()
             .clickable { expanded = true }
     ) {
+        val availableWidth = maxWidth
         Box(
             modifier = Modifier
                 .fillMaxWidth()
@@ -957,6 +962,7 @@ private fun CRMarkdownTable(model: com.mikepenz.markdown.compose.components.Mark
                 body = cleanedBody,
                 numCols = numCols,
                 maxColWidth = 240.dp,
+                availableWidth = availableWidth,
             )
         }
         // Subtle hint that the table opens fullscreen when tapped.
@@ -1019,15 +1025,22 @@ private fun TableGrid(
     body: List<List<String>>,
     numCols: Int,
     maxColWidth: androidx.compose.ui.unit.Dp,
+    availableWidth: androidx.compose.ui.unit.Dp = 0.dp,
     modifier: Modifier = Modifier,
 ) {
     val c = CRTheme.colors
 
     fun cellAt(row: List<String>, i: Int): String = row.getOrElse(i) { "" }
 
+    // On a wide surface (desktop) let columns grow so long cells don't wrap into
+    // a cramped sliver; on a phone keep the tight cap + horizontal scroll.
+    val wide = availableWidth > 600.dp
+    val charCap = if (wide) 80 else 30
+    val colMax = if (wide) 560.dp else maxColWidth
+
     val colWidths: List<androidx.compose.ui.unit.Dp> = (0 until numCols).map { i ->
         val maxChars = (listOf(header) + body).maxOf { cellAt(it, i).length }
-        ((maxChars.coerceIn(3, 30) * 7.5f).dp).coerceIn(48.dp, maxColWidth)
+        ((maxChars.coerceIn(3, charCap) * 7.5f).dp).coerceIn(48.dp, colMax)
     }
     val totalWidth = colWidths.fold(0.dp) { acc, w -> acc + w }
     val cellStyle = CRType.bodyDim

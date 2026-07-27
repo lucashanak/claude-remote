@@ -475,7 +475,7 @@ fun main() = application {
                 // background thread so the EDT is never blocked by I/O.
                 javax.swing.SwingUtilities.invokeLater {
                     try {
-                        val parent = javax.swing.SwingUtilities.getWindowAncestor(termWidget) as? java.awt.Frame
+                        val parent = appDialogParent()
                         val dialog = java.awt.FileDialog(parent, "Save File", java.awt.FileDialog.SAVE)
                         dialog.file = suggestedName
                         dialog.isVisible = true
@@ -735,6 +735,19 @@ private fun runPortal(cmd: List<String>): String? = try {
     null
 }
 
+/**
+ * The app's showing top-level window, to parent native FileDialogs on.
+ *
+ * We used to derive the parent from the JediTerm SwingPanel's window ancestor,
+ * but in Chat (transcript) mode that panel is swapped OUT of the Compose tree,
+ * so its ancestor is null / not showing — which made java.awt.FileDialog throw
+ * "layouts are not part of the same hierarchy" and the file picker never opened.
+ * The Compose window (a Frame) is always present regardless of Chat/Raw, so use
+ * the first showing top-level Frame instead.
+ */
+private fun appDialogParent(): java.awt.Frame? =
+    java.awt.Frame.getFrames().firstOrNull { it.isShowing }
+
 /** The original AWT FileDialog picker (native NSOpenPanel on macOS). */
 private fun pickFilesViaAwt(callback: (List<Pair<ByteArray, String>>) -> Unit) {
     javax.swing.SwingUtilities.invokeLater {
@@ -745,7 +758,7 @@ private fun pickFilesViaAwt(callback: (List<Pair<ByteArray, String>>) -> Unit) {
             callback(pairs)
         }
         try {
-            val parent = javax.swing.SwingUtilities.getWindowAncestor(termWidget) as? java.awt.Frame
+            val parent = appDialogParent()
             val dialog = java.awt.FileDialog(parent, "Attach File", java.awt.FileDialog.LOAD)
             dialog.isMultipleMode = true
             dialog.isVisible = true
