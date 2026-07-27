@@ -124,20 +124,19 @@ object ClaudeConfig {
                 // exit-empty off: keep the server alive when a kill-session/recreate
                 // momentarily drops it to 0 sessions (else the whole server exits).
                 "tmux set-option -g exit-empty off 2>/dev/null || true; " +
-                // CRASH GUARD — must run BEFORE new-session. Core dump (tmux 3.5a):
+                // CRASH GUARD. Core dump (tmux 3.5a, ~/core):
                 //   SIGSEGV clients_calculate_size() <- default_window_size()
                 //           <- spawn_window() <- cmd_new_session_exec()
-                // i.e. tmux crashed WHILE CREATING a session because it sized the new
-                // window from the ATTACHED CLIENTS and walked a stale one. A server
-                // that respawned after a crash starts with the default
-                // window-size=latest, so creating a session on it took exactly that
-                // path — which is why "creating a session" reliably killed the whole
-                // server and every session in it. `manual` is the ONE value whose
-                // default_window_size() branch never consults clients; pair it with an
-                // explicit default-size and pass -x/-y so the size never comes from a
-                // client. (Do NOT put window-size manual in ~/.tmux.conf — applied at
-                // server STARTUP it crashes tmux outright; it is only safe at runtime.)
-                "tmux set-option -g window-size manual 2>/dev/null || true; " +
+                // tmux died WHILE CREATING a session, sizing the new window from the
+                // attached clients. `window-size manual` is NOT the cure — it is the
+                // POISON: proven minimal repro on 3.5a, a config containing only
+                // `set -g window-size manual` makes `tmux new-session` print "server
+                // exited unexpectedly", while `latest` works. This app used to send
+                // that option on every launch AND every attach, which is exactly why
+                // "creating a session" reliably killed the whole server and all its
+                // sessions. So: never set window-size at all (leave tmux's default),
+                // and pass explicit -x/-y plus default-size so the new window's size
+                // never has to be derived from a client.
                 "tmux set-option -g default-size 200x50 2>/dev/null || true; " +
                 "tmux kill-session -t ${sq(tmuxSessionName)} 2>/dev/null; " +
                 "tmux set-option -g history-limit 100000 2>/dev/null; " +

@@ -177,7 +177,7 @@ internal class TmuxProbes(
                 val escaped = tmuxName.replace("'", "'\\''")
                 val ch = sshSession.openChannel("exec") as com.jcraft.jsch.ChannelExec
                 ch.setCommand(
-                    "tmux set-option -w -t '=$escaped' window-size manual 2>/dev/null; " +
+                    
                         "tmux resize-window -t '=$escaped' -x $cols -y $rows 2>/dev/null; echo OK"
                 )
                 ch.inputStream = null

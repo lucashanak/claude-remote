@@ -146,7 +146,6 @@ tmux set-option -g exit-empty off 2>/dev/null || true
 #   sessions -> server SEGVs -> all sessions die -> next tick tries again.
 #   Pinning manual sizing + an explicit default-size makes default_window_size()
 #   take its manual branch and never consult clients at all.
-tmux set-option -g window-size manual 2>/dev/null || true
 tmux set-option -g default-size 200x50 2>/dev/null || true
 LOCK="${'$'}HOME/.claude-remote/sessions.lock"
 # Source of truth = server-owned sessions.restore.json. The client can (and
@@ -348,7 +347,6 @@ if tmux list-sessions >/dev/null 2>&1; then
     # app's included, which passes no -x/-y — took that path. Pinning manual
     # sizing + an explicit default-size makes default_window_size() use its manual
     # branch and never consult clients, for every creator.
-    tmux set-option -g window-size manual 2>/dev/null || true
     tmux set-option -g default-size 200x50 2>/dev/null || true
 fi
 # Drop the internal keepalive __anchor__ if it lingers: with exit-empty=off the

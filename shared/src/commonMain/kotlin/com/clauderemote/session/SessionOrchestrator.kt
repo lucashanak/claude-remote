@@ -840,7 +840,8 @@ class SessionOrchestrator(
      *    It is device-scoped (never `detach-client -a`), so two DIFFERENT
      *    devices can still hold one client each.
      *  - no `-d`: intentional multi-device attach keeps working.
-     *  - `window-size manual` + kickRedraw's `resize-window` (last-device
+     *  - kickRedraw's `resize-window` for sizing (NEVER `window-size manual`,
+     *    which SIGSEGVs the tmux server — see ClaudeConfig's crash guard) (last-device
      *    priority) instead of `latest`, so a stale 80x24 client can't shrink
      *    the pane. See TmuxProbes.forceWindowSize.
      *  - EXACT target `-t '=name'`: plain `-t` prefix-matches, which could
@@ -849,7 +850,7 @@ class SessionOrchestrator(
     private fun buildAttachCommand(tmuxSessionName: String): String {
         val escaped = tmuxSessionName.replace("'", "'\\''")
         return tmuxProbes.singleClientPreamble(tmuxSessionName, deviceKey) +
-            "tmux set-option -g window-size manual 2>/dev/null; " +
+            
             "tmux set-option -g history-limit 100000 2>/dev/null; " +
             "tmux attach-session -t '=$escaped'"
     }
