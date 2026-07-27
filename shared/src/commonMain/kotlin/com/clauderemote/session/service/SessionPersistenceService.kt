@@ -85,18 +85,18 @@ internal class SessionPersistenceService(
         DUNIT="${'$'}HOME/.config/systemd/user/claude-remote-drift.service"
         DTIMER="${'$'}HOME/.config/systemd/user/claude-remote-drift.timer"
         LOCK="${'$'}HOME/.claude-remote/sessions.lock"
-        MARKER="claude-remote-restore-v12"
+        MARKER="claude-remote-restore-v13"
         touch "${'$'}LOCK"
         echo "[${'$'}(date -u +%FT%TZ)] install: invoked by client" >> "${'$'}HOME/.claude-remote/install.log"
         if ! grep -q "${'$'}MARKER" "${'$'}SCRIPT" 2>/dev/null; then
             echo "[${'$'}(date -u +%FT%TZ)] install: restore.sh missing ${'$'}MARKER — rewriting; prior marker line: ${'$'}(grep -m1 'claude-remote-restore-v' "${'$'}SCRIPT" 2>/dev/null || echo '<none/new file>')" >> "${'$'}HOME/.claude-remote/install.log"
             cat > "${'$'}SCRIPT" <<'RESTORE_EOF'
 #!/usr/bin/env bash
-# marker-compat (do NOT remove): claude-remote-restore-v6 claude-remote-restore-v7 claude-remote-restore-v8 claude-remote-restore-v9 claude-remote-restore-v10 claude-remote-restore-v11 claude-remote-restore-v12
+# marker-compat (do NOT remove): claude-remote-restore-v6 claude-remote-restore-v7 claude-remote-restore-v8 claude-remote-restore-v9 claude-remote-restore-v10 claude-remote-restore-v11 claude-remote-restore-v12 claude-remote-restore-v13
 # Makes any installed client's `grep -q ${'$'}MARKER` find its marker so it takes the
 # PRESENT no-op path and does NOT rewrite this file (reverting the fixes) nor run
 # the daemon-reload/enable reinstall that correlates with the tmux-server death.
-# claude-remote-restore-v12 — recreates tmux+claude sessions from sessions.json (snapshot under flock)
+# claude-remote-restore-v13 — recreates tmux+claude sessions from sessions.json (snapshot under flock)
 set -u
 # Any tmux server started from here (incl. auto-start by `tmux new-session`,
 # which does NOT inherit the anchor scope's LimitCORE) must be able to dump a
@@ -124,7 +124,21 @@ echo "----- ${'$'}(date -u +%FT%TZ) restore.sh start (pid=${'$'}${'$'}) -----"
 # Best-effort (`|| true`): an existing server or a failed systemd-run must never
 # break the launch.
 export XDG_RUNTIME_DIR="${'$'}{XDG_RUNTIME_DIR:-/run/user/${'$'}(id -u)}"
-tmux list-sessions >/dev/null 2>&1 || systemd-run --user --scope --quiet --unit=claude-tmux-server --property=LimitCORE=infinity tmux new-session -d -s __anchor__ sleep infinity >/dev/null 2>&1 || true
+if ! tmux list-sessions >/dev/null 2>&1; then
+    # Create the server in its OWN transient scope, never in the caller's cgroup.
+    # NOTE: no --unit=<fixed name> — a leftover unit of that name makes systemd-run
+    # fail silently, and the trailing `|| true` then let the CALLER create the
+    # server instead. When the caller was claude-remote-drift.service (oneshot,
+    # KillMode=control-group, no RemainAfterExit) the whole fleet died with the
+    # tick. Verified: no claude-tmux-server.scope ever existed on this box.
+    systemd-run --user --scope --quiet --property=LimitCORE=infinity \
+        tmux new-session -d -s __anchor__ sleep infinity >/dev/null 2>&1 || true
+    for _ in ${'$'}(seq 1 25); do tmux list-sessions >/dev/null 2>&1 && break; sleep 0.2; done
+    if ! tmux list-sessions >/dev/null 2>&1; then
+        echo "no tmux server and could not create one in a transient scope — skipping restore (drift retries next tick)"
+        exit 0
+    fi
+fi
 # THE key fix: tmux default exit-empty=on makes the server exit the instant its
 # session count hits 0 — which the app's reconnect/close churn (kill-session +
 # recreate) transiently does, killing the whole server ("server exited
@@ -266,11 +280,11 @@ RESTORE_EOF
             echo "[${'$'}(date -u +%FT%TZ)] install: drift.sh missing ${'$'}MARKER — rewriting; prior marker line: ${'$'}(grep -m1 'claude-remote-restore-v' "${'$'}DRIFT" 2>/dev/null || echo '<none/new file>')" >> "${'$'}HOME/.claude-remote/install.log"
             cat > "${'$'}DRIFT" <<'DRIFT_EOF'
 #!/usr/bin/env bash
-# marker-compat (do NOT remove): claude-remote-restore-v6 claude-remote-restore-v7 claude-remote-restore-v8 claude-remote-restore-v9 claude-remote-restore-v10 claude-remote-restore-v11 claude-remote-restore-v12
+# marker-compat (do NOT remove): claude-remote-restore-v6 claude-remote-restore-v7 claude-remote-restore-v8 claude-remote-restore-v9 claude-remote-restore-v10 claude-remote-restore-v11 claude-remote-restore-v12 claude-remote-restore-v13
 # Makes any installed client's `grep -q ${'$'}MARKER` find its marker so it takes the
 # PRESENT no-op path and does NOT rewrite this file (reverting the fixes) nor run
 # the daemon-reload/enable reinstall that correlates with the tmux-server death.
-# claude-remote-restore-v12 — drift daemon: reconciles sessions.json to mirror
+# claude-remote-restore-v13 — drift daemon: reconciles sessions.json to mirror
 # the LIVE claude-server-* tmux sessions every minute. Self-healing: re-adds
 # live sessions a misbehaving/old client truncated away, refreshes
 # claudeSessionId from claude's per-pid state files, preserves client-set
@@ -314,12 +328,22 @@ touch "${'$'}LOCK"
 # exits when sessions momentarily hit 0 (app churn/close) — server-side, no
 # dependency on the client build. This is the root fix for the mass churn
 # ("server exited unexpectedly").
-tmux set-option -g exit-empty off 2>/dev/null || true
+# ONLY against an EXISTING server: `tmux set-option -g` on a dead server STARTS
+# one — and this script runs inside claude-remote-drift.service, which is
+# Type=oneshot, RemainAfterExit=no, KillMode=control-group. So the server (plus
+# every session restored into it) was killed the moment the tick finished, and
+# the next tick recreated and re-killed it: a self-inflicted fleet flap loop
+# (watchdog: server born in .../claude-remote-drift.service, dead 12s later).
+if tmux list-sessions >/dev/null 2>&1; then
+    tmux set-option -g exit-empty off 2>/dev/null || true
+fi
 # Drop the internal keepalive __anchor__ if it lingers: with exit-empty=off the
 # server no longer needs it, and leaving it visible makes the app treat it as a
 # real session and churn it (kill/relaunch). Safe — exit-empty=off keeps the
 # server alive at 0 sessions.
-tmux kill-session -t __anchor__ 2>/dev/null || true
+if [ "${'$'}(tmux list-sessions -F '#{session_name}' 2>/dev/null | grep -c '^claude-server-')" -gt 0 ]; then
+    tmux kill-session -t __anchor__ 2>/dev/null || true
+fi
 
 # CORE DUMPS, enforced on whatever server is actually live. Setting `ulimit -c`
 # in this script only helps if THIS script cold-starts the server; normally the
@@ -560,7 +584,17 @@ if [ -f "${'$'}SF" ]; then
         ! tmux has-session -t="${'$'}n" 2>/dev/null && echo "${'$'}n"; done)
     if [ -n "${'$'}MISSING" ]; then
         echo "[${'$'}(date -u +%FT%TZ)] drift: self-heal — relaunching missing: ${'$'}(echo ${'$'}MISSING | tr '\n' ' ')"
-        bash "${'$'}HOME/.claude-remote/restore.sh" >/dev/null 2>&1 || true
+        # Run the heal in its OWN transient scope. Anything restore.sh starts
+        # (notably a tmux server, when none is running) then belongs to that
+        # scope instead of claude-remote-drift.service, whose cgroup systemd
+        # tears down the instant this tick ends — which is what killed the
+        # freshly restored fleet, twice, 9-12s after it came back.
+        if command -v systemd-run >/dev/null 2>&1; then
+            systemd-run --user --scope --quiet --property=LimitCORE=infinity \
+                bash "${'$'}HOME/.claude-remote/restore.sh" >/dev/null 2>&1 || true
+        else
+            bash "${'$'}HOME/.claude-remote/restore.sh" >/dev/null 2>&1 || true
+        fi
     fi
 fi
 DRIFT_EOF
