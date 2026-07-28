@@ -64,8 +64,12 @@ private fun CopyButton(
     text: String,
     modifier: Modifier = Modifier,
     tint: Color = CRTheme.colors.textDim,
+    // When true, also put an HTML flavour on the clipboard (converted from the
+    // markdown [text]) so rich targets paste formatted. Off for plain content
+    // (user prompts, tool results, thinking) where markdown→HTML is meaningless.
+    rich: Boolean = false,
 ) {
-    val clipboard = LocalClipboardManager.current
+    val richCopy = rememberRichCopy()
     var copied by remember { mutableStateOf(false) }
     LaunchedEffect(copied) {
         if (copied) {
@@ -75,7 +79,11 @@ private fun CopyButton(
     }
     IconButton(
         onClick = {
-            clipboard.setText(AnnotatedString(text))
+            // plain = the markdown source (readable + reusable). html = the
+            // rendered fragment ONLY for rich content; a blank html means
+            // plain-only copy (no HTML flavour) — right for user prompts, tool
+            // results and thinking where markdown→HTML is meaningless.
+            richCopy(text, if (rich) MarkdownHtml.toHtml(text) else "")
             copied = true
         },
         modifier = modifier,
@@ -232,7 +240,7 @@ internal fun AssistantTextCard(
             if (meta.isNotBlank()) {
                 Text(meta, style = CRType.monoTiny, color = c.textDim.copy(alpha = 0.7f))
             }
-            CopyButton(entry.text, modifier = Modifier.size(22.dp), tint = c.textDim.copy(alpha = 0.7f))
+            CopyButton(entry.text, modifier = Modifier.size(22.dp), tint = c.textDim.copy(alpha = 0.7f), rich = true)
             SpeakerButton(
                 text = entry.text,
                 modifier = Modifier.size(24.dp),

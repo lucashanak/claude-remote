@@ -32,6 +32,10 @@ kotlin {
                 implementation("io.sigpipe:jbsdiff:1.0")
                 implementation("org.json:json:20240303")
                 implementation("com.mikepenz:multiplatform-markdown-renderer-m3:0.30.0")
+                // JetBrains markdown parser (same one the renderer uses,
+                // transitively) — used directly to convert message markdown to
+                // HTML for rich clipboard copy.
+                implementation("org.jetbrains:markdown:0.7.3")
             }
         }
         val androidMain by getting {
