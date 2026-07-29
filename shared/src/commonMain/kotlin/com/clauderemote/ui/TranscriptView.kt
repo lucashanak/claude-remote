@@ -521,11 +521,25 @@ fun TranscriptView(
                 },
             )
         }
+        // Rich selection-copy: wrap the SelectionContainer's clipboard so a
+        // mouse/drag selection copies inline formatting (bold/italic/code/…) as
+        // HTML too, not just plain text. `by baseClipboard` delegates every other
+        // ClipboardManager member so this stays version-proof.
+        val richCopy = rememberRichCopy()
+        val baseClipboard = LocalClipboardManager.current
+        val richClipboard = remember(baseClipboard, richCopy) {
+            object : androidx.compose.ui.platform.ClipboardManager by baseClipboard {
+                override fun setText(annotatedString: AnnotatedString) {
+                    richCopy(annotatedString.text, MarkdownHtml.annotatedToHtml(annotatedString))
+                }
+            }
+        }
         CompositionLocalProvider(
             LocalDensity provides Density(
                 density = baseDensity.density,
                 fontScale = baseDensity.fontScale * fontScale
-            )
+            ),
+            LocalClipboardManager provides richClipboard,
         ) {
             Box(Modifier.fillMaxSize()) {
                 SelectionContainer {

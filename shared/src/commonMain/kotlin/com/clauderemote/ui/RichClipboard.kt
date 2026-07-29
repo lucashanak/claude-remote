@@ -1,6 +1,10 @@
 package com.clauderemote.ui
 
 import androidx.compose.runtime.Composable
+import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.font.FontStyle
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextDecoration
 import org.intellij.markdown.flavours.gfm.GFMFlavourDescriptor
 import org.intellij.markdown.html.HtmlGenerator
 import org.intellij.markdown.parser.MarkdownParser
@@ -30,6 +34,52 @@ object MarkdownHtml {
             '<' -> append("&lt;")
             '>' -> append("&gt;")
             else -> append(ch)
+        }
+    }
+
+    /**
+     * Convert a selected [AnnotatedString] to an inline-formatted HTML fragment
+     * for rich selection-copy. Only INLINE styles carried by the selection's
+     * span styles survive: bold, italic, underline, strikethrough, monospace
+     * (`<code>`). Colors are deliberately dropped (they're theme colors that
+     * would look wrong pasted onto a light background); block structure (tables,
+     * lists) isn't in the AnnotatedString so it can't be reconstructed from a
+     * partial selection. Newlines become `<br>`.
+     */
+    fun annotatedToHtml(a: AnnotatedString): String {
+        val text = a.text
+        if (text.isEmpty()) return ""
+        val spans = a.spanStyles
+        if (spans.isEmpty()) return escapeHtml(text).replace("\n", "<br>")
+
+        // Cut points at every span boundary; each segment has one constant style set.
+        val bounds = sortedSetOf(0, text.length)
+        for (s in spans) {
+            bounds.add(s.start.coerceIn(0, text.length))
+            bounds.add(s.end.coerceIn(0, text.length))
+        }
+        val b = bounds.toList()
+        return buildString {
+            for (i in 0 until b.size - 1) {
+                val start = b[i]
+                val end = b[i + 1]
+                if (start >= end) continue
+                val active = spans.filter { it.start <= start && it.end >= end }.map { it.item }
+                val bold = active.any { (it.fontWeight?.weight ?: 0) >= FontWeight.SemiBold.weight }
+                val italic = active.any { it.fontStyle == FontStyle.Italic }
+                val underline = active.any { it.textDecoration?.contains(TextDecoration.Underline) == true }
+                val strike = active.any { it.textDecoration?.contains(TextDecoration.LineThrough) == true }
+                val mono = active.any { it.fontFamily.toString().contains("Monospace", ignoreCase = true) }
+                val open = StringBuilder(); val close = StringBuilder()
+                if (bold) { open.append("<b>"); close.insert(0, "</b>") }
+                if (italic) { open.append("<i>"); close.insert(0, "</i>") }
+                if (underline) { open.append("<u>"); close.insert(0, "</u>") }
+                if (strike) { open.append("<s>"); close.insert(0, "</s>") }
+                if (mono) { open.append("<code>"); close.insert(0, "</code>") }
+                append(open)
+                append(escapeHtml(text.substring(start, end)).replace("\n", "<br>"))
+                append(close)
+            }
         }
     }
 }
