@@ -288,8 +288,7 @@ class SessionOrchestrator(
             try {
                 var attempt = 1
                 while (isActive) {
-                    val base = (2000L shl (attempt - 1).coerceAtMost(5)).coerceAtMost(60_000L)
-                    val wait = base + kotlin.random.Random.nextLong(500)
+                    val wait = ReconnectPolicy.backgroundDelayMs(attempt)
                     // Unbounded background phase: publish a countdown target so the
                     // UI shows "Retrying in Ns" (maxAttempts <= 0 ⇒ no fixed cap).
                     _reconnectStatus.update { it + (sessionId to ReconnectInfo(attempt, maxAttempts = -1, nextRetryAtMillis = System.currentTimeMillis() + wait)) }
@@ -846,15 +845,27 @@ class SessionOrchestrator(
      *    the pane. See TmuxProbes.forceWindowSize.
      *  - EXACT target `-t '=name'`: plain `-t` prefix-matches, which could
      *    attach to a DIFFERENT session whose name merely starts with ours.
+     *    Note the un-pin line below is a WINDOW target (`-w`) and needs the
+     *    trailing colon (`'=name:'`), unlike this session target — see the
+     *    comment on that line.
      */
-    private fun buildAttachCommand(tmuxSessionName: String): String {
+    // internal (not private) so ReconnectPolicyTest / commonTest can exercise
+    // it directly via friend-module access — emits the same string either way.
+    internal fun buildAttachCommand(tmuxSessionName: String): String {
         val escaped = tmuxSessionName.replace("'", "'\\''")
         return tmuxProbes.singleClientPreamble(tmuxSessionName, deviceKey) +
             // Un-pin: release any window a historical `resize-window` left in
             // `window-size manual` so it tracks the most-recently-active client
             // again (current-device-wins). We never set `manual` anymore; this
-            // only heals windows pinned by older builds.
-            "tmux set-option -w -t '=$escaped' window-size latest 2>/dev/null; " +
+            // only heals windows pinned by older builds. `-w` makes this a
+            // WINDOW target, which (unlike a session target) requires the
+            // trailing colon — `-t '=name'` without it fails with "no such
+            // window" and the `2>/dev/null` swallowed that silently, so this
+            // heal never actually ran until the colon was added. Verified on
+            // live tmux 3.5a: `set-option -w -t '=name'` (no colon) exits 1
+            // and leaves `window-size manual` in place; `-t '=name:'` exits 0
+            // and flips it to `latest`.
+            "tmux set-option -w -t '=$escaped:' window-size latest 2>/dev/null; " +
             "tmux set-option -g history-limit 100000 2>/dev/null; " +
             "tmux attach-session -t '=$escaped'"
     }
@@ -865,8 +876,40 @@ class SessionOrchestrator(
         isNew: Boolean,
         checkClosedElsewhere: Boolean = false,
     ) {
-        if (isNew) {
-            val command = ClaudeConfig.buildTmuxLaunchCommand(
+        // The decision itself lives in TmuxLaunchDecider — pure, exhaustively
+        // tested (TmuxLaunchDecisionTest), and lazy: each probe below is an SSH
+        // round-trip, sometimes over cellular, so it only runs on the paths that
+        // need it. Everything I/O — probing, logging, sending — stays here.
+        // `checkClosedElsewhere` is only trusted for the
+        // reconnect-to-an-already-tracked-tab path; launchSession's
+        // attach/history-resume callers pass false since their target may
+        // legitimately be new to sessions.json.
+        val decision = TmuxLaunchDecider.decide(
+            isNew = isNew,
+            checkClosedElsewhere = checkClosedElsewhere,
+            hasClaudeSessionId = session.claudeSessionId != null,
+            tmuxExists = { tmuxProbes.probeTmuxSession(sshManager, session.tmuxSessionName) },
+            stillTracked = { persistence.stillTrackedOnServer(sshManager, session.tmuxSessionName) },
+            hasLivePeers = { serverHasOtherLiveSession(sshManager, session.tmuxSessionName) },
+            hasTranscript = {
+                tmuxProbes.probeTranscriptExists(sshManager, session.folder, session.claudeSessionId!!)
+            },
+        )
+
+        if (decision is TmuxLaunchDecision.ForgetClosedElsewhere) {
+            FileLogger.log(TAG, "Tmux '${session.tmuxSessionName}' missing, untracked, and live peers exist — closed on another device, forgetting locally")
+            sessionStorage?.remove(session.id)
+            disconnectSession(session.id)
+            throw SessionClosedElsewhereException()
+        }
+
+        if (decision is TmuxLaunchDecision.Rebuild && decision.afterSuspectedServerOutage) {
+            FileLogger.log(TAG, "Tmux '${session.tmuxSessionName}' missing + untracked but NO live peer sessions — treating as whole-server outage, rebuilding/--resume instead of forgetting")
+        }
+
+        val command = when (decision) {
+            is TmuxLaunchDecision.ForgetClosedElsewhere -> return // unreachable: threw above
+            is TmuxLaunchDecision.FreshLaunch -> ClaudeConfig.buildTmuxLaunchCommand(
                 tmuxSessionName = session.tmuxSessionName,
                 folder = session.folder,
                 mode = session.mode,
@@ -874,51 +917,20 @@ class SessionOrchestrator(
                 claudeSessionId = session.claudeSessionId,
                 resume = false
             )
-            sshManager.sendInput(command + "\n")
-        } else {
-            // Probe tmux first. If the named session is gone (server reboot,
-            // someone killed it), recreate it and re-launch claude with --resume
-            // so the conversation continues. Otherwise plain attach.
-            val tmuxExists = tmuxProbes.probeTmuxSession(sshManager, session.tmuxSessionName)
-            if (!tmuxExists && checkClosedElsewhere && !persistence.stillTrackedOnServer(sshManager, session.tmuxSessionName)) {
-                // Another device's forgetSession() already pushed this tmux name
-                // out of the shared sessions.json — respect that instead of
-                // resurrecting a session the user consciously closed elsewhere.
-                // Only trusted for the reconnect-to-an-already-tracked-tab path
-                // (checkClosedElsewhere=true); launchSession's attach/history-resume
-                // callers pass false since their target may legitimately be new
-                // to sessions.json.
-                //
-                // BUT "!tmuxExists && !stillTracked" is AMBIGUOUS: a WHOLE-server
-                // tmux death makes probeTmuxSession=false for EVERY session AND
-                // (with a wiped/empty manifest) stillTrackedOnServer=false too, so
-                // this branch used to forget every session on a transient
-                // server-wide outage (the repeated whole-server session loss).
-                // Gate on positive liveness: only treat it as closed-elsewhere
-                // when the tmux server is PROVABLY up with ≥1 OTHER live
-                // claude-server-* session. No live peers ⇒ whole-server outage ⇒
-                // fall through to the rebuild/--resume path instead of forgetting.
-                if (serverHasOtherLiveSession(sshManager, session.tmuxSessionName)) {
-                    FileLogger.log(TAG, "Tmux '${session.tmuxSessionName}' missing, untracked, and live peers exist — closed on another device, forgetting locally")
-                    sessionStorage?.remove(session.id)
-                    disconnectSession(session.id)
-                    throw SessionClosedElsewhereException()
-                }
-                FileLogger.log(TAG, "Tmux '${session.tmuxSessionName}' missing + untracked but NO live peer sessions — treating as whole-server outage, rebuilding/--resume instead of forgetting")
-            }
             // See buildAttachCommand for the attach semantics (single client per
             // device, no -d, manual window sizing, exact target).
-            val command = if (tmuxExists) {
-                buildAttachCommand(session.tmuxSessionName)
-            } else if (session.claudeSessionId != null) {
-                // Resume only works if claude actually wrote a transcript file
-                // for this UUID. The transcript appears lazily — first user/
-                // assistant turn — so a session that was launched but never
-                // interacted with has no jsonl, and `--resume` would print
-                // "No conversation found". In that case we re-launch fresh
-                // with the same `--session-id` so future restarts can resume.
-                val hasTranscript = tmuxProbes.probeTranscriptExists(sshManager, session.folder, session.claudeSessionId)
-                if (hasTranscript) {
+            is TmuxLaunchDecision.Attach -> buildAttachCommand(session.tmuxSessionName)
+            is TmuxLaunchDecision.Rebuild -> when {
+                !decision.withSessionId -> {
+                    FileLogger.log(TAG, "Tmux '${session.tmuxSessionName}' missing and no claudeSessionId — fresh launch")
+                    ClaudeConfig.buildTmuxLaunchCommand(
+                        tmuxSessionName = session.tmuxSessionName,
+                        folder = session.folder,
+                        mode = session.mode,
+                        model = session.model
+                    )
+                }
+                decision.resume -> {
                     FileLogger.log(TAG, "Tmux '${session.tmuxSessionName}' missing — rebuilding with claude --resume ${session.claudeSessionId}")
                     ClaudeConfig.buildTmuxLaunchCommand(
                         tmuxSessionName = session.tmuxSessionName,
@@ -928,7 +940,11 @@ class SessionOrchestrator(
                         claudeSessionId = session.claudeSessionId,
                         resume = true
                     )
-                } else {
+                }
+                else -> {
+                    // A session launched but never interacted with has no jsonl,
+                    // so `--resume` would print "No conversation found" — relaunch
+                    // fresh with the SAME --session-id so later restarts resume.
                     FileLogger.log(TAG, "Tmux '${session.tmuxSessionName}' missing and no transcript for ${session.claudeSessionId} — fresh launch with same --session-id")
                     ClaudeConfig.buildTmuxLaunchCommand(
                         tmuxSessionName = session.tmuxSessionName,
@@ -939,18 +955,15 @@ class SessionOrchestrator(
                         resume = false
                     )
                 }
-            } else {
-                FileLogger.log(TAG, "Tmux '${session.tmuxSessionName}' missing and no claudeSessionId — fresh launch")
-                ClaudeConfig.buildTmuxLaunchCommand(
-                    tmuxSessionName = session.tmuxSessionName,
-                    folder = session.folder,
-                    mode = session.mode,
-                    model = session.model
-                )
             }
-            FileLogger.log(TAG, "Attaching to tmux: $command")
-            sshManager.sendInput(command + "\n")
         }
+
+        // isNew launches deliberately skip the "Attaching to tmux" line, as they
+        // always have.
+        if (decision !is TmuxLaunchDecision.FreshLaunch) {
+            FileLogger.log(TAG, "Attaching to tmux: $command")
+        }
+        sshManager.sendInput(command + "\n")
     }
 
     /**
@@ -967,9 +980,9 @@ class SessionOrchestrator(
         return try {
             val jsch = sshManager.getSession() ?: return false
             val out = execCapture(jsch, "tmux list-sessions -F '#{session_name}' 2>/dev/null")
-            out.lineSequence()
-                .map { it.trim() }
-                .any { it.startsWith("claude-server-") && it != excludeTmuxName && it != "__anchor__" }
+            // Parsing lives in TmuxPeerLiveness so it is testable without SSH;
+            // the exec round-trip and the fail-closed catch below stay here.
+            TmuxPeerLiveness.hasOtherLivePeer(out, excludeTmuxName)
         } catch (e: Exception) {
             false
         }
@@ -1021,8 +1034,6 @@ class SessionOrchestrator(
                 // into a sub-second blip (tmux preserves the session). Backoff
                 // (2s, 4s, 8s …, capped 30s) only kicks in from attempt 2 for a
                 // genuine outage, plus 0–500ms jitter against retry storms.
-                val base = if (attempt == 1) 0L
-                           else (2000L shl (attempt - 2).coerceAtMost(5)).coerceAtMost(30_000L)
                 // Cloudflare has no transport to fall back to, so a CF
                 // connect-then-die storm can't be broken by switching paths the
                 // way the Tailscale brake does. Once CF is provably flapping,
@@ -1031,8 +1042,7 @@ class SessionOrchestrator(
                 // connect→die spin. Zero until CF dies early twice in a row, so
                 // a genuine single handover still reconnects instantly.
                 val floor = transportResolver.cfEarlyDeathBackoffMs(session.server)
-                val jitter = kotlin.random.Random.nextLong(500)
-                val wait = maxOf(base, floor) + jitter
+                val wait = ReconnectPolicy.foregroundDelayMs(attempt, floor)
                 if (wait > 0) kotlinx.coroutines.delay(wait)
                 // Tab closed during the backoff — stop reconnecting it.
                 if (tabManager.getTab(session.id) == null) { _reconnectStatus.update { it - session.id }; return }

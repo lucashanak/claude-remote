@@ -227,6 +227,65 @@ socket, and the test JVM is started from inside one of them, so it inherits
 - Startup sweeps stale `/tmp/crit.*` roots, because a killed JVM never runs its
   shutdown hook.
 
+## Extracting decisions out of SessionOrchestrator
+
+`SessionOrchestrator` is ~1950 lines and by far the most-changed file here. It
+builds its own collaborators in the constructor, so it cannot be instantiated in
+a test, and wrapping all of them in interfaces would be a large, risky change to
+exactly the file that changes most often.
+
+The approach taken instead: pull the **decisions** out as pure units and leave
+the I/O where it is. Three so far, 44 tests.
+
+- **`TmuxLaunchDecider`** — the decision behind `sendTmuxCommand`, and the most
+  consequential one in the app: attach, rebuild-and-resume, rebuild-fresh, or
+  *forget the session and delete it*. Cheap inputs are passed by value and each
+  expensive probe as a `suspend () -> Boolean`, so the original laziness is
+  preserved exactly — every probe is an SSH round-trip, sometimes over cellular.
+  The tests assert the full decision table AND that probes are not called when
+  they shouldn't be (`isNew` short-circuits before any probe, a live tmux never
+  probes for a transcript, and so on).
+
+  The assertion that matters most: `!tmuxExists && !stillTracked && !hasLivePeers`
+  must **not** forget. A whole-server tmux death makes `tmuxExists` false for
+  every session and an emptied manifest makes `stillTracked` false too — that
+  combination once forgot every session on a transient outage.
+
+- **`ReconnectPolicy`** — the two backoff curves, which differ deliberately
+  (background re-arm caps at 60s and starts at ~2s; foreground auto-reconnect
+  caps at 30s and retries immediately on attempt 1 because the user is
+  watching). Both have failed in production in both directions: too tight and
+  the retry loop hammered the link hard enough to kill a Tailscale gateway, too
+  capped and a session sat DISCONNECTED until an app restart. Tests pin the
+  exact millisecond values per attempt rather than re-deriving the formula, and
+  check the curves never dip or go negative — `2000L shl n` overflows, so the
+  `coerceAtMost(5)` on the shift is load-bearing.
+
+- **`TmuxPeerLiveness`** — the parse half of the liveness gate that feeds the
+  forget decision. Deliberately asymmetric: any ambiguous or empty output must
+  read as "no peers", because a false "peers are alive" deletes a session while
+  a false "no peers" only rebuilds one.
+
+`buildAttachCommand` is now `internal` and tested for its exact output. That
+test exists because the command carried a live bug: the window-size un-pin used
+`set-option -w -t '=name'`, but a **window** target needs the trailing colon
+just like a pane target. tmux rejected it with `no such window`, and the
+`2>/dev/null` on the line swallowed the failure — so the un-pin, whose whole
+purpose is to heal windows an older build left pinned to `window-size manual`,
+had never once run. Verified on tmux 3.5a before and after:
+
+```
+$ tmux set-option -w -t '=sess:' window-size manual   # simulate an old build
+$ tmux set-option -w -t '=sess'  window-size latest 2>/dev/null; echo $?
+1                                    # …and still 'manual'
+$ tmux set-option -w -t '=sess:' window-size latest 2>/dev/null; echo $?
+0                                    # now 'latest'
+```
+
+`attach-session` on the same line correctly stays `-t '=name'` without a colon —
+it is a session target. The two forms differ deliberately, and
+`TmuxTargetSyntaxTest` now guards both.
+
 ## Deliberately not covered
 
 - **`@Composable` rendering.** Screenshot/UI tests here cost far more to
@@ -243,14 +302,13 @@ socket, and the test JVM is started from inside one of them, so it inherits
 These are deliberately deferred, not overlooked. Each needs a seam before it
 can be tested honestly, and a bad seam is worse than no test:
 
-- **`SessionOrchestrator`** (~1950 lines, by far the most-changed file in the
-  repo) is the biggest uncovered risk. It already takes its I/O as constructor
-  lambdas (`readRealSessionId`, `disconnectSession`, `onActivityUpdate`,
-  `onForgotten`, `isBackground`), but its collaborators — `ConnectionRegistry`,
-  `TerminalIOService`, `TranscriptService` — are concrete classes with no
-  interfaces, so it cannot be constructed in a test yet. Extracting interfaces
-  for those three would open up the session lifecycle (create → attach →
-  restore → forget) to real feature-level tests.
+- **`SessionOrchestrator`** is now partially covered — see below. What remains
+  uncovered is its I/O orchestration (`connectSsh`, `connectEt`,
+  `reconnectEtCarrier`, `autoReconnect`'s loop body). Those need interfaces for
+  `ConnectionRegistry` / `TerminalIOService` / `TranscriptService`, which the
+  class constructs internally rather than receiving. That is a large change to
+  the most-churned file in the repo, so the decision logic was extracted first
+  instead — see "Extracting decisions out of SessionOrchestrator".
 
 - **`TransportResolver`** — the Tailscale/Cloudflare/ET fallback and
   early-death backoff logic. Valuable to cover (it governs reconnect behavior

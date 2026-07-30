@@ -140,4 +140,45 @@ class TmuxTargetSyntaxTest {
                 offenders.joinToString("\n")
         )
     }
+
+    @Test
+    fun windowScopedSetOptionCarriesTheTrailingColon() {
+        // `set-option -w` (and `set-window-option`) target a WINDOW, which —
+        // like a pane target — needs the trailing colon: `-t '=name'` without
+        // it is REJECTED outright ("no such window", verified live on tmux
+        // 3.5a). Unlike the pane-target case above, this one fails SILENTLY
+        // when chained with `2>/dev/null`: buildAttachCommand's window-size
+        // un-pin shipped for a while as exactly this — a no-op that looked
+        // fine because the error was swallowed.
+        //
+        // Deliberately NOT flagged (these are correct as-is):
+        //  - plain `set-option -t '=name'` (no `-w`/`-p`) is a SESSION target,
+        //    which correctly has NO colon.
+        //  - `set-option -g`/`-s` (global/server scope) take no `-t` at all.
+        val offenders = mutableListOf<String>()
+        for (file in kotlinSources()) {
+            file.readLines().forEachIndexed { idx, line ->
+                if (allowed.any { it in line }) return@forEachIndexed
+                val isSetWindowOption = Regex("""tmux\s+set-window-option\b""").containsMatchIn(line)
+                val isWindowScopedSetOption = isSetWindowOption ||
+                    (Regex("""tmux\s+set-option\b""").containsMatchIn(line) &&
+                        Regex("""(?<=\s)-w(?=\s)""").containsMatchIn(line))
+                if (!isWindowScopedSetOption) return@forEachIndexed
+                // Same no-colon-before-closing-quote check as the pane-target
+                // test above: a `-t` target of the form `'=something'` with no
+                // `:` anywhere before the closing quote.
+                val noColonTarget = Regex("""-t\s+(['"])=[^'":]*\1""")
+                if (noColonTarget.containsMatchIn(line)) {
+                    offenders += "${file.path}:${idx + 1}  [window set-option]  ${line.trim().take(140)}"
+                }
+            }
+        }
+        assertTrue(
+            offenders.isEmpty(),
+            "window-scoped tmux set-option using `=name` without the required trailing `:` — " +
+                "tmux rejects this with \"no such window\" (verified on 3.5a), and a trailing " +
+                "`2>/dev/null` swallows that failure silently:\n" +
+                offenders.joinToString("\n")
+        )
+    }
 }
