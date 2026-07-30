@@ -219,6 +219,8 @@ fun TerminalScreen(
     var showRestartConfirm by remember { mutableStateOf(false) }
     // File download / image preview state
     var showDownloadDialog by remember { mutableStateOf(false) }
+    // Path tapped in a Claude answer, awaiting confirmation.
+    var pendingFileLink by remember { mutableStateOf<String?>(null) }
     var downloadBusy by remember { mutableStateOf(false) }
     var downloadError by remember { mutableStateOf<String?>(null) }
     var previewFileName by remember { mutableStateOf<String?>(null) }
@@ -239,6 +241,50 @@ fun TerminalScreen(
     var showPalette by remember { mutableStateOf(false) }
     var showSessionDrawer by remember { mutableStateOf(false) }
     var showExpanded by remember { mutableStateOf(false) }
+
+    // Tapping a path in a Claude answer opens the confirm dialog. Null when the
+    // screen has no download capability, which also hides the links themselves.
+    // Remembered so RichBody's UriHandler isn't rebuilt on every recomposition.
+    val openFileLink: ((String) -> Unit)? = remember(onDownloadFile) {
+        if (onDownloadFile == null) null else { path: String ->
+            downloadError = null
+            downloadBusy = false
+            pendingFileLink = path
+        }
+    }
+
+    // Shared by the manual "Download file…" dialog and by file links tapped in a
+    // Claude answer. [stillOpen] reports whether the dialog that started the
+    // download is still on screen — if the user dismissed it mid-flight we drop
+    // the result rather than popping a save picker they no longer expect.
+    val runDownload: (String, () -> Boolean, () -> Unit) -> Unit = { path, stillOpen, close ->
+        downloadBusy = true
+        downloadError = null
+        downloadJob = scope.launch {
+            val bytes = onDownloadFile?.invoke(path)
+            if (!stillOpen()) return@launch
+            downloadBusy = false
+            when {
+                bytes === com.clauderemote.session.SessionOrchestrator.DOWNLOAD_TOO_LARGE ->
+                    downloadError = "File too large (>50 MB)."
+                bytes == null ->
+                    downloadError = "Download failed. Check the path and try again."
+                else -> {
+                    val name = fileNameFromPath(path)
+                    if (isImagePath(path)) {
+                        previewFileName = name
+                        previewBytes = bytes
+                        previewBitmap = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Default) {
+                            com.clauderemote.util.decodeImageBitmap(bytes)
+                        }
+                    } else {
+                        onSaveFile?.invoke(bytes, name)
+                    }
+                    close()
+                }
+            }
+        }
+    }
 
     // Replay terminal buffer when switching back from transcript. Keyed on the
     // EFFECTIVE view so the #70 auto-switch to Raw also triggers a replay.
@@ -618,35 +664,26 @@ fun TerminalScreen(
                             showDownloadDialog = false
                         },
                         onConfirm = { path ->
-                            downloadBusy = true
-                            downloadError = null
-                            val job = scope.launch {
-                                val bytes = onDownloadFile.invoke(path)
-                                // If the dialog was dismissed while the download ran, drop result silently.
-                                if (!showDownloadDialog) return@launch
-                                downloadBusy = false
-                                if (bytes === com.clauderemote.session.SessionOrchestrator.DOWNLOAD_TOO_LARGE) {
-                                    downloadError = "File too large (>50 MB)."
-                                    return@launch
-                                }
-                                if (bytes == null) {
-                                    downloadError = "Download failed. Check the path and try again."
-                                    return@launch
-                                }
-                                val name = fileNameFromPath(path)
-                                if (isImagePath(path)) {
-                                    previewFileName = name
-                                    previewBytes = bytes
-                                    previewBitmap = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Default) {
-                                        com.clauderemote.util.decodeImageBitmap(bytes)
-                                    }
-                                    if (showDownloadDialog) showDownloadDialog = false
-                                } else {
-                                    onSaveFile?.invoke(bytes, name)
-                                    if (showDownloadDialog) showDownloadDialog = false
-                                }
-                            }
-                            downloadJob = job
+                            runDownload(path, { showDownloadDialog }, { showDownloadDialog = false })
+                        },
+                    )
+                }
+
+                // Confirmation for a file path tapped in a Claude answer.
+                val linkPath = pendingFileLink
+                if (linkPath != null && onDownloadFile != null) {
+                    RemoteFileLinkDialog(
+                        path = linkPath,
+                        busy = downloadBusy,
+                        errorMessage = downloadError,
+                        onDismiss = {
+                            downloadJob?.cancel()
+                            downloadJob = null
+                            downloadBusy = false
+                            pendingFileLink = null
+                        },
+                        onConfirm = {
+                            runDownload(linkPath, { pendingFileLink != null }, { pendingFileLink = null })
                         },
                     )
                 }
@@ -1010,6 +1047,7 @@ fun TerminalScreen(
                                                 activity = sessionActivities[sid],
                                                 hookActive = sid in hookActiveSessions,
                                                 claudeSessionId = tab?.claudeSessionId,
+                                                onFileLink = openFileLink,
                                             )
                                         }
                                     }
@@ -1083,6 +1121,7 @@ fun TerminalScreen(
                                     claudeSessionId = activeClaudeSessionId,
                                     streamStatus = transcriptStatus,
                                     connectionLabel = connectionLabel,
+                                    onFileLink = openFileLink,
                                 )
                             }
                         } else {

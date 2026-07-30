@@ -27,6 +27,8 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.platform.LocalUriHandler
+import androidx.compose.ui.platform.UriHandler
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.drawBehind
@@ -215,6 +217,7 @@ internal fun SlashCommandRow(entry: TranscriptEntry.SlashCommand) {
 internal fun AssistantTextCard(
     entry: TranscriptEntry.AssistantText,
     framed: Boolean = false,
+    onFileLink: ((String) -> Unit)? = null,
 ) {
     val c = CRTheme.colors
     val m = CRTheme.metrics
@@ -227,7 +230,7 @@ internal fun AssistantTextCard(
         Modifier.padding(vertical = 2.dp)
     }
     Column(modifier = Modifier.fillMaxWidth().then(frameModifier)) {
-        RichBody(entry.text)
+        RichBody(entry.text, onFileLink = onFileLink)
         Row(
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(6.dp),
@@ -799,6 +802,7 @@ internal fun SystemNoteRow(entry: TranscriptEntry.SystemNote) {
 private fun RichBody(
     text: String,
     textAlign: androidx.compose.ui.text.style.TextAlign? = null,
+    onFileLink: ((String) -> Unit)? = null,
 ) {
     val c = CRTheme.colors
     val mono = FontFamily.Monospace
@@ -839,44 +843,64 @@ private fun RichBody(
         inlineCodeBackground = c.surface2,
         dividerColor = c.border.copy(alpha = 0.4f)
     )
-    Markdown(
-        content = remember(text) { taskListToGlyphs(text) },
-        colors = colors,
-        typography = typography,
-        padding = padding,
-        components = com.mikepenz.markdown.compose.components.markdownComponents(
-            table = { model -> CRMarkdownTable(model) },
-            blockQuote = { model ->
-                // The library's default block-quote renderer only shows the
-                // FIRST paragraph of a multi-paragraph quote — the rest of a
-                // quoted email/message silently vanished (only the greeting
-                // line showed). Render the full quote ourselves: strip the '>'
-                // markers and run the inner text back through Markdown() (so
-                // paragraphs, emphasis, etc. are preserved) behind a left
-                // accent bar. Stripping the markers means `inner` is no longer
-                // a quote, so this doesn't recurse.
-                val raw = model.content.substring(model.node.startOffset, model.node.endOffset)
-                val inner = raw.lineSequence()
-                    .map { it.replace(Regex("^\\s*>\\s?"), "") }
-                    .joinToString("\n")
-                    .trim()
-                Box(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(vertical = 2.dp)
-                        .leftAccentBar(c.border.copy(alpha = 0.5f), 2.dp)
-                        .padding(start = 10.dp)
-                ) {
-                    Markdown(
-                        content = inner,
-                        colors = colors,
-                        typography = typography,
-                        padding = padding,
-                    )
+    // When the caller can act on file links, rewrite paths Claude mentioned into
+    // markdown links carrying REMOTE_FILE_SCHEME and intercept them below.
+    val content = remember(text, onFileLink != null) {
+        val glyphs = taskListToGlyphs(text)
+        if (onFileLink != null) linkifyRemoteFilePaths(glyphs) else glyphs
+    }
+    val platformUriHandler = LocalUriHandler.current
+    val uriHandler = remember(onFileLink, platformUriHandler) {
+        object : UriHandler {
+            override fun openUri(uri: String) {
+                if (onFileLink != null && uri.startsWith(REMOTE_FILE_SCHEME)) {
+                    onFileLink(uri.removePrefix(REMOTE_FILE_SCHEME))
+                } else {
+                    platformUriHandler.openUri(uri)
                 }
             }
+        }
+    }
+    CompositionLocalProvider(LocalUriHandler provides uriHandler) {
+        Markdown(
+            content = content,
+            colors = colors,
+            typography = typography,
+            padding = padding,
+            components = com.mikepenz.markdown.compose.components.markdownComponents(
+                table = { model -> CRMarkdownTable(model) },
+                blockQuote = { model ->
+                    // The library's default block-quote renderer only shows the
+                    // FIRST paragraph of a multi-paragraph quote — the rest of a
+                    // quoted email/message silently vanished (only the greeting
+                    // line showed). Render the full quote ourselves: strip the '>'
+                    // markers and run the inner text back through Markdown() (so
+                    // paragraphs, emphasis, etc. are preserved) behind a left
+                    // accent bar. Stripping the markers means `inner` is no longer
+                    // a quote, so this doesn't recurse.
+                    val raw = model.content.substring(model.node.startOffset, model.node.endOffset)
+                    val inner = raw.lineSequence()
+                        .map { it.replace(Regex("^\\s*>\\s?"), "") }
+                        .joinToString("\n")
+                        .trim()
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(vertical = 2.dp)
+                            .leftAccentBar(c.border.copy(alpha = 0.5f), 2.dp)
+                            .padding(start = 10.dp)
+                    ) {
+                        Markdown(
+                            content = inner,
+                            colors = colors,
+                            typography = typography,
+                            padding = padding,
+                        )
+                    }
+                }
+            )
         )
-    )
+    }
 }
 
 /**

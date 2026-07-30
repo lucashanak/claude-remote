@@ -81,6 +81,8 @@ fun TranscriptView(
     claudeSessionId: String? = null,
     streamStatus: String? = null,
     connectionLabel: String? = null,
+    /** Tapped a file path Claude mentioned in an answer — null disables the links. */
+    onFileLink: ((String) -> Unit)? = null,
 ) {
     // Key list+scroll state on the session uuid so switching tabs resets
     // scroll position and stickiness — otherwise the new session inherits
@@ -570,7 +572,11 @@ fun TranscriptView(
                                         is TranscriptEntry.UserPrompt -> UserPromptCard(e)
                                         is TranscriptEntry.SlashCommand -> SlashCommandRow(e)
                                         is TranscriptEntry.AssistantText ->
-                                            AssistantTextCard(e, framed = item.isFinalAnswer)
+                                            AssistantTextCard(
+                                                e,
+                                                framed = item.isFinalAnswer,
+                                                onFileLink = onFileLink,
+                                            )
                                         is TranscriptEntry.AssistantThinking -> ThinkingCard(e)
                                         is TranscriptEntry.ToolCall -> when (e.name) {
                                             "AskUserQuestion" ->

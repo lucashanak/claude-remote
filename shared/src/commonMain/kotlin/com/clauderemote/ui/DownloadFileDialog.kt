@@ -99,6 +99,51 @@ fun DownloadPathDialog(
 }
 
 /**
+ * Confirmation for a file path tapped in the transcript. Unlike
+ * [DownloadPathDialog] the path is already known, so this only guards against a
+ * mis-tap on a long message before we pull bytes over the wire.
+ */
+@Composable
+fun RemoteFileLinkDialog(
+    path: String,
+    busy: Boolean,
+    errorMessage: String?,
+    onDismiss: () -> Unit,
+    onConfirm: () -> Unit,
+) {
+    val c = CRTheme.colors
+    FloatingDialog(
+        visible = true,
+        onDismiss = { if (!busy) onDismiss() },
+        theme = CRThemeSnapshot.current(),
+        title = { Text(fileNameFromPath(path), color = c.text) },
+        text = {
+            Column {
+                Text(path, style = CRType.monoTiny, color = c.textDim)
+                if (errorMessage != null) {
+                    Text(
+                        errorMessage,
+                        style = CRType.bodyDim,
+                        color = c.disconnected,
+                        modifier = Modifier.padding(top = 8.dp),
+                    )
+                }
+            }
+        },
+        confirmButton = {
+            if (busy) {
+                CircularProgressIndicator(modifier = Modifier.width(24.dp), color = c.text)
+            } else {
+                TextButton(onClick = onConfirm) { Text("Download", color = c.text) }
+            }
+        },
+        dismissButton = {
+            TextButton(enabled = !busy, onClick = onDismiss) { Text("Cancel", color = c.textDim) }
+        },
+    )
+}
+
+/**
  * Inline image preview with a Save action. If [bitmap] is null the file could
  * not be decoded, so only the Save / Close actions are shown.
  */
