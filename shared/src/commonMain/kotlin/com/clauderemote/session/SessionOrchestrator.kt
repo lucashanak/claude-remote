@@ -850,7 +850,11 @@ class SessionOrchestrator(
     private fun buildAttachCommand(tmuxSessionName: String): String {
         val escaped = tmuxSessionName.replace("'", "'\\''")
         return tmuxProbes.singleClientPreamble(tmuxSessionName, deviceKey) +
-            
+            // Un-pin: release any window a historical `resize-window` left in
+            // `window-size manual` so it tracks the most-recently-active client
+            // again (current-device-wins). We never set `manual` anymore; this
+            // only heals windows pinned by older builds.
+            "tmux set-option -w -t '=$escaped' window-size latest 2>/dev/null; " +
             "tmux set-option -g history-limit 100000 2>/dev/null; " +
             "tmux attach-session -t '=$escaped'"
     }

@@ -57,34 +57,18 @@ internal class TmuxProbes(
         // the final geometry, so replace any pending one with this.
         val kick = scope.launch {
             kotlinx.coroutines.delay(REDRAW_COALESCE_MS)
-            // LAST-DEVICE-PRIORITY sizing. `window-size latest` made the pane
-            // follow whichever client was most recently active — and stale
-            // clients (e.g. Eternal Terminal keeps its server-side shells alive
-            // across drops, so old 80x24 `tmux attach` clients pile up) kept
-            // stealing it and shrinking the pane, leaving the terminal not
-            // filling the window. Instead: switch to manual sizing and force the
-            // window to THIS view's size on attach/redraw. Whoever opens or
-            // interacts with the session last sets its size; zombie clients can
-            // no longer override it. A genuine second live device just re-forces
-            // its own size next time it redraws.
-            //
-            // …but ONLY when the size actually differs. Re-pinning a window to
-            // the size it already has is pure churn through tmux's layout code
-            // for zero visible effect, and it ran on every single redraw. tmux
-            // itself is the authority here (another device may have re-pinned
-            // the window since our last kick); [pinnedWindowSize] is only the
-            // fallback for when the geometry probe fails.
-            if (tmuxName != null) {
-                val want = cols to rows
-                val actual = probeTmuxGeometry(conn, tmuxName, sessionId, cols, rows)
-                val needsResize = if (actual != null) actual != want else pinnedWindowSize[tmuxName] != want
-                if (needsResize) {
-                    if (forceWindowSize(conn, tmuxName, cols, rows)) pinnedWindowSize[tmuxName] = want
-                } else {
-                    pinnedWindowSize[tmuxName] = want
-                    FileLogger.log("TermGeom", "kickRedraw $sessionId window already ${cols}x${rows} — no resize-window")
-                }
-            }
+            // CURRENT-DEVICE-WINS sizing via tmux's native `window-size latest`
+            // (the default; we never set `manual`). The `conn.resize(cols,rows)`
+            // above is a channel SIGWINCH → tmux MSG_RESIZE, which promotes THIS
+            // (active) client to the window's `latest` and sizes the window to
+            // its pty — so the device the user is actually on wins, with NO
+            // server-side `resize-window`. We deliberately dropped that call: it
+            // implicitly flips the window to `window-size manual` (documented
+            // tmux side-effect) and PINS it to one device, which is exactly why
+            // a phone kept seeing a stale desktop width. A zombie/stale client
+            // can only steal the size at the instant the active client drops
+            // (tmux promotes a survivor), and the next attach's SIGWINCH self-
+            // heals it — no manual pinning needed.
             val refreshed = tmuxName != null && refreshTmuxClient(conn, tmuxName)
             if (!refreshed) {
                 // Fallback: SIGWINCH toggle. Shrink COLS, not ROWS — row
@@ -108,15 +92,9 @@ internal class TmuxProbes(
     // Pending (debounced) redraw per session — see REDRAW_COALESCE_MS.
     private val redrawJobs = java.util.concurrent.ConcurrentHashMap<String, kotlinx.coroutines.Job>()
 
-    // Last size we successfully pinned per tmux window, keyed by tmux session
-    // name. Only consulted when the geometry probe can't tell us what tmux
-    // currently has (exec failure mid-reconnect).
-    private val pinnedWindowSize = java.util.concurrent.ConcurrentHashMap<String, Pair<Int, Int>>()
-
-    /** Session teardown: cancel a pending redraw and forget its pinned size. */
-    fun dispose(sessionId: String, tmuxName: String?) {
+    /** Session teardown: cancel a pending redraw. */
+    fun dispose(sessionId: String, @Suppress("UNUSED_PARAMETER") tmuxName: String?) {
         redrawJobs.remove(sessionId)?.cancel()
-        if (tmuxName != null) pinnedWindowSize.remove(tmuxName)
     }
 
     /**
@@ -163,36 +141,6 @@ internal class TmuxProbes(
     }
 
     /**
-     * Force [tmuxName]'s window to [cols]x[rows] — last-device-priority sizing.
-     * Switches the window to manual sizing (so tmux stops auto-tracking the
-     * most-recently-active client, which lets stale/zombie clients shrink the
-     * pane) and pins it to this view's size. Run only when the size actually
-     * CHANGES (see kickRedraw), so the device the user is looking at still
-     * wins without re-pinning an already-correct window on every redraw.
-     */
-    private suspend fun forceWindowSize(conn: SshManager, tmuxName: String, cols: Int, rows: Int): Boolean =
-        kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
-            try {
-                val sshSession = conn.getSession() ?: return@withContext false
-                val escaped = tmuxName.replace("'", "'\\''")
-                val ch = sshSession.openChannel("exec") as com.jcraft.jsch.ChannelExec
-                ch.setCommand(
-                    
-                        "tmux resize-window -t '=$escaped' -x $cols -y $rows 2>/dev/null; echo OK"
-                )
-                ch.inputStream = null
-                val input = ch.inputStream
-                ch.connect(1500)
-                val out = input.bufferedReader().readText()
-                ch.disconnect()
-                out.contains("OK")
-            } catch (e: Exception) {
-                FileLogger.log(TAG, "resize-window failed for $tmuxName: ${e.message}")
-                false
-            }
-        }
-
-    /**
      * Run `tmux refresh-client` for every client attached to [tmuxName] via a
      * short-lived exec channel. Returns true only if at least one client was
      * actually refreshed (the command echoes OK per successful refresh).
@@ -228,35 +176,6 @@ internal class TmuxProbes(
      * window is what we'd pin, so comparing it to the request is exact. Changes
      * no tmux state.
      */
-    private suspend fun probeTmuxGeometry(
-        conn: SshManager,
-        tmuxName: String,
-        sessionId: String,
-        cols: Int,
-        rows: Int,
-    ): Pair<Int, Int>? = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
-        try {
-            val sshSession = conn.getSession() ?: return@withContext null
-            val escaped = tmuxName.replace("'", "'\\''")
-            val ch = sshSession.openChannel("exec") as com.jcraft.jsch.ChannelExec
-            ch.setCommand(
-                "tmux display-message -p -t '=$escaped' " +
-                    "'#{pane_width}x#{pane_height} win=#{window_width}x#{window_height} ws=#{?window-size,#{window-size},?}' 2>/dev/null"
-            )
-            ch.inputStream = null
-            val input = ch.inputStream
-            ch.connect(1500)
-            val out = input.bufferedReader().readText().trim()
-            ch.disconnect()
-            FileLogger.log("TermGeom", "kickRedraw $sessionId tmux pane=$out (requested ${cols}x${rows})")
-            val win = Regex("win=(\\d+)x(\\d+)").find(out) ?: return@withContext null
-            win.groupValues[1].toInt() to win.groupValues[2].toInt()
-        } catch (e: Exception) {
-            FileLogger.log("TermGeom", "kickRedraw $sessionId tmux probe failed: ${e.message}")
-            null
-        }
-    }
-
     /**
      * Synchronous tmux session existence probe via SSH exec channel.
      * Returns true if `tmux has-session -t=<name>` exits 0. Returns true on
