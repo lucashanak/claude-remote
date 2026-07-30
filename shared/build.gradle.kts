@@ -96,6 +96,26 @@ kotlin {
     }
 }
 
+// TmuxTargetSyntaxTest SCANS the Kotlin sources of every module at runtime, which
+// Gradle cannot see — they are not on the test classpath as files. With the build
+// cache on (org.gradle.caching), desktopTest could be restored FROM-CACHE while a
+// scanned source has changed, so the guard would silently not run: exactly the
+// failure mode it exists to prevent. Declaring the scanned trees as inputs makes a
+// change to any of them invalidate the task.
+tasks.named<Test>("desktopTest") {
+    inputs.files(
+        rootProject.layout.projectDirectory.let { root ->
+            listOf("shared/src", "androidApp/src", "wearApp/src", "desktopApp/src")
+                .map { root.dir(it) }
+                .filter { it.asFile.isDirectory }
+                .map { project.fileTree(it) { include("**/*.kt") } }
+        }
+    )
+        .withPropertyName("tmuxTargetScanSources")
+        .withPathSensitivity(PathSensitivity.RELATIVE)
+        .ignoreEmptyDirectories()
+}
+
 // `./gradlew :shared:integrationTest` — the slow lane. Not wired into `check`
 // or `allTests`: it needs sshd/tmux/jq on the box, so it stays opt-in.
 val integrationTest by tasks.registering(Test::class) {
@@ -111,10 +131,18 @@ val integrationTest by tasks.registering(Test::class) {
     dependsOn(compilation.compileTaskProvider)
 
     useJUnit()
-    // Real external processes: serial, and never cached as up-to-date (the
-    // environment, not the inputs, is what these assert against).
+    // Real external processes: serial, and never skipped. These assert against
+    // the ENVIRONMENT (a live sshd, a real tmux server, the installed restore.sh)
+    // rather than against their declared inputs, so reusing a previous result is
+    // always wrong.
+    //
+    // Both switches are needed: `upToDateWhen { false }` only defeats the
+    // up-to-date check, and a task that is out-of-date can still be restored
+    // FROM-CACHE once org.gradle.caching is on — which would "pass" this lane
+    // without ever starting sshd.
     maxParallelForks = 1
     outputs.upToDateWhen { false }
+    outputs.cacheIf { false }
 
     // HARD SAFETY INVARIANT. This dev box runs the user's live Claude sessions
     // on the DEFAULT tmux socket, and the tests themselves execute inside one of
