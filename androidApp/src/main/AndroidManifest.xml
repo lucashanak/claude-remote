@@ -13,6 +13,7 @@
     <application
         android:name="com.clauderemote.App"
         android:allowBackup="true"
+        android:largeHeap="true"
         android:icon="@mipmap/ic_launcher"
         android:label="Claude Remote"
         android:theme="@style/Theme.ClaudeRemote"

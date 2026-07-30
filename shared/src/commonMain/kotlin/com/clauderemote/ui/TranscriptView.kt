@@ -83,6 +83,8 @@ fun TranscriptView(
     connectionLabel: String? = null,
     /** Tapped a file path Claude mentioned in an answer — null disables the links. */
     onFileLink: ((String) -> Unit)? = null,
+    /** Narrows file-path candidates to the ones that really exist on the server. */
+    onVerifyPaths: (suspend (List<String>) -> Set<String>)? = null,
 ) {
     // Key list+scroll state on the session uuid so switching tabs resets
     // scroll position and stickiness — otherwise the new session inherits
@@ -576,6 +578,7 @@ fun TranscriptView(
                                                 e,
                                                 framed = item.isFinalAnswer,
                                                 onFileLink = onFileLink,
+                                                onVerifyPaths = onVerifyPaths,
                                             )
                                         is TranscriptEntry.AssistantThinking -> ThinkingCard(e)
                                         is TranscriptEntry.ToolCall -> when (e.name) {

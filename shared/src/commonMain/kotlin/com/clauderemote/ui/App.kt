@@ -88,6 +88,8 @@ fun App(
     composeTerminalUnderTranscript: Boolean = false
 ) {
     val scope = rememberCoroutineScope()
+    // Which chat-mentioned paths the server confirmed are real files.
+    val pathVerifyCache = remember { RemotePathCache() }
 
     var currentScreen by remember { mutableStateOf(Screen.LAUNCHER) }
     var selectedServer by remember { mutableStateOf<SshServer?>(null) }
@@ -973,16 +975,26 @@ fun App(
                             if (id == null) {
                                 null
                             } else {
-                                // Resolve a relative path against the session folder so
-                                // the user can type "output.png" instead of an absolute
-                                // path; absolute paths are passed through untouched.
                                 val folder = tabManager.getTab(id)?.folder ?: "~"
-                                val remotePath = if (path.startsWith("/") || path.startsWith("~")) {
-                                    path
-                                } else {
-                                    "${folder.trimEnd('/')}/$path"
+                                sessionOrchestrator.downloadFile(id, resolveSessionPath(path, folder))
+                            }
+                        },
+                        onVerifyPaths = { paths ->
+                            val id = activeTabId
+                            if (id == null) {
+                                emptySet()
+                            } else {
+                                val folder = tabManager.getTab(id)?.folder ?: "~"
+                                // Key on the RESOLVED path, scoped by session, so two
+                                // sessions in different folders can't answer for each other.
+                                val resolved = paths.associateWith { resolveSessionPath(it, folder) }
+                                val key = { p: String -> id + " " + resolved[p] }
+                                val ask = paths.filter { pathVerifyCache[key(it)] == null }
+                                if (ask.isNotEmpty()) {
+                                    val found = sessionOrchestrator.statFiles(id, ask.map { resolved[it]!! })
+                                    ask.forEach { pathVerifyCache[key(it)] = resolved[it] in found }
                                 }
-                                sessionOrchestrator.downloadFile(id, remotePath)
+                                paths.filterTo(mutableSetOf()) { pathVerifyCache[key(it)] == true }
                             }
                         },
                         onSaveFile = onSaveFile,

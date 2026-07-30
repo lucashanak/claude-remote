@@ -1924,6 +1924,13 @@ class SessionOrchestrator(
     suspend fun downloadFile(sessionId: String, remotePath: String): ByteArray? =
         remoteOps.downloadFile(sessionId, remotePath)
 
+    /**
+     * Which of [remotePaths] are regular files. Used to confirm the paths Claude
+     * mentions in chat before rendering them as download links.
+     */
+    suspend fun statFiles(sessionId: String, remotePaths: List<String>): Set<String> =
+        remoteOps.statFiles(sessionId, remotePaths)
+
     fun getBuffer(sessionId: String): String = terminalIO.getBuffer(sessionId)
 
     private fun generateId(): String {
@@ -1945,6 +1952,6 @@ class SessionOrchestrator(
         private const val TAG = "SessionOrchestrator"
         /** Sentinel returned by [downloadFile] when the remote file exceeds [DOWNLOAD_SIZE_LIMIT]. */
         val DOWNLOAD_TOO_LARGE: ByteArray = ByteArray(0)
-        private const val DOWNLOAD_SIZE_LIMIT = 50L * 1024 * 1024 // 50 MB
+        private const val DOWNLOAD_SIZE_LIMIT = 200L * 1024 * 1024 // 200 MB
     }
 }

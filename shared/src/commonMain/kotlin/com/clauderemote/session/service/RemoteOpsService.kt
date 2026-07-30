@@ -174,7 +174,10 @@ internal class RemoteOpsService(
                     remotePath.startsWith("/")     -> remotePath
                     else                           -> "$home/$remotePath"
                 }
-                val attrs = sftp.lstat(resolved)
+                // stat, NOT lstat: lstat reports the symlink's own size (a few
+                // bytes) while get() follows it, which let a link to a huge file
+                // slip past this guard and then blow up the heap.
+                val attrs = sftp.stat(resolved)
                 if (attrs.size > DOWNLOAD_SIZE_LIMIT) {
                     FileLogger.log(TAG, "Download refused: $resolved is ${attrs.size} bytes (limit $DOWNLOAD_SIZE_LIMIT)")
                     return@withContext SessionOrchestrator.DOWNLOAD_TOO_LARGE
@@ -185,13 +188,63 @@ internal class RemoteOpsService(
             } finally {
                 sftp.disconnect()
             }
+        } catch (e: OutOfMemoryError) {
+            // The whole file is buffered in memory, so a large download can
+            // exhaust the app heap. Report it like any other failure instead of
+            // letting it tear the process down.
+            FileLogger.error(TAG, "Download ran out of memory: $remotePath", RuntimeException(e))
+            SessionOrchestrator.DOWNLOAD_TOO_LARGE
         } catch (e: Exception) {
             FileLogger.error(TAG, "Download file failed: $remotePath", e)
             null
         }
     }
 
+    /**
+     * Which of [remotePaths] are regular files we could actually download.
+     * Used to confirm the file paths Claude mentions in chat before offering
+     * them as links, so prose never turns into a bogus download.
+     *
+     * One SFTP channel is reused for the whole batch, and paths go over the
+     * wire as data — no shell quoting, so names with spaces or apostrophes
+     * are handled like any other.
+     */
+    suspend fun statFiles(sessionId: String, remotePaths: List<String>): Set<String> =
+        withContext(Dispatchers.IO) {
+            if (remotePaths.isEmpty()) return@withContext emptySet()
+            try {
+                val conn = registry.ssh(sessionId) ?: return@withContext emptySet()
+                val sshSession = conn.getSession() ?: return@withContext emptySet()
+                val sftp = sshSession.openChannel("sftp") as com.jcraft.jsch.ChannelSftp
+                sftp.connect(5000)
+                try {
+                    val home = sftp.home ?: "~"
+                    remotePaths.filterTo(mutableSetOf()) { path ->
+                        val resolved = when {
+                            path == "~" -> home
+                            path.startsWith("~/") -> home + path.substring(1)
+                            path.startsWith("/") -> path
+                            else -> "$home/$path"
+                        }
+                        try {
+                            // stat() follows symlinks, so a link to a real file counts.
+                            !sftp.stat(resolved).isDir
+                        } catch (_: Exception) {
+                            false // no such file — the common case for prose
+                        }
+                    }
+                } finally {
+                    sftp.disconnect()
+                }
+            } catch (e: Exception) {
+                FileLogger.error(TAG, "statFiles failed for $sessionId", e)
+                emptySet()
+            }
+        }
+
     companion object {
-        private const val DOWNLOAD_SIZE_LIMIT = 50L * 1024 * 1024 // 50 MB
+        // Raised from 50 MB on request. The download is buffered whole in memory,
+        // so this rides on androidApp's largeHeap; see the OutOfMemoryError catch.
+        private const val DOWNLOAD_SIZE_LIMIT = 200L * 1024 * 1024 // 200 MB
     }
 }

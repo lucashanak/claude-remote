@@ -218,6 +218,7 @@ internal fun AssistantTextCard(
     entry: TranscriptEntry.AssistantText,
     framed: Boolean = false,
     onFileLink: ((String) -> Unit)? = null,
+    onVerifyPaths: (suspend (List<String>) -> Set<String>)? = null,
 ) {
     val c = CRTheme.colors
     val m = CRTheme.metrics
@@ -230,7 +231,18 @@ internal fun AssistantTextCard(
         Modifier.padding(vertical = 2.dp)
     }
     Column(modifier = Modifier.fillMaxWidth().then(frameModifier)) {
-        RichBody(entry.text, onFileLink = onFileLink)
+        // Ask the server which of the mentioned paths are real files before
+        // offering any of them as a link; until it answers, nothing is linkified.
+        val candidates = remember(entry.text) {
+            detectFilePathCandidates(entry.text).map { it.path }.distinct()
+        }
+        var verifiedPaths by remember(entry.text) { mutableStateOf(emptySet<String>()) }
+        if (onVerifyPaths != null && onFileLink != null && candidates.isNotEmpty()) {
+            LaunchedEffect(entry.text) {
+                verifiedPaths = try { onVerifyPaths(candidates) } catch (_: Exception) { emptySet() }
+            }
+        }
+        RichBody(entry.text, onFileLink = onFileLink, verifiedPaths = verifiedPaths)
         Row(
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(6.dp),
@@ -803,6 +815,7 @@ private fun RichBody(
     text: String,
     textAlign: androidx.compose.ui.text.style.TextAlign? = null,
     onFileLink: ((String) -> Unit)? = null,
+    verifiedPaths: Set<String> = emptySet(),
 ) {
     val c = CRTheme.colors
     val mono = FontFamily.Monospace
@@ -845,9 +858,9 @@ private fun RichBody(
     )
     // When the caller can act on file links, rewrite paths Claude mentioned into
     // markdown links carrying REMOTE_FILE_SCHEME and intercept them below.
-    val content = remember(text, onFileLink != null) {
+    val content = remember(text, onFileLink != null, verifiedPaths) {
         val glyphs = taskListToGlyphs(text)
-        if (onFileLink != null) linkifyRemoteFilePaths(glyphs) else glyphs
+        if (onFileLink != null) linkifyRemoteFilePaths(glyphs, verifiedPaths) else glyphs
     }
     val platformUriHandler = LocalUriHandler.current
     val uriHandler = remember(onFileLink, platformUriHandler) {

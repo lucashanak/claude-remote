@@ -123,6 +123,8 @@ fun TerminalScreen(
     onRenameSession: ((sessionId: String, newAlias: String) -> Unit)? = null,
     onAttachFile: (suspend () -> String?)? = null,
     onDownloadFile: (suspend (path: String) -> ByteArray?)? = null,
+    /** Narrows chat file-path candidates to the ones that are really files on the server. */
+    onVerifyPaths: (suspend (List<String>) -> Set<String>)? = null,
     onSaveFile: ((bytes: ByteArray, suggestedName: String) -> Unit)? = null,
     onFetchClaudeMd: (suspend () -> String)? = null,
     onSaveClaudeMd: (suspend (String) -> Unit)? = null,
@@ -1048,6 +1050,7 @@ fun TerminalScreen(
                                                 hookActive = sid in hookActiveSessions,
                                                 claudeSessionId = tab?.claudeSessionId,
                                                 onFileLink = openFileLink,
+                                                onVerifyPaths = onVerifyPaths,
                                             )
                                         }
                                     }
@@ -1122,6 +1125,7 @@ fun TerminalScreen(
                                     streamStatus = transcriptStatus,
                                     connectionLabel = connectionLabel,
                                     onFileLink = openFileLink,
+                                    onVerifyPaths = onVerifyPaths,
                                 )
                             }
                         } else {
