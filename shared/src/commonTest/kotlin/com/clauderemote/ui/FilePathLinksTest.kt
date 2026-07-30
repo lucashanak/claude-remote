@@ -95,11 +95,35 @@ class FilePathLinksTest {
     }
 
     @Test
-    fun ignoresCodeBlocksAndExistingLinks() {
-        val fenced = "Here:\n\n```bash\ncat /etc/hosts.conf\n```"
-        assertEquals(emptyList(), candidates(fenced))
-        assertEquals(emptyList(), candidates("Run this:\n\n    cp src/a.txt dst/b.txt\n"))
+    fun ignoresExistingLinks() {
         assertEquals(emptyList(), candidates("See [the doc](docs/readme.md) for more."))
+    }
+
+    @Test
+    fun findsPathsInsideCodeBlocks() {
+        // Dropping the bare path in a fence is how Claude hands over a file, so
+        // these must be verified — they get a clickable renderer, not a rewrite.
+        val fenced = "Archive ready:\n\n```\n/home/l/db-2026-07-30.tar.gz\n```"
+        assertEquals(listOf("/home/l/db-2026-07-30.tar.gz"), candidates(fenced))
+        assertEquals(listOf("src/a.txt", "dst/b.txt"), candidates("Run:\n\n    cp src/a.txt dst/b.txt\n"))
+    }
+
+    @Test
+    fun linkifyNeverRewritesInsideCodeBlocks() {
+        // Markdown isn't parsed in a fence — an injected link would render as
+        // literal `[x](crfile://x)` garbage.
+        val fenced = "Archive:\n\n```\n/home/l/db.tar.gz\n```"
+        assertEquals(fenced, linkifyRemoteFilePaths(fenced, setOf("/home/l/db.tar.gz")))
+        val indented = "Run:\n\n    cp src/a.txt there\n"
+        assertEquals(indented, linkifyRemoteFilePaths(indented, setOf("src/a.txt")))
+    }
+
+    @Test
+    fun fenceInnerTextStripsDelimitersAndLanguage() {
+        assertEquals("/home/l/db.tar.gz", fenceInnerText("```\n/home/l/db.tar.gz\n```"))
+        assertEquals("cat x", fenceInnerText("```bash\ncat x\n```"))
+        assertEquals("a\nb", fenceInnerText("~~~\na\nb\n~~~"))
+        assertEquals("plain", fenceInnerText("plain"))
     }
 
     // --- linkify: only what the server confirmed --------------------------

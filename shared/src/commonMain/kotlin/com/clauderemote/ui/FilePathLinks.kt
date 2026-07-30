@@ -115,9 +115,12 @@ private fun plausibleCandidate(s: String): Boolean {
  * candidate list, NOT a list of known files — feed the paths through the
  * server check and pass the surviving set to [linkifyRemoteFilePaths].
  */
-fun detectFilePathCandidates(text: String): List<FilePathMatch> {
+fun detectFilePathCandidates(
+    text: String,
+    includeCodeBlocks: Boolean = true,
+): List<FilePathMatch> {
     if (text.isEmpty()) return emptyList()
-    val mask = buildMask(text)
+    val mask = buildMask(text, includeCodeBlocks)
     val out = mutableListOf<FilePathMatch>()
 
     // Inline code first — its content is taken whole, so `My Report.pdf` and
@@ -179,9 +182,14 @@ fun detectFilePathCandidates(text: String): List<FilePathMatch> {
  * isn't parsed there, so an injected link would render as literal `[x](crfile://x)`
  * garbage) plus existing links and autolinks.
  */
-private fun buildMask(text: String): BooleanArray {
+private fun buildMask(text: String, includeCodeBlocks: Boolean): BooleanArray {
     val mask = BooleanArray(text.length)
 
+    // Code blocks are masked for the markdown REWRITE (an injected link would
+    // render as literal `[x](crfile://x)` there) but not when merely collecting
+    // candidates — a standalone path in a fence is exactly how Claude hands over
+    // a file, and those get their own clickable renderer instead.
+    if (!includeCodeBlocks) {
     var inFence = false
     var fenceMarker = ""
     var lineStart = 0
@@ -212,6 +220,7 @@ private fun buildMask(text: String): BooleanArray {
         if (nl < 0) break
         lineStart = nl + 1
     }
+    }
 
     for (re in listOf(MARKDOWN_LINK, AUTOLINK)) {
         for (m in re.findAll(text)) {
@@ -240,7 +249,8 @@ private fun destination(path: String): String {
  */
 fun linkifyRemoteFilePaths(markdown: String, verifiedPaths: Set<String>): String {
     if (verifiedPaths.isEmpty()) return markdown
-    val matches = detectFilePathCandidates(markdown).filter { it.path in verifiedPaths }
+    val matches = detectFilePathCandidates(markdown, includeCodeBlocks = false)
+        .filter { it.path in verifiedPaths }
     if (matches.isEmpty()) return markdown
     val sb = StringBuilder(markdown.length + matches.size * 24)
     var cursor = 0

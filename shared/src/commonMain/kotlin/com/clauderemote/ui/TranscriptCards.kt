@@ -30,6 +30,12 @@ import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.platform.UriHandler
 import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.LinkAnnotation
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.buildAnnotatedString
+import androidx.compose.ui.text.style.TextDecoration
+import androidx.compose.ui.text.withLink
+import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.graphics.Color
@@ -882,6 +888,23 @@ private fun RichBody(
             padding = padding,
             components = com.mikepenz.markdown.compose.components.markdownComponents(
                 table = { model -> CRMarkdownTable(model) },
+                // Claude hands over a file by dropping the bare path in a fence, so
+                // code blocks need their own clickable rendering — markdown injected
+                // into a fence would show up as literal `[x](crfile://x)` text.
+                codeFence = { model ->
+                    CodeBlockWithFileLinks(
+                        fenceInnerText(model.content.substring(model.node.startOffset, model.node.endOffset)),
+                        verifiedPaths,
+                        onFileLink,
+                    )
+                },
+                codeBlock = { model ->
+                    CodeBlockWithFileLinks(
+                        fenceInnerText(model.content.substring(model.node.startOffset, model.node.endOffset)),
+                        verifiedPaths,
+                        onFileLink,
+                    )
+                },
                 blockQuote = { model ->
                     // The library's default block-quote renderer only shows the
                     // FIRST paragraph of a multi-paragraph quote — the rest of a
@@ -1156,6 +1179,74 @@ private fun MonospaceBlock(text: String) {
             modifier = Modifier.padding(horizontal = 8.dp, vertical = 6.dp),
             style = CRType.mono,
             color = c.text
+        )
+    }
+}
+
+/** Strips the ``` / ~~~ delimiter lines (and any language tag) off a fence. */
+internal fun fenceInnerText(raw: String): String {
+    val lines = raw.lines()
+    if (lines.isEmpty()) return raw
+    var from = 0
+    var to = lines.size
+    val first = lines.first().trimStart()
+    if (first.startsWith("```") || first.startsWith("~~~")) from = 1
+    if (to > from) {
+        val last = lines[to - 1].trimStart()
+        if (last.startsWith("```") || last.startsWith("~~~")) to--
+    }
+    return lines.subList(from, to).joinToString("\n").trimEnd()
+}
+
+/**
+ * A fenced/indented code block whose confirmed file paths are tappable. Same
+ * monospace chrome as [MonospaceBlock]; only verified spans get decorated, so an
+ * ordinary snippet looks exactly as it did before.
+ */
+@Composable
+private fun CodeBlockWithFileLinks(
+    text: String,
+    verifiedPaths: Set<String>,
+    onFileLink: ((String) -> Unit)?,
+) {
+    val c = CRTheme.colors
+    val accent = c.accent
+    val annotated = remember(text, verifiedPaths, onFileLink) {
+        if (onFileLink == null || verifiedPaths.isEmpty()) {
+            AnnotatedString(text)
+        } else {
+            buildAnnotatedString {
+                var cursor = 0
+                for (m in detectFilePathCandidates(text).filter { it.path in verifiedPaths }) {
+                    if (m.start < cursor) continue
+                    append(text.substring(cursor, m.start))
+                    withLink(
+                        LinkAnnotation.Clickable(
+                            tag = m.path,
+                            linkInteractionListener = { onFileLink(m.path) },
+                        )
+                    ) {
+                        withStyle(
+                            SpanStyle(color = accent, textDecoration = TextDecoration.Underline)
+                        ) { append(text.substring(m.start, m.end)) }
+                    }
+                    cursor = m.end
+                }
+                append(text.substring(cursor))
+            }
+        }
+    }
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(c.surface2, RoundedCornerShape(4.dp))
+            .horizontalScroll(rememberScrollState())
+    ) {
+        Text(
+            annotated,
+            modifier = Modifier.padding(horizontal = 8.dp, vertical = 6.dp),
+            style = CRType.mono,
+            color = c.text,
         )
     }
 }
