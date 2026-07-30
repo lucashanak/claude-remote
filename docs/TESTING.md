@@ -76,24 +76,57 @@ faked in tests — the desktop `PlatformPreferences` writes to
 
 ## CI
 
-Tests live in their own workflow, `.github/workflows/tests.yml`, with two jobs
-that run in parallel: `unit` (fast) and `integration` (real sshd + tmux).
+Tests live in their own workflow, `.github/workflows/tests.yml`, as a single
+`test` job: unit tests, the release-variant compiles, then the integration lane.
 
 It is deliberately a **separate workflow with its own concurrency group** so it
-runs alongside `build-and-release` and never delays a release. The separate
-group also matters because the release workflow uses `cancel-in-progress` on one
-shared group — a burst of pushes cancelling release runs would otherwise take
-the test runs down with it.
+runs alongside `build-and-release` and never delays a release (that workflow
+takes ~7 min; this one ~3). The separate group also matters because the release
+workflow uses `cancel-in-progress` on one shared group — a burst of pushes
+cancelling release runs would otherwise take the test runs down with it.
+
+**One job, not two.** It was originally split into parallel `unit` and
+`integration` jobs at ~166s each — but only 1.1s and 8.5s of that was running
+tests. The rest was Kotlin compilation and runner setup, paid for TWICE:
+`:shared` compiled once per job (~60s each), two Android SDK installs, two
+Gradle setups. The build cache cannot fix that, because parallel jobs start
+before either has written a cache. One job does: `build/` persists across steps,
+so the release-compile and integration steps reuse the first step's
+compilation (verified — the integration step reports `compileKotlinDesktop
+UP-TO-DATE`). The lanes are serial now, so wall-clock rises slightly; that is
+free while the release takes twice as long anyway.
+
+The release-compile and integration steps run under `if: !cancelled()` so one
+push surfaces every failure at once, instead of making you fix the unit tests
+and push again to discover the integration lane is broken too.
 
 **Trade-off, stated plainly:** nothing here gates the release, so a failing test
-does *not* stop a release from shipping. If you want that brake back without
-slowing releases, make `unit` a required status check on `main` — it blocks the
-merge while still running in parallel.
+does *not* stop a release from shipping. Make this job a required status check
+on `main` to get that brake back without slowing anything down.
 
-Reports upload as `unit-test-results` / `integration-test-results` even on
-failure, and the integration harness's sshd/tmux/restore logs upload as
-`integration-diagnostics` when it fails — without them a CI-only failure in the
-integration lane is close to undiagnosable.
+Reports upload as `test-results` even on failure, and the integration harness's
+sshd/tmux/restore logs upload as `integration-diagnostics` when it fails —
+without them a CI-only failure in the integration lane is close to
+undiagnosable.
+
+### Build caching
+
+`org.gradle.caching=true` reuses task outputs across builds and CI runs;
+`org.gradle.configuration-cache=true` only skips Gradle's configuration phase
+and does not help with compilation. With the classes deleted, a rebuild pulls
+`compileKotlinDesktop`/`compileTestKotlinDesktop` FROM-CACHE and finishes in
+~2.5s instead of ~29s.
+
+Two tasks must NOT be reused, and both are pinned so:
+
+- `desktopTest` declares every module's Kotlin sources as inputs, because
+  `TmuxTargetSyntaxTest` reads them at runtime and Gradle cannot see that.
+  Without the declaration a cached result could be restored while a scanned
+  source had changed, and the guard would silently not run.
+- `integrationTest` sets `outputs.cacheIf { false }` as well as
+  `upToDateWhen { false }`. The latter alone only defeats the up-to-date check —
+  an out-of-date task can still be restored FROM-CACHE, which would "pass" the
+  lane without ever starting sshd.
 
 ## What is covered, and why
 
