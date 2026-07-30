@@ -280,21 +280,74 @@ class ServerStorageTest {
     }
 
     @Test
-    fun unknownTransportValue_isFatalForTheWholeList() {
-        // SUSPECTED BUG (forward-compat): an unknown ENUM VALUE is not the same as
-        // an unknown key — ignoreUnknownKeys does not cover it, so a server saved
-        // by a newer app version with a transport this build doesn't know makes the
+    fun unknownTransportValue_fallsBackToDefaultInsteadOfWipingTheList() {
+        // Regression guard (forward-compat): an unknown ENUM VALUE is not the same
+        // as an unknown key — ignoreUnknownKeys alone does not cover it, so a
+        // server saved by a NEWER app version (or a downgrade / phone-watch version
+        // skew) with a transport this build doesn't know would otherwise make the
         // ENTIRE server list undecodable and the user sees zero saved servers.
-        // AppSettings guards its enums with a valueOf fallback; the @Serializable
-        // models do not. Asserted against CURRENT behavior.
+        // coerceInputValues=true (ServerStorage.kt) fixes this: an unrecognized
+        // enum constant falls back to the property's declared default and the rest
+        // of the list (and object) survives intact.
         val raw = """
             [{"id":"srv-1","name":"dev","host":"dev.example.org","username":"lucas",
               "transport":"QUANTUM_ENTANGLEMENT"}]
         """.trimIndent()
-        assertEquals(
-            emptyList(),
-            ServerStorage(FakeKeyValueStore(mapOf(serversKey to raw))).loadServers()
-        )
+        val s = ServerStorage(FakeKeyValueStore(mapOf(serversKey to raw))).loadServers().single()
+        assertEquals("srv-1", s.id)
+        assertEquals("dev", s.name)
+        assertEquals(ServerTransport.CLOUDFLARE, s.transport)
+    }
+
+    @Test
+    fun unknownAuthMethodValue_fallsBackToDefault() {
+        val raw = """
+            [{"id":"srv-1","name":"dev","host":"dev.example.org","username":"lucas",
+              "authMethod":"QUANTUM_KEY"}]
+        """.trimIndent()
+        val s = ServerStorage(FakeKeyValueStore(mapOf(serversKey to raw))).loadServers().single()
+        assertEquals("srv-1", s.id)
+        assertEquals("dev.example.org", s.host)
+        assertEquals(AuthMethod.PASSWORD, s.authMethod)
+    }
+
+    @Test
+    fun unknownClaudeModeValue_fallsBackToDefault() {
+        val raw = """
+            [{"id":"srv-1","name":"dev","host":"dev.example.org","username":"lucas",
+              "defaultClaudeMode":"HYPERSPEED"}]
+        """.trimIndent()
+        val s = ServerStorage(FakeKeyValueStore(mapOf(serversKey to raw))).loadServers().single()
+        assertEquals("srv-1", s.id)
+        assertEquals("lucas", s.username)
+        assertEquals(ClaudeMode.NORMAL, s.defaultClaudeMode)
+    }
+
+    @Test
+    fun unknownClaudeModelValue_fallsBackToDefault() {
+        val raw = """
+            [{"id":"srv-1","name":"dev","host":"dev.example.org","username":"lucas",
+              "defaultClaudeModel":"GPT7"}]
+        """.trimIndent()
+        val s = ServerStorage(FakeKeyValueStore(mapOf(serversKey to raw))).loadServers().single()
+        assertEquals("srv-1", s.id)
+        assertEquals("dev.example.org", s.host)
+        assertEquals(ClaudeModel.DEFAULT, s.defaultClaudeModel)
+    }
+
+    @Test
+    fun explicitNullForNonNullableDefaultedField_fallsBackToDefault() {
+        // coerceInputValues also covers a JSON `null` against a non-nullable
+        // property that has a default — e.g. a field a future version made
+        // nullable-with-fallback and this build still declares non-nullable.
+        val raw = """
+            [{"id":"srv-1","name":"dev","host":"dev.example.org","username":"lucas",
+              "favorite":null}]
+        """.trimIndent()
+        val s = ServerStorage(FakeKeyValueStore(mapOf(serversKey to raw))).loadServers().single()
+        assertEquals("srv-1", s.id)
+        assertEquals("dev.example.org", s.host)
+        assertEquals(false, s.favorite)
     }
 
     // --- the seam itself ---

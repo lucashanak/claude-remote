@@ -138,7 +138,10 @@ object ClaudeConfig {
                 // and pass explicit -x/-y plus default-size so the new window's size
                 // never has to be derived from a client.
                 "tmux set-option -g default-size 200x50 2>/dev/null || true; " +
-                "tmux kill-session -t ${sq(tmuxSessionName)} 2>/dev/null; " +
+                // `-t '=name'`: plain `-t` prefix-matches, so killing "proj--cashy"
+                // would also hit a live "proj--cashy-2" (measured on tmux 3.5a).
+                // `=` forces an exact-name match for a target-session.
+                "tmux kill-session -t ${sq("=" + tmuxSessionName)} 2>/dev/null; " +
                 "tmux set-option -g history-limit 100000 2>/dev/null; " +
                 "tmux new-session -x 200 -y 50 -s ${sq(tmuxSessionName)} " +
                 "\\; set-option -g mouse on " +
@@ -188,9 +191,15 @@ object ClaudeConfig {
         val inner = "cd \"\$HOME\"; " + buildLaunchCommand(folder, mode, model, claudeSessionId, resume = true)
         fun sq(s: String) = "'" + s.replace("'", "'\\''") + "'"
         val loginRun = "bash -lc ${sq(inner)}"
-        return "tmux respawn-pane -k -t ${sq(tmuxSessionName)} 2>/dev/null; " +
+        // `respawn-pane`/`send-keys` take a target-PANE, not target-session:
+        // `-t '=name'` alone FAILS ("can't find pane") for a pane target, but
+        // `-t '=name:'` (trailing colon) both works AND exact-matches, closing
+        // the same prefix-match data-loss bug as kill-session above (measured
+        // on tmux 3.5a: plain `-t` would respawn/send into a "name-2" sibling).
+        val paneTarget = sq("=" + tmuxSessionName + ":")
+        return "tmux respawn-pane -k -t $paneTarget 2>/dev/null; " +
                 "sleep 0.4; " +
-                "tmux send-keys -t ${sq(tmuxSessionName)} ${sq(loginRun)} Enter"
+                "tmux send-keys -t $paneTarget ${sq(loginRun)} Enter"
     }
 
     // ======================== RUNTIME CONTROLS ========================

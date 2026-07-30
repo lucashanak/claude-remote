@@ -63,7 +63,16 @@ internal class SessionPersistenceService(
     // wrong (or non-existent) conversation.
     private val sessionIdRefreshJobs = mutableMapOf<String, kotlinx.coroutines.Job>()
 
-    private val fetchJson = kotlinx.serialization.json.Json { ignoreUnknownKeys = true }
+    // coerceInputValues: this parses the SERVER-side sessions.json, written by
+    // whatever restore.sh/drift.sh a possibly different-vintage client
+    // installed — the exact phone/watch (or upgrade/downgrade) version-skew
+    // scenario. An unknown enum value would otherwise make the whole fetch
+    // throw; PersistedSession's mode/model/connectionType now carry defaults
+    // (see SessionStorage.kt) so this actually takes effect here too. Low
+    // blast radius either way — fetchSessionsFromServer already fails open
+    // (returns null) on any decode error, so this only upgrades "skip this
+    // tick's server sync" into "sync with safe defaults".
+    private val fetchJson = kotlinx.serialization.json.Json { ignoreUnknownKeys = true; coerceInputValues = true }
 
     // Companion (not an instance field) and `internal` rather than `private` so
     // RestoreScriptSyntaxTest in desktopTest can `bash -n` this script — and the

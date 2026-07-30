@@ -295,12 +295,12 @@ class InputPromptDetector(
             // Either capture group 1 (legacy '/usage' output) or 2 (OMC '5h:NN%').
             (m.groupValues.getOrNull(1)?.toIntOrNull()
                 ?: m.groupValues.getOrNull(2)?.toIntOrNull())
-                ?.let { pct -> result["session"] = pct }
+                ?.let { pct -> result["session"] = pct.coerceIn(0, 100) }
         }
         WEEK_USAGE_REGEX.findAll(stripped).lastOrNull()?.let { m ->
             (m.groupValues.getOrNull(1)?.toIntOrNull()
                 ?: m.groupValues.getOrNull(2)?.toIntOrNull())
-                ?.let { pct -> result["week"] = pct }
+                ?.let { pct -> result["week"] = pct.coerceIn(0, 100) }
         }
         // Reset times in total minutes — only captured when paired with the
         // OMC short-form, since /usage doesn't print them in this layout.

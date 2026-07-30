@@ -47,12 +47,24 @@ namespace only fail in a release build. Before pushing Kotlin changes:
 
 CI runs this in the same job as the tests.
 
+### Integration lane (real sshd + real tmux)
+
+```bash
+./gradlew :shared:integrationTest
+```
+
+Needs `openssh-server`, `tmux`, `jq`, `flock` on the box; it fails loudly with a
+list of what's missing rather than passing zero tests. It is deliberately NOT
+wired into `check`, and `:shared:desktopTest` cannot see it — the separation is
+structural (its own compilation), not a filter someone can forget.
+
 ## Source-set layout
 
 | Source set | Runs on | Use for |
 |---|---|---|
 | `shared/src/commonTest` | both targets | Pure logic — parsers, classifiers, command builders, state machines |
 | `shared/src/desktopTest` | desktop JVM only | Tests needing JVM/OS facilities (e.g. shelling out to `bash`) |
+| `shared/src/desktopIntegrationTest` | desktop JVM only | Real sshd / tmux / restore.sh. Slow (seconds per test), opt-in |
 
 `commonTest` has friend-module access to `commonMain`, so `internal`
 declarations are visible to tests without widening their visibility.
@@ -64,10 +76,24 @@ faked in tests — the desktop `PlatformPreferences` writes to
 
 ## CI
 
-The `test` job in `.github/workflows/build-and-release.yml` runs the unit tests
-and the release-variant compiles, and **gates** `build-android`, `build-macos`
-and `build-linux`. A failing test blocks the release rather than shipping.
-Test reports upload as the `test-results` artifact even on failure.
+Tests live in their own workflow, `.github/workflows/tests.yml`, with two jobs
+that run in parallel: `unit` (fast) and `integration` (real sshd + tmux).
+
+It is deliberately a **separate workflow with its own concurrency group** so it
+runs alongside `build-and-release` and never delays a release. The separate
+group also matters because the release workflow uses `cancel-in-progress` on one
+shared group — a burst of pushes cancelling release runs would otherwise take
+the test runs down with it.
+
+**Trade-off, stated plainly:** nothing here gates the release, so a failing test
+does *not* stop a release from shipping. If you want that brake back without
+slowing releases, make `unit` a required status check on `main` — it blocks the
+merge while still running in parallel.
+
+Reports upload as `unit-test-results` / `integration-test-results` even on
+failure, and the integration harness's sshd/tmux/restore logs upload as
+`integration-diagnostics` when it fails — without them a CI-only failure in the
+integration lane is close to undiagnosable.
 
 ## What is covered, and why
 
@@ -102,7 +128,32 @@ Targets were chosen by *churn × fragility*, not coverage percentage.
 
 - **`TabManager`** — the session tab/drawer state machine. Chiefly that
   removing the active tab reassigns `activeTabId` to a valid remaining tab (or
-  `null`), never a removed id; a dangling id renders a blank terminal.
+  `null`), never a removed id; a dangling id renders a blank terminal. Also that
+  `addTab` is idempotent on id — appending a duplicate produced a phantom tab
+  that every id-keyed lookup could never reach again.
+
+- **tmux target syntax** (`TmuxTargetSyntaxTest`) — a source-level scan, not a
+  normal unit test, because this defect has been found and fixed **five** times
+  in this codebase and most of the offending command strings are built inline
+  inside functions that need a live SSH session.
+
+  tmux resolves `-t name` as exact → **prefix** → fnmatch. Measured on tmux
+  3.5a: `kill-session -t 'proj--cashy'` kills the session named
+  `proj--cashy-2`. In this app that means the user's *wrong* Claude session gets
+  killed, renamed, scrolled, or reported on. The correct forms — all verified
+  against real tmux, not inferred:
+
+  | verb | exact form |
+  |---|---|
+  | `has-session`, `kill-session`, `rename-session`, `list-panes`, `attach-session` | `-t '=name'` |
+  | `send-keys`, `respawn-pane`, `copy-mode`, `display-message` | `-t '=name:'` |
+
+  The trailing colon is required, not cosmetic: `-t '=name'` on a pane target is
+  rejected outright with `can't find pane`. tmux's own `-t=name` spelling (used
+  by the embedded bash as `-t="$VAR"`) is already exact and is deliberately not
+  flagged. The scan carries a short justified allowlist for targets that aren't
+  session names (a client tty) and asserts it actually scanned the sources, so
+  a broken path can't make it pass vacuously.
 
 - **`TranscriptRenderModel`** — the pure transform behind the Chat view:
   consecutive tool calls collapsing into one group, time-gap insertion at the
@@ -123,15 +174,68 @@ Targets were chosen by *churn × fragility*, not coverage percentage.
   backward-compat fixtures: a field rename must fail a test rather than
   silently wipe users' saved sessions and servers.
 
+## The integration lane
+
+15 tests in `shared/src/desktopIntegrationTest` drive the production connection,
+probe and restore code against real infrastructure.
+
+**How it sandboxes production code without a seam.** The code under test builds
+its own shell commands and opens its own exec channels; there is no "use this
+HOME" hook and adding one just for tests would be the wrong trade. Instead the
+sandbox lives in the *server*: `sshd_config` carries `ForceCommand wrap.sh`, and
+that wrapper rewrites `HOME`, `TMUX_TMPDIR`, `PATH` and unsets `TMUX` for every
+command the sshd ever runs. Unmodified production code is therefore sandboxed by
+construction.
+
+**What it proves that unit tests cannot:**
+
+- **The `sessions.json` producer/consumer contract.** `restore.sh` parses the
+  manifest with `jq .[i].tmuxSessionName`; the producer is
+  `SessionStorage.serializeForServer`. The test feeds the *app's own serializer
+  output* into the *real restore.sh* and asserts the tmux sessions appear. A
+  paired negative test renames one manifest field and asserts nothing is
+  created — so the contract test is provably able to fail. Nothing else in the
+  suite guards this, and a field rename would silently break session restore for
+  every user.
+- **tmux exact-match, end to end.** The real `TmuxProbes.probeTmuxSession` over
+  a real SSH connection must answer `false` for `proj--cashy` while only
+  `proj--cashy-2` exists.
+- **drift self-heal**: kill one restored session, run the real `drift.sh`,
+  assert only that one is relaunched and the healthy sibling is untouched.
+- **Eternal Terminal** round-trips a command through a real `etserver`, and
+  `mosh-server new` really emits the `MOSH CONNECT <port> <key>` line the app
+  parses.
+
+**Claude Code itself is never run.** It needs OAuth and would draw on a capped
+subscription credit pool, so a stand-in `claude` on `PATH` parks forever and
+leaves a live pane. `systemctl`/`loginctl`/`systemd-run` are likewise shimmed so
+the tests can't mutate the developer's real systemd user instance — and so
+drift.sh's self-heal branch is observable on a CI runner with no user session
+bus. These tests assert *our* logic, not Claude's and not systemd's.
+
+**Safety invariants** (the dev box runs live Claude sessions on the default tmux
+socket, and the test JVM is started from inside one of them, so it inherits
+`TMUX` — which *overrides* `TMUX_TMPDIR`):
+
+- `TMUX`/`TMUX_PANE` are stripped from the test JVM, from the daemon, and from
+  every child process.
+- Every tmux call passes an explicit `-S <private socket>`.
+- `kill-server` runs only after asserting the socket is inside the fixture root.
+- Teardown kills tracked PIDs, never `pkill -f <pattern>` — that matches any
+  process whose command line merely *mentions* the string, which will happily
+  kill a concurrent run or a developer's shell.
+- Startup sweeps stale `/tmp/crit.*` roots, because a killed JVM never runs its
+  shutdown hook.
+
 ## Deliberately not covered
 
 - **`@Composable` rendering.** Screenshot/UI tests here cost far more to
   maintain than they protect. The pure model behind the UI is tested instead
   (transcript render models, diffing, parsing).
-- **Real network / SSH / tmux against a live server.** Tests assert the
-  *commands and parsers* — the byte-exact strings sent and the output parsed —
-  not the transport. Transport behavior (Starlink IP rotation, Eternal
-  Terminal, Cloudflare fallback) is only reproducible against real links.
+- **Live remote servers.** The integration lane covers real sshd/tmux/ET on
+  loopback, but genuinely network-dependent behavior (Starlink egress-IP
+  rotation, the Cloudflare WebSocket tunnel, ET resume across a real drop) is
+  only reproducible against real links and is not simulated.
 - **Voice/STT and Wear.** Needs device hardware and a paired watch.
 
 ## Known gaps

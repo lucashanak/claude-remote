@@ -64,6 +64,118 @@ kotlin {
             }
         }
     }
+
+    // ---- Integration test layer: REAL sshd + REAL tmux + the real embedded
+    // restore.sh/drift.sh. Sources live in src/desktopIntegrationTest/kotlin.
+    //
+    // Deliberately its OWN compilation rather than a filtered slice of
+    // desktopTest: each test forks an sshd and a tmux server and takes seconds,
+    // so it must never be pulled into (or slow down) the fast pure-logic lane.
+    // `:shared:desktopTest` compiles only src/{common,desktop}Test, so it can't
+    // see these classes at all — the separation is structural, not a filter
+    // someone can forget to apply.
+    //
+    // associateWith(main) is what makes this worth doing: it grants `internal`
+    // visibility into :shared, so the tests drive the actual production
+    // TmuxProbes / ConnectionRegistry / INSTALL_RESTORE_COMMAND instead of
+    // reimplementing them.
+    val desktopTarget = targets.getByName("desktop") as
+        org.jetbrains.kotlin.gradle.targets.jvm.KotlinJvmTarget
+    desktopTarget.compilations.create("integrationTest") {
+        associateWith(desktopTarget.compilations.getByName("main"))
+        defaultSourceSet.dependencies {
+            implementation(kotlin("test"))
+            // Pinned to the JUnit4 runner explicitly (the Test task below calls
+            // useJUnit()) so kotlin("test") can't resolve to a framework the
+            // hand-registered task isn't configured for.
+            implementation(kotlin("test-junit"))
+            implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.9.0")
+            implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.7.3")
+            implementation("com.github.mwiede:jsch:0.2.21")
+        }
+    }
+}
+
+// `./gradlew :shared:integrationTest` — the slow lane. Not wired into `check`
+// or `allTests`: it needs sshd/tmux/jq on the box, so it stays opt-in.
+val integrationTest by tasks.registering(Test::class) {
+    val compilation = (kotlin.targets.getByName("desktop") as
+        org.jetbrains.kotlin.gradle.targets.jvm.KotlinJvmTarget)
+        .compilations.getByName("integrationTest")
+
+    group = "verification"
+    description = "Integration tests against a real sshd + real tmux server (slow)."
+
+    testClassesDirs = compilation.output.classesDirs
+    classpath = compilation.output.allOutputs + compilation.runtimeDependencyFiles
+    dependsOn(compilation.compileTaskProvider)
+
+    useJUnit()
+    // Real external processes: serial, and never cached as up-to-date (the
+    // environment, not the inputs, is what these assert against).
+    maxParallelForks = 1
+    outputs.upToDateWhen { false }
+
+    // HARD SAFETY INVARIANT. This dev box runs the user's live Claude sessions
+    // on the DEFAULT tmux socket, and the tests themselves execute inside one of
+    // those sessions — so the JVM inherits TMUX/TMUX_PANE. A set TMUX
+    // *overrides* TMUX_TMPDIR, which means a single stray `tmux kill-server`
+    // would destroy real work. Strip them from the test JVM here, and the
+    // fixture strips them again from every child process it spawns.
+    environment.remove("TMUX")
+    environment.remove("TMUX_PANE")
+
+    // The CI workflow uploads these paths on failure; keep them where it looks.
+    reports.junitXml.outputLocation.set(layout.buildDirectory.dir("test-results/integrationTest"))
+    reports.html.outputLocation.set(layout.buildDirectory.dir("reports/tests/integrationTest"))
+    binaryResultsDirectory.set(layout.buildDirectory.dir("test-results/integrationTest/binary"))
+
+    // sshd/tmux/restore logs land here so a CI-only failure is diagnosable.
+    val logDir = layout.buildDirectory.dir("integration-logs").get().asFile
+    systemProperty("clauderemote.integration.logDir", logDir.absolutePath)
+
+    testLogging {
+        events("passed", "skipped", "failed", "standardOut", "standardError")
+        exceptionFormat = org.gradle.api.tasks.testing.logging.TestExceptionFormat.FULL
+        showStackTraces = true
+        showCauses = true
+    }
+
+    val resultsDir = layout.buildDirectory.dir("test-results/integrationTest").get().asFile
+
+    doFirst {
+        // Start from empty so the CI artifact holds only THIS run's diagnostics,
+        // and so the no-results check below cannot be satisfied by a stale XML
+        // from an earlier run.
+        logDir.deleteRecursively()
+        logDir.mkdirs()
+        resultsDir.deleteRecursively()
+        // Fail LOUDLY on a box without the infrastructure instead of "passing"
+        // by running nothing — a silent zero-test success is the failure mode
+        // this whole lane exists to prevent.
+        val missing = mutableListOf<String>()
+        if (!File("/usr/sbin/sshd").canExecute()) missing += "/usr/sbin/sshd (openssh-server)"
+        val path = (System.getenv("PATH") ?: "").split(File.pathSeparator)
+        for (bin in listOf("tmux", "jq", "ssh-keygen", "flock")) {
+            if (path.none { File(it, bin).canExecute() }) missing += bin
+        }
+        if (missing.isNotEmpty()) {
+            throw GradleException(
+                "integrationTest cannot run — missing: ${missing.joinToString(", ")}. " +
+                    "Install them (see .github/workflows/tests.yml) or run :shared:desktopTest instead."
+            )
+        }
+    }
+
+    doLast {
+        val xml = resultsDir.listFiles { f: File -> f.name.endsWith(".xml") }
+        if (xml == null || xml.isEmpty()) {
+            throw GradleException(
+                "integrationTest produced NO test results — the source set compiled but nothing ran. " +
+                    "That is a wiring failure, not a pass."
+            )
+        }
+    }
 }
 
 android {

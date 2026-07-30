@@ -162,12 +162,12 @@ class ClaudeConfigTest {
             "bob's session", "/proj", ClaudeMode.NORMAL, ClaudeModel.DEFAULT
         )
         assertTrue(
-            "tmux kill-session -t 'bob'\\''s session' 2>/dev/null;" in cmd,
-            "kill-session target must use the '\\'' escaped session name"
+            "tmux kill-session -t '=bob'\\''s session' 2>/dev/null;" in cmd,
+            "kill-session target must use the '\\'' escaped session name, with the '=' exact-match prefix inside the quotes"
         )
         assertTrue(
             "tmux new-session -x 200 -y 50 -s 'bob'\\''s session' " in cmd,
-            "new-session target must use the '\\'' escaped session name"
+            "new-session target must use the '\\'' escaped session name, and must NOT get an '=' prefix (it's a name, not a target)"
         )
     }
 
@@ -176,9 +176,29 @@ class ClaudeConfigTest {
         // Prevents `-A` re-attach semantics from sending keystrokes into an
         // already-running program under a reused session name.
         val cmd = ClaudeConfig.buildTmuxLaunchCommand("sess", "/proj", ClaudeMode.NORMAL, ClaudeModel.DEFAULT)
-        val killIdx = cmd.indexOf("tmux kill-session -t 'sess'")
+        val killIdx = cmd.indexOf("tmux kill-session -t '=sess'")
         val newIdx = cmd.indexOf("tmux new-session -x 200 -y 50 -s 'sess'")
         assertTrue(killIdx >= 0 && newIdx >= 0 && killIdx < newIdx)
+    }
+
+    @Test
+    fun buildTmuxLaunchCommand_killSessionTargetStartsWithEqualsForExactMatch() {
+        // Locks in the tmux-prefix-match data-loss bug fix: plain `-t 'name'`
+        // on kill-session prefix-matches, so killing "proj--cashy" also killed
+        // a live "proj--cashy-2" sibling (measured on real tmux 3.5a). `-t
+        // '=name'` forces an exact match for a target-session.
+        val cmd = ClaudeConfig.buildTmuxLaunchCommand("proj--cashy", "/proj", ClaudeMode.NORMAL, ClaudeModel.DEFAULT)
+        assertTrue("tmux kill-session -t '=proj--cashy' " in cmd)
+    }
+
+    @Test
+    fun buildTmuxLaunchCommand_newSessionNameDoesNotGetEqualsPrefix() {
+        // Guard against an over-eager future "make everything consistent" fix:
+        // `new-session -s` takes a NAME, not a target, so it must never be
+        // prefixed with '='.
+        val cmd = ClaudeConfig.buildTmuxLaunchCommand("proj--cashy", "/proj", ClaudeMode.NORMAL, ClaudeModel.DEFAULT)
+        assertTrue("tmux new-session -x 200 -y 50 -s 'proj--cashy' " in cmd)
+        assertTrue("-s '=proj--cashy'" !in cmd)
     }
 
     @Test
@@ -237,14 +257,30 @@ class ClaudeConfigTest {
         // Expected value derived by hand-tracing sq() applied twice (once for
         // the inner `bash -lc` wrap, once for the outer `send-keys` wrap) over
         // a session name that itself contains a single quote — the worst-case
-        // nesting this builder produces.
+        // nesting this builder produces. The target is now the pane form
+        // '=name:' (exact-match '=' plus the trailing ':' pane-target requires).
         assertEquals(
-            "tmux respawn-pane -k -t 'bob'\\''s session' 2>/dev/null; sleep 0.4; " +
-                "tmux send-keys -t 'bob'\\''s session' 'bash -lc '\\''cd \"\$HOME\"; cd " +
+            "tmux respawn-pane -k -t '=bob'\\''s session:' 2>/dev/null; sleep 0.4; " +
+                "tmux send-keys -t '=bob'\\''s session:' 'bash -lc '\\''cd \"\$HOME\"; cd " +
                 "'\\''\\'\\'''\\''/proj'\\''\\'\\'''\\'' && claude --allow-dangerously-skip-permissions " +
                 "--resume uuid-1'\\''' Enter",
             cmd
         )
+    }
+
+    @Test
+    fun buildRestartCommand_respawnAndSendKeysTargetsUseExactMatchPaneFormWithTrailingColon() {
+        // Locks in the tmux-prefix-match data-loss bug fix for the pane-target
+        // commands: `respawn-pane`/`send-keys` take a target-PANE, not a
+        // target-session. `-t '=name'` alone FAILS OUTRIGHT ("can't find
+        // pane") for a pane target — the trailing ':' is required for the
+        // command to work at all, and '=' makes it exact-match rather than
+        // prefix-match (measured on real tmux 3.5a).
+        val cmd = ClaudeConfig.buildRestartCommand(
+            "proj--cashy", "/proj", ClaudeMode.NORMAL, ClaudeModel.DEFAULT, "uuid-1"
+        )
+        assertTrue("tmux respawn-pane -k -t '=proj--cashy:' " in cmd)
+        assertTrue("tmux send-keys -t '=proj--cashy:' " in cmd)
     }
 
     @Test

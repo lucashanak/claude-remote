@@ -19,7 +19,17 @@ class TabManager {
         get() = _tabs.value.find { it.id == _activeTabId.value }
 
     fun addTab(session: ClaudeSession) {
-        _tabs.update { it + session }
+        // Idempotent on id: replacing in place (rather than appending) avoids
+        // a phantom duplicate tab that every id-keyed lookup (getTab,
+        // updateTabStatus, updateAlias, updateClaudeSessionId — all
+        // find/first-match) would never be able to reach or update again.
+        _tabs.update { tabs ->
+            if (tabs.any { it.id == session.id }) {
+                tabs.map { if (it.id == session.id) session else it }
+            } else {
+                tabs + session
+            }
+        }
         _activeTabId.value = session.id
     }
 

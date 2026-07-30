@@ -1,0 +1,128 @@
+name: Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# Deliberately a SEPARATE workflow from build-and-release, and a separate
+# concurrency group. Tests run fully in parallel with the release jobs so they
+# never delay a release, and a burst of pushes cancelling release runs (that
+# workflow uses cancel-in-progress on a single shared group) can't take the test
+# runs down with it.
+#
+# Trade-off, stated plainly: because nothing here gates the release, a failing
+# test does NOT stop a release from shipping. Add `unit` as a required status
+# check on main if you later want that back.
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # Fast lane: pure-logic tests + the release-variant compiles. The debug
+  # pipeline does not catch missing icon imports, cross-module `internal`
+  # access, sealed-state inference or R-namespace breakage — only a release
+  # compile does.
+  unit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      # :shared applies com.android.library, so Gradle configuration needs the
+      # Android SDK even to run the desktop-only test task.
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      # Lets RestoreScriptSyntaxTest run its shellcheck pass over the embedded
+      # restore/drift scripts (bash -n runs unconditionally).
+      - name: Install shellcheck
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq shellcheck
+
+      - name: Unit tests
+        run: ./gradlew :shared:desktopTest
+
+      - name: Release-variant compile check
+        run: >-
+          ./gradlew :shared:compileReleaseKotlinAndroid
+          :androidApp:compileReleaseKotlin
+          :wearApp:compileReleaseKotlin
+
+      - name: Upload test report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: unit-test-results
+          path: |
+            shared/build/reports/tests/
+            shared/build/test-results/
+          if-no-files-found: ignore
+
+  # Slow lane: real SSH + real tmux. Starts an sshd on loopback and drives the
+  # actual connection/session code against it, then runs the embedded
+  # restore.sh/drift.sh against a real tmux server.
+  #
+  # NOT covered here: the Claude Code CLI itself. It needs OAuth and would burn
+  # the capped subscription credit pool, so the scripts run against a stand-in
+  # `claude` shim on PATH — these tests validate OUR session/restore logic, not
+  # Claude.
+  integration:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      # openssh-server: the harness starts its OWN sshd on a high port as the
+      # current user (verified working non-root). tmux + jq are what
+      # restore.sh/drift.sh actually require. mosh/et are installed so the
+      # transport probes have real binaries to find.
+      - name: Install integration dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq openssh-server tmux jq mosh
+          tmux -V
+          jq --version
+          /usr/sbin/sshd -V 2>&1 | head -1 || true
+
+      - name: Integration tests
+        run: ./gradlew :shared:integrationTest
+
+      - name: Upload integration report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: integration-test-results
+          path: |
+            shared/build/reports/tests/
+            shared/build/test-results/
+          if-no-files-found: ignore
+
+      # The harness writes sshd/tmux/restore logs here; without them a CI-only
+      # failure is very hard to diagnose.
+      - name: Upload harness diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: integration-diagnostics
+          path: shared/build/integration-logs/
+          if-no-files-found: ignore

@@ -6,7 +6,13 @@ import kotlinx.serialization.json.Json
 
 class ServerStorage(private val prefs: KeyValueStore) {
 
-    private val json = Json { ignoreUnknownKeys = true; prettyPrint = false }
+    // coerceInputValues: ignoreUnknownKeys only covers unknown KEYS. An unknown
+    // ENUM VALUE (e.g. a `transport` written by a newer app build) would still
+    // make decodeFromString throw for the WHOLE list, wiping every saved
+    // server. With this on, an unrecognized enum constant (or `null` for a
+    // non-nullable field) falls back to that property's declared default
+    // instead of aborting the decode.
+    private val json = Json { ignoreUnknownKeys = true; coerceInputValues = true; prettyPrint = false }
 
     fun loadServers(): List<SshServer> {
         val raw = prefs.getString(KEY_SERVERS, "[]")

@@ -242,6 +242,55 @@ class SessionStorageTest {
     }
 
     @Test
+    fun unknownModeValue_fallsBackToDefaultInsteadOfWipingTheList() {
+        // Regression guard (forward-compat): ignoreUnknownKeys covers unknown
+        // KEYS, not unknown ENUM VALUES — a session persisted by a newer (or
+        // watch-skewed) app build with a `mode` this build doesn't know would
+        // otherwise make decodeFromString throw for the WHOLE session list.
+        // mode/model/connectionType now carry defaults (SessionStorage.kt) and
+        // coerceInputValues=true is set on `json`, so an unrecognized enum
+        // constant falls back instead — the rest of the entry survives intact.
+        val raw = """[{"id":"sess-1","serverId":"srv-1","folder":"/x","mode":"HYPERSPEED",""" +
+            """"model":"OPUS","tmuxSessionName":"t","connectionType":"SSH"}]"""
+        val s = SessionStorage(FakeKeyValueStore(mapOf(key to raw))).load().single()
+        assertEquals("sess-1", s.id)
+        assertEquals("t", s.tmuxSessionName)
+        assertEquals(ClaudeMode.NORMAL, s.mode)
+    }
+
+    @Test
+    fun unknownModelValue_fallsBackToDefault() {
+        val raw = """[{"id":"sess-1","serverId":"srv-1","folder":"/x","mode":"YOLO",""" +
+            """"model":"GPT7","tmuxSessionName":"t","connectionType":"SSH"}]"""
+        val s = SessionStorage(FakeKeyValueStore(mapOf(key to raw))).load().single()
+        assertEquals("sess-1", s.id)
+        assertEquals("srv-1", s.serverId)
+        assertEquals(ClaudeModel.DEFAULT, s.model)
+    }
+
+    @Test
+    fun unknownConnectionTypeValue_fallsBackToDefault() {
+        val raw = """[{"id":"sess-1","serverId":"srv-1","folder":"/x","mode":"YOLO",""" +
+            """"model":"OPUS","tmuxSessionName":"t","connectionType":"CARRIER_PIGEON"}]"""
+        val s = SessionStorage(FakeKeyValueStore(mapOf(key to raw))).load().single()
+        assertEquals("sess-1", s.id)
+        assertEquals("/x", s.folder)
+        assertEquals(ConnectionType.SSH, s.connectionType)
+    }
+
+    @Test
+    fun explicitNullForNonNullableDefaultedField_fallsBackToDefault() {
+        // coerceInputValues also covers a JSON `null` against a non-nullable
+        // property that has a default.
+        val raw = """[{"id":"sess-1","serverId":"srv-1","folder":"/x","mode":null,""" +
+            """"model":"OPUS","tmuxSessionName":"t","connectionType":"SSH"}]"""
+        val s = SessionStorage(FakeKeyValueStore(mapOf(key to raw))).load().single()
+        assertEquals("sess-1", s.id)
+        assertEquals("t", s.tmuxSessionName)
+        assertEquals(ClaudeMode.NORMAL, s.mode)
+    }
+
+    @Test
     fun unknownFutureField_isIgnoredNotFatal() {
         // Forward compatibility: a newer app version adds a field, the older
         // version must still read its own sessions (ignoreUnknownKeys = true).

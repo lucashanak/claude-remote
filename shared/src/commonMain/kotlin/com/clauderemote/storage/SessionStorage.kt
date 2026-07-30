@@ -24,10 +24,14 @@ data class PersistedSession(
     val id: String,
     val serverId: String,
     val folder: String,
-    val mode: ClaudeMode,
-    val model: ClaudeModel,
+    // Defaulted (unlike serverId/folder/tmuxSessionName) so an unknown enum
+    // value written by a skewed app build (newer phone, older watch, or vice
+    // versa) coerces to a safe fallback instead of making decodeFromString
+    // throw for the whole session list — see `json`'s coerceInputValues above.
+    val mode: ClaudeMode = ClaudeMode.NORMAL,
+    val model: ClaudeModel = ClaudeModel.DEFAULT,
     val tmuxSessionName: String,
-    val connectionType: ConnectionType,
+    val connectionType: ConnectionType = ConnectionType.SSH,
     val alias: String = "",
     val claudeSessionId: String? = null,
     val createdAt: Long = 0L
@@ -38,8 +42,15 @@ class SessionStorage(private val prefs: KeyValueStore) {
     // Compact JSON for the on-device prefs blob (size matters on Android
     // SharedPreferences). The server-side snapshot uses a pretty variant
     // for human inspection.
-    private val json = Json { ignoreUnknownKeys = true; prettyPrint = false; encodeDefaults = true }
-    private val prettyJson = Json { ignoreUnknownKeys = true; prettyPrint = true; encodeDefaults = true }
+    //
+    // coerceInputValues: ignoreUnknownKeys only covers unknown KEYS, not an
+    // unknown ENUM VALUE — a `mode`/`model`/`connectionType` written by a
+    // newer (or watch-skewed) app build would otherwise make decodeFromString
+    // throw for the WHOLE list, wiping every restorable session. With this
+    // on, an unrecognized enum constant (or `null` for a non-nullable field)
+    // falls back to that property's declared default instead.
+    private val json = Json { ignoreUnknownKeys = true; coerceInputValues = true; prettyPrint = false; encodeDefaults = true }
+    private val prettyJson = Json { ignoreUnknownKeys = true; coerceInputValues = true; prettyPrint = true; encodeDefaults = true }
 
     fun load(): List<PersistedSession> {
         val raw = prefs.getString(KEY_SESSIONS, "[]")

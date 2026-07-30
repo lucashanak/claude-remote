@@ -48,7 +48,10 @@ internal class RemoteOpsService(
                         val sshSession = registry.ssh(sessionId)?.getSession() ?: return@withContext
                         val escaped = tmuxName.replace("'", "'\\''")
                         val key = if (up) "page-up" else "page-down"
-                        val cmd = "tmux copy-mode -e -t '$escaped'; tmux send-keys -t '$escaped' -X $key"
+                        // `=name:` — exact-match PANE target. `=` alone is rejected for a
+                        // pane target ("can't find pane"), and plain `-t name` prefix-matches,
+                        // which would scroll a DIFFERENT session's pane. Measured on tmux 3.5a.
+                        val cmd = "tmux copy-mode -e -t '=$escaped:'; tmux send-keys -t '=$escaped:' -X $key"
                         val ch = sshSession.openChannel("exec") as com.jcraft.jsch.ChannelExec
                         ch.setCommand(cmd)
                         ch.inputStream = null
@@ -86,8 +89,13 @@ internal class RemoteOpsService(
                     val escaped = tmuxName.replace("'", "'\\''")
                     // `tmux has-session` first to avoid the display-message error noise
                     // when the session doesn't exist.
-                    val checkCmd = "tmux has-session -t '$escaped' 2>/dev/null && " +
-                        "tmux display-message -p -t '$escaped' '#{pane_current_path}' 2>/dev/null " +
+                    // Exact-match targets: `=name` for the session probe, `=name:` for the
+                    // pane that display-message reads. Plain `-t` prefix-matches, so this
+                    // used to report a DIFFERENT session's cwd. The has-session gate is
+                    // what actually protects the pair — display-message alone exits 0 even
+                    // on an unresolvable target (measured on tmux 3.5a).
+                    val checkCmd = "tmux has-session -t '=$escaped' 2>/dev/null && " +
+                        "tmux display-message -p -t '=$escaped:' '#{pane_current_path}' 2>/dev/null " +
                         "|| echo __NO_SESSION__"
                     val ch = sess.openChannel("exec") as ChannelExec
                     ch.setCommand(checkCmd)

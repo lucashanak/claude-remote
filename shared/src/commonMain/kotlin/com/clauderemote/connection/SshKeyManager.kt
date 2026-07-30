@@ -25,7 +25,12 @@ class SshKeyManager(private val prefs: KeyValueStore) {
         val createdAt: Long = System.currentTimeMillis()
     )
 
-    private val json = Json { ignoreUnknownKeys = true; prettyPrint = false }
+    // coerceInputValues: same forward-compat guard as ServerStorage/SessionStorage
+    // — ignoreUnknownKeys doesn't cover an unknown enum value, which would
+    // otherwise make the whole managed-keys list fail to decode. ManagedKey has
+    // no enum fields today, but this keeps the persisted-keys blob consistent
+    // with the other stores and safe if one is added later.
+    private val json = Json { ignoreUnknownKeys = true; coerceInputValues = true; prettyPrint = false }
 
     fun loadKeys(): List<ManagedKey> {
         val raw = prefs.getString("managed_ssh_keys", "")

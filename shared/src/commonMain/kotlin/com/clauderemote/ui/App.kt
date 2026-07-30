@@ -902,7 +902,10 @@ fun App(
                                         if (sess != null) {
                                             kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
                                                 val ch = sess.openChannel("exec") as com.jcraft.jsch.ChannelExec
-                                                ch.setCommand("tmux rename-session -t '${tab.tmuxSessionName.replace("'", "'\\''")}' '${newTmuxName.replace("'", "'\\''")}'")
+                                                // `=` forces an exact target match — plain `-t` prefix-matches
+                                                // and would rename a DIFFERENT session whose name merely
+                                                // starts with this one's.
+                                                ch.setCommand("tmux rename-session -t '=${tab.tmuxSessionName.replace("'", "'\\''")}' '${newTmuxName.replace("'", "'\\''")}'")
                                                 ch.connect(5000)
                                                 ch.inputStream.bufferedReader().readText()
                                                 ch.disconnect()

@@ -189,14 +189,29 @@ class InputPromptDetectorParsingTest {
     }
 
     @Test
-    fun usageSessionPercentAbove100_isNotClamped() {
-        // SUSPECTED BUG: unlike parseContextPercent (which explicitly
-        // .coerceIn(0, 100)s every branch), parseUsage's SESSION_USAGE_REGEX /
-        // WEEK_USAGE_REGEX branches store the parsed int with no clamping at
-        // all. A malformed/garbled statusline render with a 3-digit
-        // percentage sails through unclamped. Pinning current behavior.
-        val usage = detector.parseUsage("usage-unclamped", "5h:150%(1h0m)")
-        assertEquals(150, usage?.get("session"))
+    fun usageSessionPercentAbove100_isClamped() {
+        // Regression guard: parseContextPercent already .coerceIn(0, 100)s
+        // every branch, but parseUsage's SESSION_USAGE_REGEX branch used to
+        // store the parsed int unclamped, letting a garbled statusline render
+        // with a 3-digit percentage flow straight into the UI usage chips.
+        val usage = detector.parseUsage("usage-clamped-session", "5h:150%(1h0m)")
+        assertEquals(100, usage?.get("session"))
+    }
+
+    @Test
+    fun usageWeekPercentAbove100_isClamped() {
+        // Same consistency fix as above, for the week branch.
+        val usage = detector.parseUsage("usage-clamped-week", "wk:250%(1h0m)")
+        assertEquals(100, usage?.get("week"))
+    }
+
+    @Test
+    fun usageResetMinutesAbove100_isNotClamped() {
+        // Guard against an over-eager future clamp landing on the wrong
+        // field: session_reset_min/week_reset_min are durations in minutes,
+        // not percentages, and must NOT be coerced to 100.
+        val usage = detector.parseUsage("usage-reset-not-clamped", "5h:10%(5h0m)")
+        assertEquals(300, usage?.get("session_reset_min"))
     }
 
     // ---- parseClaudeWorking ----

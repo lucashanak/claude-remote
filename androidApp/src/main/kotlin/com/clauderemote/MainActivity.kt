@@ -59,7 +59,11 @@ class MainActivity : FragmentActivity() {
         if (uri != null) {
             try {
                 val json = contentResolver.openInputStream(uri)?.bufferedReader()?.readText() ?: ""
-                val imported = kotlinx.serialization.json.Json { ignoreUnknownKeys = true }
+                // coerceInputValues: an export from a newer/older app build can carry
+                // an enum value (transport, authMethod, ...) this build doesn't know —
+                // without it, one unrecognized value aborts decoding the WHOLE file
+                // instead of just falling back that server's field to its default.
+                val imported = kotlinx.serialization.json.Json { ignoreUnknownKeys = true; coerceInputValues = true }
                     .decodeFromString<List<com.clauderemote.model.SshServer>>(json)
                 imported.forEach { serverStorage.addServer(it) }
                 android.widget.Toast.makeText(this, "Imported ${imported.size} servers", android.widget.Toast.LENGTH_SHORT).show()

@@ -63,7 +63,10 @@ object TmuxManager {
      * Rename a tmux session (blocking, call from IO thread).
      */
     fun renameSession(session: Session, oldName: String, newName: String) {
-        execCommand(session, "tmux rename-session -t '${oldName.replace("'", "'\\''")}' '${newName.replace("'", "'\\''")}'")
+        // `=` forces an EXACT target match. Plain `-t name` prefix-matches, so
+        // renaming `x` while only `x-2` existed renamed the WRONG session — and
+        // the app then lost track of both. Measured on tmux 3.5a.
+        execCommand(session, "tmux rename-session -t '=${oldName.replace("'", "'\\''")}' '${newName.replace("'", "'\\''")}'")
     }
 
     /**
@@ -71,7 +74,10 @@ object TmuxManager {
      */
     suspend fun killSession(session: Session, sessionName: String): Boolean = withContext(Dispatchers.IO) {
         try {
-            execCommand(session, "tmux kill-session -t '${sessionName.replace("'", "'\\''")}'")
+            // `-t '=name'`: plain `-t` prefix-matches, so killing "proj--cashy"
+            // would also hit a live "proj--cashy-2" (measured on tmux 3.5a).
+            // `=` forces an exact-name match for a target-session.
+            execCommand(session, "tmux kill-session -t '=${sessionName.replace("'", "'\\''")}'")
             true
         } catch (e: Exception) {
             false

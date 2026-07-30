@@ -70,15 +70,55 @@ class TabManagerTest {
     }
 
     @Test
-    fun addTab_duplicateId_appendsDuplicateRatherThanReplacing() {
-        // SUSPECTED BUG: addTab has no dedup/replace check — adding a session
-        // with an id that already exists produces TWO entries sharing that id
-        // instead of replacing the existing tab. Documenting actual behavior.
+    fun addTab_duplicateId_replacesInPlaceRatherThanAppending() {
+        // Regression guard: addTab used to have no dedup/replace check —
+        // adding a session with an id that already exists produced TWO
+        // entries sharing that id. Every id-keyed lookup (getTab,
+        // updateTabStatus, updateAlias, updateClaudeSessionId) uses
+        // find/first-match, so the duplicate was unreachable-but-rendered —
+        // a phantom tab in the drawer that could never be updated again.
         val manager = TabManager()
         manager.addTab(session("a", alias = "first"))
         manager.addTab(session("a", alias = "second"))
-        assertEquals(listOf("a", "a"), manager.tabs.value.map { it.id })
-        assertEquals(listOf("first", "second"), manager.tabs.value.map { it.alias })
+        assertEquals(listOf("a"), manager.tabs.value.map { it.id })
+        assertEquals("second", manager.tabs.value.single().alias)
+    }
+
+    @Test
+    fun addTab_duplicateId_preservesListPosition() {
+        // The tab strip must not reshuffle when re-adding an existing
+        // session id — the replaced tab stays at its original index.
+        val manager = TabManager()
+        manager.addTab(session("a"))
+        manager.addTab(session("b"))
+        manager.addTab(session("c"))
+        manager.addTab(session("b", alias = "renamed"))
+        assertEquals(listOf("a", "b", "c"), manager.tabs.value.map { it.id })
+        assertEquals("renamed", manager.getTab("b")?.alias)
+    }
+
+    @Test
+    fun addTab_duplicateId_leavesSiblingTabsUntouched() {
+        val manager = TabManager()
+        manager.addTab(session("a", alias = "alias-a"))
+        manager.addTab(session("b", alias = "alias-b"))
+        manager.addTab(session("a", alias = "alias-a-2"))
+        assertEquals("alias-b", manager.getTab("b")?.alias)
+    }
+
+    @Test
+    fun addTab_duplicateId_replacedTabRemainsReachableAndMutable() {
+        // The replaced tab must not become a second unreachable phantom —
+        // it has to stay findable via getTab and mutable via the id-keyed
+        // update methods.
+        val manager = TabManager()
+        manager.addTab(session("a", alias = "first"))
+        manager.addTab(session("a", alias = "second"))
+        assertEquals("second", manager.getTab("a")?.alias)
+        manager.updateTabStatus("a", SessionStatus.ACTIVE)
+        assertEquals(SessionStatus.ACTIVE, manager.getTab("a")?.status)
+        manager.updateAlias("a", "third")
+        assertEquals("third", manager.getTab("a")?.alias)
     }
 
     // ---- switchTab ----
