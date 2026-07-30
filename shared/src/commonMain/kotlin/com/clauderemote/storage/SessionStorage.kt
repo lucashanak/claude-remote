@@ -33,7 +33,7 @@ data class PersistedSession(
     val createdAt: Long = 0L
 )
 
-class SessionStorage(private val prefs: PlatformPreferences) {
+class SessionStorage(private val prefs: KeyValueStore) {
 
     // Compact JSON for the on-device prefs blob (size matters on Android
     // SharedPreferences). The server-side snapshot uses a pretty variant

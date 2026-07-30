@@ -65,18 +65,23 @@ internal class SessionPersistenceService(
 
     private val fetchJson = kotlinx.serialization.json.Json { ignoreUnknownKeys = true }
 
-    /**
-     * Idempotent installer for the user-level systemd service that restores
-     * tmux + claude sessions after a server reboot. Writes:
-     *   ~/.claude-remote/restore.sh
-     *   ~/.config/systemd/user/claude-remote-restore.service
-     * then enables linger + the unit. Safe to call on every connect — checks
-     * for a marker line in the script before rewriting.
-     *
-     * Requires: bash, jq, tmux, claude on PATH at boot. The service uses an
-     * explicit PATH so it works under empty systemd-user env.
-     */
-    private val INSTALL_RESTORE_COMMAND = """
+    // Companion (not an instance field) and `internal` rather than `private` so
+    // RestoreScriptSyntaxTest in desktopTest can `bash -n` this script — and the
+    // RESTORE_EOF/DRIFT_EOF heredocs it writes — without instantiating
+    // SessionPersistenceService, whose constructor takes many live collaborators.
+    internal companion object {
+        /**
+         * Idempotent installer for the user-level systemd service that restores
+         * tmux + claude sessions after a server reboot. Writes:
+         *   ~/.claude-remote/restore.sh
+         *   ~/.config/systemd/user/claude-remote-restore.service
+         * then enables linger + the unit. Safe to call on every connect — checks
+         * for a marker line in the script before rewriting.
+         *
+         * Requires: bash, jq, tmux, claude on PATH at boot. The service uses an
+         * explicit PATH so it works under empty systemd-user env.
+         */
+        internal val INSTALL_RESTORE_COMMAND = """
         set -e
         mkdir -p "${'$'}HOME/.claude-remote" "${'$'}HOME/.config/systemd/user"
         SCRIPT="${'$'}HOME/.claude-remote/restore.sh"
@@ -692,6 +697,7 @@ DTIMER_EOF
         LINGER=${'$'}(loginctl show-user "${'$'}USER" --property=Linger --value 2>/dev/null || echo unknown)
         echo "LINGER=${'$'}LINGER"
     """.trimIndent()
+    }
 
     /**
      * Track which servers we've already attempted install on this app session

@@ -1,6 +1,6 @@
 package com.clauderemote.connection
 
-import com.clauderemote.storage.PlatformPreferences
+import com.clauderemote.storage.KeyValueStore
 import com.clauderemote.util.FileLogger
 import com.jcraft.jsch.JSch
 import com.jcraft.jsch.KeyPair
@@ -12,7 +12,7 @@ import kotlinx.serialization.json.Json
  * Manages SSH key pairs: generation, storage, listing, import/export.
  * Keys are stored in PlatformPreferences as JSON.
  */
-class SshKeyManager(private val prefs: PlatformPreferences) {
+class SshKeyManager(private val prefs: KeyValueStore) {
 
     @Serializable
     data class ManagedKey(

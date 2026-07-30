@@ -11,7 +11,7 @@ import com.clauderemote.ui.theme.CRTerminalScheme
 import com.clauderemote.ui.theme.CRTerminalView
 import com.clauderemote.ui.theme.CRVariant
 
-class AppSettings(private val prefs: PlatformPreferences) {
+class AppSettings(private val prefs: KeyValueStore) {
 
     /**
      * Stable per-installation id — names this device's remote log file on the

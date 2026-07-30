@@ -1,6 +1,12 @@
 package com.clauderemote.storage
 
-expect class PlatformPreferences {
+/**
+ * Platform-agnostic key/value persistence contract. Exists so the storage layer
+ * ([AppSettings], [ServerStorage], [SessionStorage]) can be unit-tested against
+ * an in-memory implementation — the [PlatformPreferences] actuals have different
+ * constructors per platform and the desktop one writes to the real user home.
+ */
+interface KeyValueStore {
     fun getString(key: String, default: String): String
     fun putString(key: String, value: String)
     /** Blocking write that's durable on disk before returning — use only where losing the
@@ -12,3 +18,5 @@ expect class PlatformPreferences {
     fun getBoolean(key: String, default: Boolean): Boolean
     fun putBoolean(key: String, value: Boolean)
 }
+
+expect class PlatformPreferences : KeyValueStore

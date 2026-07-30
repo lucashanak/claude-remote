@@ -4,7 +4,7 @@ import com.clauderemote.model.SshServer
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 
-class ServerStorage(private val prefs: PlatformPreferences) {
+class ServerStorage(private val prefs: KeyValueStore) {
 
     private val json = Json { ignoreUnknownKeys = true; prettyPrint = false }
 

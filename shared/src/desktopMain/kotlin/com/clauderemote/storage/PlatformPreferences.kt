@@ -3,7 +3,7 @@ package com.clauderemote.storage
 import java.io.File
 import java.util.Properties
 
-actual class PlatformPreferences {
+actual class PlatformPreferences : KeyValueStore {
     private val propsFile = File(System.getProperty("user.home"), ".claude-remote/settings.properties")
     private val props = Properties()
 
@@ -18,12 +18,12 @@ actual class PlatformPreferences {
         propsFile.outputStream().use { props.store(it, "Claude Remote Settings") }
     }
 
-    actual fun getString(key: String, default: String): String = props.getProperty(key, default)
-    actual fun putString(key: String, value: String) { props.setProperty(key, value); save() }
+    override fun getString(key: String, default: String): String = props.getProperty(key, default)
+    override fun putString(key: String, value: String) { props.setProperty(key, value); save() }
     // Already a blocking file write above — same implementation serves both.
-    actual fun putStringSync(key: String, value: String) { putString(key, value) }
-    actual fun getInt(key: String, default: Int): Int = props.getProperty(key)?.toIntOrNull() ?: default
-    actual fun putInt(key: String, value: Int) { props.setProperty(key, value.toString()); save() }
-    actual fun getBoolean(key: String, default: Boolean): Boolean = props.getProperty(key)?.toBooleanStrictOrNull() ?: default
-    actual fun putBoolean(key: String, value: Boolean) { props.setProperty(key, value.toString()); save() }
+    override fun putStringSync(key: String, value: String) { putString(key, value) }
+    override fun getInt(key: String, default: Int): Int = props.getProperty(key)?.toIntOrNull() ?: default
+    override fun putInt(key: String, value: Int) { props.setProperty(key, value.toString()); save() }
+    override fun getBoolean(key: String, default: Boolean): Boolean = props.getProperty(key)?.toBooleanStrictOrNull() ?: default
+    override fun putBoolean(key: String, value: Boolean) { props.setProperty(key, value.toString()); save() }
 }

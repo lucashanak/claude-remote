@@ -249,7 +249,9 @@ object UpdateChecker {
         }
     }
 
-    private fun isNewer(remote: String, local: String): Boolean {
+    // internal (not private) so UpdateCheckerTest in commonTest can reach it
+    // directly — commonTest has friend-module access to commonMain.
+    internal fun isNewer(remote: String, local: String): Boolean {
         val r = remote.split(".").map { it.toIntOrNull() ?: 0 }
         val l = local.split(".").map { it.toIntOrNull() ?: 0 }
         for (i in 0 until maxOf(r.size, l.size)) {

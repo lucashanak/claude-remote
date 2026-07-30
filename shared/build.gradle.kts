@@ -57,6 +57,10 @@ kotlin {
         val commonTest by getting {
             dependencies {
                 implementation(kotlin("test"))
+                // Virtual-time test dispatchers: the session layer is built on
+                // delays (quiescence windows, redraw coalescing, poll loops).
+                // runTest fast-forwards them so timing tests stay instant.
+                implementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.9.0")
             }
         }
     }
