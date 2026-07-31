@@ -117,6 +117,13 @@ internal fun CRTopBar(
      * had no way to tell which login they were on.
      */
     accountLabel: String? = null,
+    /**
+     * Tapping the account tag switches account. Null leaves it a plain indicator
+     * (single account, or no switch handler) so it never looks tappable when it
+     * isn't. The indicator and the action are the same control on purpose —
+     * "which account am I on" and "change it" are one intent.
+     */
+    onAccountClick: (() -> Unit)? = null,
     contextPercent: Int?,
     gitStatus: com.clauderemote.model.GitStatus?,
     sessionUsagePercent: Int?,
@@ -232,13 +239,27 @@ internal fun CRTopBar(
                         modifier = Modifier.padding(horizontal = 4.dp))
                 }
 
-                // Account tag — which login this session runs Claude under.
+                // Account tag — which login this session runs Claude under, and
+                // the shortcut to change it. Matches ModelChip's pill so the two
+                // read as the same class of control.
                 if (!accountLabel.isNullOrBlank()) {
                     Text(
                         accountLabel,
-                        style = CRType.monoTiny,
+                        style = CRType.pill,
                         color = c.accent,
-                        modifier = Modifier.padding(horizontal = 4.dp),
+                        maxLines = 1,
+                        modifier = Modifier
+                            .padding(horizontal = 4.dp)
+                            .clip(CircleShape)
+                            .background(c.surface2)
+                            .then(
+                                if (onAccountClick != null) {
+                                    Modifier.clickable { onAccountClick() }
+                                } else {
+                                    Modifier
+                                }
+                            )
+                            .padding(horizontal = 6.dp, vertical = 2.dp),
                     )
                 }
 

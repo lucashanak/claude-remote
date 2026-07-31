@@ -436,6 +436,9 @@ fun TerminalScreen(
                 CRTopBar(
                     activeSession = activeSession,
                     accountLabel = activeAccountLabel,
+                    onAccountClick = if (onSwitchAccount != null && accounts.size > 1) {
+                        { showSwitchAccountDialog = true }
+                    } else null,
                     sessionActivities = sessionActivities,
                     hasMultiple = hasMultiple,
                     wideMode = wideMode,
