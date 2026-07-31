@@ -83,6 +83,8 @@ fun TranscriptView(
     connectionLabel: String? = null,
     /** Tapped a file path Claude mentioned in an answer — null disables the links. */
     onFileLink: ((String) -> Unit)? = null,
+    /** Claude account this session runs under, for the status bar; null hides it. */
+    accountLabel: String? = null,
     /** Narrows file-path candidates to the ones that really exist on the server. */
     onVerifyPaths: (suspend (List<String>) -> Set<String>)? = null,
 ) {
@@ -233,6 +235,7 @@ fun TranscriptView(
             activeSubagents = remoteStatus?.activeSubagents ?: 0,
             activity = effectiveActivity,
             connectionLabel = connectionLabel,
+            accountLabel = accountLabel,
             showThinking = showThinking,
             showSystem = showSystem,
             onToggleThinking = { showThinking = !showThinking },

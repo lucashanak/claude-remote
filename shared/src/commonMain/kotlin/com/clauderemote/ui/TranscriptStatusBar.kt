@@ -68,6 +68,8 @@ internal fun StatusBar(
     activeSubagents: Int,
     activity: SessionActivity?,
     connectionLabel: String?,
+    /** Which Claude account this session runs under; null hides the chip. */
+    accountLabel: String?,
     showThinking: Boolean,
     showSystem: Boolean,
     onToggleThinking: () -> Unit,
@@ -98,6 +100,9 @@ internal fun StatusBar(
             ) {
                 ActivityIndicator(activity)
                 if (!connectionLabel.isNullOrBlank()) StatusChip(connectionLabel)
+                // Which login this session is on. Sits right after the connection
+                // chip because "where am I / as whom" is one question.
+                if (!accountLabel.isNullOrBlank()) StatusChip("as $accountLabel")
                 StatusChip("$entryCount entries")
                 StatusChip("ctx ${contextPercent?.let { "$it%" } ?: "—"}")
                 StatusChip(buildUsageLabel("5h", sessionUsagePercent, sessionResetMin))

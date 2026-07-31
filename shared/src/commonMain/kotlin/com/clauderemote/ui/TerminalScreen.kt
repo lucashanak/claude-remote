@@ -244,6 +244,14 @@ fun TerminalScreen(
     var claudeMdContent by remember { mutableStateOf("") }
     var commands by remember { mutableStateOf(CommandFetcher.getCachedOrFallback()) }
     val activeSession = tabs.find { it.id == activeTabId }
+    // Which login the active session runs under, for the status bar. Resolved from
+    // the probed account list so the chip shows a human org name rather than the
+    // slug; falls back to the slug when the probe came back blank.
+    val activeAccountLabel: String? = activeSession?.let { s ->
+        accounts.firstOrNull {
+            it.slug == (s.accountSlug ?: com.clauderemote.model.ClaudeAccount.DEFAULT_SLUG)
+        }?.shortLabel ?: s.accountSlug
+    }
     val scope = rememberCoroutineScope()
     var showPalette by remember { mutableStateOf(false) }
     var showSessionDrawer by remember { mutableStateOf(false) }
@@ -1082,6 +1090,9 @@ fun TerminalScreen(
                                                 claudeSessionId = tab?.claudeSessionId,
                                                 onFileLink = openFileLink,
                                                 onVerifyPaths = onVerifyPaths,
+                                                accountLabel = accounts.firstOrNull { a ->
+                                                    a.slug == (tab?.accountSlug ?: com.clauderemote.model.ClaudeAccount.DEFAULT_SLUG)
+                                                }?.shortLabel,
                                             )
                                         }
                                     }
@@ -1157,6 +1168,7 @@ fun TerminalScreen(
                                     connectionLabel = connectionLabel,
                                     onFileLink = openFileLink,
                                     onVerifyPaths = onVerifyPaths,
+                                    accountLabel = activeAccountLabel,
                                 )
                             }
                         } else {

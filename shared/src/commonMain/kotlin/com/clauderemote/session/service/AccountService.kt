@@ -343,6 +343,34 @@ internal class AccountService(
             "done; fi"
 
         /**
+         * Entries under `~/.claude` that every account SHARES by symlink. Anything
+         * not listed stays private to the account — credentials, `.claude.json`
+         * (identity + trust map), and all the per-run state (`sessions/`,
+         * `history.jsonl`, `statsig/`, `cache/`, `todos/`, …).
+         *
+         * `hud/` is not optional decoration: the `statusLine` command in
+         * settings.json is
+         * `sh ${'$'}{CLAUDE_CONFIG_DIR:-${'$'}HOME/.claude}/hud/omc-hud-cache.sh …`,
+         * i.e. it resolves relative to the CONFIG DIR. Without the link an account
+         * has no statusline at all — which also blanks the usage/working chips the
+         * app scrapes out of it (see InputPromptDetector).
+         *
+         * `settings.local.json` carries the permission allowlist; omitting it
+         * leaves the account prompting for every tool it should already trust.
+         * The `.omc*` entries are oh-my-claudecode's own config/version/state, and
+         * `hooks/` + `skills/` are user-authored extensions that belong to the
+         * person, not to one login.
+         *
+         * A missing target is skipped rather than linked into a dangling symlink —
+         * not every install has every one of these.
+         */
+        private val SHARED_ENTRIES = listOf(
+            "projects", "plugins", "settings.json", "settings.local.json",
+            "CLAUDE.md", "hud", "hooks", "skills",
+            ".omc", ".omc-config.json", ".omc-version.json",
+        )
+
+        /**
          * PROVISIONING ORDER IS MANDATORY: `mkdir -m 700` → write the onboarding
          * seed → create the symlinks → only THEN may a session launch. Launch
          * first and `claude` creates REAL `settings.json`, `plugins/`, `cache/`
@@ -376,13 +404,12 @@ internal class AccountService(
             "> \"\$D/.claude.json\"; chmod 600 \"\$D/.claude.json\"; fi; " +
             "mkdir -p \"\$HOME/.claude/projects\" \"\$HOME/.claude/plugins\"; " +
             "link() { tgt=\"\$1\"; lnk=\"\$D/\$2\"; " +
+            "[ -e \"\$tgt\" ] || return 0; " +
             "if [ ! -L \"\$lnk\" ] && [ -e \"\$lnk\" ]; then rm -rf \"\$lnk\"; fi; " +
             // -n so an existing symlink-to-directory is REPLACED, not written into.
             "ln -sfn \"\$tgt\" \"\$lnk\"; }; " +
-            "link \"\$HOME/.claude/projects\" projects; " +
-            "link \"\$HOME/.claude/plugins\" plugins; " +
-            "link \"\$HOME/.claude/settings.json\" settings.json; " +
-            "link \"\$HOME/.claude/CLAUDE.md\" CLAUDE.md; " +
+            "for n in ${SHARED_ENTRIES.joinToString(" ")}; do " +
+            "link \"\$HOME/.claude/\$n\" \"\$n\"; done; " +
             "echo PROVISIONED"
 
         /**

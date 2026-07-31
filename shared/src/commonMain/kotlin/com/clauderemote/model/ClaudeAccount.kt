@@ -25,6 +25,14 @@ data class ClaudeAccount(
     /** Primary UI label. Falls back to the slug for an account we couldn't probe. */
     val label: String get() = email.ifBlank { slug }
 
+    /**
+     * Compact label for a status-bar chip. The org name is what distinguishes two
+     * seats at a glance ("Nekrachni" vs "Kontexta"); a full email would crowd the
+     * chip row off a phone screen.
+     */
+    val shortLabel: String
+        get() = orgName.ifBlank { email.substringBefore('@').ifBlank { slug } }
+
     /** Secondary UI line, e.g. "Nekrachni · team". */
     val subtitle: String
         get() = listOf(orgName, subscriptionType).filter { it.isNotBlank() }.joinToString(" · ")
