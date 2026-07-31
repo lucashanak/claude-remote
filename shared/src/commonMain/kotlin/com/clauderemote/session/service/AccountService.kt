@@ -247,11 +247,30 @@ internal class AccountService(
     }
 
     /**
+     * A slug we're willing to touch on the filesystem. `default` is excluded on
+     * purpose: it names the pre-existing `~/.claude` login, which has no dir
+     * under `accounts/` — provisioning or deleting it is always a bug.
+     */
+    private fun isUsableSlug(slug: String): Boolean =
+        slug.isNotBlank() &&
+            slug != ClaudeAccount.DEFAULT_SLUG &&
+            slug != "." && slug != ".." &&
+            !slug.contains('/') &&
+            !slug.contains("..") &&
+            SLUG_CHARS.matches(slug)
+
+    internal companion object {
+        private const val BLOCK_MARKER = "==="
+
+        /** Filesystem-name charset — also keeps the slug shell-metachar-free. */
+        private val SLUG_CHARS = Regex("^[A-Za-z0-9._@-]+$")
+
+    /**
      * Split the probe output into `===<slug>` blocks and turn each into a
      * [ClaudeAccount]. Regex field extraction (no serialization dependency),
      * matching how [UsageService] parses the usage endpoint.
      */
-    private fun parseAccounts(out: String): List<ClaudeAccount> {
+    internal fun parseAccounts(out: String): List<ClaudeAccount> {
         val accounts = mutableListOf<ClaudeAccount>()
         var slug: String? = null
         val body = StringBuilder()
@@ -277,7 +296,7 @@ internal class AccountService(
             .sortedByDescending { it.isDefault }
     }
 
-    private fun toAccount(slug: String, json: String): ClaudeAccount = ClaudeAccount(
+    internal fun toAccount(slug: String, json: String): ClaudeAccount = ClaudeAccount(
         slug = slug,
         email = jsonString(json, "email"),
         orgName = jsonString(json, "orgName"),
@@ -287,25 +306,6 @@ internal class AccountService(
 
     private fun jsonString(json: String, key: String): String =
         Regex("\"$key\"\\s*:\\s*\"([^\"]*)\"").find(json)?.groupValues?.get(1) ?: ""
-
-    /**
-     * A slug we're willing to touch on the filesystem. `default` is excluded on
-     * purpose: it names the pre-existing `~/.claude` login, which has no dir
-     * under `accounts/` — provisioning or deleting it is always a bug.
-     */
-    private fun isUsableSlug(slug: String): Boolean =
-        slug.isNotBlank() &&
-            slug != ClaudeAccount.DEFAULT_SLUG &&
-            slug != "." && slug != ".." &&
-            !slug.contains('/') &&
-            !slug.contains("..") &&
-            SLUG_CHARS.matches(slug)
-
-    private companion object {
-        private const val BLOCK_MARKER = "==="
-
-        /** Filesystem-name charset — also keeps the slug shell-metachar-free. */
-        private val SLUG_CHARS = Regex("^[A-Za-z0-9._@-]+$")
 
         /**
          * An SSH exec channel gets a NON-login shell, so `~/.local/bin` (where
