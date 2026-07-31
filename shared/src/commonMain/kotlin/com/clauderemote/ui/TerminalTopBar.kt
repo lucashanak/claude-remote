@@ -110,6 +110,13 @@ internal fun CRTopBar(
     invertColors: Boolean,
     terminalView: CRTerminalView,
     latencyMs: Long?,
+    /**
+     * Two-letter tag for the account this session runs under (see
+     * ClaudeAccount.initials). Lives in the TOP bar, not the transcript status
+     * bar, because that one only renders in Chat view — in Raw view the user
+     * had no way to tell which login they were on.
+     */
+    accountLabel: String? = null,
     contextPercent: Int?,
     gitStatus: com.clauderemote.model.GitStatus?,
     sessionUsagePercent: Int?,
@@ -223,6 +230,16 @@ internal fun CRTopBar(
                     }
                     Text("${latencyMs}ms", style = CRType.monoTiny, color = latColor,
                         modifier = Modifier.padding(horizontal = 4.dp))
+                }
+
+                // Account tag — which login this session runs Claude under.
+                if (!accountLabel.isNullOrBlank()) {
+                    Text(
+                        accountLabel,
+                        style = CRType.monoTiny,
+                        color = c.accent,
+                        modifier = Modifier.padding(horizontal = 4.dp),
+                    )
                 }
 
                 // Active model chip

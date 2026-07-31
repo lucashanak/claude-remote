@@ -34,7 +34,10 @@ private fun rateLimitCmd(accountConfigDir: String): String =
     "CRED=\"$accountConfigDir/.credentials.json\"; " +
         "T=\$(grep -oE '\"accessToken\":\"[^\"]+\"' \"\$CRED\" 2>/dev/null | head -1 | sed 's/.*:\"//; s/\"\$//'); " +
         "[ -z \"\$T\" ] && { echo '{}'; exit 0; }; " +
-        "printf 'header = \"Authorization: Bearer %s\"\\nheader = \"anthropic-beta: oauth-2025-04-20\"\\nurl = \"https://api.anthropic.com/api/oauth/usage\"\\n' \"\$T\" | curl -sK - --max-time 8 2>/dev/null || echo '{}'"
+        "printf 'header = \"Authorization: Bearer %s\"\\nheader = \"anthropic-beta: oauth-2025-04-20\"\\nurl = \"https://api.anthropic.com/api/oauth/usage\"\\n' \"\$T\" | " +
+        // -w exposes the status: without it a 429 body is indistinguishable from
+        // an empty reply, so the poller kept hammering a tripped rate limit.
+        "curl -sK - --max-time 8 -w '\\nHTTP:%{http_code}' 2>/dev/null || echo '{}'"
 
 /**
  * 5h/week usage percents + reset minutes + usage tokens + per-server ccusage
@@ -150,6 +153,7 @@ internal class UsageService(
             if (existing?.isActive == true) return@compute existing
             scope.launch {
                 kotlinx.coroutines.delay(2000) // small initial delay
+                var backoffMs = 0L
                 while (isActive) {
                     // Skip when backgrounded — user can't see the chips anyway.
                     if (!isBackground()) {
@@ -165,11 +169,28 @@ internal class UsageService(
                                     cmd,
                                     totalMs = 10_000,
                                 )
-                                parseRateLimitJson(key, output)
+                                if (isRateLimited(output)) {
+                                    // Back off instead of retrying into the wall.
+                                    // This endpoint's quota is per ACCOUNT and is
+                                    // shared with whatever else uses that login —
+                                    // notably the OMC statusline, which renders
+                                    // "[API 429]" and loses its usage bars when we
+                                    // monopolise it. Retrying on the fixed interval
+                                    // kept the limit permanently tripped.
+                                    backoffMs = if (backoffMs == 0L) RATE_LIMIT_BACKOFF_MS
+                                    else (backoffMs * 2).coerceAtMost(RATE_LIMIT_BACKOFF_MAX_MS)
+                                    FileLogger.log(
+                                        TAG,
+                                        "usage endpoint 429 for $key — backing off ${backoffMs / 1000}s",
+                                    )
+                                } else {
+                                    backoffMs = 0L
+                                    parseRateLimitJson(key, output)
+                                }
                             }
                         } catch (_: Exception) {}
                     }
-                    kotlinx.coroutines.delay(30_000) // poll every 30s
+                    kotlinx.coroutines.delay(if (backoffMs > 0L) backoffMs else RATE_LIMIT_POLL_MS)
                 }
             }
         }
@@ -183,6 +204,13 @@ internal class UsageService(
      * minutes-from-now. Only keys that parse are included; a blank/`{}`/unparseable
      * response is skipped (keeps the last value) — no OMC-cache fallback.
      */
+    /**
+     * True when the probe came back rate-limited. Checked before parsing so a 429
+     * body (which carries no `five_hour`) isn't mistaken for "no data yet".
+     */
+    private fun isRateLimited(output: String): Boolean =
+        Regex("HTTP:(\\d{3})").find(output)?.groupValues?.get(1) == "429"
+
     private fun parseRateLimitJson(key: String, json: String) {
         try {
             if (json.isBlank() || json.trim() == "{}") return
@@ -266,6 +294,16 @@ internal class UsageService(
          * bare server id, so every existing lookup (`map[activeServerId]`) behaves
          * exactly as before multi-account; other logins get `serverId#slug`.
          */
+        /**
+         * Base cadence for the usage-endpoint poll, per ACCOUNT. Deliberately
+         * slower than the old 30s: that was tuned when a single account polled,
+         * and N accounts multiply the load on a quota that is also feeding the
+         * OMC statusline for the same login.
+         */
+        private const val RATE_LIMIT_POLL_MS = 60_000L
+        private const val RATE_LIMIT_BACKOFF_MS = 120_000L
+        private const val RATE_LIMIT_BACKOFF_MAX_MS = 600_000L
+
         fun usageKey(serverId: String, accountSlug: String?): String =
             if (accountSlug.isNullOrBlank() || accountSlug == ClaudeAccount.DEFAULT_SLUG) serverId
             else "$serverId#$accountSlug"

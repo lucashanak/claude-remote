@@ -435,6 +435,7 @@ fun TerminalScreen(
                 // ── Topbar (56 dp) ─────────────────────────────────────────
                 CRTopBar(
                     activeSession = activeSession,
+                    accountLabel = activeAccountLabel,
                     sessionActivities = sessionActivities,
                     hasMultiple = hasMultiple,
                     wideMode = wideMode,
