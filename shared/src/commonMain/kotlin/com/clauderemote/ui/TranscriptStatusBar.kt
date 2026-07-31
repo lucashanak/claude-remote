@@ -100,9 +100,11 @@ internal fun StatusBar(
             ) {
                 ActivityIndicator(activity)
                 if (!connectionLabel.isNullOrBlank()) StatusChip(connectionLabel)
-                // Which login this session is on. Sits right after the connection
-                // chip because "where am I / as whom" is one question.
-                if (!accountLabel.isNullOrBlank()) StatusChip("as $accountLabel")
+                // Which login this session is on — two-letter tag (see
+                // ClaudeAccount.initials). Sits right after the connection chip
+                // because "where am I / as whom" is one question, and stays this
+                // terse because the chip row is the tightest space in the UI.
+                if (!accountLabel.isNullOrBlank()) StatusChip(accountLabel)
                 StatusChip("$entryCount entries")
                 StatusChip("ctx ${contextPercent?.let { "$it%" } ?: "—"}")
                 StatusChip(buildUsageLabel("5h", sessionUsagePercent, sessionResetMin))

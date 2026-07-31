@@ -168,11 +168,18 @@ fun RemoveAccountConfirmDialog(
 fun SwitchAccountDialog(
     accounts: List<ClaudeAccount>,
     currentSlug: String?,
+    /**
+     * This folder's policy. Nothing is hidden on its basis — a non-preferred pick
+     * is offered and merely warned about, so the guard prevents a mis-tap without
+     * locking the owner out of their own folder.
+     */
+    folderPolicy: com.clauderemote.model.FolderPolicy? = null,
     onDismiss: () -> Unit,
     onConfirm: (accountSlug: String?) -> Unit,
 ) {
     val c = CRTheme.colors
     var selected by remember { mutableStateOf(currentSlug) }
+    val offPolicy = !com.clauderemote.model.isAccountPreferred(folderPolicy, selected)
 
     FloatingDialog(
         visible = true,
@@ -186,6 +193,14 @@ fun SwitchAccountDialog(
                         "itself is preserved and resumes right after.",
                     style = CRType.bodyDim, color = c.textDim,
                 )
+                if (offPolicy) {
+                    Text(
+                        "This folder isn't set up for that account. Switching anyway is fine — " +
+                            "this is a reminder, not a restriction.",
+                        style = CRType.bodyDim,
+                        color = c.disconnected,
+                    )
+                }
                 Spacer(Modifier.height(4.dp))
                 accounts.forEach { acc ->
                     // Normalize the default account to the same null the rest of the
@@ -208,6 +223,13 @@ fun SwitchAccountDialog(
                             if (acc.subtitle.isNotBlank()) {
                                 Text(acc.subtitle, style = CRType.bodyDim, color = c.textDim)
                             }
+                            if (!com.clauderemote.model.isAccountPreferred(folderPolicy, slug)) {
+                                Text(
+                                    "not set up for this folder",
+                                    style = CRType.monoTiny,
+                                    color = c.disconnected,
+                                )
+                            }
                         }
                     }
                 }
@@ -217,7 +239,14 @@ fun SwitchAccountDialog(
             TextButton(
                 enabled = selected != currentSlug,
                 onClick = { onConfirm(selected) },
-            ) { Text("Switch", color = c.accent) }
+            ) {
+                // The label itself carries the warning, so a mis-tap can't sail
+                // through unnoticed without adding a second nested dialog.
+                Text(
+                    if (offPolicy) "Switch anyway" else "Switch",
+                    color = if (offPolicy) c.disconnected else c.accent,
+                )
+            }
         },
         dismissButton = {
             TextButton(onClick = onDismiss) { Text("Cancel", color = c.textDim) }

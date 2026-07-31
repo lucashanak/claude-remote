@@ -1224,6 +1224,11 @@ fun App(
                         composeTerminalUnderTranscript = composeTerminalUnderTranscript,
                         connectionLabel = activeTabId?.let { connectionLabels[it] },
                         accounts = terminalAccounts,
+                        activeFolderPolicy = activeTabId?.let { id ->
+                            tabManager.getTab(id)?.let { t ->
+                                folderPolicyStorage.get(t.server.id, t.folder)
+                            }
+                        },
                         onSwitchAccount = { id, slug -> sessionOrchestrator.switchSessionAccount(id, slug) },
                     )
                 }

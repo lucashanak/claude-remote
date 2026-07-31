@@ -61,7 +61,11 @@ fun ConnectScreen(
         accounts = try { onLoadAccounts?.invoke() ?: emptyList() } catch (_: Exception) { emptyList() }
     }
     val folderPolicy = remember(folder, server.id, accounts) { folderPolicyStorage?.get(server.id, folder) }
-    val offerableAccounts = remember(folderPolicy, accounts) { allowedAccountsFor(folderPolicy, accounts) }
+    // Every account is offered; the folder policy only drives which one is
+    // PRESELECTED and whether a warning shows. Hiding accounts here while the
+    // live-session switcher allowed them made the guard inconsistent, and it is
+    // meant to prevent a mis-tap rather than lock the owner out of a folder.
+    val offerableAccounts = accounts
     var selectedAccountSlug by remember(server.id) { mutableStateOf<String?>(null) }
     // Re-pick the default whenever the folder (and thus its policy) changes —
     // e.g. typing a different path should re-offer that folder's own default,
@@ -422,14 +426,23 @@ fun ConnectScreen(
                         )
                     }
                     // Compact account chip — only shown once there's an actual
-                    // choice to make (a lone account, or a folder policy that
-                    // narrows to just one, needs no picker at all).
+                    // choice to make; a lone account needs no picker at all.
                     if (offerableAccounts.size > 1) {
                         LabeledRow("Account") {
                             AccountPickerChip(
                                 accounts = offerableAccounts,
                                 selectedSlug = selectedAccountSlug,
                                 onSelect = { acc -> selectedAccountSlug = if (acc.isDefault) null else acc.slug },
+                            )
+                        }
+                        // Same reminder wording as the live-session switcher, so the
+                        // folder guard reads identically wherever an account is chosen.
+                        if (!isAccountPreferred(folderPolicy, selectedAccountSlug)) {
+                            Text(
+                                "This folder isn't set up for that account — launching anyway is fine.",
+                                style = CRType.bodyDim,
+                                color = c.disconnected,
+                                modifier = Modifier.padding(top = 2.dp),
                             )
                         }
                     }

@@ -26,12 +26,22 @@ data class ClaudeAccount(
     val label: String get() = email.ifBlank { slug }
 
     /**
-     * Compact label for a status-bar chip. The org name is what distinguishes two
-     * seats at a glance ("Nekrachni" vs "Kontexta"); a full email would crowd the
-     * chip row off a phone screen.
+     * Two-letter tag for the status bar: first letter of the email's local part
+     * plus first letter of its domain — `lukashanak@nekrachni.cz` → `LN`,
+     * `lukas@kontexta.cz` → `LK`. The chip row is the most space-starved place in
+     * the UI, so this stays two glyphs; the full identity lives in the switcher
+     * and on the accounts screen.
+     *
+     * Falls back to the first two alphanumerics of the slug for an account whose
+     * probe came back without an email, so the chip is never blank or misleading.
      */
-    val shortLabel: String
-        get() = orgName.ifBlank { email.substringBefore('@').ifBlank { slug } }
+    val initials: String
+        get() {
+            val local = email.substringBefore('@').firstOrNull { it.isLetterOrDigit() }
+            val domain = email.substringAfter('@', "").firstOrNull { it.isLetterOrDigit() }
+            if (local != null && domain != null) return "${local.uppercaseChar()}${domain.uppercaseChar()}"
+            return slug.filter { it.isLetterOrDigit() }.take(2).uppercase().ifBlank { "?" }
+        }
 
     /** Secondary UI line, e.g. "Nekrachni · team". */
     val subtitle: String
@@ -103,6 +113,20 @@ fun allowedAccountsFor(policy: FolderPolicy?, all: List<ClaudeAccount>): List<Cl
     if (allow.isEmpty()) return all
     val filtered = all.filter { it.slug in allow }
     return filtered.ifEmpty { all }
+}
+
+/**
+ * Whether [slug] is one the folder's policy prefers. Distinct from
+ * [allowedAccountsFor]: nothing is ever hidden or refused on this basis — both
+ * the launch picker and the live-session switcher offer every account and merely
+ * WARN when the pick isn't preferred here. The policy exists to prevent a
+ * mis-tap (a work seat on a personal repo), not to lock the owner out of their
+ * own machine, so it must be escapable in one deliberate step.
+ */
+fun isAccountPreferred(policy: FolderPolicy?, slug: String?): Boolean {
+    val allow = policy?.allowedAccountSlugs ?: return true
+    if (allow.isEmpty()) return true
+    return (slug ?: ClaudeAccount.DEFAULT_SLUG) in allow
 }
 
 /**

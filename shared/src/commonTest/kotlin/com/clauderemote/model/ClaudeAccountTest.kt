@@ -219,4 +219,49 @@ class ClaudeAccountTest {
         assertFalse(FolderPolicy(allowedAccountSlugs = setOf("a")).isEmpty)
         assertNotNull(FolderPolicy(defaultAccountSlug = "a", allowedAccountSlugs = setOf("a")))
     }
+
+    // --- initials (status-bar tag) ---
+
+    @Test
+    fun initialsAreFirstLetterEachSideOfTheAt() {
+        assertEquals("LN", ClaudeAccount("s", email = "lukashanak@nekrachni.cz").initials)
+        assertEquals("LK", ClaudeAccount("s", email = "lukas@kontexta.cz").initials)
+    }
+
+    @Test
+    fun initialsSkipLeadingPunctuationAndUppercase() {
+        assertEquals("AB", ClaudeAccount("s", email = ".a.b@b-corp.io").initials)
+        assertEquals("XY", ClaudeAccount("s", email = "X@yolo.dev").initials)
+    }
+
+    @Test
+    fun initialsFallBackToSlugWhenEmailUnusable() {
+        // A probe that came back without an email must still yield a readable tag
+        // rather than a blank chip the user can't interpret.
+        assertEquals("WO", ClaudeAccount("work-seat").initials)
+        assertEquals("AC", ClaudeAccount("acme", email = "no-at-sign").initials)
+        assertEquals("?", ClaudeAccount("---").initials)
+    }
+
+    // --- isAccountPreferred (soft folder guard) ---
+
+    @Test
+    fun everythingIsPreferredWithoutAPolicy() {
+        assertTrue(isAccountPreferred(null, null))
+        assertTrue(isAccountPreferred(null, "anything"))
+        // An empty allow-set means unrestricted, so it must not warn either.
+        assertTrue(isAccountPreferred(FolderPolicy(), "anything"))
+        assertTrue(isAccountPreferred(FolderPolicy(defaultAccountSlug = "a"), "b"))
+    }
+
+    @Test
+    fun preferenceFollowsTheAllowSetAndTreatsNullAsDefault() {
+        val p = FolderPolicy(allowedAccountSlugs = setOf("work"))
+        assertTrue(isAccountPreferred(p, "work"))
+        assertTrue(!isAccountPreferred(p, "personal"))
+        // null slug means the default account — it is NOT implicitly allowed when
+        // the folder restricts to a specific seat.
+        assertTrue(!isAccountPreferred(p, null))
+        assertTrue(isAccountPreferred(FolderPolicy(allowedAccountSlugs = setOf(ClaudeAccount.DEFAULT_SLUG)), null))
+    }
 }

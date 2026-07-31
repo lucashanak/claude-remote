@@ -193,6 +193,8 @@ fun TerminalScreen(
     // Multi-account: accounts available on the active session's server, and
     // the callback to change which one the session runs Claude under.
     accounts: List<com.clauderemote.model.ClaudeAccount> = emptyList(),
+    /** Active session folder's account policy — warns on a non-preferred switch. */
+    activeFolderPolicy: com.clauderemote.model.FolderPolicy? = null,
     onSwitchAccount: ((sessionId: String, accountSlug: String?) -> Unit)? = null,
 ) {
     val c = CRTheme.colors
@@ -250,7 +252,7 @@ fun TerminalScreen(
     val activeAccountLabel: String? = activeSession?.let { s ->
         accounts.firstOrNull {
             it.slug == (s.accountSlug ?: com.clauderemote.model.ClaudeAccount.DEFAULT_SLUG)
-        }?.shortLabel ?: s.accountSlug
+        }?.initials ?: s.accountSlug?.take(2)?.uppercase()
     }
     val scope = rememberCoroutineScope()
     var showPalette by remember { mutableStateOf(false) }
@@ -683,6 +685,7 @@ fun TerminalScreen(
 
                 if (activeSession != null && showSwitchAccountDialog) {
                     SwitchAccountDialog(
+                        folderPolicy = activeFolderPolicy,
                         accounts = accounts,
                         currentSlug = activeSession.accountSlug,
                         onDismiss = { showSwitchAccountDialog = false },
@@ -1092,7 +1095,7 @@ fun TerminalScreen(
                                                 onVerifyPaths = onVerifyPaths,
                                                 accountLabel = accounts.firstOrNull { a ->
                                                     a.slug == (tab?.accountSlug ?: com.clauderemote.model.ClaudeAccount.DEFAULT_SLUG)
-                                                }?.shortLabel,
+                                                }?.initials,
                                             )
                                         }
                                     }
