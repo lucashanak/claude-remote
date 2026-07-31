@@ -54,7 +54,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 enum class Screen {
-    LAUNCHER, CONNECT, TERMINAL, SETTINGS, LOG_VIEWER, USAGE_DASHBOARD, HISTORY
+    LAUNCHER, CONNECT, TERMINAL, SETTINGS, LOG_VIEWER, USAGE_DASHBOARD, HISTORY, ACCOUNTS
 }
 
 @Composable
@@ -63,6 +63,10 @@ fun App(
     appSettings: AppSettings,
     tabManager: TabManager,
     sessionOrchestrator: SessionOrchestrator,
+    // Multi-account: per-(server, folder) account policy. Constructed the
+    // same way as serverStorage/appSettings (wrapping the platform `prefs`) —
+    // see MainActivity.kt / Main.kt.
+    folderPolicyStorage: com.clauderemote.storage.FolderPolicyStorage,
     appVersion: String = "1.0.0",
     onInstallUpdate: ((ByteArray, UpdateInfo) -> Unit)? = null,
     onGetCurrentApk: (() -> ByteArray)? = null,
@@ -134,6 +138,15 @@ fun App(
     val activeTabId by tabManager.activeTabId.collectAsState()
     // Server of the active tab — usage chips (5h/wk) are keyed by server.
     val activeServerId = tabs.firstOrNull { it.id == activeTabId }?.server?.id
+
+    // Multi-account: accounts available on the active session's server, for
+    // the "Switch account" entry in TerminalScreen's overflow menu.
+    var terminalAccounts by remember { mutableStateOf<List<com.clauderemote.model.ClaudeAccount>>(emptyList()) }
+    LaunchedEffect(activeServerId) {
+        terminalAccounts = activeServerId?.let { id ->
+            try { sessionOrchestrator.listClaudeAccounts(id) } catch (_: Exception) { emptyList() }
+        } ?: emptyList()
+    }
 
     // ── Pane grid (Phase 1, low-risk) ──────────────────────────────────────
     var gridLayout by remember { mutableStateOf(GridLayout.ONE) }
@@ -795,10 +808,19 @@ fun App(
                                     } catch (_: Exception) {}
                                 }
                             },
-                            onLaunch = { folder, mode, model, connType, tmuxName, isNewTmux ->
+                            onLoadAccounts = { sessionOrchestrator.listClaudeAccounts(server.id) },
+                            folderPolicyStorage = folderPolicyStorage,
+                            onLaunch = { folder, mode, model, connType, tmuxName, isNewTmux, accountSlug ->
                                 scope.launch {
                                     try {
                                         connectionError = null
+                                        // The account is bound at LAUNCH, not after: it is
+                                        // carried by CLAUDE_CONFIG_DIR in the process env, so
+                                        // it only takes effect for a process that hasn't
+                                        // started yet. Launching first and switching after
+                                        // would run the session under the wrong account,
+                                        // write transcript entries as that account, and only
+                                        // then restart Claude.
                                         sessionOrchestrator.launchSession(
                                             server = server,
                                             folder = folder,
@@ -806,7 +828,8 @@ fun App(
                                             model = model,
                                             connectionType = connType,
                                             tmuxSessionName = tmuxName,
-                                            isNewTmuxSession = isNewTmux
+                                            isNewTmuxSession = isNewTmux,
+                                            accountSlug = accountSlug
                                         )
                                         currentScreen = Screen.TERMINAL
                                     } catch (e: Exception) {
@@ -1200,6 +1223,8 @@ fun App(
                         },
                         composeTerminalUnderTranscript = composeTerminalUnderTranscript,
                         connectionLabel = activeTabId?.let { connectionLabels[it] },
+                        accounts = terminalAccounts,
+                        onSwitchAccount = { id, slug -> sessionOrchestrator.switchSessionAccount(id, slug) },
                     )
                 }
 
@@ -1222,6 +1247,7 @@ fun App(
                         onImportServers = onImportServers,
                         onViewLog = { currentScreen = Screen.LOG_VIEWER },
                         onTestNotification = onTestNotification,
+                        onAccounts = { currentScreen = Screen.ACCOUNTS },
                     )
                 }
 
@@ -1229,6 +1255,16 @@ fun App(
                     LogViewerScreen(
                         onBack = { currentScreen = Screen.LAUNCHER },
                         onShare = onShareLog
+                    )
+                }
+
+                Screen.ACCOUNTS -> {
+                    AccountsScreen(
+                        servers = serverList,
+                        sessionOrchestrator = sessionOrchestrator,
+                        folderPolicyStorage = folderPolicyStorage,
+                        onBack = { currentScreen = Screen.SETTINGS },
+                        onOpenUrl = onOpenUrl,
                     )
                 }
 

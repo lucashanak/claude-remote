@@ -42,6 +42,7 @@ fun SettingsScreen(
     onImportServers: (() -> Unit)? = null,
     onViewLog: (() -> Unit)? = null,
     onTestNotification: (() -> Unit)? = null,
+    onAccounts: (() -> Unit)? = null,
     sshKeyManager: com.clauderemote.connection.SshKeyManager? = null,
     appearance: AppearanceState = settings.loadAppearance(),
     onAppearanceChange: (AppearanceState) -> Unit = { settings.saveAppearance(it) }
@@ -373,6 +374,17 @@ fun SettingsScreen(
                             modifier = Modifier.fillMaxWidth(),
                         ) { Text("Otestovat notifikaci", color = c.accent) }
                     }
+                }
+            }
+
+            // ── Accounts ────────────────────────────────────────────────────
+            if (onAccounts != null) {
+                SectionHeader("Accounts")
+                CRCard {
+                    OutlinedButton(
+                        onClick = onAccounts,
+                        modifier = Modifier.fillMaxWidth(),
+                    ) { Text("Manage Claude accounts", color = c.accent) }
                 }
             }
 

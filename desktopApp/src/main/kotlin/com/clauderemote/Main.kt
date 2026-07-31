@@ -228,6 +228,7 @@ fun main() = application {
     val prefs = PlatformPreferences()
     val serverStorage = ServerStorage(prefs)
     val appSettings = AppSettings(prefs)
+    val folderPolicyStorage = com.clauderemote.storage.FolderPolicyStorage(prefs)
     val tabManager = TabManager()
     val sessionStorage = com.clauderemote.storage.SessionStorage(prefs)
     val sessionOrchestrator = SessionOrchestrator(serverStorage, tabManager, sessionStorage)
@@ -359,6 +360,7 @@ fun main() = application {
         App(
             serverStorage = serverStorage,
             appSettings = appSettings,
+            folderPolicyStorage = folderPolicyStorage,
             tabManager = tabManager,
             sessionOrchestrator = sessionOrchestrator,
             sshKeyManager = sshKeyManager,

@@ -32,6 +32,7 @@ class MainActivity : FragmentActivity() {
 
     private lateinit var serverStorage: ServerStorage
     private lateinit var appSettings: AppSettings
+    private lateinit var folderPolicyStorage: com.clauderemote.storage.FolderPolicyStorage
     private lateinit var tabManager: TabManager
     private lateinit var sessionOrchestrator: SessionOrchestrator
     @Volatile private var terminalHandle: SshTerminalHandle? = null
@@ -163,6 +164,7 @@ class MainActivity : FragmentActivity() {
         val prefs = PlatformPreferences(this)
         serverStorage = ServerStorage(prefs)
         appSettings = AppSettings(prefs)
+        folderPolicyStorage = com.clauderemote.storage.FolderPolicyStorage(prefs)
         tabManager = TabManager()
         val sessionStorage = com.clauderemote.storage.SessionStorage(prefs)
         sessionOrchestrator = SessionOrchestrator(serverStorage, tabManager, sessionStorage)
@@ -293,6 +295,7 @@ class MainActivity : FragmentActivity() {
             App(
                 serverStorage = serverStorage,
                 appSettings = appSettings,
+                folderPolicyStorage = folderPolicyStorage,
                 tabManager = tabManager,
                 sessionOrchestrator = sessionOrchestrator,
                 sshKeyManager = sshKeyManager,

@@ -1,5 +1,7 @@
 package com.clauderemote.session.service
 
+import com.clauderemote.model.ClaudeAccount
+import com.clauderemote.model.claudeConfigDirFor
 import com.clauderemote.session.CostCalculator
 import com.clauderemote.session.TabManager
 import com.clauderemote.util.FileLogger
@@ -20,8 +22,16 @@ private const val TAG = "SessionOrchestrator"
 // credentials file Claude Code keeps refreshed. SECURITY: the token is piped to
 // curl via a stdin config file (`-K -`) so it never appears in argv/`ps`, and
 // it never leaves the server — the app only ever receives the usage JSON.
-private const val RATE_LIMIT_CMD =
-    "CRED=\"\${CLAUDE_CONFIG_DIR:-\$HOME/.claude}/.credentials.json\"; " +
+//
+// PER ACCOUNT: the credentials path is passed in, NOT taken from the server
+// shell's environment. This exec runs in a plain SSH shell where
+// CLAUDE_CONFIG_DIR is never set, so the old `${CLAUDE_CONFIG_DIR:-$HOME/.claude}`
+// always resolved to the DEFAULT account — every session's chips showed the
+// default seat's numbers no matter which login it was actually running under.
+// [accountConfigDir] is `~/.claude` for the default account and
+// `~/.claude-remote/accounts/<slug>` otherwise; it is shell-quoted by the caller.
+private fun rateLimitCmd(accountConfigDir: String): String =
+    "CRED=\"$accountConfigDir/.credentials.json\"; " +
         "T=\$(grep -oE '\"accessToken\":\"[^\"]+\"' \"\$CRED\" 2>/dev/null | head -1 | sed 's/.*:\"//; s/\"\$//'); " +
         "[ -z \"\$T\" ] && { echo '{}'; exit 0; }; " +
         "printf 'header = \"Authorization: Bearer %s\"\\nheader = \"anthropic-beta: oauth-2025-04-20\"\\nurl = \"https://api.anthropic.com/api/oauth/usage\"\\n' \"\$T\" | curl -sK - --max-time 8 2>/dev/null || echo '{}'"
@@ -43,10 +53,12 @@ internal class UsageService(
     private val _usageTokens = MutableStateFlow<CostCalculator.UsageTokens?>(null)
     val usageTokens: StateFlow<CostCalculator.UsageTokens?> = _usageTokens
 
-    // Usage percentages parsed from the OMC statusline, keyed by SERVER id.
-    // 5h and weekly limits are account-wide, so every session on the same
-    // server shares them — switch tabs and the values stay put instead of
-    // resetting to '—' until the new tab fetches them itself.
+    // Usage percentages keyed by USAGE KEY = [usageKey] (server id for the
+    // default account, "serverId#slug" for any other login). 5h and weekly
+    // limits are per LOGIN and shared by every session on it, so switching tabs
+    // keeps the values put instead of resetting to '—' until the new tab fetches
+    // them itself — while two sessions on two different seats no longer show
+    // each other's numbers.
     private val _sessionUsagePercents = kotlinx.coroutines.flow.MutableStateFlow<Map<String, Int>>(emptyMap())
     val sessionUsagePercents: kotlinx.coroutines.flow.StateFlow<Map<String, Int>> = _sessionUsagePercents
     private val _weekUsagePercents = kotlinx.coroutines.flow.MutableStateFlow<Map<String, Int>>(emptyMap())
@@ -66,11 +78,17 @@ internal class UsageService(
     // its server's entry, overlapping with disconnects during a reconnect storm.
     private val usagePollingJobs = java.util.concurrent.ConcurrentHashMap<String, kotlinx.coroutines.Job>()
 
-    // SEPARATE per-server jobs map for the rate-limit chip poller. Kept apart
-    // from usagePollingJobs so the two loops (ccusage token totals vs. the
-    // 5h/week chips) are fully independent — different cadence, different source,
-    // and one failing/cancelling never touches the other.
-    private val rateLimitPollingJobs = java.util.concurrent.ConcurrentHashMap<String, kotlinx.coroutines.Job>()
+    // SEPARATE jobs map for the rate-limit chip poller. Kept apart from
+    // usagePollingJobs so the two loops (ccusage token totals vs. the 5h/week
+    // chips) are fully independent — different cadence, different source, and one
+    // failing/cancelling never touches the other.
+    //
+    // Keyed per (server, ACCOUNT): the 5h/week limits belong to the login, so N
+    // accounts on one server need N independent pollers. A data-class key (not a
+    // concatenated string) so [stopPolling] can match a server exactly instead of
+    // prefix-matching its id — the same prefix-match trap the tmux targets hit.
+    private data class RateKey(val serverId: String, val accountSlug: String?)
+    private val rateLimitPollingJobs = java.util.concurrent.ConcurrentHashMap<RateKey, kotlinx.coroutines.Job>()
 
     fun startServerUsagePolling(serverId: String) {
         // Idempotent: ccusage data is account-wide, one loop per server serves
@@ -111,16 +129,24 @@ internal class UsageService(
     /**
      * Poll Anthropic's usage endpoint DIRECTLY so the 5h/week chips update
      * INDEPENDENTLY of interactive session activity and of OMC. Runs a small
-     * shell command on the server (see RATE_LIMIT_CMD) over the EXISTING shared
+     * shell command on the server (see [rateLimitCmd]) over the EXISTING shared
      * connection — free (usage metadata only, no `claude`/SDK/model tokens).
      *
-     * Idempotent + self-healing exactly like startServerUsagePolling: one loop
-     * per server (limits are account-wide), compute() makes check-and-launch
-     * atomic against a concurrent teardown's remove()+cancel(), and a missing
-     * live session (mid-reconnect) skips the tick rather than breaking the loop.
+     * One loop per (server, [accountSlug]) pair — the limits belong to the LOGIN,
+     * so a second account on the same server polls its own credentials and
+     * publishes under its own [usageKey]. null slug = the default `~/.claude`
+     * login, whose key is the bare server id (so existing UI lookups by server id
+     * keep working unchanged).
+     *
+     * Idempotent + self-healing exactly like startServerUsagePolling: compute()
+     * makes check-and-launch atomic against a concurrent teardown's
+     * remove()+cancel(), and a missing live session (mid-reconnect) skips the tick
+     * rather than breaking the loop.
      */
-    fun startServerRateLimitPolling(serverId: String) {
-        rateLimitPollingJobs.compute(serverId) { _, existing ->
+    fun startServerRateLimitPolling(serverId: String, accountSlug: String? = null) {
+        val cmd = rateLimitCmd(serverConfigDir(accountSlug))
+        val key = usageKey(serverId, accountSlug)
+        rateLimitPollingJobs.compute(RateKey(serverId, accountSlug)) { _, existing ->
             if (existing?.isActive == true) return@compute existing
             scope.launch {
                 kotlinx.coroutines.delay(2000) // small initial delay
@@ -128,14 +154,18 @@ internal class UsageService(
                     // Skip when backgrounded — user can't see the chips anyway.
                     if (!isBackground()) {
                         try {
+                            // Any live connection to the server will do — the
+                            // command names the account's credentials path
+                            // explicitly, so it does not matter which session's
+                            // transport carries it.
                             val sshSession = registry.liveServerSession(serverId)
                             if (sshSession != null) {
                                 val output = execReadWithWatchdog(
                                     sshSession,
-                                    RATE_LIMIT_CMD,
+                                    cmd,
                                     totalMs = 10_000,
                                 )
-                                parseRateLimitJson(serverId, output)
+                                parseRateLimitJson(key, output)
                             }
                         } catch (_: Exception) {}
                     }
@@ -153,7 +183,7 @@ internal class UsageService(
      * minutes-from-now. Only keys that parse are included; a blank/`{}`/unparseable
      * response is skipped (keeps the last value) — no OMC-cache fallback.
      */
-    private fun parseRateLimitJson(serverId: String, json: String) {
+    private fun parseRateLimitJson(key: String, json: String) {
         try {
             if (json.isBlank() || json.trim() == "{}") return
 
@@ -187,8 +217,8 @@ internal class UsageService(
             }
 
             if (update.isEmpty()) return
-            applyStatusline(serverId, update)
-            FileLogger.log(TAG, "RateLimit: 5h=${fiveHour}% wk=${weekly}%")
+            applyStatusline(key, update)
+            FileLogger.log(TAG, "RateLimit[$key]: 5h=${fiveHour}% wk=${weekly}%")
         } catch (e: Exception) {
             FileLogger.error(TAG, "RateLimit parse failed: ${e.message}", e)
         }
@@ -196,30 +226,69 @@ internal class UsageService(
 
     /**
      * Apply the 5h/week usage + reset-minute values scraped from the OMC
-     * statusline. Keyed by SERVER, not session — switching to another session
-     * on the same server then keeps the values instead of resetting to "—"
-     * until that session happens to fetch them itself.
+     * statusline. Keyed by [usageKey] (server + account), not by session —
+     * switching to another session on the same server AND account then keeps the
+     * values instead of resetting to "—" until that session happens to fetch them
+     * itself, while a session on a different login gets its own numbers.
      */
-    fun applyStatusline(serverId: String, usage: Map<String, Int>) {
+    fun applyStatusline(usageKey: String, usage: Map<String, Int>) {
         usage["session"]?.let { s ->
-            _sessionUsagePercents.update { it + (serverId to s) }
+            _sessionUsagePercents.update { it + (usageKey to s) }
         }
         usage["week"]?.let { w ->
-            _weekUsagePercents.update { it + (serverId to w) }
+            _weekUsagePercents.update { it + (usageKey to w) }
         }
         usage["session_reset_min"]?.let { m ->
-            _sessionResetMin.update { it + (serverId to m) }
+            _sessionResetMin.update { it + (usageKey to m) }
         }
         usage["week_reset_min"]?.let { m ->
-            _weekResetMin.update { it + (serverId to m) }
+            _weekResetMin.update { it + (usageKey to m) }
         }
         onUsageUpdate(usage["session"], usage["week"])
     }
 
-    /** Cancel + drop this server's usage + rate-limit polling jobs (last session left). */
+    /**
+     * Cancel + drop this server's usage + rate-limit polling jobs (last session
+     * left). ALL of the server's per-account rate-limit loops go, matched on the
+     * key's serverId field — no string prefix matching, so a server whose id is a
+     * prefix of another's is never caught in the sweep.
+     */
     fun stopPolling(serverId: String) {
         usagePollingJobs.remove(serverId)?.cancel()
-        rateLimitPollingJobs.remove(serverId)?.cancel()
+        rateLimitPollingJobs.keys.filter { it.serverId == serverId }.forEach { key ->
+            rateLimitPollingJobs.remove(key)?.cancel()
+        }
+    }
+
+    companion object {
+        /**
+         * State-map key for one LOGIN on one server. The default account keeps the
+         * bare server id, so every existing lookup (`map[activeServerId]`) behaves
+         * exactly as before multi-account; other logins get `serverId#slug`.
+         */
+        fun usageKey(serverId: String, accountSlug: String?): String =
+            if (accountSlug.isNullOrBlank() || accountSlug == ClaudeAccount.DEFAULT_SLUG) serverId
+            else "$serverId#$accountSlug"
+
+        /**
+         * The account's config dir as a path the SERVER shell can expand inside a
+         * double-quoted string — so `~` becomes `$HOME` (a literal `~` there does
+         * NOT expand). Default account ⇒ `$HOME/.claude`, which is what this probe
+         * has always read.
+         *
+         * The slug is reduced to the filesystem-name charset first: it is
+         * interpolated into a double-quoted shell string, and a malformed slug must
+         * not be able to break out of the quotes. A slug that doesn't survive that
+         * can't name a real account dir anyway, so it falls back to the default
+         * (the probe then simply finds no credentials and the tick no-ops).
+         */
+        internal fun serverConfigDir(accountSlug: String?): String {
+            val home = "\$HOME"
+            if (claudeConfigDirFor(accountSlug) == null) return "$home/.claude"
+            val safe = accountSlug!!.filter { it.isLetterOrDigit() || it in "._-@" }
+            if (safe.isEmpty() || safe == "." || safe == "..") return "$home/.claude"
+            return "$home/${ClaudeAccount.ACCOUNTS_ROOT.removePrefix("~/")}/$safe"
+        }
     }
 
     private fun parseUsageJson(json: String) {

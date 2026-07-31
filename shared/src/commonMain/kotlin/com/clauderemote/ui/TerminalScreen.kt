@@ -190,6 +190,10 @@ fun TerminalScreen(
     // a Compose overlay and cannot be reliably occluded by a lightweight layer.
     composeTerminalUnderTranscript: Boolean = false,
     connectionLabel: String? = null,
+    // Multi-account: accounts available on the active session's server, and
+    // the callback to change which one the session runs Claude under.
+    accounts: List<com.clauderemote.model.ClaudeAccount> = emptyList(),
+    onSwitchAccount: ((sessionId: String, accountSlug: String?) -> Unit)? = null,
 ) {
     val c = CRTheme.colors
     val m = CRTheme.metrics
@@ -219,6 +223,7 @@ fun TerminalScreen(
     var renameText by remember { mutableStateOf("") }
     var moreMenu by remember { mutableStateOf(false) }
     var showRestartConfirm by remember { mutableStateOf(false) }
+    var showSwitchAccountDialog by remember { mutableStateOf(false) }
     // File download / image preview state
     var showDownloadDialog by remember { mutableStateOf(false) }
     // Path tapped in a Claude answer, awaiting confirmation.
@@ -611,6 +616,20 @@ fun TerminalScreen(
                                         renameText = activeSession.alias.ifBlank { activeSession.displayLabel }
                                         showRenameDialog = true
                                     }, modifier = Modifier.fillMaxWidth()) { Text("Rename session", color = c.text) }
+                                    if (onSwitchAccount != null && accounts.size > 1) {
+                                        TextButton(onClick = {
+                                            moreMenu = false
+                                            showSwitchAccountDialog = true
+                                        }, modifier = Modifier.fillMaxWidth()) {
+                                            val currentLabel = accounts.firstOrNull {
+                                                (if (it.isDefault) null else it.slug) == activeSession.accountSlug
+                                            }?.label
+                                            Text(
+                                                if (currentLabel != null) "Switch account ($currentLabel)" else "Switch account",
+                                                color = c.text,
+                                            )
+                                        }
+                                    }
                                     if (activeSession.status == SessionStatus.DISCONNECTED || activeSession.status == SessionStatus.ERROR) {
                                         TextButton(onClick = { moreMenu = false; onReconnect?.invoke(activeSession.id) },
                                             modifier = Modifier.fillMaxWidth()) { Text("Reconnect", color = c.text) }
@@ -651,6 +670,18 @@ fun TerminalScreen(
                         dismissButton = {
                             TextButton(onClick = { showRestartConfirm = false }) { Text("Cancel", color = c.textDim) }
                         }
+                    )
+                }
+
+                if (activeSession != null && showSwitchAccountDialog) {
+                    SwitchAccountDialog(
+                        accounts = accounts,
+                        currentSlug = activeSession.accountSlug,
+                        onDismiss = { showSwitchAccountDialog = false },
+                        onConfirm = { slug ->
+                            showSwitchAccountDialog = false
+                            onSwitchAccount?.invoke(activeSession.id, slug)
+                        },
                     )
                 }
 

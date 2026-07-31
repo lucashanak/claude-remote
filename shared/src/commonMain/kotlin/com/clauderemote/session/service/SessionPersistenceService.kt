@@ -99,18 +99,18 @@ internal class SessionPersistenceService(
         DUNIT="${'$'}HOME/.config/systemd/user/claude-remote-drift.service"
         DTIMER="${'$'}HOME/.config/systemd/user/claude-remote-drift.timer"
         LOCK="${'$'}HOME/.claude-remote/sessions.lock"
-        MARKER="claude-remote-restore-v14"
+        MARKER="claude-remote-restore-v15"
         touch "${'$'}LOCK"
         echo "[${'$'}(date -u +%FT%TZ)] install: invoked by client" >> "${'$'}HOME/.claude-remote/install.log"
         if ! grep -q "${'$'}MARKER" "${'$'}SCRIPT" 2>/dev/null; then
             echo "[${'$'}(date -u +%FT%TZ)] install: restore.sh missing ${'$'}MARKER — rewriting; prior marker line: ${'$'}(grep -m1 'claude-remote-restore-v' "${'$'}SCRIPT" 2>/dev/null || echo '<none/new file>')" >> "${'$'}HOME/.claude-remote/install.log"
             cat > "${'$'}SCRIPT" <<'RESTORE_EOF'
 #!/usr/bin/env bash
-# marker-compat (do NOT remove): claude-remote-restore-v6 claude-remote-restore-v7 claude-remote-restore-v8 claude-remote-restore-v9 claude-remote-restore-v10 claude-remote-restore-v11 claude-remote-restore-v12 claude-remote-restore-v13 claude-remote-restore-v14
+# marker-compat (do NOT remove): claude-remote-restore-v6 claude-remote-restore-v7 claude-remote-restore-v8 claude-remote-restore-v9 claude-remote-restore-v10 claude-remote-restore-v11 claude-remote-restore-v12 claude-remote-restore-v13 claude-remote-restore-v14 claude-remote-restore-v15
 # Makes any installed client's `grep -q ${'$'}MARKER` find its marker so it takes the
 # PRESENT no-op path and does NOT rewrite this file (reverting the fixes) nor run
 # the daemon-reload/enable reinstall that correlates with the tmux-server death.
-# claude-remote-restore-v14 — recreates tmux+claude sessions from sessions.json (snapshot under flock)
+# claude-remote-restore-v15 — recreates tmux+claude sessions from sessions.json (snapshot under flock)
 set -u
 # Any tmux server started from here (incl. auto-start by `tmux new-session`,
 # which does NOT inherit the anchor scope's LimitCORE) must be able to dump a
@@ -205,6 +205,10 @@ if [ "${'$'}HAVE_JQ" = "1" ]; then
         MODE=${'$'}(echo "${'$'}SNAP" | jq -r ".[${'$'}i].mode")
         MODEL=${'$'}(echo "${'$'}SNAP" | jq -r ".[${'$'}i].model")
         UUID=${'$'}(echo "${'$'}SNAP" | jq -r ".[${'$'}i].claudeSessionId // empty")
+        # Which Claude LOGIN this session belongs to. Empty (or "default") means
+        # the pre-existing ~/.claude login, which MUST run with CLAUDE_CONFIG_DIR
+        # unset — see the ENVPFX note below.
+        ACCT=${'$'}(echo "${'$'}SNAP" | jq -r ".[${'$'}i].accountSlug // empty")
         tmux has-session -t="${'$'}TMUX_NAME" 2>/dev/null && continue
         FOLDER_EXP="${'$'}{FOLDER/#\~/${'$'}HOME}"
         case "${'$'}FOLDER_EXP" in /*) ;; *) FOLDER_EXP="${'$'}HOME/${'$'}FOLDER_EXP";; esac
@@ -247,6 +251,18 @@ if [ "${'$'}HAVE_JQ" = "1" ]; then
             fi
         fi
         CMD="${'$'}{ARGS[*]}"
+        # ACCOUNT. This script builds the claude command a SECOND time, entirely
+        # independently of the app's ClaudeConfig — so the account has to be
+        # honoured HERE too or a restored/self-healed session silently reverts to
+        # the default login (drift runs server-side with no app attached, so
+        # nothing would surface the error).
+        # An EMPTY or "default" slug must produce a BARE `claude` with NO env var:
+        # CLAUDE_CONFIG_DIR=${'$'}HOME/.claude is NOT the same as leaving it unset —
+        # set, claude reads ~/.claude/.claude.json, which doesn't exist, gets
+        # created empty, and the session loses its project trust map + MCP config.
+        if [ -n "${'$'}{ACCT:-}" ] && [ "${'$'}{ACCT:-}" != "default" ]; then
+            CMD="CLAUDE_CONFIG_DIR=\"${'$'}HOME/.claude-remote/accounts/${'$'}ACCT\" ${'$'}CMD"
+        fi
         # `exec bash -l` keepalive: when claude exits (crash, usage limit, OOM,
         # /exit, network blip) the pane drops to a login shell instead of the
         # whole tmux session vanishing — matches app-created sessions, which
@@ -268,6 +284,7 @@ else
             *\"mode\"*)        MODE=${'$'}(parse_field mode "${'$'}line");;
             *\"model\"*)       MODEL=${'$'}(parse_field model "${'$'}line");;
             *claudeSessionId*) UUID=${'$'}(parse_field claudeSessionId "${'$'}line");;
+            *accountSlug*)     ACCT=${'$'}(parse_field accountSlug "${'$'}line");;
             *\}*)
                 if [ -n "${'$'}{TMUX_NAME:-}" ] && [ -n "${'$'}{FOLDER:-}" ]; then
                     if ! tmux has-session -t="${'$'}TMUX_NAME" 2>/dev/null; then
@@ -275,13 +292,20 @@ else
                         [ -d "${'$'}FOLDER_EXP" ] && {
                             CMD="claude --allow-dangerously-skip-permissions"
                             [ -n "${'$'}{UUID:-}" ] && CMD="${'$'}CMD --resume ${'$'}UUID"
+                            # Same account rule as the jq branch above — this
+                            # SECOND command builder must honour it too, or a
+                            # jq-less box quietly restores every session onto the
+                            # default login. Empty/"default" ⇒ NO env var at all.
+                            if [ -n "${'$'}{ACCT:-}" ] && [ "${'$'}{ACCT:-}" != "default" ]; then
+                                CMD="CLAUDE_CONFIG_DIR=\"${'$'}HOME/.claude-remote/accounts/${'$'}ACCT\" ${'$'}CMD"
+                            fi
                             tmux new-session -d -x 200 -y 50 -s "${'$'}TMUX_NAME" -c "${'$'}FOLDER_EXP" \
                                 "tmux set-option -g mouse on; tmux set-option -g history-limit 100000; ${'$'}CMD; exec bash -l"
                             echo "Restored ${'$'}TMUX_NAME"
                         }
                     fi
                 fi
-                TMUX_NAME=""; FOLDER=""; MODE=""; MODEL=""; UUID=""
+                TMUX_NAME=""; FOLDER=""; MODE=""; MODEL=""; UUID=""; ACCT=""
                 ;;
         esac
     done < "${'$'}SESSIONS_FILE"
@@ -296,11 +320,11 @@ RESTORE_EOF
             echo "[${'$'}(date -u +%FT%TZ)] install: drift.sh missing ${'$'}MARKER — rewriting; prior marker line: ${'$'}(grep -m1 'claude-remote-restore-v' "${'$'}DRIFT" 2>/dev/null || echo '<none/new file>')" >> "${'$'}HOME/.claude-remote/install.log"
             cat > "${'$'}DRIFT" <<'DRIFT_EOF'
 #!/usr/bin/env bash
-# marker-compat (do NOT remove): claude-remote-restore-v6 claude-remote-restore-v7 claude-remote-restore-v8 claude-remote-restore-v9 claude-remote-restore-v10 claude-remote-restore-v11 claude-remote-restore-v12 claude-remote-restore-v13 claude-remote-restore-v14
+# marker-compat (do NOT remove): claude-remote-restore-v6 claude-remote-restore-v7 claude-remote-restore-v8 claude-remote-restore-v9 claude-remote-restore-v10 claude-remote-restore-v11 claude-remote-restore-v12 claude-remote-restore-v13 claude-remote-restore-v14 claude-remote-restore-v15
 # Makes any installed client's `grep -q ${'$'}MARKER` find its marker so it takes the
 # PRESENT no-op path and does NOT rewrite this file (reverting the fixes) nor run
 # the daemon-reload/enable reinstall that correlates with the tmux-server death.
-# claude-remote-restore-v14 — drift daemon: reconciles sessions.json to mirror
+# claude-remote-restore-v15 — drift daemon: reconciles sessions.json to mirror
 # the LIVE claude-server-* tmux sessions every minute. Self-healing: re-adds
 # live sessions a misbehaving/old client truncated away, refreshes
 # claudeSessionId from claude's per-pid state files, preserves client-set
@@ -425,9 +449,18 @@ for s in ${'$'}(tmux list-sessions -F '#{session_name}' 2>/dev/null); do
     [ -n "${'$'}pane_pid" ] || continue
     folder=${'$'}(tmux display-message -p -t "${'$'}s" '#{pane_current_path}' 2>/dev/null)
     pid=${'$'}(find_claude_descendant "${'$'}pane_pid")
-    sid=""; model="DEFAULT"; mode="YOLO"
+    sid=""; model="DEFAULT"; mode="YOLO"; acct=""
     if [ -n "${'$'}pid" ]; then
         args=${'$'}(tr '\0' ' ' < "/proc/${'$'}pid/cmdline" 2>/dev/null)
+        # ACCOUNT: the login this pane actually runs under. The command PREFIX
+        # (CLAUDE_CONFIG_DIR=... claude ...) is an env assignment, not an argv
+        # token, so cmdline can't show it — the process's own environ can.
+        # Empty ⇒ the default ~/.claude login (no var), which is exactly the
+        # null the manifest wants.
+        if [ -r "/proc/${'$'}pid/environ" ]; then
+            acct=${'$'}(tr '\0' '\n' < "/proc/${'$'}pid/environ" 2>/dev/null \
+                | sed -n 's|^CLAUDE_CONFIG_DIR=.*/accounts/\([^/]*\)/*${'$'}|\1|p' | head -1)
+        fi
         case "${'$'}args" in
             *"--model opus"*)   model=OPUS;;
             *"--model sonnet"*) model=SONNET;;
@@ -457,7 +490,7 @@ for s in ${'$'}(tmux list-sessions -F '#{session_name}' 2>/dev/null); do
         fi
     fi
     case "${'$'}s" in *--*) alias="${'$'}{s##*--}";; *) alias="";; esac
-    [ -n "${'$'}LIVE_TBL" ] && printf '%s\t%s\t%s\t%s\t%s\t%s\n' "${'$'}s" "${'$'}folder" "${'$'}mode" "${'$'}model" "${'$'}alias" "${'$'}sid" >> "${'$'}LIVE_TBL"
+    [ -n "${'$'}LIVE_TBL" ] && printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "${'$'}s" "${'$'}folder" "${'$'}mode" "${'$'}model" "${'$'}alias" "${'$'}sid" "${'$'}acct" >> "${'$'}LIVE_TBL"
 done
 LIVE="[]"
 if [ -n "${'$'}LIVE_TBL" ]; then
@@ -465,7 +498,8 @@ if [ -n "${'$'}LIVE_TBL" ]; then
         split("\n") | map(select(length>0)) | map(split("\t")) | map({
             id: .[0], serverId: "", folder: .[1], mode: .[2], model: .[3],
             tmuxSessionName: .[0], connectionType: "SSH", alias: .[4],
-            claudeSessionId: (if .[5]=="" then null else .[5] end), createdAt: 0
+            claudeSessionId: (if .[5]=="" then null else .[5] end), createdAt: 0,
+            accountSlug: (if (.[6] // "")=="" then null else .[6] end)
         })' "${'$'}LIVE_TBL" 2>/dev/null)
     rm -f "${'$'}LIVE_TBL"
     [ -n "${'$'}LIVE" ] || LIVE="[]"
@@ -527,7 +561,8 @@ LIVE=${'$'}(echo "${'$'}LIVE" | jq -c 'map(.tmuxSessionName)')"
         ((${'$'}live | map({key:.tmuxSessionName, value:.}) | from_entries) as ${'$'}lm
         | (${'$'}old | map(.tmuxSessionName)) as ${'$'}on
         | (${'$'}old | map(. as ${'$'}o | (${'$'}lm[${'$'}o.tmuxSessionName]) as ${'$'}l
-             | if ${'$'}l and (${'$'}l.claudeSessionId != null) then ${'$'}o + {claudeSessionId:${'$'}l.claudeSessionId} else ${'$'}o end))
+             | (if ${'$'}l and (${'$'}l.claudeSessionId != null) then ${'$'}o + {claudeSessionId:${'$'}l.claudeSessionId} else ${'$'}o end)
+             | (if ${'$'}l and (${'$'}l.accountSlug != null) then . + {accountSlug:${'$'}l.accountSlug} else . end)))
           + (${'$'}live | map(select(.tmuxSessionName as ${'$'}n | (${'$'}on | index(${'$'}n)) | not))))
         | map(select(.tmuxSessionName as ${'$'}n | (${'$'}forget | index(${'$'}n)) | not))' 2>/dev/null)
     NEWLEN=${'$'}(echo "${'$'}NEW" | jq 'length' 2>/dev/null || echo 0)

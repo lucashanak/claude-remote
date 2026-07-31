@@ -30,7 +30,15 @@ data class ClaudeSession(
      */
     val claudeSessionId: String? = null,
     /** Per-session cost history samples (normalised 0–1) for sparkline display. */
-    val history: List<Float> = emptyList()
+    val history: List<Float> = emptyList(),
+    /**
+     * Which server-side Claude login this session runs under, as a
+     * [ClaudeAccount.slug]. **null (the default) means the default `~/.claude`
+     * account**, which must launch with `CLAUDE_CONFIG_DIR` UNSET — see
+     * [claudeConfigDirFor]. Any other value selects
+     * `~/.claude-remote/accounts/<slug>/` as the session's config dir.
+     */
+    val accountSlug: String? = null
 ) {
     val tabTitle: String get() {
         if (alias.isNotBlank()) return alias

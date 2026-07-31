@@ -34,7 +34,15 @@ data class PersistedSession(
     val connectionType: ConnectionType = ConnectionType.SSH,
     val alias: String = "",
     val claudeSessionId: String? = null,
-    val createdAt: Long = 0L
+    val createdAt: Long = 0L,
+    /**
+     * Server-side Claude login this session runs under. Absent/null = the
+     * default `~/.claude` account, so every row written before multi-account
+     * existed keeps restoring exactly as before — no migration needed. The
+     * server-side restore/drift scripts read this same key out of
+     * `sessions.json` (see SessionPersistenceService).
+     */
+    val accountSlug: String? = null
 )
 
 class SessionStorage(private val prefs: KeyValueStore) {
@@ -135,7 +143,8 @@ class SessionStorage(private val prefs: KeyValueStore) {
                 connectionType = session.connectionType,
                 alias = session.alias,
                 claudeSessionId = session.claudeSessionId,
-                createdAt = session.connectedAt
+                createdAt = session.connectedAt,
+                accountSlug = session.accountSlug
             )
 
         /**
@@ -156,7 +165,8 @@ class SessionStorage(private val prefs: KeyValueStore) {
                 status = SessionStatus.CONNECTING,
                 connectedAt = if (persisted.createdAt > 0L) persisted.createdAt else System.currentTimeMillis(),
                 alias = persisted.alias,
-                claudeSessionId = persisted.claudeSessionId
+                claudeSessionId = persisted.claudeSessionId,
+                accountSlug = persisted.accountSlug
             )
         }
     }

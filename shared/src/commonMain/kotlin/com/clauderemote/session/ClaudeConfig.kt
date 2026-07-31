@@ -3,6 +3,7 @@ package com.clauderemote.session
 import com.clauderemote.model.ClaudeEffort
 import com.clauderemote.model.ClaudeMode
 import com.clauderemote.model.ClaudeModel
+import com.clauderemote.model.claudeConfigDirFor
 
 /**
  * Claude Code CLI command builder and runtime control sequences.
@@ -29,19 +30,45 @@ object ClaudeConfig {
         mode: ClaudeMode,
         model: ClaudeModel,
         claudeSessionId: String? = null,
-        resume: Boolean = false
-    ): String = "cd ${shellEscape(folder)} && ${claudeInvocation(mode, model, claudeSessionId, resume)}"
+        resume: Boolean = false,
+        accountSlug: String? = null
+    ): String = "cd ${shellEscape(folder)} && ${claudeInvocation(mode, model, claudeSessionId, resume, accountSlug)}"
 
     /**
-     * Just the `claude …` invocation (no `cd`), space-joined. All tokens are
-     * plain (flags, model alias, uuid) — no shell metacharacters — so this is
-     * safe to single-quote-wrap for `send-keys`/`bash -lc` without escaping.
+     * `CLAUDE_CONFIG_DIR=<dir> ` prefix for a non-default account, or `""`.
+     *
+     * The empty string is load-bearing: `CLAUDE_CONFIG_DIR=$HOME/.claude` is NOT
+     * the same as leaving the variable unset (unset ⇒ global config at
+     * `~/.claude.json`; set ⇒ `~/.claude/.claude.json`, which doesn't exist, gets
+     * created empty, and the session loses the project trust map + MCP config).
+     * [claudeConfigDirFor] returns null for exactly that case, and then we must
+     * emit NO prefix at all — see the doc on that function.
+     *
+     * The dir starts with `~`, which has to stay unquoted so the pane's shell
+     * expands it, so it goes through the same [shellEscape] treatment as the
+     * `cd <folder>` above: leading `~/` bare, the rest single-quoted. That keeps
+     * the result safe under the double `sq()` wrapping in
+     * [buildTmuxLaunchCommand] / [buildRestartCommand] (which already handle the
+     * quotes `cd` contributes) even for a slug carrying shell metacharacters.
+     */
+    private fun configDirPrefix(accountSlug: String?): String {
+        val dir = claudeConfigDirFor(accountSlug) ?: return ""
+        return "CLAUDE_CONFIG_DIR=${shellEscape(dir)} "
+    }
+
+    /**
+     * Just the `claude …` invocation (no `cd`), space-joined, optionally prefixed
+     * with this session's account `CLAUDE_CONFIG_DIR=` (see [configDirPrefix]).
+     * All argument tokens are plain (flags, model alias, uuid) — no shell
+     * metacharacters — and the account prefix is [shellEscape]d, so this stays
+     * safe to single-quote-wrap for `send-keys`/`bash -lc`.
      */
     private fun claudeInvocation(
         mode: ClaudeMode,
         model: ClaudeModel,
         claudeSessionId: String?,
         resume: Boolean,
+        accountSlug: String? = null,
     ): String {
         // Local models launch the `claude-local` wrapper (which sets the
         // gateway env server-side); everything else launches plain `claude`.
@@ -77,7 +104,7 @@ object ClaudeConfig {
             }
         }
 
-        return claudeArgs.joinToString(" ")
+        return configDirPrefix(accountSlug) + claudeArgs.joinToString(" ")
     }
 
     fun buildTmuxLaunchCommand(
@@ -86,9 +113,33 @@ object ClaudeConfig {
         mode: ClaudeMode,
         model: ClaudeModel,
         claudeSessionId: String? = null,
-        resume: Boolean = false
+        resume: Boolean = false,
+        accountSlug: String? = null
+    ): String = buildTmuxRunCommand(
+        tmuxSessionName,
+        buildLaunchCommand(folder, mode, model, claudeSessionId, resume, accountSlug),
+    )
+
+    /**
+     * `claude auth login` under [accountSlug]'s own config dir — the ONLY
+     * supported way to add a login (never `claude setup-token`: it hardcodes
+     * scope=user:inference and ignores CLAUDE_CODE_OAUTH_SCOPES, which would
+     * break MCP, uploads and the usage endpoint). Runs in a tmux pane so the
+     * app's screen-scraper can read the OAuth URL and type the pasted code.
+     */
+    fun buildTmuxLoginCommand(tmuxSessionName: String, accountSlug: String): String =
+        buildTmuxRunCommand(tmuxSessionName, configDirPrefix(accountSlug) + "claude auth login")
+
+    /**
+     * Create the anchored tmux session [tmuxSessionName] and `send-keys` the shell
+     * command [claudeCmd] into its pane. Everything about the tmux SERVER (anchoring,
+     * exit-empty, sizing, exact-match targets) lives here so every creator —
+     * claude launches and the account-login pane alike — gets the same treatment.
+     */
+    private fun buildTmuxRunCommand(
+        tmuxSessionName: String,
+        claudeCmd: String,
     ): String {
-        val claudeCmd = buildLaunchCommand(folder, mode, model, claudeSessionId, resume)
         // POSIX single-quote wrap: a literal ' inside a '...' string must be
         // written as '\'' — NOT \' (you can't backslash-escape a quote inside
         // single quotes). The old `\'` produced an unterminated quote because
@@ -168,6 +219,7 @@ object ClaudeConfig {
         mode: ClaudeMode,
         model: ClaudeModel,
         claudeSessionId: String,
+        accountSlug: String? = null,
     ): String {
         // Restart claude in place, KEEPING both the conversation AND the folder.
         //
@@ -188,7 +240,13 @@ object ClaudeConfig {
         // Quoting: `sq` is applied TWICE (once wrapping the inner for `bash -lc`,
         // once wrapping that for `send-keys`) — verified across ~, ~/x, absolute,
         // relative and embedded-quote folders.
-        val inner = "cd \"\$HOME\"; " + buildLaunchCommand(folder, mode, model, claudeSessionId, resume = true)
+        //
+        // [accountSlug] is what makes an in-place ACCOUNT switch possible: the
+        // pane restarts under the new account's CLAUDE_CONFIG_DIR while
+        // `--resume <uuid>` reloads the same conversation, which survives the
+        // switch because `projects/` is symlinked to the shared `~/.claude/`.
+        val inner = "cd \"\$HOME\"; " +
+            buildLaunchCommand(folder, mode, model, claudeSessionId, resume = true, accountSlug = accountSlug)
         fun sq(s: String) = "'" + s.replace("'", "'\\''") + "'"
         val loginRun = "bash -lc ${sq(inner)}"
         // `respawn-pane`/`send-keys` take a target-PANE, not target-session:

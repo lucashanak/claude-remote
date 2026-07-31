@@ -25,6 +25,7 @@ import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.unit.dp
 import com.clauderemote.model.*
 import com.clauderemote.storage.AppSettings
+import com.clauderemote.storage.FolderPolicyStorage
 import com.clauderemote.ui.components.CRCard
 import com.clauderemote.ui.components.Segmented
 import com.clauderemote.ui.components.ServerGlyph
@@ -41,12 +42,34 @@ fun ConnectScreen(
     onBack: () -> Unit,
     onKillTmux: ((String) -> Unit)? = null,
     onBrowseFolders: (suspend (String) -> List<String>)? = null,
-    onLaunch: (folder: String, mode: ClaudeMode, model: ClaudeModel, connectionType: ConnectionType, tmuxSession: String, isNewTmuxSession: Boolean) -> Unit
+    // Multi-account support: accounts are loaded lazily (a suspend callback,
+    // matching onBrowseFolders' idiom) rather than threading the whole
+    // SessionOrchestrator through, and folder policy is read directly since it
+    // depends on the in-screen `folder` field, not anything App.kt tracks.
+    onLoadAccounts: (suspend () -> List<ClaudeAccount>)? = null,
+    folderPolicyStorage: FolderPolicyStorage? = null,
+    onLaunch: (folder: String, mode: ClaudeMode, model: ClaudeModel, connectionType: ConnectionType, tmuxSession: String, isNewTmuxSession: Boolean, accountSlug: String?) -> Unit
 ) {
     val c = CRTheme.colors
     val m = CRTheme.metrics
 
     var folder by remember { mutableStateOf(server.defaultFolder) }
+
+    // ── Accounts (multi-account) ────────────────────────────────────────────
+    var accounts by remember { mutableStateOf<List<ClaudeAccount>>(emptyList()) }
+    LaunchedEffect(server.id) {
+        accounts = try { onLoadAccounts?.invoke() ?: emptyList() } catch (_: Exception) { emptyList() }
+    }
+    val folderPolicy = remember(folder, server.id, accounts) { folderPolicyStorage?.get(server.id, folder) }
+    val offerableAccounts = remember(folderPolicy, accounts) { allowedAccountsFor(folderPolicy, accounts) }
+    var selectedAccountSlug by remember(server.id) { mutableStateOf<String?>(null) }
+    // Re-pick the default whenever the folder (and thus its policy) changes —
+    // e.g. typing a different path should re-offer that folder's own default,
+    // not silently keep whatever the previous folder had selected.
+    LaunchedEffect(folderPolicy, accounts) {
+        selectedAccountSlug = defaultAccountFor(folderPolicy, accounts)
+            ?.let { if (it.isDefault) null else it.slug }
+    }
     var selectedMode by remember { mutableStateOf(appSettings.defaultClaudeMode) }
     var selectedModel by remember { mutableStateOf(appSettings.defaultClaudeModel) }
     // Default to Mosh when the server prefers it AND a direct-UDP path exists
@@ -92,7 +115,7 @@ fun ConnectScreen(
     val launch: () -> Unit = {
         if (!launching) {
             launching = true
-            onLaunch(folder, selectedMode, selectedModel, connectionType, tmuxSessionName, !useExistingTmux)
+            onLaunch(folder, selectedMode, selectedModel, connectionType, tmuxSessionName, !useExistingTmux, selectedAccountSlug)
         }
     }
     val launchKeyboardOptions = KeyboardOptions(imeAction = ImeAction.Go)
@@ -398,6 +421,18 @@ fun ConnectScreen(
                             colors = crTextFieldColors(),
                         )
                     }
+                    // Compact account chip — only shown once there's an actual
+                    // choice to make (a lone account, or a folder policy that
+                    // narrows to just one, needs no picker at all).
+                    if (offerableAccounts.size > 1) {
+                        LabeledRow("Account") {
+                            AccountPickerChip(
+                                accounts = offerableAccounts,
+                                selectedSlug = selectedAccountSlug,
+                                onSelect = { acc -> selectedAccountSlug = if (acc.isDefault) null else acc.slug },
+                            )
+                        }
+                    }
                 }
             }
 
@@ -484,6 +519,55 @@ private fun LabeledRow(label: String, content: @Composable () -> Unit) {
     Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
         Text(label, style = CRType.bodyDim, color = c.textDim)
         content()
+    }
+}
+
+@Composable
+private fun AccountPickerChip(
+    accounts: List<ClaudeAccount>,
+    selectedSlug: String?,
+    onSelect: (ClaudeAccount) -> Unit,
+) {
+    val c = CRTheme.colors
+    var open by remember { mutableStateOf(false) }
+    val current = accounts.firstOrNull { (if (it.isDefault) null else it.slug) == selectedSlug }
+        ?: accounts.firstOrNull()
+    val shape = RoundedCornerShape(999.dp)
+    Box {
+        Box(
+            modifier = Modifier
+                .background(c.surface2, shape)
+                .border(1.dp, c.border, shape)
+                .clip(shape),
+        ) {
+            TextButton(
+                onClick = { open = true },
+                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+            ) {
+                Text(
+                    current?.label ?: "Account",
+                    style = CRType.mono,
+                    color = c.text,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+        }
+        DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
+            accounts.forEach { acc ->
+                DropdownMenuItem(
+                    text = {
+                        Column {
+                            Text(acc.label, style = CRType.cardTitle, color = c.text)
+                            if (acc.subtitle.isNotBlank()) {
+                                Text(acc.subtitle, style = CRType.bodyDim, color = c.textDim)
+                            }
+                        }
+                    },
+                    onClick = { open = false; onSelect(acc) },
+                )
+            }
+        }
     }
 }
 

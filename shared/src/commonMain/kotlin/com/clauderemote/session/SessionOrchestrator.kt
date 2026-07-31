@@ -146,6 +146,14 @@ class SessionOrchestrator(
         reconnectScope, connectionRegistry, tabManager,
     )
 
+    // Server-side Claude logins: enumerate/provision/remove account config dirs
+    // and drive `claude auth login`. Takes serverStorage as well as the registry
+    // because the accounts screen can be opened before any session on that
+    // server is connected (then it borrows a one-off/pooled transport).
+    private val accountService = com.clauderemote.session.service.AccountService(
+        connectionRegistry, serverStorage,
+    )
+
     // Shared sessions.json (fetch/cache/push), the systemd restore-service
     // installer + restore/drift scripts, per-session real-UUID refresh
     // pollers, and the forget/rename lifecycle edits.
@@ -240,14 +248,25 @@ class SessionOrchestrator(
     // into a new empty session when tapped.
     var onSessionForgotten: ((serverId: String, tmuxSessionName: String) -> Unit)? = null
 
-    // Usage percentages parsed from the OMC statusline, keyed by SERVER id —
-    // owned by usageService.
+    // 5h/week usage percentages, keyed by [usageKeyFor] — owned by usageService.
     val sessionUsagePercents: kotlinx.coroutines.flow.StateFlow<Map<String, Int>> get() = usageService.sessionUsagePercents
     val weekUsagePercents: kotlinx.coroutines.flow.StateFlow<Map<String, Int>> get() = usageService.weekUsagePercents
 
     // Time-to-reset (minutes) parsed from the OMC `(XhYm)` suffix — owned by usageService.
     val sessionResetMin: kotlinx.coroutines.flow.StateFlow<Map<String, Int>> get() = usageService.sessionResetMin
     val weekResetMin: kotlinx.coroutines.flow.StateFlow<Map<String, Int>> get() = usageService.weekResetMin
+
+    /**
+     * Key into the four usage maps above for one LOGIN on one server. The 5h and
+     * weekly limits belong to the account, not the machine, so a session running
+     * under a second seat must not be shown the default seat's numbers.
+     *
+     * The DEFAULT account's key is the bare server id, so a lookup by
+     * `activeServerId` keeps returning the default seat's values exactly as it did
+     * before multi-account existed.
+     */
+    fun usageKeyFor(serverId: String, accountSlug: String?): String =
+        com.clauderemote.session.service.UsageService.usageKey(serverId, accountSlug)
 
 
 
@@ -328,7 +347,10 @@ class SessionOrchestrator(
             // Per-server loops: idempotent, first session on the server starts
             // them, later sessions just register/reuse.
             usageService.startServerUsagePolling(serverId)
-            usageService.startServerRateLimitPolling(serverId)
+            // Rate-limit chips are per LOGIN: idempotent per (server, account), so
+            // three sessions on two accounts end up with two pollers, each reading
+            // its own credentials file.
+            usageService.startServerRateLimitPolling(serverId, tabManager.getTab(sessionId)?.accountSlug)
             serverHealthService.startServerLatencyPolling(serverId)
             notificationService.startNotifyWatcher(sessionId, tmuxSessionName, serverId)
         }
@@ -500,7 +522,10 @@ class SessionOrchestrator(
         // minting a fresh one — used to resume an orphaned session discovered by
         // ClaudeHistoryScanner. connectSsh already does `claude --resume <uuid>`
         // when the tmux pane is missing but a transcript exists for this UUID.
-        resumeClaudeSessionId: String? = null
+        resumeClaudeSessionId: String? = null,
+        // Which server-side Claude login to launch under. null = the default
+        // `~/.claude` account (no CLAUDE_CONFIG_DIR at all — see claudeConfigDirFor).
+        accountSlug: String? = null
     ): ClaudeSession = withContext(Dispatchers.IO) {
         // Idempotency guard: a tab for this exact tmux session already exists
         // (typically a second tap on Create while the first launch is still
@@ -533,12 +558,13 @@ class SessionOrchestrator(
             connectionType = connectionType,
             status = SessionStatus.CONNECTING,
             alias = parsedAlias,
-            claudeSessionId = claudeSessionId
+            claudeSessionId = claudeSessionId,
+            accountSlug = accountSlug
         )
 
         terminalIO.initBuffer(sessionId)
         tabManager.addTab(session)
-        FileLogger.log(TAG, "Launching session: ${server.name} → $folder (${connectionType.name}, ${mode.name}, ${model.name})")
+        FileLogger.log(TAG, "Launching session: ${server.name} → $folder (${connectionType.name}, ${mode.name}, ${model.name}, account=${accountSlug ?: "default"})")
 
         try {
             when (connectionType) {
@@ -763,7 +789,12 @@ class SessionOrchestrator(
             if (transcriptService.hasSeenWork(session.id)) {
                 val usage = notificationService.promptDetector.parseUsage(session.id, text)
                 if (usage != null) {
-                    usageService.applyStatusline(session.server.id, usage)
+                    // Keyed by (server, account): this statusline belongs to THIS
+                    // session, so its numbers are its login's, not the server's.
+                    usageService.applyStatusline(
+                        usageKeyFor(session.server.id, session.accountSlug),
+                        usage,
+                    )
                 }
             }
         }
@@ -915,7 +946,8 @@ class SessionOrchestrator(
                 mode = session.mode,
                 model = session.model,
                 claudeSessionId = session.claudeSessionId,
-                resume = false
+                resume = false,
+                accountSlug = session.accountSlug
             )
             // See buildAttachCommand for the attach semantics (single client per
             // device, no -d, manual window sizing, exact target).
@@ -927,7 +959,8 @@ class SessionOrchestrator(
                         tmuxSessionName = session.tmuxSessionName,
                         folder = session.folder,
                         mode = session.mode,
-                        model = session.model
+                        model = session.model,
+                        accountSlug = session.accountSlug
                     )
                 }
                 decision.resume -> {
@@ -938,7 +971,8 @@ class SessionOrchestrator(
                         mode = session.mode,
                         model = session.model,
                         claudeSessionId = session.claudeSessionId,
-                        resume = true
+                        resume = true,
+                        accountSlug = session.accountSlug
                     )
                 }
                 else -> {
@@ -952,7 +986,8 @@ class SessionOrchestrator(
                         mode = session.mode,
                         model = session.model,
                         claudeSessionId = session.claudeSessionId,
-                        resume = false
+                        resume = false,
+                        accountSlug = session.accountSlug
                     )
                 }
             }
@@ -1161,7 +1196,8 @@ class SessionOrchestrator(
                 tmuxSessionName = session.tmuxSessionName,
                 folder = session.folder,
                 mode = session.mode,
-                model = session.model
+                model = session.model,
+                accountSlug = session.accountSlug
             )
         } else {
             // On a MISS (server reboot / tmux death) do NOT `tmux new-session -A`:
@@ -1178,7 +1214,8 @@ class SessionOrchestrator(
                 mode = session.mode,
                 model = session.model,
                 claudeSessionId = session.claudeSessionId,
-                resume = true
+                resume = true,
+                accountSlug = session.accountSlug
             )
             "${buildAttachCommand(session.tmuxSessionName)} 2>/dev/null || { $relaunch ; }"
         }
@@ -1331,7 +1368,8 @@ class SessionOrchestrator(
                 tmuxSessionName = session.tmuxSessionName,
                 folder = session.folder,
                 mode = session.mode,
-                model = session.model
+                model = session.model,
+                accountSlug = session.accountSlug
             )
         } else {
             // On a MISS do NOT `tmux new-session -A` (bare shell + tmux server
@@ -1346,7 +1384,8 @@ class SessionOrchestrator(
                 mode = session.mode,
                 model = session.model,
                 claudeSessionId = session.claudeSessionId,
-                resume = true
+                resume = true,
+                accountSlug = session.accountSlug
             )
             "${buildAttachCommand(session.tmuxSessionName)} 2>/dev/null || { $relaunch ; }"
         }
@@ -1891,8 +1930,10 @@ class SessionOrchestrator(
             FileLogger.log(TAG, "restartClaude: no live connection for $sessionId")
             return
         }
-        val cmd = ClaudeConfig.buildRestartCommand(tab.tmuxSessionName, tab.folder, tab.mode, tab.model, uuid)
-        FileLogger.log(TAG, "Restarting Claude Code for $sessionId (resume $uuid) in tmux ${tab.tmuxSessionName}")
+        val cmd = ClaudeConfig.buildRestartCommand(
+            tab.tmuxSessionName, tab.folder, tab.mode, tab.model, uuid, tab.accountSlug,
+        )
+        FileLogger.log(TAG, "Restarting Claude Code for $sessionId (resume $uuid, account=${tab.accountSlug ?: "default"}) in tmux ${tab.tmuxSessionName}")
         // The respawn kills+redraws the pane; suppress the prompt detector so it
         // doesn't misfire on the transient screen. UUID is unchanged, so the
         // transcript stream keeps tailing the same file across the restart.
@@ -1901,6 +1942,114 @@ class SessionOrchestrator(
             execReadWithWatchdog(sshSession, cmd, totalMs = 15_000)
         } catch (e: Exception) {
             FileLogger.error(TAG, "restartClaude failed for $sessionId", e)
+        }
+    }
+
+    // ======================== CLAUDE ACCOUNTS ========================
+
+    /**
+     * Every Claude login provisioned on [serverId], DEFAULT FIRST. Labels only —
+     * tokens never leave the server (see AccountService).
+     */
+    suspend fun listClaudeAccounts(serverId: String): List<ClaudeAccount> =
+        accountService.listAccounts(serverId)
+
+    /**
+     * Create the server-side config dir for [slug] (idempotent). Must complete
+     * before any session launches under that slug — a session that starts first
+     * makes claude create real `settings.json`/`plugins/` where the shared
+     * symlinks belong, silently losing the hooks and the OMC statusline.
+     */
+    suspend fun provisionClaudeAccount(serverId: String, slug: String): Boolean =
+        accountService.provisionAccount(serverId, slug)
+
+    /** Delete [slug]'s config dir (its credentials with it). Never touches `~/.claude`. */
+    suspend fun removeClaudeAccount(serverId: String, slug: String): Boolean =
+        accountService.removeAccount(serverId, slug)
+
+    /**
+     * Provision [slug] if needed and start `claude auth login` for it in a
+     * detached tmux session (`claude-login-<slug>`) the UI can screen-scrape for
+     * the OAuth URL / code prompt.
+     */
+    suspend fun startClaudeAccountLogin(serverId: String, slug: String): Boolean =
+        accountService.startLogin(serverId, slug)
+
+    /**
+     * Visible text of [slug]'s login pane, or null when no pane is running.
+     *
+     * The in-session login card ([loginFlow]) is driven by the terminal emulator
+     * of an ATTACHED tab, and the account-login pane deliberately has no tab — so
+     * poll this to find the OAuth URL (`https://…oauth/authorize…`) and to see
+     * `Paste code here if prompted >` appear, then answer with
+     * [submitClaudeAccountLoginCode].
+     */
+    suspend fun readClaudeAccountLoginScreen(serverId: String, slug: String): String? =
+        accountService.readLoginScreen(serverId, slug)
+
+    /** Type the pasted OAuth code into [slug]'s login pane and press Enter. */
+    suspend fun submitClaudeAccountLoginCode(serverId: String, slug: String, code: String): Boolean =
+        accountService.submitLoginCode(serverId, slug, code)
+
+    /** Kill [slug]'s login pane (cancelled, or finished). Absent pane = success. */
+    suspend fun cancelClaudeAccountLogin(serverId: String, slug: String): Boolean =
+        accountService.cancelLogin(serverId, slug)
+
+    /**
+     * Move a LIVE session to another Claude login, KEEPING the conversation.
+     *
+     * Reuses the "Restart Claude Code" path — `tmux respawn-pane -k` + `claude
+     * --resume <uuid>` — but relaunches under the new account's
+     * `CLAUDE_CONFIG_DIR`. The history survives because every account symlinks
+     * `projects/` to the shared `~/.claude/projects/`, so the transcript the
+     * resume reads is the very same file (and the app's transcript stream keeps
+     * tailing it — the UUID doesn't change).
+     *
+     * [accountSlug] null (or "default") moves it back to the default `~/.claude`
+     * login, which runs with NO `CLAUDE_CONFIG_DIR` at all.
+     *
+     * Fire-and-forget on the orchestrator's own scope: the tab + persisted record
+     * are updated immediately (so a reconnect/restore can't revert the account),
+     * the respawn and the sessions.json push happen in the background. A session
+     * with no `claudeSessionId` can't be respawned mid-conversation — restartClaude
+     * logs that and the new account takes effect at its next (re)launch instead.
+     */
+    fun switchSessionAccount(sessionId: String, accountSlug: String?) {
+        val tab = tabManager.getTab(sessionId) ?: return
+        // Normalise "default" to null: the model treats them as the same account,
+        // and null is what the launch builders check for the no-env-var case.
+        val target = accountSlug?.takeUnless { it.isBlank() || it == ClaudeAccount.DEFAULT_SLUG }
+        if (tab.accountSlug == target) return
+        val updated = tab.copy(accountSlug = target)
+
+        // In-memory first, so ANY relaunch from here on (reconnect, drift restore,
+        // respawn below) already carries the new account. addTab replaces in place
+        // (idempotent on id) but also makes the tab active — restore the previously
+        // active tab, since switching a BACKGROUND session's account must not yank
+        // the user's view (the terminal only repaints via switchTab/onTabSwitched,
+        // so a silent active-tab change would desync it).
+        val previouslyActive = tabManager.activeTabId.value
+        tabManager.addTab(updated)
+        if (previouslyActive != null && previouslyActive != sessionId) {
+            tabManager.switchTab(previouslyActive)
+        }
+        sessionStorage?.upsert(SessionStorage.fromClaudeSession(updated))
+        FileLogger.log(TAG, "Switching $sessionId to account ${target ?: "default"} (resume ${tab.claudeSessionId})")
+
+        reconnectScope.launch {
+            // Provision on demand: the user may be moving a session onto an
+            // account whose dir was removed, or one provisioned by another device.
+            // Idempotent, and skipped entirely for the default account.
+            if (target != null) accountService.provisionAccount(tab.server.id, target)
+            restartClaude(sessionId)
+            // Push the manifest so the server-side restore/drift scripts relaunch
+            // this session under the NEW account after a reboot or a self-heal.
+            connectionRegistry.ssh(sessionId)?.let { conn ->
+                persistence.pushSessionsToServer(conn, tab.server.id)
+            }
+            // The chips belong to the login — start (idempotently) the poller for
+            // the account we just moved to.
+            usageService.startServerRateLimitPolling(tab.server.id, target)
         }
     }
 
