@@ -172,6 +172,15 @@ fun App(
         }
     }
 
+    // Correct the active session's account from the running process. The stored
+    // slug can be stale (adopted from the server manifest, written by another
+    // device, or persisted before the field existed) and the chip must not claim
+    // an account the session isn't on.
+    LaunchedEffect(activeTabId, terminalAccounts) {
+        val id = activeTabId ?: return@LaunchedEffect
+        try { sessionOrchestrator.resolveSessionAccount(id) } catch (_: Exception) {}
+    }
+
     // ── Pane grid (Phase 1, low-risk) ──────────────────────────────────────
     var gridLayout by remember { mutableStateOf(GridLayout.ONE) }
     var paneSessions by remember { mutableStateOf(listOf<String?>(null, null, null, null)) }

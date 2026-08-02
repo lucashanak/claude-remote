@@ -71,4 +71,44 @@ class AccountLoginUrlTest {
         assertEquals("claude-login-lukas-kontexta-cz", AccountService.loginTmuxName("lukas-kontexta-cz"))
         assertEquals("claude-login-work", AccountService.loginTmuxName("work"))
     }
+
+    // --- which account a running session is on ---
+
+    @Test
+    fun readsTheSlugOutOfAProbedConfigDir() {
+        // Real probe output from a session running under the second account.
+        assertEquals(
+            "lukas-kontexta-cz",
+            AccountService.parseSessionAccountSlug("/home/lucas/.claude-remote/accounts/lukas-kontexta-cz\n"),
+        )
+        assertEquals(
+            "hanakl@nekrachni.cz",
+            AccountService.parseSessionAccountSlug("/home/lucas/.claude-remote/accounts/hanakl@nekrachni.cz"),
+        )
+    }
+
+    @Test
+    fun defaultAccountProbesAsNull() {
+        // No variable set at all is the DEFAULT login, not "unknown" — the chip
+        // must show the default rather than going blank.
+        assertNull(AccountService.parseSessionAccountSlug("__DEFAULT__"))
+        assertNull(AccountService.parseSessionAccountSlug(""))
+        assertNull(AccountService.parseSessionAccountSlug("\n  \n"))
+    }
+
+    @Test
+    fun aConfigDirOutsideTheAccountsRootIsTreatedAsDefault() {
+        // Someone running with CLAUDE_CONFIG_DIR pointed somewhere of their own
+        // isn't on one of our accounts; claiming a slug there would be a lie.
+        assertNull(AccountService.parseSessionAccountSlug("/home/lucas/.claude"))
+        assertNull(AccountService.parseSessionAccountSlug("/tmp/scratch-config"))
+    }
+
+    @Test
+    fun trailingPathSegmentsDoNotLeakIntoTheSlug() {
+        assertEquals(
+            "work",
+            AccountService.parseSessionAccountSlug("/home/lucas/.claude-remote/accounts/work/projects"),
+        )
+    }
 }

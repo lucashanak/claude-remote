@@ -1988,6 +1988,31 @@ class SessionOrchestrator(
         accountService.readLoginScreen(serverId, slug)
 
     /** Type the pasted OAuth code into [slug]'s login pane and press Enter. */
+    /**
+     * Which account [sessionId] is REALLY running under, probed from the process.
+     * Also reconciles: a stored slug that disagrees is corrected, so the switcher
+     * and the restore script stop working from a stale belief.
+     */
+    suspend fun resolveSessionAccount(sessionId: String): String? {
+        val tab = tabManager.getTab(sessionId) ?: return null
+        val actual = accountService.readSessionAccountSlug(tab.server.id, tab.tmuxSessionName)
+        if (actual != tab.accountSlug) {
+            FileLogger.log(
+                TAG,
+                "Session $sessionId is on account ${actual ?: "default"}, " +
+                    "stored was ${tab.accountSlug ?: "default"} — correcting",
+            )
+            val updated = tab.copy(accountSlug = actual)
+            val previouslyActive = tabManager.activeTabId.value
+            tabManager.addTab(updated)
+            if (previouslyActive != null && previouslyActive != sessionId) {
+                tabManager.switchTab(previouslyActive)
+            }
+            sessionStorage?.upsert(SessionStorage.fromClaudeSession(updated))
+        }
+        return actual
+    }
+
     /** OAuth URL from the account-login pane, or null until it renders. */
     suspend fun readClaudeAccountLoginUrl(serverId: String, slug: String): String? =
         accountService.readLoginUrl(serverId, slug)

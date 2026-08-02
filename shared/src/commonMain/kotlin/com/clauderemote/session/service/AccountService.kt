@@ -182,6 +182,29 @@ internal class AccountService(
     }
 
     /**
+     * Which account a RUNNING session is actually on, read from the `claude`
+     * process's own `CLAUDE_CONFIG_DIR`. Null means the default login.
+     *
+     * The app's stored slug is a BELIEF and can be stale or absent — the session
+     * may have been started by another device, adopted from the server manifest,
+     * or persisted before the field existed. The chip must not claim an account
+     * the process isn't on, so it is resolved from the process, not from storage.
+     */
+    suspend fun readSessionAccountSlug(serverId: String, tmuxSessionName: String): String? =
+        withContext(Dispatchers.IO) {
+            if (tmuxSessionName.isBlank()) return@withContext null
+            val out = try {
+                withServerSession(serverId) { sess ->
+                    execReadWithWatchdog(sess, sessionAccountCmd(tmuxSessionName), totalMs = 10_000)
+                }
+            } catch (e: Exception) {
+                FileLogger.error(TAG, "readSessionAccountSlug($tmuxSessionName) failed: ${e.message}", e)
+                null
+            } ?: return@withContext null
+            parseSessionAccountSlug(out)
+        }
+
+    /**
      * The OAuth URL from the login pane, or null while it hasn't appeared yet.
      * Poll this after [startLogin] — the pane takes a second or two to render it.
      */
@@ -311,6 +334,42 @@ internal class AccountService(
          */
         internal fun loginTmuxName(slug: String): String =
             "claude-login-" + slug.map { if (it.isLetterOrDigit() || it == '-') it else '_' }.joinToString("")
+
+        /**
+         * Walk the tmux session's pane process and its children/grandchildren for a
+         * `CLAUDE_CONFIG_DIR`. `claude` is usually the pane's direct child but sits a
+         * level deeper when the pane runs a login shell first, so two levels are
+         * checked rather than assuming a shape.
+         */
+        internal fun sessionAccountCmd(tmuxSessionName: String): String {
+            val n = "'" + tmuxSessionName.replace("'", "'\\''") + "'"
+            return PATH_PREAMBLE +
+                "cfg() { tr '\\0' '\\n' < /proc/\$1/environ 2>/dev/null | " +
+                "sed -n 's/^CLAUDE_CONFIG_DIR=//p' | head -1; }; " +
+                "for p in \$(tmux list-panes -t \"=$n\" -F '#{pane_pid}' 2>/dev/null); do " +
+                "for pid in \$p \$(pgrep -P \$p 2>/dev/null); do " +
+                "d=\$(cfg \$pid); [ -n \"\$d\" ] && { echo \"\$d\"; exit 0; }; " +
+                "for g in \$(pgrep -P \$pid 2>/dev/null); do " +
+                "d=\$(cfg \$g); [ -n \"\$d\" ] && { echo \"\$d\"; exit 0; }; " +
+                "done; done; done; echo __DEFAULT__"
+        }
+
+        /**
+         * Slug out of a probed config dir. Anything that isn't a path under the
+         * accounts root — including the `__DEFAULT__` marker and an empty read —
+         * means the default login, which runs with no variable set at all.
+         */
+        internal fun parseSessionAccountSlug(out: String): String? {
+            val line = out.lineSequence()
+                .map { it.trim() }
+                .firstOrNull { it.isNotEmpty() && !it.startsWith("+") }
+                ?: return null
+            if (line == "__DEFAULT__") return null
+            val marker = "/.claude-remote/accounts/"
+            val i = line.indexOf(marker)
+            if (i < 0) return null
+            return line.substring(i + marker.length).trim('/').substringBefore('/').ifBlank { null }
+        }
 
         /** Filesystem-name charset — also keeps the slug shell-metachar-free. */
         private val SLUG_CHARS = Regex("^[A-Za-z0-9._@-]+$")
