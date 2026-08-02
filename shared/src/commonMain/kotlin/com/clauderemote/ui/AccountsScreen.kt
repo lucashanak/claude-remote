@@ -325,6 +325,10 @@ fun AccountsScreen(
                         server?.let { sessionOrchestrator.cancelClaudeAccountLogin(it.id, loginSlug) }
                         pendingLoginSlug = null
                         loginTimedOut = false
+                        // Refresh even on failure: provisioning already created the
+                        // directory, so the half-made account must appear in the
+                        // list or the user has no way to remove it.
+                        refreshAccounts()
                     }
                 },
             )

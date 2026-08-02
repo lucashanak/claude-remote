@@ -146,7 +146,7 @@ internal class AccountService(
     }
 
     /** tmux session the login pane for [slug] runs in — the UI attaches/scrapes this. */
-    fun loginTmuxName(slug: String): String = "claude-login-$slug"
+    fun loginTmuxName(slug: String): String = Companion.loginTmuxName(slug)
 
     /**
      * The login pane's visible text, or null when there is no such pane (login
@@ -293,6 +293,24 @@ internal class AccountService(
             }
             return sb.toString().takeIf { it.length > "https://".length }
         }
+
+        /**
+         * tmux session name for a slug's login pane.
+         *
+         * tmux SILENTLY REWRITES `.` in a session name (to `_`), because it uses
+         * the dot as a window.pane separator in targets. Creating
+         * `claude-login-a.b` therefore yields a session actually called
+         * `claude-login-a_b`, and every later `-t '=claude-login-a.b'` fails with
+         * "can't find session" — the pane exists but is unreachable, so the login
+         * appears to never start. Since slugs gained `.` and `@`, sanitise here
+         * rather than trusting tmux's exact rewrite rules.
+         *
+         * Two slugs differing only in a separator collapse to one pane name; that
+         * is acceptable for a short-lived login pane and cannot affect the account
+         * directories themselves, which keep the real slug.
+         */
+        internal fun loginTmuxName(slug: String): String =
+            "claude-login-" + slug.map { if (it.isLetterOrDigit() || it == '-') it else '_' }.joinToString("")
 
         /** Filesystem-name charset — also keeps the slug shell-metachar-free. */
         private val SLUG_CHARS = Regex("^[A-Za-z0-9._@-]+$")

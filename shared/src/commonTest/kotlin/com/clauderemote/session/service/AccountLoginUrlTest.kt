@@ -53,4 +53,22 @@ class AccountLoginUrlTest {
         // A non-oauth link in the pane must not be mistaken for the sign-in URL.
         assertNull(AccountService.extractLoginUrl("see https://example.com/docs for help"))
     }
+
+    // --- tmux session naming ---
+
+    @Test
+    fun loginPaneNameHasNoDots() {
+        // tmux rewrites '.' in a session name (it's the window.pane separator), so
+        // a dotted name creates a session the app can never target again — the
+        // pane exists but every has-session/capture-pane says "can't find".
+        val name = AccountService.loginTmuxName("hanakl@nekrachni.cz")
+        assertEquals("claude-login-hanakl_nekrachni_cz", name)
+        assertTrue(name.none { it == '.' || it == ':' || it == '@' }, name)
+    }
+
+    @Test
+    fun loginPaneNameKeepsPlainSlugsIntact() {
+        assertEquals("claude-login-lukas-kontexta-cz", AccountService.loginTmuxName("lukas-kontexta-cz"))
+        assertEquals("claude-login-work", AccountService.loginTmuxName("work"))
+    }
 }
