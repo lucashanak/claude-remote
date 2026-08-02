@@ -55,6 +55,21 @@ class AppSettings(private val prefs: KeyValueStore) {
         } catch (e: Exception) { ClaudeModel.DEFAULT }
         set(value) = prefs.putString("default_claude_model", value.name)
 
+    /**
+     * Last seen email of a server's DEFAULT account (the `~/.claude` login).
+     *
+     * That account is a SLOT, not an identity: `accountSlug == null` means
+     * "whatever is logged into ~/.claude right now". If someone logs that dir in
+     * as a different person, every folder policy naming the default silently
+     * starts allowing them. Remembering the email lets the accounts screen notice
+     * and say so, rather than the change passing unseen.
+     */
+    fun rememberedDefaultAccount(serverId: String): String =
+        prefs.getString("default_account_email_$serverId", "")
+
+    fun setRememberedDefaultAccount(serverId: String, email: String) =
+        prefs.putString("default_account_email_$serverId", email)
+
     // SSH defaults
     var defaultSshPort: Int
         get() = prefs.getInt("default_ssh_port", 22)

@@ -42,7 +42,11 @@ import kotlinx.coroutines.launch
 @Composable
 fun AccountsScreen(
     accountColorStorage: com.clauderemote.storage.AccountColorStorage,
+    appSettings: com.clauderemote.storage.AppSettings,
     servers: List<SshServer>,
+    /** Preselected server; when set the in-screen picker is hidden, because the
+     *  caller (the server's own settings) has already answered "which server". */
+    initialServerId: String? = null,
     sessionOrchestrator: SessionOrchestrator,
     folderPolicyStorage: FolderPolicyStorage,
     onBack: () -> Unit,
@@ -51,7 +55,7 @@ fun AccountsScreen(
     val c = CRTheme.colors
     val scope = rememberCoroutineScope()
 
-    var selectedServerId by remember { mutableStateOf(servers.firstOrNull()?.id) }
+    var selectedServerId by remember { mutableStateOf(initialServerId ?: servers.firstOrNull()?.id) }
     val selectedServer = servers.firstOrNull { it.id == selectedServerId }
 
     var accounts by remember { mutableStateOf<List<ClaudeAccount>>(emptyList()) }
@@ -98,6 +102,20 @@ fun AccountsScreen(
         // guarantees two accounts don't come up the same colour.
         accountColors = accountColorStorage.assign(accounts.map { it.slug })
     }
+    // The default account is a slot, not an identity — warn when the person
+    // behind it changes, since folder policies that name it silently follow.
+    var defaultAccountChangedFrom by remember { mutableStateOf<String?>(null) }
+    LaunchedEffect(accounts, selectedServerId) {
+        val srv = selectedServerId ?: return@LaunchedEffect
+        val current = accounts.firstOrNull { it.isDefault }?.email.orEmpty()
+        if (current.isBlank()) return@LaunchedEffect
+        val remembered = appSettings.rememberedDefaultAccount(srv)
+        if (remembered.isBlank()) {
+            appSettings.setRememberedDefaultAccount(srv, current)
+        } else if (remembered != current) {
+            defaultAccountChangedFrom = remembered
+        }
+    }
     var pendingLoginSlug by remember { mutableStateOf<String?>(null) }
     var loginUrl by remember { mutableStateOf<String?>(null) }
     var loginTimedOut by remember { mutableStateOf(false) }
@@ -141,7 +159,7 @@ fun AccountsScreen(
             ) {
                 Spacer(Modifier.height(4.dp))
 
-                if (servers.size > 1) {
+                if (servers.size > 1 && initialServerId == null) {
                     SectionHeader("Server")
                     FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                         servers.forEach { srv ->
@@ -157,6 +175,29 @@ fun AccountsScreen(
                 }
 
                 SectionHeader("Accounts")
+                // Shown until acknowledged: a changed default means every folder
+                // policy naming it now applies to a different person.
+                defaultAccountChangedFrom?.let { was ->
+                    val nowEmail = accounts.firstOrNull { it.isDefault }?.email.orEmpty()
+                    CRCard {
+                        Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                            Text("Default account changed", style = CRType.cardTitle, color = c.disconnected)
+                            Text(
+                                "This server's default login was $was and is now $nowEmail. " +
+                                    "Folder rules that allow \"default\" now allow this account instead.",
+                                style = CRType.bodyDim,
+                                color = c.textDim,
+                            )
+                            TextButton(
+                                onClick = {
+                                    selectedServerId?.let { appSettings.setRememberedDefaultAccount(it, nowEmail) }
+                                    defaultAccountChangedFrom = null
+                                },
+                                contentPadding = PaddingValues(horizontal = 0.dp),
+                            ) { Text("Got it", color = c.accent) }
+                        }
+                    }
+                }
                 CRCard {
                     Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                         when {

@@ -31,7 +31,10 @@ fun ServerEditDialog(
     onDismiss: () -> Unit,
     onSave: (SshServer) -> Unit,
     onPickKeyFile: ((callback: (String) -> Unit) -> Unit)? = null,
-    onDelete: ((SshServer) -> Unit)? = null
+    onDelete: ((SshServer) -> Unit)? = null,
+    /** Opens this server's Claude accounts. Null while creating a server —
+     *  there is no server id to scope accounts to until it is saved. */
+    onManageAccounts: (() -> Unit)? = null,
 ) {
     val c = CRTheme.colors
     val m = CRTheme.metrics
@@ -439,6 +442,19 @@ fun ServerEditDialog(
                 }
 
                 // ── Danger: delete ──────────────────────────────────────────
+                // Claude accounts live on the SERVER (one config dir per account in
+                // its filesystem), so this is where they belong rather than behind a
+                // server picker in global settings.
+                if (!isNew && onManageAccounts != null) {
+                    HorizontalDivider(color = c.border)
+                    OutlinedButton(
+                        onClick = onManageAccounts,
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = RoundedCornerShape(m.cardRadius),
+                    ) {
+                        Text("Claude accounts", style = CRType.cardTitle, color = c.accent)
+                    }
+                }
                 if (!isNew) {
                     HorizontalDivider(color = c.border)
                     OutlinedButton(

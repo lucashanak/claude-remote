@@ -97,6 +97,9 @@ fun App(
     val pathVerifyCache = remember { RemotePathCache() }
 
     var currentScreen by remember { mutableStateOf(Screen.LAUNCHER) }
+    // Which server's accounts the accounts screen is showing; set when opened
+    // from that server's settings, which is the only way in.
+    var accountsServerId by remember { mutableStateOf<String?>(null) }
     var selectedServer by remember { mutableStateOf<SshServer?>(null) }
     var showServerDialog by remember { mutableStateOf(false) }
     var editingServer by remember { mutableStateOf<SshServer?>(null) }
@@ -1282,7 +1285,6 @@ fun App(
                         onImportServers = onImportServers,
                         onViewLog = { currentScreen = Screen.LOG_VIEWER },
                         onTestNotification = onTestNotification,
-                        onAccounts = { currentScreen = Screen.ACCOUNTS },
                     )
                 }
 
@@ -1299,7 +1301,9 @@ fun App(
                         sessionOrchestrator = sessionOrchestrator,
                         folderPolicyStorage = folderPolicyStorage,
                         accountColorStorage = accountColorStorage,
-                        onBack = { currentScreen = Screen.SETTINGS },
+                        appSettings = appSettings,
+                        initialServerId = accountsServerId,
+                        onBack = { currentScreen = Screen.LAUNCHER },
                         onOpenUrl = onOpenUrl,
                     )
                 }
@@ -1406,6 +1410,13 @@ fun App(
         if (showServerDialog) {
             ServerEditDialog(
                 server = editingServer,
+                onManageAccounts = editingServer?.let { srv ->
+                    {
+                        showServerDialog = false
+                        accountsServerId = srv.id
+                        currentScreen = Screen.ACCOUNTS
+                    }
+                },
                 onDismiss = { showServerDialog = false },
                 onSave = { server ->
                     if (editingServer != null) {
