@@ -1988,6 +1988,10 @@ class SessionOrchestrator(
         accountService.readLoginScreen(serverId, slug)
 
     /** Type the pasted OAuth code into [slug]'s login pane and press Enter. */
+    /** OAuth URL from the account-login pane, or null until it renders. */
+    suspend fun readClaudeAccountLoginUrl(serverId: String, slug: String): String? =
+        accountService.readLoginUrl(serverId, slug)
+
     suspend fun submitClaudeAccountLoginCode(serverId: String, slug: String, code: String): Boolean =
         accountService.submitLoginCode(serverId, slug, code)
 

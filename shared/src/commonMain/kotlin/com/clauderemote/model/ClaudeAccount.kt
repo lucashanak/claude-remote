@@ -75,16 +75,27 @@ fun claudeConfigDirFor(accountSlug: String?): String? =
     else "${ClaudeAccount.ACCOUNTS_ROOT}/$accountSlug"
 
 /**
- * Derives a filesystem-safe slug from an account email. Collision-proof enough
- * that two seats in the same org don't clash (which keying on the org would).
+ * Derives a directory-safe slug from a name or email.
+ *
+ * `@`, `.`, `_` and `-` are KEPT: they are legal in a filename and the paths
+ * built from a slug are single-quoted in every shell command, so they need no
+ * mangling — turning them into dashes only made `lukas@kontexta.cz` render as
+ * the unrecognisable `lukas-kontexta-cz`. Everything else collapses to `-`.
+ *
+ * Leading dots are stripped so a slug can't create a hidden directory, and the
+ * `.`/`..` results that would escape or alias the accounts root are rejected by
+ * AccountService's own slug guard as well.
  */
 fun accountSlugFromEmail(email: String): String {
     val cleaned = email.lowercase()
-        .map { if (it.isLetterOrDigit()) it else '-' }
+        .map { if (it.isLetterOrDigit() || it in "@._-") it else '-' }
         .joinToString("")
         .replace(Regex("-+"), "-")
-        .trim('-')
-    return cleaned.take(48).ifBlank { "account" }
+        .trim('-', '.')
+    val slug = cleaned.take(48).trim('-', '.')
+    // Pure punctuation ("...@@@...") is a legal directory name but a useless
+    // label, so it falls back rather than becoming an account called "@@@".
+    return if (slug.any { it.isLetterOrDigit() }) slug else "account"
 }
 
 /**

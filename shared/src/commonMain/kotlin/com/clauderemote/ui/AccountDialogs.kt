@@ -78,6 +78,46 @@ fun AddAccountDialog(
  * (Claude prints the URL hard-wrapped across terminal rows, which breaks a
  * naive copy from the raw terminal).
  */
+/**
+ * Shown between "add account" and the OAuth URL appearing. The pane takes a
+ * moment to render it, and a login that never starts has to surface as an error
+ * rather than a spinner that never resolves — otherwise the user is left with a
+ * provisioned account dir and no way to tell it failed.
+ */
+@Composable
+fun AccountLoginPendingDialog(
+    timedOut: Boolean,
+    onCancel: () -> Unit,
+) {
+    val c = CRTheme.colors
+    FloatingDialog(
+        visible = true,
+        onDismiss = onCancel,
+        theme = CRThemeSnapshot.current(),
+        title = { Text(if (timedOut) "Sign-in didn't start" else "Starting sign-in…", color = c.text) },
+        text = {
+            if (timedOut) {
+                Text(
+                    "No sign-in page appeared on the server. The account folder was " +
+                        "created but has no login — remove it and try again.",
+                    style = CRType.bodyDim,
+                    color = c.textDim,
+                )
+            } else {
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    CircularProgressIndicator(modifier = Modifier.width(20.dp), color = c.text)
+                    Text("Waiting for the sign-in page…", style = CRType.bodyDim, color = c.textDim)
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onCancel) {
+                Text(if (timedOut) "OK" else "Cancel", color = c.text)
+            }
+        },
+    )
+}
+
 @Composable
 fun AccountLoginDialog(
     url: String,

@@ -84,6 +84,8 @@ fun AccountsScreen(
 
     var addAccountOpen by remember { mutableStateOf(false) }
     var pendingLoginSlug by remember { mutableStateOf<String?>(null) }
+    var loginUrl by remember { mutableStateOf<String?>(null) }
+    var loginTimedOut by remember { mutableStateOf(false) }
     var removeTarget by remember { mutableStateOf<ClaudeAccount?>(null) }
     val loginFlow by sessionOrchestrator.loginFlow.collectAsState()
 
@@ -264,26 +266,69 @@ fun AccountsScreen(
     }
 
     // ── OAuth sign-in for the account just provisioned ─────────────────────
-    // Gated on pendingLoginSlug (set only right after we call
-    // startClaudeAccountLogin above) so this doesn't accidentally react to an
-    // unrelated /login flow started from a live terminal session — loginFlow
-    // is one shared StateFlow for both.
-    val flow = loginFlow
-    if (pendingLoginSlug != null && flow != null) {
-        AccountLoginDialog(
-            url = flow.url,
-            onOpenUrl = { onOpenUrl?.invoke(flow.url) },
-            onSubmitCode = { code ->
-                sessionOrchestrator.submitLoginCode(flow.sessionId, code)
-                sessionOrchestrator.clearLoginFlow(flow.sessionId)
-                pendingLoginSlug = null
-                refreshAccounts()
-            },
-            onCancel = {
-                sessionOrchestrator.clearLoginFlow(flow.sessionId)
-                pendingLoginSlug = null
-            },
-        )
+    // Read from the login PANE, not from sessionOrchestrator.loginFlow: that
+    // StateFlow is fed by InputPromptDetector, which only scans sessions the app
+    // has ATTACHED as tabs. The account-login pane deliberately has no tab, so
+    // nothing ever fed that flow — the dialog never appeared and the user was
+    // left with a provisioned dir and no login. Poll the pane instead.
+    val loginSlug = pendingLoginSlug
+    if (loginSlug != null) {
+        val server = selectedServer
+        LaunchedEffect(loginSlug, server?.id) {
+            if (server == null) return@LaunchedEffect
+            loginUrl = null
+            loginTimedOut = false
+            // The pane needs a moment to render the URL; give it a bounded number
+            // of tries so a login that never starts surfaces as an error instead
+            // of a dialog that spins forever.
+            repeat(LOGIN_URL_POLL_TRIES) {
+                val url = sessionOrchestrator.readClaudeAccountLoginUrl(server.id, loginSlug)
+                if (url != null) {
+                    loginUrl = url
+                    return@LaunchedEffect
+                }
+                kotlinx.coroutines.delay(LOGIN_URL_POLL_MS)
+            }
+            loginTimedOut = true
+        }
+
+        val url = loginUrl
+        if (url != null) {
+            AccountLoginDialog(
+                url = url,
+                onOpenUrl = { onOpenUrl?.invoke(url) },
+                onSubmitCode = { code ->
+                    scope.launch {
+                        server?.let { sessionOrchestrator.submitClaudeAccountLoginCode(it.id, loginSlug, code) }
+                        pendingLoginSlug = null
+                        loginUrl = null
+                        // The pane writes the credentials a beat after the code is
+                        // accepted, so give it a moment before re-probing or the
+                        // row comes back label-less.
+                        kotlinx.coroutines.delay(2500)
+                        refreshAccounts()
+                    }
+                },
+                onCancel = {
+                    scope.launch {
+                        server?.let { sessionOrchestrator.cancelClaudeAccountLogin(it.id, loginSlug) }
+                        pendingLoginSlug = null
+                        loginUrl = null
+                    }
+                },
+            )
+        } else {
+            AccountLoginPendingDialog(
+                timedOut = loginTimedOut,
+                onCancel = {
+                    scope.launch {
+                        server?.let { sessionOrchestrator.cancelClaudeAccountLogin(it.id, loginSlug) }
+                        pendingLoginSlug = null
+                        loginTimedOut = false
+                    }
+                },
+            )
+        }
     }
 
     // ── Remove account ───────────────────────────────────────────────────────
@@ -470,3 +515,7 @@ private fun Modifier.clickableNoRipple(onClick: () -> Unit): Modifier =
         indication = null,
         onClick = onClick,
     )
+
+/** How long to wait for the login pane to render its OAuth URL. */
+private const val LOGIN_URL_POLL_TRIES = 20
+private const val LOGIN_URL_POLL_MS = 1000L

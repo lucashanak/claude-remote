@@ -182,6 +182,15 @@ internal class AccountService(
     }
 
     /**
+     * The OAuth URL from the login pane, or null while it hasn't appeared yet.
+     * Poll this after [startLogin] — the pane takes a second or two to render it.
+     */
+    suspend fun readLoginUrl(serverId: String, slug: String): String? {
+        val pane = readLoginScreen(serverId, slug) ?: return null
+        return extractLoginUrl(pane)
+    }
+
+    /**
      * Type [code] into the login pane and press Enter. `send-keys -l` sends it
      * LITERALLY (no key-name interpretation, so a code containing e.g. "Space"
      * isn't turned into a keypress), and the code is single-quote-escaped because
@@ -261,6 +270,29 @@ internal class AccountService(
 
     internal companion object {
         private const val BLOCK_MARKER = "==="
+
+        /**
+         * Pull the OAuth URL out of a captured login pane.
+         *
+         * The terminal HARD-WRAPS it across lines with no continuation marker, so
+         * the tail has to be stitched back on or the link is truncated and the
+         * sign-in page 404s. Continuation lines are the ones with no whitespace;
+         * the wrap stops at the first blank line, at prose (which contains
+         * spaces), or at the `Paste code here if prompted >` prompt.
+         */
+        internal fun extractLoginUrl(pane: String): String? {
+            val lines = pane.lines()
+            val start = lines.indexOfFirst { it.contains("https://") && it.contains("oauth") }
+            if (start < 0) return null
+            val head = lines[start].substringAfter("https://")
+            val sb = StringBuilder("https://").append(head.trim())
+            for (i in start + 1 until lines.size) {
+                val s = lines[i].trim()
+                if (s.isEmpty() || s.contains(' ') || s.startsWith("Paste")) break
+                sb.append(s)
+            }
+            return sb.toString().takeIf { it.length > "https://".length }
+        }
 
         /** Filesystem-name charset — also keeps the slug shell-metachar-free. */
         private val SLUG_CHARS = Regex("^[A-Za-z0-9._@-]+$")

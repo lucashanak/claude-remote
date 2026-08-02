@@ -47,27 +47,27 @@ class ClaudeAccountTest {
 
     @Test
     fun accountSlugFromEmail_normalEmail() {
-        assertEquals("lukashanak-nekrachni-cz", accountSlugFromEmail("lukashanak@nekrachni.cz"))
+        assertEquals("lukashanak@nekrachni.cz", accountSlugFromEmail("lukashanak@nekrachni.cz"))
     }
 
     @Test
     fun accountSlugFromEmail_uppercaseIsLowercased() {
-        assertEquals("lukashanak-nekrachni-cz", accountSlugFromEmail("LukasHanak@Nekrachni.CZ"))
+        assertEquals("lukashanak@nekrachni.cz", accountSlugFromEmail("LukasHanak@Nekrachni.CZ"))
     }
 
     @Test
     fun accountSlugFromEmail_plusAddressing() {
+        // '+' isn't in the kept set, so it collapses; '@' survives.
         val slug = accountSlugFromEmail("lukas+work@nekrachni.cz")
-        assertEquals("lukas-work-nekrachni-cz", slug)
+        assertEquals("lukas-work@nekrachni.cz", slug)
     }
 
     @Test
     fun accountSlugFromEmail_unicodeAndDiacritics() {
         // Letters/digits (per Char.isLetterOrDigit, which is unicode-aware) pass
-        // through as-is; only non-letter-or-digit separators get collapsed to '-'.
+        // through as-is, and '.'/'@' are kept so the slug still reads as the email.
         val slug = accountSlugFromEmail("lukáš.hanák@example.com")
-        assertEquals("lukáš-hanák-example-com", slug)
-        assertTrue(slug.none { it == '.' || it == '@' })
+        assertEquals("lukáš.hanák@example.com", slug)
     }
 
     @Test
@@ -79,7 +79,8 @@ class ClaudeAccountTest {
 
     @Test
     fun accountSlugFromEmail_onlySeparatorChars_fallsBackNotBlank() {
-        // Everything collapses/trims away, leaving a blank string pre-fallback.
+        // Punctuation-only survives the charset filter but carries no meaning, so
+        // it must still fall back rather than name an account "@@@".
         val slug = accountSlugFromEmail("...@@@...")
         assertTrue(slug.isNotBlank())
         assertEquals("account", slug)
