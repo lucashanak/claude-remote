@@ -143,9 +143,29 @@ fun App(
     // the "Switch account" entry in TerminalScreen's overflow menu.
     var terminalAccounts by remember { mutableStateOf<List<com.clauderemote.model.ClaudeAccount>>(emptyList()) }
     LaunchedEffect(activeServerId) {
-        terminalAccounts = activeServerId?.let { id ->
-            try { sessionOrchestrator.listClaudeAccounts(id) } catch (_: Exception) { emptyList() }
-        } ?: emptyList()
+        val id = activeServerId
+        if (id == null) {
+            terminalAccounts = emptyList()
+            return@LaunchedEffect
+        }
+        // Retry while empty. The probe needs a live SSH transport, and on a
+        // session RESTORED at app start there often isn't one yet — a single
+        // attempt then failed silently and left the list empty for good, which
+        // hides the account chip and the switcher on exactly those sessions.
+        // (A session created through ConnectScreen re-triggered this effect by
+        // changing the server, which is why new sessions looked fine.)
+        repeat(ACCOUNTS_LOAD_TRIES) { attempt ->
+            val loaded = try {
+                sessionOrchestrator.listClaudeAccounts(id)
+            } catch (_: Exception) {
+                emptyList()
+            }
+            if (loaded.isNotEmpty()) {
+                terminalAccounts = loaded
+                return@LaunchedEffect
+            }
+            kotlinx.coroutines.delay(ACCOUNTS_LOAD_RETRY_MS * (attempt + 1))
+        }
     }
 
     // ── Pane grid (Phase 1, low-risk) ──────────────────────────────────────
@@ -1543,3 +1563,6 @@ fun App(
     }
 }
 
+/** Retries for the account probe — a restored session has no transport yet. */
+private const val ACCOUNTS_LOAD_TRIES = 6
+private const val ACCOUNTS_LOAD_RETRY_MS = 2000L
