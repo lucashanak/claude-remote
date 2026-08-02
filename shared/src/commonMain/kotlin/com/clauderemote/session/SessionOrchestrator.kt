@@ -481,6 +481,20 @@ class SessionOrchestrator(
                 // EXACT target ('=name'): plain -t prefix-matches, so this used to
                 // read the pane pid of a DIFFERENT session whose name starts with
                 // ours and pin the tab's transcript to the wrong conversation.
+                //
+                // The state file lives under the pane's OWN config dir, which for a
+                // non-default login is ~/.claude-remote/accounts/<slug>/sessions/ —
+                // `sessions` is deliberately NOT shared (see AccountService
+                // .SHARED_ENTRIES), so reading ~/.claude/sessions/ found nothing for
+                // those panes and the probe returned null on every call. Take
+                // CLAUDE_CONFIG_DIR from the candidate pid's own environ (same user,
+                // always readable; the launcher sets it as an env assignment, so it
+                // never shows up in cmdline) and fall back to ~/.claude.
+                //
+                // Only report a UUID whose transcript already exists: claude >=
+                // 2.1.220 FORKS on --resume and reports the new id before writing
+                // its jsonl, so adopting eagerly would repoint the chat view at an
+                // empty conversation. Same guard the drift daemon uses.
                 val cmd = "PID=\$(tmux list-panes -t '=$escaped' -F '#{pane_pid}' 2>/dev/null | head -1); " +
                     "[ -n \"\$PID\" ] || exit 1; " +
                     "PIDS=\$(ps -eo pid=,ppid= 2>/dev/null | awk -v root=\"\$PID\" '" +
@@ -488,8 +502,15 @@ class SessionOrchestrator(
                     "END { head=0;tail=0;q[tail++]=root; " +
                     "while(head<tail){p=q[head++];print p;m=split(kids[p],a,\" \");" +
                     "for(i=1;i<=m;i++)if(a[i]!=\"\")q[tail++]=a[i]} }'); " +
-                    "for p in \$PIDS; do f=\"\$HOME/.claude/sessions/\$p.json\"; " +
-                    "[ -f \"\$f\" ] && { jq -r '.sessionId // empty' \"\$f\" 2>/dev/null; break; }; done"
+                    "for p in \$PIDS; do " +
+                    "CFG=\$(tr '\\0' '\\n' < /proc/\$p/environ 2>/dev/null | " +
+                    "sed -n 's|^CLAUDE_CONFIG_DIR=||p' | head -1); " +
+                    "f=\"\${CFG:-\$HOME/.claude}/sessions/\$p.json\"; " +
+                    "[ -f \"\$f\" ] || continue; " +
+                    "v=\$(jq -r '.sessionId // empty' \"\$f\" 2>/dev/null); " +
+                    "[ -n \"\$v\" ] && { ls \"\$HOME\"/.claude/projects/*/\"\$v\".jsonl >/dev/null 2>&1 || " +
+                    "ls \"\${CFG:-\$HOME/.claude}\"/projects/*/\"\$v\".jsonl >/dev/null 2>&1; } && " +
+                    "echo \"\$v\"; break; done"
                 val ch = sshSession.openChannel("exec") as com.jcraft.jsch.ChannelExec
                 ch.setCommand(cmd)
                 ch.inputStream = null

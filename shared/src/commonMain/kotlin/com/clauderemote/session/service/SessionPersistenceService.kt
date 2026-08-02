@@ -99,18 +99,18 @@ internal class SessionPersistenceService(
         DUNIT="${'$'}HOME/.config/systemd/user/claude-remote-drift.service"
         DTIMER="${'$'}HOME/.config/systemd/user/claude-remote-drift.timer"
         LOCK="${'$'}HOME/.claude-remote/sessions.lock"
-        MARKER="claude-remote-restore-v15"
+        MARKER="claude-remote-restore-v16"
         touch "${'$'}LOCK"
         echo "[${'$'}(date -u +%FT%TZ)] install: invoked by client" >> "${'$'}HOME/.claude-remote/install.log"
         if ! grep -q "${'$'}MARKER" "${'$'}SCRIPT" 2>/dev/null; then
             echo "[${'$'}(date -u +%FT%TZ)] install: restore.sh missing ${'$'}MARKER — rewriting; prior marker line: ${'$'}(grep -m1 'claude-remote-restore-v' "${'$'}SCRIPT" 2>/dev/null || echo '<none/new file>')" >> "${'$'}HOME/.claude-remote/install.log"
             cat > "${'$'}SCRIPT" <<'RESTORE_EOF'
 #!/usr/bin/env bash
-# marker-compat (do NOT remove): claude-remote-restore-v6 claude-remote-restore-v7 claude-remote-restore-v8 claude-remote-restore-v9 claude-remote-restore-v10 claude-remote-restore-v11 claude-remote-restore-v12 claude-remote-restore-v13 claude-remote-restore-v14 claude-remote-restore-v15
+# marker-compat (do NOT remove): claude-remote-restore-v6 claude-remote-restore-v7 claude-remote-restore-v8 claude-remote-restore-v9 claude-remote-restore-v10 claude-remote-restore-v11 claude-remote-restore-v12 claude-remote-restore-v13 claude-remote-restore-v14 claude-remote-restore-v15 claude-remote-restore-v16
 # Makes any installed client's `grep -q ${'$'}MARKER` find its marker so it takes the
 # PRESENT no-op path and does NOT rewrite this file (reverting the fixes) nor run
 # the daemon-reload/enable reinstall that correlates with the tmux-server death.
-# claude-remote-restore-v15 — recreates tmux+claude sessions from sessions.json (snapshot under flock)
+# claude-remote-restore-v16 — recreates tmux+claude sessions from sessions.json (snapshot under flock)
 set -u
 # Any tmux server started from here (incl. auto-start by `tmux new-session`,
 # which does NOT inherit the anchor scope's LimitCORE) must be able to dump a
@@ -320,11 +320,11 @@ RESTORE_EOF
             echo "[${'$'}(date -u +%FT%TZ)] install: drift.sh missing ${'$'}MARKER — rewriting; prior marker line: ${'$'}(grep -m1 'claude-remote-restore-v' "${'$'}DRIFT" 2>/dev/null || echo '<none/new file>')" >> "${'$'}HOME/.claude-remote/install.log"
             cat > "${'$'}DRIFT" <<'DRIFT_EOF'
 #!/usr/bin/env bash
-# marker-compat (do NOT remove): claude-remote-restore-v6 claude-remote-restore-v7 claude-remote-restore-v8 claude-remote-restore-v9 claude-remote-restore-v10 claude-remote-restore-v11 claude-remote-restore-v12 claude-remote-restore-v13 claude-remote-restore-v14 claude-remote-restore-v15
+# marker-compat (do NOT remove): claude-remote-restore-v6 claude-remote-restore-v7 claude-remote-restore-v8 claude-remote-restore-v9 claude-remote-restore-v10 claude-remote-restore-v11 claude-remote-restore-v12 claude-remote-restore-v13 claude-remote-restore-v14 claude-remote-restore-v15 claude-remote-restore-v16
 # Makes any installed client's `grep -q ${'$'}MARKER` find its marker so it takes the
 # PRESENT no-op path and does NOT rewrite this file (reverting the fixes) nor run
 # the daemon-reload/enable reinstall that correlates with the tmux-server death.
-# claude-remote-restore-v15 — drift daemon: reconciles sessions.json to mirror
+# claude-remote-restore-v16 — drift daemon: reconciles sessions.json to mirror
 # the LIVE claude-server-* tmux sessions every minute. Self-healing: re-adds
 # live sessions a misbehaving/old client truncated away, refreshes
 # claudeSessionId from claude's per-pid state files, preserves client-set
@@ -457,9 +457,11 @@ for s in ${'$'}(tmux list-sessions -F '#{session_name}' 2>/dev/null); do
         # token, so cmdline can't show it — the process's own environ can.
         # Empty ⇒ the default ~/.claude login (no var), which is exactly the
         # null the manifest wants.
+        cfg=""
         if [ -r "/proc/${'$'}pid/environ" ]; then
-            acct=${'$'}(tr '\0' '\n' < "/proc/${'$'}pid/environ" 2>/dev/null \
-                | sed -n 's|^CLAUDE_CONFIG_DIR=.*/accounts/\([^/]*\)/*${'$'}|\1|p' | head -1)
+            cfg=${'$'}(tr '\0' '\n' < "/proc/${'$'}pid/environ" 2>/dev/null \
+                | sed -n 's|^CLAUDE_CONFIG_DIR=||p' | head -1)
+            acct=${'$'}(printf '%s' "${'$'}cfg" | sed -n 's|.*/accounts/\([^/]*\)/*${'$'}|\1|p')
         fi
         case "${'$'}args" in
             *"--model opus"*)   model=OPUS;;
@@ -473,7 +475,13 @@ for s in ${'$'}(tmux list-sessions -F '#{session_name}' 2>/dev/null); do
             *"--allow-dangerously-skip-permissions"*) mode=DEFAULT;;
         esac
         sid=${'$'}(echo "${'$'}args" | sed -n 's/.*--\(resume\|session-id\) \([0-9a-f-]*\).*/\2/p' | head -1)
-        psf="${'$'}HOME/.claude/sessions/${'$'}pid.json"
+        # Claude writes its per-pid state under the CONFIG DIR, so a pane running
+        # under a non-default login keeps it in ~/.claude-remote/accounts/<slug>/
+        # sessions/, not ~/.claude/sessions/. Hardcoding the latter made this
+        # whole refresh a no-op for account sessions: their claudeSessionId was
+        # frozen at the launch/--resume id forever, which is what pinned a
+        # client's chat view to the pre-fork transcript after every restore.
+        psf="${'$'}{cfg:-${'$'}HOME/.claude}/sessions/${'$'}pid.json"
         if [ -f "${'$'}psf" ]; then
             v=${'$'}(jq -r .sessionId "${'$'}psf" 2>/dev/null)
             # claude >= 2.1.220 FORKS on --resume: it reports a BRAND NEW
@@ -482,8 +490,12 @@ for s in ${'$'}(tmux list-sessions -F '#{session_name}' 2>/dev/null); do
             # real one for good (proven: server--CC 17b4feef -> 667a07bd, then
             # "no transcript -> launching fresh" on every restore since).
             # Only adopt an id that actually HAS a transcript on disk.
+            # Accounts normally share ~/.claude/projects via symlink, but a login
+            # provisioned out of order has a REAL projects dir of its own — look
+            # in both so the guard can't reject a transcript that exists.
             if [ -n "${'$'}v" ] && [ "${'$'}v" != "null" ] && [ "${'$'}v" != "${'$'}sid" ]; then
-                if ls "${'$'}HOME"/.claude/projects/*/"${'$'}v".jsonl >/dev/null 2>&1; then
+                if ls "${'$'}HOME"/.claude/projects/*/"${'$'}v".jsonl >/dev/null 2>&1 \
+                   || ls "${'$'}{cfg:-${'$'}HOME/.claude}"/projects/*/"${'$'}v".jsonl >/dev/null 2>&1; then
                     sid="${'$'}v"
                 fi
             fi
