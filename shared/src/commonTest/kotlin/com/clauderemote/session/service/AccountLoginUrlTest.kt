@@ -111,4 +111,21 @@ class AccountLoginUrlTest {
             AccountService.parseSessionAccountSlug("/home/lucas/.claude-remote/accounts/work/projects"),
         )
     }
+
+    @Test
+    fun probeTargetsTheSessionWithASingleExactMatchQuote() {
+        // Regression: the target was built single-quoted AND wrapped in double
+        // quotes, so tmux read the apostrophes as part of the name ("can't find
+        // window: 'claude-...'"). Every probe then fell through to __DEFAULT__ and
+        // every session claimed the default account.
+        val cmd = AccountService.sessionAccountCmd("claude-server-kontexta-yolo--files")
+        assertTrue(cmd.contains("-t '=claude-server-kontexta-yolo--files'"), cmd)
+        assertTrue(!cmd.contains("\"'="), "target must not be double-wrapped: $cmd")
+    }
+
+    @Test
+    fun probeEscapesAnApostropheInTheSessionName() {
+        val cmd = AccountService.sessionAccountCmd("weird'name")
+        assertTrue(cmd.contains("""-t '=weird'\''name'"""), cmd)
+    }
 }

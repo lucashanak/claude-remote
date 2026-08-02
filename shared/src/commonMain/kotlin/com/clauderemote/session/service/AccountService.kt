@@ -342,11 +342,15 @@ internal class AccountService(
          * checked rather than assuming a shape.
          */
         internal fun sessionAccountCmd(tmuxSessionName: String): String {
-            val n = "'" + tmuxSessionName.replace("'", "'\\''") + "'"
+            // Single-quoted ONLY. Wrapping this in double quotes as well made tmux
+            // see the apostrophes as part of the name ("can't find window:
+            // 'claude-...'"), so every probe fell through to __DEFAULT__ and every
+            // session claimed the default account.
+            val n = "'=" + tmuxSessionName.replace("'", "'\\''") + "'"
             return PATH_PREAMBLE +
                 "cfg() { tr '\\0' '\\n' < /proc/\$1/environ 2>/dev/null | " +
                 "sed -n 's/^CLAUDE_CONFIG_DIR=//p' | head -1; }; " +
-                "for p in \$(tmux list-panes -t \"=$n\" -F '#{pane_pid}' 2>/dev/null); do " +
+                "for p in \$(tmux list-panes -t $n -F '#{pane_pid}' 2>/dev/null); do " +
                 "for pid in \$p \$(pgrep -P \$p 2>/dev/null); do " +
                 "d=\$(cfg \$pid); [ -n \"\$d\" ] && { echo \"\$d\"; exit 0; }; " +
                 "for g in \$(pgrep -P \$pid 2>/dev/null); do " +
