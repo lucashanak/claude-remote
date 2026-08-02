@@ -82,13 +82,7 @@ class MainActivity : FragmentActivity() {
         val files = uris.mapNotNull { uri ->
             try {
                 val bytes = contentResolver.openInputStream(uri)?.readBytes() ?: return@mapNotNull null
-                val name = uri.lastPathSegment
-                    ?.substringAfterLast('/')
-                    ?.substringAfterLast(':')
-                    ?: "file_${System.currentTimeMillis()}"
-                val ext = contentResolver.getType(uri)?.substringAfter('/')?.let { ".$it" } ?: ""
-                val fileName = if (name.contains('.')) name else "$name$ext"
-                bytes to fileName
+                bytes to attachmentName(uri)
             } catch (e: Exception) {
                 FileLogger.error("MainActivity", "Failed to read attached file", e)
                 null
@@ -96,6 +90,45 @@ class MainActivity : FragmentActivity() {
         }
         attachFileCallback?.invoke(files)
         attachFileCallback = null
+    }
+
+    /**
+     * Human-readable filename for a picked document.
+     *
+     * The URI's last path segment is a provider-internal row id
+     * ("content://…/document/286496"), so using it produced uploads named
+     * "286496.vnd.openxmlformats-officedocument.wordprocessingml.document" —
+     * an id with the raw MIME subtype glued on. SAF exposes the real name in
+     * OpenableColumns.DISPLAY_NAME; the segment is only a last resort, and
+     * then the extension comes from MimeTypeMap ("docx", not the subtype).
+     */
+    private fun attachmentName(uri: android.net.Uri): String {
+        val displayName = try {
+            contentResolver.query(uri, arrayOf(android.provider.OpenableColumns.DISPLAY_NAME), null, null, null)
+                ?.use { c ->
+                    val idx = c.getColumnIndex(android.provider.OpenableColumns.DISPLAY_NAME)
+                    if (idx >= 0 && c.moveToFirst()) c.getString(idx) else null
+                }
+        } catch (e: Exception) {
+            FileLogger.error("MainActivity", "DISPLAY_NAME query failed for $uri", e)
+            null
+        }
+        val raw = displayName?.takeIf { it.isNotBlank() }
+            ?: uri.lastPathSegment
+                ?.substringAfterLast('/')
+                ?.substringAfterLast(':')
+            ?: "file_${System.currentTimeMillis()}"
+        // Slashes (and a bare "..") would let a document name escape the
+        // remote upload dir.
+        val cleaned = raw.replace('/', '_').replace('\\', '_').trim()
+        val name = if (cleaned.isEmpty() || cleaned.all { it == '.' }) {
+            "file_${System.currentTimeMillis()}"
+        } else cleaned
+        if (name.substringAfterLast('.', "").isNotEmpty()) return name
+        val ext = contentResolver.getType(uri)
+            ?.let { android.webkit.MimeTypeMap.getSingleton().getExtensionFromMimeType(it) }
+            ?: return name
+        return "$name.$ext"
     }
 
     private val saveFilePicker = registerForActivityResult(
