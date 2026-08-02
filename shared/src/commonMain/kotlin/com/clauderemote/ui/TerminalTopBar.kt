@@ -117,6 +117,8 @@ internal fun CRTopBar(
      * had no way to tell which login they were on.
      */
     accountLabel: String? = null,
+    /** Chip fill for the account tag; null falls back to the theme surface. */
+    accountColor: androidx.compose.ui.graphics.Color? = null,
     /**
      * Tapping the account tag switches account. Null leaves it a plain indicator
      * (single account, or no switch handler) so it never looks tappable when it
@@ -243,15 +245,19 @@ internal fun CRTopBar(
                 // the shortcut to change it. Matches ModelChip's pill so the two
                 // read as the same class of control.
                 if (!accountLabel.isNullOrBlank()) {
+                    // Filled with the account's own colour rather than tinted text:
+                    // at two glyphs a coloured outline reads as decoration, while a
+                    // solid chip is identifiable at a glance without being read.
+                    val fill = accountColor ?: c.surface2
                     Text(
                         accountLabel,
                         style = CRType.pill,
-                        color = c.accent,
+                        color = if (accountColor != null) inkOn(fill) else c.accent,
                         maxLines = 1,
                         modifier = Modifier
                             .padding(horizontal = 4.dp)
                             .clip(CircleShape)
-                            .background(c.surface2)
+                            .background(fill)
                             .then(
                                 if (onAccountClick != null) {
                                     Modifier.clickable { onAccountClick() }
@@ -421,3 +427,13 @@ private fun SessionActivity?.toCRStatus(): CRStatus = when (this) {
 // SpecialKeysRow (spec §6.3 CRITICAL)
 // ---------------------------------------------------------------------------
 
+/**
+ * Readable text colour for a filled chip. Picked from luminance rather than
+ * hardcoded dark, so a colour set later (or a light theme accent) can't end up
+ * as pale-on-pale.
+ */
+private fun inkOn(background: androidx.compose.ui.graphics.Color): androidx.compose.ui.graphics.Color {
+    val l = 0.2126f * background.red + 0.7152f * background.green + 0.0722f * background.blue
+    return if (l > 0.55f) androidx.compose.ui.graphics.Color(0xFF0B1220)
+    else androidx.compose.ui.graphics.Color(0xFFF8FAFC)
+}

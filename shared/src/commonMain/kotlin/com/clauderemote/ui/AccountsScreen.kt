@@ -1,6 +1,10 @@
 package com.clauderemote.ui
 
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.ui.draw.clip
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
@@ -37,6 +41,7 @@ import kotlinx.coroutines.launch
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
 fun AccountsScreen(
+    accountColorStorage: com.clauderemote.storage.AccountColorStorage,
     servers: List<SshServer>,
     sessionOrchestrator: SessionOrchestrator,
     folderPolicyStorage: FolderPolicyStorage,
@@ -83,6 +88,16 @@ fun AccountsScreen(
     var draftFolders by remember(selectedServerId) { mutableStateOf<List<String>>(emptyList()) }
 
     var addAccountOpen by remember { mutableStateOf(false) }
+    // Chip colours held in state so a pick repaints immediately — the storage
+    // itself re-reads prefs on every call and is not observable.
+    var accountColors by remember {
+        mutableStateOf<Map<String, com.clauderemote.ui.theme.CRAccent>>(emptyMap())
+    }
+    LaunchedEffect(accounts) {
+        // assign() over the whole list, not colorFor() per account: it is what
+        // guarantees two accounts don't come up the same colour.
+        accountColors = accountColorStorage.assign(accounts.map { it.slug })
+    }
     var pendingLoginSlug by remember { mutableStateOf<String?>(null) }
     var loginUrl by remember { mutableStateOf<String?>(null) }
     var loginTimedOut by remember { mutableStateOf(false) }
@@ -169,6 +184,11 @@ fun AccountsScreen(
                                     AccountRow(
                                         account = account,
                                         onRemove = if (!account.isDefault) ({ removeTarget = account }) else null,
+                                        selectedColor = accountColors[account.slug],
+                                        onPickColor = { accent ->
+                                            accountColorStorage.set(account.slug, accent)
+                                            accountColors = accountColorStorage.assign(accounts.map { it.slug })
+                                        },
                                     )
                                 }
                             }
@@ -357,7 +377,12 @@ fun AccountsScreen(
 // ── Rows ─────────────────────────────────────────────────────────────────────
 
 @Composable
-private fun AccountRow(account: ClaudeAccount, onRemove: (() -> Unit)?) {
+private fun AccountRow(
+    account: ClaudeAccount,
+    onRemove: (() -> Unit)?,
+    selectedColor: com.clauderemote.ui.theme.CRAccent? = null,
+    onPickColor: ((com.clauderemote.ui.theme.CRAccent) -> Unit)? = null,
+) {
     val c = CRTheme.colors
     Row(
         modifier = Modifier.fillMaxWidth(),
@@ -379,6 +404,29 @@ private fun AccountRow(account: ClaudeAccount, onRemove: (() -> Unit)?) {
                     account.subtitle, style = CRType.bodyDim, color = c.textDim,
                     maxLines = 1, overflow = TextOverflow.Ellipsis,
                 )
+            }
+        }
+        if (onPickColor != null) {
+            // Swatches inline on the row: the chip colour only makes sense next to
+            // the account it marks, and this is the only place both are visible.
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(4.dp),
+                modifier = Modifier.padding(end = 6.dp),
+            ) {
+                com.clauderemote.ui.theme.CRAccent.entries.forEach { accent ->
+                    val picked = accent == selectedColor
+                    Box(
+                        modifier = Modifier
+                            .size(if (picked) 20.dp else 16.dp)
+                            .clip(CircleShape)
+                            .background(accent.color)
+                            .then(
+                                if (picked) Modifier.border(2.dp, c.text, CircleShape) else Modifier
+                            )
+                            .clickable { onPickColor(accent) },
+                    )
+                }
             }
         }
         if (onRemove != null) {

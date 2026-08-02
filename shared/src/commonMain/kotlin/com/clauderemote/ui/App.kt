@@ -67,6 +67,7 @@ fun App(
     // same way as serverStorage/appSettings (wrapping the platform `prefs`) —
     // see MainActivity.kt / Main.kt.
     folderPolicyStorage: com.clauderemote.storage.FolderPolicyStorage,
+    accountColorStorage: com.clauderemote.storage.AccountColorStorage,
     appVersion: String = "1.0.0",
     onInstallUpdate: ((ByteArray, UpdateInfo) -> Unit)? = null,
     onGetCurrentApk: (() -> ByteArray)? = null,
@@ -1244,6 +1245,15 @@ fun App(
                         composeTerminalUnderTranscript = composeTerminalUnderTranscript,
                         connectionLabel = activeTabId?.let { connectionLabels[it] },
                         accounts = terminalAccounts,
+                        activeAccountColor = activeTabId?.let { id ->
+                            val slug = tabManager.getTab(id)?.accountSlug
+                                ?: com.clauderemote.model.ClaudeAccount.DEFAULT_SLUG
+                            // Resolve through the whole list so the chip matches the
+                            // swatch shown on the accounts screen — assign() only
+                            // guarantees distinctness when it sees every account.
+                            val slugs = terminalAccounts.map { it.slug }.ifEmpty { listOf(slug) }
+                            accountColorStorage.assign(slugs)[slug]?.color
+                        },
                         activeFolderPolicy = activeTabId?.let { id ->
                             tabManager.getTab(id)?.let { t ->
                                 folderPolicyStorage.get(t.server.id, t.folder)
@@ -1288,6 +1298,7 @@ fun App(
                         servers = serverList,
                         sessionOrchestrator = sessionOrchestrator,
                         folderPolicyStorage = folderPolicyStorage,
+                        accountColorStorage = accountColorStorage,
                         onBack = { currentScreen = Screen.SETTINGS },
                         onOpenUrl = onOpenUrl,
                     )

@@ -195,6 +195,8 @@ fun TerminalScreen(
     accounts: List<com.clauderemote.model.ClaudeAccount> = emptyList(),
     /** Active session folder's account policy — warns on a non-preferred switch. */
     activeFolderPolicy: com.clauderemote.model.FolderPolicy? = null,
+    /** Chip fill for the active session's account. */
+    activeAccountColor: androidx.compose.ui.graphics.Color? = null,
     onSwitchAccount: ((sessionId: String, accountSlug: String?) -> Unit)? = null,
 ) {
     val c = CRTheme.colors
@@ -436,6 +438,7 @@ fun TerminalScreen(
                 CRTopBar(
                     activeSession = activeSession,
                     accountLabel = activeAccountLabel,
+                    accountColor = activeAccountColor,
                     onAccountClick = if (onSwitchAccount != null && accounts.size > 1) {
                         { showSwitchAccountDialog = true }
                     } else null,

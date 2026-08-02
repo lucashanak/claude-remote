@@ -128,7 +128,13 @@ object ClaudeConfig {
      * app's screen-scraper can read the OAuth URL and type the pasted code.
      */
     fun buildTmuxLoginCommand(tmuxSessionName: String, accountSlug: String): String =
-        buildTmuxRunCommand(tmuxSessionName, configDirPrefix(accountSlug) + "claude auth login")
+        buildTmuxRunCommand(
+            tmuxSessionName,
+            configDirPrefix(accountSlug) + "claude auth login",
+            // Detached: this runs over an exec channel with no TTY, and the pane is
+            // never attached — the app reads it with capture-pane.
+            detached = true,
+        )
 
     /**
      * Create the anchored tmux session [tmuxSessionName] and `send-keys` the shell
@@ -139,6 +145,14 @@ object ClaudeConfig {
     private fun buildTmuxRunCommand(
         tmuxSessionName: String,
         claudeCmd: String,
+        /**
+         * Create the session DETACHED. Required whenever this command is sent over
+         * an SSH *exec* channel, which has no TTY: an attaching `new-session` dies
+         * with "open terminal failed: not a terminal" and the session is never
+         * created at all. Terminal launches leave this false — they run on the
+         * PTY channel and the app attaches that session immediately.
+         */
+        detached: Boolean = false,
     ): String {
         // POSIX single-quote wrap: a literal ' inside a '...' string must be
         // written as '\'' — NOT \' (you can't backslash-escape a quote inside
@@ -194,7 +208,7 @@ object ClaudeConfig {
                 // `=` forces an exact-name match for a target-session.
                 "tmux kill-session -t ${sq("=" + tmuxSessionName)} 2>/dev/null; " +
                 "tmux set-option -g history-limit 100000 2>/dev/null; " +
-                "tmux new-session -x 200 -y 50 -s ${sq(tmuxSessionName)} " +
+                "tmux new-session ${if (detached) "-d " else ""}-x 200 -y 50 -s ${sq(tmuxSessionName)} " +
                 "\\; set-option -g mouse on " +
                 "\\; set-option -g history-limit 100000 " +
                 "\\; send-keys ${sq(claudeCmd)} Enter"
