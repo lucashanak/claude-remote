@@ -95,6 +95,20 @@ val RemoteSession.durationText: String get() {
  * Tmux session name convention: claude-{server}-{folder}[-yolo][--{alias}]
  */
 object TmuxNameParser {
+    /**
+     * Apply tmux's own rewrite of session names: `.` and `:` are its target
+     * syntax separators (`-t sess:win.pane`), so `new-session -s a.b` silently
+     * creates `a_b` and `-t '=a.b'` can then never address it again.
+     *
+     * Minting a name tmux will rename means the launching tab points at a
+     * session that does not exist — every probe, attach and kill for it fails —
+     * and the remote scan discovers the renamed session as an unknown one and
+     * opens a SECOND tab for it. That is the `nekrachni.plus` /
+     * `nekrachni_plus` duplicate. Substitute up front so what the client stores
+     * is what tmux will actually hold.
+     */
+    fun sanitize(tmuxName: String): String = tmuxName.replace('.', '_').replace(':', '_')
+
     fun build(serverName: String, folder: String, isYolo: Boolean, alias: String = ""): String {
         val folderPart = folder.trimEnd('/').substringAfterLast('/').ifBlank { folder }
         val yolo = if (isYolo) "-yolo" else ""
@@ -111,7 +125,7 @@ object TmuxNameParser {
         // than corrupted (the old hard 64-cap was arbitrary).
         val budget = 64 - prefix.length - suffix.length
         val boundedFolder = if (budget in 1 until folderPart.length) folderPart.take(budget) else folderPart
-        return "${prefix}${boundedFolder}${suffix}"
+        return sanitize("${prefix}${boundedFolder}${suffix}")
     }
 
     data class Parsed(val folder: String, val isYolo: Boolean, val alias: String)

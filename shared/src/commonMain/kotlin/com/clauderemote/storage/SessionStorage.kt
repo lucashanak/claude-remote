@@ -5,6 +5,7 @@ import com.clauderemote.model.ClaudeModel
 import com.clauderemote.model.ClaudeSession
 import com.clauderemote.model.ConnectionType
 import com.clauderemote.model.SessionStatus
+import com.clauderemote.model.TmuxNameParser
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
@@ -70,14 +71,33 @@ class SessionStorage(private val prefs: KeyValueStore) {
             println("SessionStorage: failed to decode persisted sessions, resetting (${e.message})")
             return emptyList()
         }
+        // Names written before build() applied tmux's own substitution still
+        // carry '.'/':' and can never match the live session tmux actually
+        // created, so they read as a separate session and show up as a
+        // duplicate tab. Normalize first, then dedupe.
+        val normalized = parsed.map { it to TmuxNameParser.sanitize(it.tmuxSessionName) }
         // Dedupe by (serverId, tmuxSessionName) keeping the entry with the
         // newest createdAt — heals stale duplicates that older app versions
         // (which keyed upsert only on the in-memory id) accumulated on disk.
-        val deduped = parsed
-            .groupBy { it.serverId to it.tmuxSessionName }
-            .map { (_, group) -> group.maxByOrNull { it.createdAt } ?: group.first() }
-        if (deduped.size != parsed.size) {
-            println("SessionStorage: deduped ${parsed.size - deduped.size} stale entries on load")
+        //
+        // A row whose name we just rewrote wins its group outright: it is the
+        // one the launcher created, so it holds the REAL folder
+        // (/home/lucas/nekrachni.plus). The row it collapses with was minted by
+        // the scan discovering the renamed session, whose folder could only be
+        // parsed back out of the mangled name (nekrachni_plus) — keeping that
+        // one would leave the tab pointing at a directory that does not exist.
+        // claudeSessionId needs no such care: the drift/probe refresh re-syncs
+        // it from the live pane within a tick.
+        val deduped = normalized
+            .groupBy { (entry, name) -> entry.serverId to name }
+            .map { (_, group) ->
+                val (entry, name) = group.firstOrNull { (e, name) -> e.tmuxSessionName != name }
+                    ?: group.maxByOrNull { (e, _) -> e.createdAt }
+                    ?: group.first()
+                if (entry.tmuxSessionName == name) entry else entry.copy(tmuxSessionName = name)
+            }
+        if (deduped != parsed) {
+            println("SessionStorage: normalized/deduped ${parsed.size - deduped.size} stale entries on load")
             save(deduped)
         }
         return deduped

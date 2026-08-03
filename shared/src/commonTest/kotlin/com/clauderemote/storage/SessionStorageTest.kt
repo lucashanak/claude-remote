@@ -336,6 +336,46 @@ class SessionStorageTest {
         assertTrue(!store.map.getValue(key).contains("\"old\""))
     }
 
+    // --- tmux name normalization heal on load ---
+
+    @Test
+    fun load_rewritesNamesTmuxWouldHaveRenamed() {
+        val store = FakeKeyValueStore()
+        val storage = SessionStorage(store)
+        storage.save(listOf(session("s1", tmux = "claude-server-nekrachni.plus-yolo")))
+        assertEquals("claude-server-nekrachni_plus-yolo", storage.load().single().tmuxSessionName)
+    }
+
+    @Test
+    fun load_collapsesDottedGhostOntoTheDiscoveredSession_keepingTheRealFolder() {
+        val store = FakeKeyValueStore()
+        val storage = SessionStorage(store)
+        // What the bug leaves on disk: the launcher's tab under the name tmux
+        // refused to keep, plus the tab the scan opened for the session tmux
+        // actually created — whose folder could only come from the mangled name.
+        storage.save(
+            listOf(
+                session("launched", tmux = "claude-server-nekrachni.plus-yolo", createdAt = 100L)
+                    .copy(folder = "/home/lucas/nekrachni.plus"),
+                session("discovered", tmux = "claude-server-nekrachni_plus-yolo", createdAt = 200L)
+                    .copy(folder = "nekrachni_plus"),
+            )
+        )
+        val loaded = storage.load()
+        assertEquals(1, loaded.size)
+        assertEquals("claude-server-nekrachni_plus-yolo", loaded.single().tmuxSessionName)
+        assertEquals("/home/lucas/nekrachni.plus", loaded.single().folder)
+    }
+
+    @Test
+    fun load_leavesCleanNamesAlone() {
+        val store = FakeKeyValueStore()
+        val storage = SessionStorage(store)
+        val clean = listOf(session("s1", tmux = "claude-server-proj-yolo--my-tab"))
+        storage.save(clean)
+        assertEquals(clean, storage.load())
+    }
+
     @Test
     fun load_doesNotRewriteWhenThereIsNothingToDedupe() {
         val store = FakeKeyValueStore()
