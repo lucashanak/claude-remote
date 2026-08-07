@@ -166,6 +166,15 @@ fun App(
             }
             if (loaded.isNotEmpty()) {
                 terminalAccounts = loaded
+                // Pull the SHARED folder policies at the same time. They live on
+                // the server so every client sees the same rules; the local store
+                // is just a cache, and without this a rule set on another device
+                // simply wouldn't exist here.
+                try {
+                    sessionOrchestrator.readFolderPolicies(id)?.let {
+                        folderPolicyStorage.importFromServer(id, it)
+                    }
+                } catch (_: Exception) {}
                 return@LaunchedEffect
             }
             kotlinx.coroutines.delay(ACCOUNTS_LOAD_RETRY_MS * (attempt + 1))

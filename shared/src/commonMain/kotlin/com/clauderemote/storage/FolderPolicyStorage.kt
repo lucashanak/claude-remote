@@ -69,6 +69,30 @@ class FolderPolicyStorage(private val prefs: KeyValueStore) {
             .mapValues { (_, dto) -> dto.toDomain() }
     }
 
+    /**
+     * This server's policies as the JSON that lives on the server. The store
+     * itself is only a local CACHE — the shared copy is server-side so every
+     * client agrees, which per-device preferences could never do.
+     */
+    fun exportForServer(serverId: String): String {
+        val prefix = "$serverId$SEPARATOR"
+        val mine = load().filterKeys { it.startsWith(prefix) }.mapKeys { it.key.removePrefix(prefix) }
+        return json.encodeToString(mine)
+    }
+
+    /** Replace this server's cached policies with the server's copy. */
+    fun importFromServer(serverId: String, raw: String) {
+        val incoming = try {
+            json.decodeFromString<Map<String, FolderPolicyDto>>(raw)
+        } catch (e: Exception) {
+            println("FolderPolicyStorage: server blob unparseable, keeping local (${e.message})")
+            return
+        }
+        val prefix = "$serverId$SEPARATOR"
+        val others = load().filterKeys { !it.startsWith(prefix) }
+        save(others + incoming.mapKeys { prefix + it.key })
+    }
+
     private fun load(): Map<String, FolderPolicyDto> {
         val raw = prefs.getString(KEY_POLICIES, "{}")
         return try {

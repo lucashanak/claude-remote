@@ -267,6 +267,15 @@ fun AccountsScreen(
                                     onChange = { updated ->
                                         selectedServer?.let { srv ->
                                             folderPolicyStorage.set(srv.id, folder, updated)
+                                            // Publish immediately: a rule only kept
+                                            // on this device is exactly the bug this
+                                            // replaced.
+                                            scope.launch {
+                                                sessionOrchestrator.writeFolderPolicies(
+                                                    srv.id,
+                                                    folderPolicyStorage.exportForServer(srv.id),
+                                                )
+                                            }
                                             // set() deletes the stored row outright when the
                                             // resulting policy is empty (see FolderPolicyStorage.set)
                                             // — keep the row itself on screen via draftFolders so

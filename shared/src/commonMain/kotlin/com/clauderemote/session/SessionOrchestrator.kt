@@ -1951,10 +1951,22 @@ class SessionOrchestrator(
             FileLogger.log(TAG, "restartClaude: no live connection for $sessionId")
             return
         }
+        // A session nobody has spoken to yet has NO transcript, and `--resume` on
+        // one exits with "No conversation found with session ID" — which is how
+        // switching the account of a freshly created session used to kill it.
+        val hasConversation = try {
+            connectionRegistry.ssh(sessionId)?.let { mgr ->
+                tmuxProbes.probeTranscriptExists(mgr, tab.folder, uuid)
+            } ?: false
+        } catch (e: Exception) {
+            FileLogger.error(TAG, "transcript probe failed for $sessionId; assuming none", e)
+            false
+        }
         val cmd = ClaudeConfig.buildRestartCommand(
             tab.tmuxSessionName, tab.folder, tab.mode, tab.model, uuid, tab.accountSlug,
+            resume = hasConversation,
         )
-        FileLogger.log(TAG, "Restarting Claude Code for $sessionId (resume $uuid, account=${tab.accountSlug ?: "default"}) in tmux ${tab.tmuxSessionName}")
+        FileLogger.log(TAG, "Restarting Claude Code for $sessionId (${if (hasConversation) "resume" else "fresh"} $uuid, account=${tab.accountSlug ?: "default"}) in tmux ${tab.tmuxSessionName}")
         // The respawn kills+redraws the pane; suppress the prompt detector so it
         // doesn't misfire on the transient screen. UUID is unchanged, so the
         // transcript stream keeps tailing the same file across the restart.
@@ -2033,6 +2045,14 @@ class SessionOrchestrator(
         }
         return actual
     }
+
+    /** This server's shared folder-policy blob, or null when it has none yet. */
+    suspend fun readFolderPolicies(serverId: String): String? =
+        accountService.readFolderPolicies(serverId)
+
+    /** Publish folder policies so the other clients see the same rules. */
+    suspend fun writeFolderPolicies(serverId: String, json: String): Boolean =
+        accountService.writeFolderPolicies(serverId, json)
 
     /** OAuth URL from the account-login pane, or null until it renders. */
     suspend fun readClaudeAccountLoginUrl(serverId: String, slug: String): String? =

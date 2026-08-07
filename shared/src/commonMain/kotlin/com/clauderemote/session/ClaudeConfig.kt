@@ -234,6 +234,14 @@ object ClaudeConfig {
         model: ClaudeModel,
         claudeSessionId: String,
         accountSlug: String? = null,
+        /**
+         * False when the conversation doesn't exist yet, which is the case for a
+         * session nobody has spoken to. `--resume` on a missing transcript makes
+         * claude exit with "No conversation found with session ID", killing the
+         * restart; `--session-id` starts that same uuid instead, so nothing is
+         * lost and later restarts resume normally.
+         */
+        resume: Boolean = true,
     ): String {
         // Restart claude in place, KEEPING both the conversation AND the folder.
         //
@@ -260,7 +268,7 @@ object ClaudeConfig {
         // `--resume <uuid>` reloads the same conversation, which survives the
         // switch because `projects/` is symlinked to the shared `~/.claude/`.
         val inner = "cd \"\$HOME\"; " +
-            buildLaunchCommand(folder, mode, model, claudeSessionId, resume = true, accountSlug = accountSlug)
+            buildLaunchCommand(folder, mode, model, claudeSessionId, resume = resume, accountSlug = accountSlug)
         fun sq(s: String) = "'" + s.replace("'", "'\\''") + "'"
         val loginRun = "bash -lc ${sq(inner)}"
         // `respawn-pane`/`send-keys` take a target-PANE, not target-session:

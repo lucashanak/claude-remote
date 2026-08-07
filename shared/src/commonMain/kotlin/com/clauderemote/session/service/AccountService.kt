@@ -182,6 +182,52 @@ internal class AccountService(
     }
 
     /**
+     * Read this server's shared folder-policy blob.
+     *
+     * Policies live on the SERVER, next to the account dirs, for the same reason
+     * the accounts do: they are a property of that machine's folders, and every
+     * client has to agree about them. Keeping them in per-device preferences
+     * meant a rule set on the phone simply didn't exist on the desktop.
+     */
+    suspend fun readFolderPolicies(serverId: String): String? = withContext(Dispatchers.IO) {
+        try {
+            withServerSession(serverId) { sess ->
+                execReadWithWatchdog(
+                    sess,
+                    "cat \"\$HOME/.claude-remote/folder-policies.json\" 2>/dev/null || echo __NONE__",
+                    totalMs = 10_000,
+                )
+            }?.takeUnless { it.contains("__NONE__") }
+        } catch (e: Exception) {
+            FileLogger.error(TAG, "readFolderPolicies failed on $serverId: ${e.message}", e)
+            null
+        }
+    }
+
+    /** Replace this server's folder-policy blob. Written atomically. */
+    suspend fun writeFolderPolicies(serverId: String, json: String): Boolean =
+        withContext(Dispatchers.IO) {
+            try {
+                // Base64 over the wire: the blob is JSON with quotes and braces,
+                // and heredocs through an exec channel are fragile.
+                val b64 = java.util.Base64.getEncoder().encodeToString(json.encodeToByteArray())
+                withServerSession(serverId) { sess ->
+                    execReadWithWatchdog(
+                        sess,
+                        "mkdir -p \"\$HOME/.claude-remote\"; " +
+                            "printf %s '$b64' | base64 -d > \"\$HOME/.claude-remote/.folder-policies.tmp\" && " +
+                            "mv \"\$HOME/.claude-remote/.folder-policies.tmp\" " +
+                            "\"\$HOME/.claude-remote/folder-policies.json\" && echo OK",
+                        totalMs = 10_000,
+                    )
+                }?.contains("OK") == true
+            } catch (e: Exception) {
+                FileLogger.error(TAG, "writeFolderPolicies failed on $serverId: ${e.message}", e)
+                false
+            }
+        }
+
+    /**
      * Which account a RUNNING session is actually on, read from the `claude`
      * process's own `CLAUDE_CONFIG_DIR`. Null means the default login.
      *
