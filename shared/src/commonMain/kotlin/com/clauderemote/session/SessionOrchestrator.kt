@@ -629,11 +629,21 @@ class SessionOrchestrator(
         // the dialog is still showing, so leaving APPROVAL_NEEDED would produce a stale
         // "needs attention" badge (#55) that never clears.
         val previousId = tabManager.activeTabId.value
+        // Everything below repaints the ONE shared emulator for [id] and points
+        // the prompt detector at it, so it may only run once [id] really is the
+        // active tab. A notification tap for a session the tab list doesn't hold
+        // yet used to fall through here: the switch itself was dropped, but the
+        // buffer replay and kickRedraw still fired, leaving the screen showing
+        // one session while every keystroke went to the one that stayed active.
+        // The user saw that as a broken session only an app restart could fix.
+        if (!tabManager.switchTab(id)) {
+            FileLogger.log(TAG, "switchTab($id) ignored — no such tab (not restored yet?)")
+            return
+        }
         if (previousId != null && previousId != id &&
             statusService.currentActivity(previousId) == SessionActivity.APPROVAL_NEEDED) {
             statusService.updateActivity(previousId, SessionActivity.WAITING_FOR_INPUT)
         }
-        tabManager.switchTab(id)
         notificationService.promptDetector.onUserInput(id)
         // Re-verify the Claude session UUID whenever we (re)enter a session.
         // While this tab was in the background Claude may have rotated its

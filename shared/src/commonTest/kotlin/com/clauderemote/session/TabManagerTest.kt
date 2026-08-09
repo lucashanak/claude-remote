@@ -142,6 +142,20 @@ class TabManagerTest {
         assertEquals("a", manager.activeTabId.value)
     }
 
+    @Test
+    fun switchTab_reportsWhetherItActuallySwitched() {
+        // The caller repaints the shared terminal for the target session, so a
+        // dropped switch has to be distinguishable from a real one — otherwise
+        // the screen shows a session that isn't active (a notification tap
+        // landing before restore rebuilt the tab list).
+        val manager = TabManager()
+        manager.addTab(session("a"))
+        manager.addTab(session("b"))
+        assertFalse(manager.switchTab("not-restored-yet"))
+        assertTrue(manager.switchTab("b"))
+        assertEquals("b", manager.activeTabId.value)
+    }
+
     // ---- removeTab: active-tab reassignment ----
 
     @Test

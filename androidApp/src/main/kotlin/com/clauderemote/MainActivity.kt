@@ -24,9 +24,18 @@ import com.clauderemote.util.UpdateInfo
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.GlobalScope
 import kotlinx.coroutines.async
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
+
+/**
+ * How long a notification tap waits for restore to produce its tab before
+ * giving up. Generous: a cold start reconnects over SSH (Cloudflare tunnel on a
+ * cold radio is seconds), and the cost of waiting is only that the app opens on
+ * the previously-active tab, which is where it would have landed anyway.
+ */
+private const val RESTORE_WAIT_MS = 30_000L
 
 class MainActivity : FragmentActivity() {
 
@@ -39,6 +48,10 @@ class MainActivity : FragmentActivity() {
     @Volatile private var terminalHandle: SshTerminalHandle? = null
     private var keyFileCallback: ((String) -> Unit)? = null
     private var attachFileCallback: ((List<Pair<ByteArray, String>>) -> Unit)? = null
+    // In-flight "enter this session" request from a notification tap, waiting
+    // for restore to produce the tab. Replaced (not stacked) when a second
+    // notification is tapped before the first one resolves.
+    @Volatile private var pendingSwitchJob: kotlinx.coroutines.Job? = null
     @Volatile private var pendingSaveBytes: ByteArray? = null
 
     private val keyFilePicker = registerForActivityResult(
@@ -485,10 +498,41 @@ class MainActivity : FragmentActivity() {
         handleSessionIntent(intent)
     }
 
+    /**
+     * Enter the session a notification points at.
+     *
+     * onCreate runs this BEFORE restoreAndReconnect(), so on a cold start (the
+     * usual case — the notification fired because the app was backgrounded, and
+     * HyperOS had since reaped it) the tab does not exist yet and an immediate
+     * switch is a no-op. Wait for it to appear instead of dropping the tap on
+     * the floor, which is what left the user in a different session than the
+     * one they answered.
+     */
     private fun handleSessionIntent(intent: Intent?) {
-        intent?.getStringExtra("switch_to_session")?.let { sessionId ->
-            sessionOrchestrator.switchTab(sessionId)
-            AlertNotifier.clear(applicationContext, sessionId)
+        val sessionId = intent?.getStringExtra("switch_to_session") ?: return
+        // Consume it: the same Intent is redelivered when the Activity is
+        // recreated, and replaying the switch would yank the user out of
+        // whatever tab they had moved to since.
+        intent.removeExtra("switch_to_session")
+        setIntent(intent)
+        AlertNotifier.clear(applicationContext, sessionId)
+        FileLogger.log(
+            "MainActivity",
+            "Notification tap -> $sessionId (tabs=${tabManager.tabs.value.size}, " +
+                "known=${tabManager.getTab(sessionId) != null}, terminal=${terminalHandle != null})"
+        )
+        pendingSwitchJob?.cancel()
+        pendingSwitchJob = GlobalScope.launch(Dispatchers.Main) {
+            // Emits the current list first, so an already-restored tab switches
+            // on the next main-thread pass rather than waiting for anything.
+            val appeared = kotlinx.coroutines.withTimeoutOrNull(RESTORE_WAIT_MS) {
+                tabManager.tabs.first { tabs -> tabs.any { it.id == sessionId } }
+            } != null
+            if (appeared) {
+                sessionOrchestrator.switchTab(sessionId)
+            } else {
+                FileLogger.log("MainActivity", "Notification switch to $sessionId gave up — tab never restored")
+            }
         }
     }
 

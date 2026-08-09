@@ -43,10 +43,17 @@ class TabManager {
         }
     }
 
-    fun switchTab(id: String) {
-        if (_tabs.value.any { it.id == id }) {
-            _activeTabId.value = id
-        }
+    /**
+     * Make [id] the active tab. Returns false — leaving the active tab alone —
+     * when no such tab exists, which is the normal state for a few seconds
+     * after a cold start: the notification that asked for it is delivered
+     * before restore has rebuilt the list. Callers must not act on a switch
+     * that did not happen (see SessionOrchestrator.switchTab).
+     */
+    fun switchTab(id: String): Boolean {
+        if (_tabs.value.none { it.id == id }) return false
+        _activeTabId.value = id
+        return true
     }
 
     fun updateTabStatus(id: String, status: SessionStatus) {
