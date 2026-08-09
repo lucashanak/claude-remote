@@ -523,10 +523,35 @@ internal class AccountService(
          * A missing target is skipped rather than linked into a dangling symlink —
          * not every install has every one of these.
          */
+        /** What provisioning actually links: the shared list minus anything private. */
+        internal val LINKED_ENTRIES: List<String>
+            get() = SHARED_ENTRIES.filterNot { it in NEVER_SHARED }
+
         private val SHARED_ENTRIES = listOf(
             "projects", "plugins", "settings.json", "settings.local.json",
             "CLAUDE.md", "hud", "hooks", "skills",
             ".omc", ".omc-config.json", ".omc-version.json",
+            // Prompt history belongs to the person, not the login: without this,
+            // arrow-up after switching account showed a different, near-empty
+            // history. Safe to share because claude APPENDS to it under a lock
+            // rather than rewriting it via tmp+rename — a rename would silently
+            // replace the symlink with a real file and un-share it again.
+            "history.jsonl",
+        )
+
+        /**
+         * Deliberately NOT shared, and the reason this stays an allowlist rather
+         * than "share everything except these": `.claude.json` carries
+         * `oauthAccount`, and `daemon.lock` / `.storage-write` / `sessions` /
+         * `statsig` are per-config-dir by design — that isolation is what makes
+         * concurrent accounts safe. With a denylist, any future sibling of those
+         * would be shared by default, and the failure mode flips from "a feature
+         * silently stops working" to "identity leaks between accounts".
+         */
+        private val NEVER_SHARED = listOf(
+            ".credentials.json", ".claude.json", ".claude.json.lock",
+            ".storage-write", "daemon", "daemon.lock", "daemon.log",
+            "sessions", "statsig", "shell-snapshots", "todos", "backups", "cache",
         )
 
         /**
@@ -567,7 +592,7 @@ internal class AccountService(
             "if [ ! -L \"\$lnk\" ] && [ -e \"\$lnk\" ]; then rm -rf \"\$lnk\"; fi; " +
             // -n so an existing symlink-to-directory is REPLACED, not written into.
             "ln -sfn \"\$tgt\" \"\$lnk\"; }; " +
-            "for n in ${SHARED_ENTRIES.joinToString(" ")}; do " +
+            "for n in ${LINKED_ENTRIES.joinToString(" ")}; do " +
             "link \"\$HOME/.claude/\$n\" \"\$n\"; done; " +
             "echo PROVISIONED"
 

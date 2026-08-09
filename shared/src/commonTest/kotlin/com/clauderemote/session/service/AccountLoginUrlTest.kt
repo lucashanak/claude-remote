@@ -129,3 +129,33 @@ class AccountLoginUrlTest {
         assertTrue(cmd.contains("""-t '=weird'\''name'"""), cmd)
     }
 }
+
+/**
+ * The shared/private split is the whole isolation boundary, so it is pinned
+ * rather than left to a comment.
+ */
+class AccountSharedEntriesTest {
+
+    @Test
+    fun identityAndLockStateIsNeverLinked() {
+        // Sharing any of these would either merge two accounts' identity or undo
+        // the per-config-dir locking that makes concurrent accounts safe.
+        val linked = AccountService.LINKED_ENTRIES
+        for (private in listOf(
+            ".credentials.json", ".claude.json", ".storage-write",
+            "daemon.lock", "sessions", "statsig",
+        )) {
+            assertTrue(private !in linked, "$private must not be shared")
+        }
+    }
+
+    @Test
+    fun userContentIsLinked() {
+        val linked = AccountService.LINKED_ENTRIES
+        // projects carries transcripts AND the memory dir, which is why switching
+        // account keeps both; hud is what the OMC statusline resolves against.
+        for (shared in listOf("projects", "plugins", "settings.json", "CLAUDE.md", "hud", "history.jsonl")) {
+            assertTrue(shared in linked, "$shared should be shared")
+        }
+    }
+}
