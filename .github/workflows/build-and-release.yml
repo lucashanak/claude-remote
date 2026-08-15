@@ -7,6 +7,8 @@ on:
 
 permissions:
   contents: write
+  # Lets the `tests-passed` gate below read the Tests workflow's conclusion.
+  actions: read
 
 # Serialize runs: a burst of quick pushes used to run several release jobs
 # concurrently, which computed the same next version and raced on
@@ -531,9 +533,63 @@ jobs:
           name: manjaro-pkg
           path: "*.pkg.tar.zst"
 
+  # The brake on a bad release, without a brake on pushing.
+  #
+  # A required status check on `main` would be the textbook answer, but it does
+  # not fit this repo: work is pushed straight to main, and GitHub refuses a push
+  # to a protected branch whose required checks haven't passed for that commit —
+  # which they cannot have, since they only run once the commit exists. It would
+  # force every change through a pull request.
+  #
+  # So gate the RELEASE instead of the push. This waits for the Tests workflow
+  # run for this exact SHA and fails if it did not succeed, which blocks the
+  # `release` job below. It costs no wall-clock: the builds take ~7 min and Tests
+  # ~1.5-4 min, so the result is already in by the time the builds finish.
+  tests-passed:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require the Tests workflow to have passed for this commit
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          API="repos/${{ github.repository }}/actions/workflows/tests.yml/runs?head_sha=${{ github.sha }}"
+          # ~10 min of polling: comfortably longer than a cold Tests run (~4 min),
+          # and still well inside the build jobs this gate runs beside.
+          for i in $(seq 1 60); do
+            RUN=$(gh api "$API" --jq '[.workflow_runs[] | select(.event=="push")] | first // empty' 2>/dev/null || echo "")
+            if [ -n "$RUN" ]; then
+              STATUS=$(echo "$RUN" | jq -r '.status')
+              CONCL=$(echo "$RUN" | jq -r '.conclusion // ""')
+              URL=$(echo "$RUN" | jq -r '.html_url')
+              if [ "$STATUS" = "completed" ]; then
+                case "$CONCL" in
+                  success)
+                    echo "Tests passed for ${{ github.sha }} — $URL"
+                    exit 0 ;;
+                  cancelled|skipped)
+                    # A newer push superseded this commit; that run's own
+                    # concurrency group cancels this release too. Don't publish
+                    # off an unverified commit.
+                    echo "::error::Tests were $CONCL for this commit — $URL"
+                    exit 1 ;;
+                  *)
+                    echo "::error::Tests $CONCL for this commit — refusing to release. $URL"
+                    exit 1 ;;
+                esac
+              fi
+              echo "Tests $STATUS ($i/60) — $URL"
+            else
+              echo "waiting for the Tests run for ${{ github.sha }} to appear ($i/60)"
+            fi
+            sleep 10
+          done
+          echo "::error::Timed out waiting for the Tests workflow on ${{ github.sha }}."
+          exit 1
+
   release:
     runs-on: ubuntu-latest
-    needs: [version, build-android, build-macos, build-linux, package-manjaro, build-etserver-linux]
+    needs: [version, tests-passed, build-android, build-macos, build-linux, package-manjaro, build-etserver-linux]
     steps:
       - name: Download APK
         uses: actions/download-artifact@v4
