@@ -120,6 +120,23 @@ fun App(
     // Rename dialog: which session is being renamed.
     var renameSessionId by remember { mutableStateOf<String?>(null) }
     var invertColors by remember { mutableStateOf(appSettings.invertColors) }
+    // Font sizes live here as Compose state because AppSettings is a plain prefs
+    // wrapper: writing the pref alone never recomposes anything, so a change made
+    // in Settings used to reach the terminal/chat only by accident, on the next
+    // unrelated recomposition. Both entry points (Settings sliders and the
+    // in-terminal A−/A+ controls) funnel through the two lambdas below.
+    var terminalFontSize by remember { mutableStateOf(appSettings.terminalFontSize) }
+    var transcriptFontPercent by remember { mutableStateOf(appSettings.transcriptFontPercent) }
+    val applyTerminalFontSize: (Int) -> Unit = { size ->
+        appSettings.terminalFontSize = size
+        // Read back so the state matches what was actually stored (clamped).
+        terminalFontSize = appSettings.terminalFontSize
+        onApplyFontSize?.invoke(terminalFontSize)
+    }
+    val applyTranscriptFontPercent: (Int) -> Unit = { percent ->
+        appSettings.transcriptFontPercent = percent
+        transcriptFontPercent = appSettings.transcriptFontPercent
+    }
 
     // Collect new StateFlows from orchestrator
     val sessionActivities by sessionOrchestrator.sessionActivities.collectAsState()
@@ -1132,9 +1149,13 @@ fun App(
                                 com.clauderemote.session.CommandFetcher.getCachedOrFallback()
                             }
                         },
-                        onFontSizeChange = { size ->
-                            appSettings.terminalFontSize = size
-                            onApplyFontSize?.invoke(size)
+                        terminalFontSize = terminalFontSize,
+                        onFontSizeChange = applyTerminalFontSize,
+                        transcriptFontScale = transcriptFontPercent / 100f,
+                        onTranscriptFontScaleChange = { scale ->
+                            // roundToInt, not toInt: 1.3f * 100 is 129.99999 and
+                            // truncating would drift the percent down step by step.
+                            applyTranscriptFontPercent(kotlin.math.round(scale * 100.0).toInt())
                         },
                         remoteSessions = remoteSessions,
                         onAttachRemote = { remote ->
@@ -1303,6 +1324,8 @@ fun App(
                         onImportServers = onImportServers,
                         onViewLog = { currentScreen = Screen.LOG_VIEWER },
                         onTestNotification = onTestNotification,
+                        onFontSizeChange = applyTerminalFontSize,
+                        onTranscriptFontChange = applyTranscriptFontPercent,
                     )
                 }
 

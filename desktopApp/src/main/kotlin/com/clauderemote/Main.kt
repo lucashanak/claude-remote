@@ -210,8 +210,50 @@ class SshTtyConnector(
     }
 }
 
+/**
+ * TerminalPanel that exposes JediTerm's protected font re-init. The settings
+ * provider is read live for the font size, but the panel caches the derived
+ * java.awt.Font and the char-cell metrics, so nothing changes on screen until
+ * `reinitFontAndResize()` runs — and that is protected, hence the subclass.
+ */
+private class FontReinitTerminalPanel(
+    settingsProvider: com.jediterm.terminal.ui.settings.SettingsProvider,
+    textBuffer: com.jediterm.terminal.model.TerminalTextBuffer,
+    styleState: com.jediterm.terminal.model.StyleState,
+) : com.jediterm.terminal.ui.TerminalPanel(settingsProvider, textBuffer, styleState) {
+    fun applyFontChange() {
+        reinitFontAndResize()
+    }
+}
+
+/**
+ * Widget subclass that installs [FontReinitTerminalPanel]. Needed because the
+ * app keeps ONE widget alive for its whole lifetime (see [termWidget]) — without
+ * a live re-init a font-size change would only show up after a restart, not even
+ * for newly opened sessions.
+ */
+private class FontReinitTermWidget(
+    settingsProvider: com.jediterm.terminal.ui.settings.SettingsProvider,
+) : JediTermWidget(settingsProvider) {
+    override fun createTerminalPanel(
+        settingsProvider: com.jediterm.terminal.ui.settings.SettingsProvider,
+        styleState: com.jediterm.terminal.model.StyleState,
+        textBuffer: com.jediterm.terminal.model.TerminalTextBuffer,
+    ): com.jediterm.terminal.ui.TerminalPanel =
+        FontReinitTerminalPanel(settingsProvider, textBuffer, styleState)
+
+    /** Re-reads the font size from the settings provider and re-lays out the grid.
+     *  The resulting component resize propagates to the server through
+     *  [SshTtyConnector.resize] (which also re-pins the tmux window size). */
+    fun applyFontSize() {
+        (terminalPanel as? FontReinitTerminalPanel)?.applyFontChange()
+        revalidate()
+        repaint()
+    }
+}
+
 // Global terminal state
-private var termWidget: JediTermWidget? = null
+private var termWidget: FontReinitTermWidget? = null
 private var sshConnector: SshTtyConnector? = null
 // macOS-only: last-applied "invert colors" state, used ONLY to detect a change in
 // DesktopTerminalView's `update` lambda and trigger an immediate repaint. The actual
@@ -515,6 +557,12 @@ fun main() = application {
                 }
             },
             exitApp = ::exitApplication,
+            // The pref is already written by the caller; the settings provider
+            // reads it live, so this only has to make the panel pick it up.
+            onApplyFontSize = { size ->
+                FileLogger.log("TermGeom", "applyFontSize $size")
+                javax.swing.SwingUtilities.invokeLater { termWidget?.applyFontSize() }
+            },
             terminalContent = { modifier ->
                 DesktopTerminalView(
                     modifier = modifier,
@@ -898,7 +946,7 @@ private fun DesktopTerminalView(
                         override fun copyOnSelect(): Boolean = true
                     }
 
-                    val widget = JediTermWidget(settings)
+                    val widget = FontReinitTermWidget(settings)
                     widget.setTtyConnector(connector)
                     widget.start()
                     termWidget = widget

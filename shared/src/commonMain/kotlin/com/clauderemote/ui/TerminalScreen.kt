@@ -129,7 +129,12 @@ fun TerminalScreen(
     onFetchClaudeMd: (suspend () -> String)? = null,
     onSaveClaudeMd: (suspend (String) -> Unit)? = null,
     onFetchCommands: (suspend () -> List<SlashCommand>)? = null,
+    /** Current persisted terminal font size — seeds the A−/A+ control. */
+    terminalFontSize: Int = 14,
     onFontSizeChange: ((Int) -> Unit)? = null,
+    /** Persisted chat text scale (1f = 100%), forwarded to the transcript views. */
+    transcriptFontScale: Float = 1f,
+    onTranscriptFontScaleChange: ((Float) -> Unit)? = null,
     onAttachRemote: ((com.clauderemote.model.RemoteSession) -> Unit)? = null,
     remoteSessions: List<com.clauderemote.model.RemoteSession> = emptyList(),
     contextPercent: Int? = null,
@@ -222,7 +227,10 @@ fun TerminalScreen(
     // State — preserved from original
     var showControlBar by remember { mutableStateOf(true) }
     var compactMode by remember { mutableStateOf(false) }
-    var currentFontSize by remember { mutableStateOf(14) }
+    // Seeded from (and re-keyed on) the persisted size, so the A−/A+ readout
+    // starts at the user's saved value instead of a hardcoded 14 — and follows
+    // along when the Settings slider changes it.
+    var currentFontSize by remember(terminalFontSize) { mutableStateOf(terminalFontSize) }
     var showRenameDialog by remember { mutableStateOf(false) }
     var renameText by remember { mutableStateOf("") }
     var moreMenu by remember { mutableStateOf(false) }
@@ -1103,6 +1111,8 @@ fun TerminalScreen(
                                                 accountLabel = accounts.firstOrNull { a ->
                                                     a.slug == (tab?.accountSlug ?: com.clauderemote.model.ClaudeAccount.DEFAULT_SLUG)
                                                 }?.initials,
+                                                fontScale = transcriptFontScale,
+                                                onFontScaleChange = onTranscriptFontScaleChange,
                                             )
                                         }
                                     }
@@ -1179,6 +1189,8 @@ fun TerminalScreen(
                                     onFileLink = openFileLink,
                                     onVerifyPaths = onVerifyPaths,
                                     accountLabel = activeAccountLabel,
+                                    fontScale = transcriptFontScale,
+                                    onFontScaleChange = onTranscriptFontScaleChange,
                                 )
                             }
                         } else {

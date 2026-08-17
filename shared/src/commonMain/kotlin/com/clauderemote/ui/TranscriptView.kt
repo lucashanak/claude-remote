@@ -87,6 +87,10 @@ fun TranscriptView(
     accountLabel: String? = null,
     /** Narrows file-path candidates to the ones that really exist on the server. */
     onVerifyPaths: (suspend (List<String>) -> Set<String>)? = null,
+    /** Chat text scale (1f = 100%). Ignored unless [onFontScaleChange] is wired. */
+    fontScale: Float = 1f,
+    /** Wire to persist the A−/A+ choice; when null the scale stays view-local. */
+    onFontScaleChange: ((Float) -> Unit)? = null,
 ) {
     // Key list+scroll state on the session uuid so switching tabs resets
     // scroll position and stickiness — otherwise the new session inherits
@@ -97,7 +101,11 @@ fun TranscriptView(
     val scope = rememberCoroutineScope()
     var showSystem by remember { mutableStateOf(false) }
     var showThinking by remember { mutableStateOf(false) }
-    var fontScale by rememberSaveable { mutableStateOf(1f) }
+    // Chat text scale. Hoisted (and persisted in AppSettings) when the caller
+    // wires onFontScaleChange; otherwise falls back to view-local state so the
+    // A−/A+ control still works for an unwired caller.
+    var localFontScale by rememberSaveable { mutableStateOf(fontScale) }
+    val effectiveFontScale = if (onFontScaleChange != null) fontScale else localFontScale
     var searchOpen by remember(sessionKey) { mutableStateOf(false) }
     var searchQuery by remember(sessionKey) { mutableStateOf("") }
     var searchPos by remember(sessionKey) { mutableStateOf(0) }
@@ -240,9 +248,10 @@ fun TranscriptView(
             showSystem = showSystem,
             onToggleThinking = { showThinking = !showThinking },
             onToggleSystem = { showSystem = !showSystem },
-            fontScale = fontScale,
+            fontScale = effectiveFontScale,
             onFontScaleDelta = { delta ->
-                fontScale = (fontScale + delta).coerceIn(0.7f, 1.6f)
+                val next = (effectiveFontScale + delta).coerceIn(0.7f, 1.6f)
+                if (onFontScaleChange != null) onFontScaleChange(next) else localFontScale = next
             },
             searchOpen = searchOpen,
             onToggleSearch = {
@@ -544,7 +553,7 @@ fun TranscriptView(
         CompositionLocalProvider(
             LocalDensity provides Density(
                 density = baseDensity.density,
-                fontScale = baseDensity.fontScale * fontScale
+                fontScale = baseDensity.fontScale * effectiveFontScale
             ),
             LocalClipboardManager provides richClipboard,
         ) {

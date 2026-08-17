@@ -324,6 +324,16 @@ class AppSettingsTest {
     }
 
     @Test
+    fun transcriptFontPercent_defaultsTo100AndClampsOnWrite() {
+        val (s, _) = settings()
+        assertEquals(100, s.transcriptFontPercent)
+        s.transcriptFontPercent = 500
+        assertEquals(160, s.transcriptFontPercent)
+        s.transcriptFontPercent = 10
+        assertEquals(70, s.transcriptFontPercent)
+    }
+
+    @Test
     fun terminalFontSize_storedOutOfRangeValueIsNotClampedOnRead() {
         // SUSPECTED BUG: the setter clamps to 8..32 but the getter does not, so a
         // value written by another build (or hand-edited into

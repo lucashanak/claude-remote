@@ -42,6 +42,17 @@ class AppSettings(private val prefs: KeyValueStore) {
         get() = prefs.getInt("terminal_scrollback", 10000)
         set(value) = prefs.putInt("terminal_scrollback", value)
 
+    /**
+     * Chat (transcript) text scale in percent, multiplied onto the platform font
+     * scale. Independent of [terminalFontSize] — the raw terminal renders in a
+     * fixed grid, the chat reflows — but persisted the same way, so the A−/A+
+     * choice survives a restart instead of snapping back to 100%.
+     * Stored as an Int because [KeyValueStore] has no float accessor.
+     */
+    var transcriptFontPercent: Int
+        get() = prefs.getInt("transcript_font_percent", 100)
+        set(value) = prefs.putInt("transcript_font_percent", value.coerceIn(70, 160))
+
     // Claude defaults
     var defaultClaudeMode: ClaudeMode
         get() = try {

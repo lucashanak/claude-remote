@@ -44,11 +44,20 @@ fun SettingsScreen(
     onTestNotification: (() -> Unit)? = null,
     sshKeyManager: com.clauderemote.connection.SshKeyManager? = null,
     appearance: AppearanceState = settings.loadAppearance(),
-    onAppearanceChange: (AppearanceState) -> Unit = { settings.saveAppearance(it) }
+    onAppearanceChange: (AppearanceState) -> Unit = { settings.saveAppearance(it) },
+    /**
+     * Wire to apply a terminal font-size change to the live terminal (the
+     * settings object is not Compose state, so writing the pref alone repaints
+     * nothing). When null the slider only persists the value.
+     */
+    onFontSizeChange: ((Int) -> Unit)? = null,
+    /** Same for the chat text scale, in percent. */
+    onTranscriptFontChange: ((Int) -> Unit)? = null,
 ) {
     val c = CRTheme.colors
 
     var fontSize by remember { mutableStateOf(settings.terminalFontSize) }
+    var chatFontPercent by remember { mutableStateOf(settings.transcriptFontPercent) }
     var scrollback by remember { mutableStateOf(settings.terminalScrollback) }
     var defaultMode by remember { mutableStateOf(settings.defaultClaudeMode) }
     var defaultModel by remember { mutableStateOf(settings.defaultClaudeModel) }
@@ -187,7 +196,25 @@ fun SettingsScreen(
                         label = "Font size",
                         value = fontSize,
                         range = 8..32,
-                        onValueChange = { fontSize = it; settings.terminalFontSize = it }
+                        onValueChange = {
+                            fontSize = it
+                            if (onFontSizeChange != null) onFontSizeChange(it)
+                            else settings.terminalFontSize = it
+                        }
+                    )
+
+                    // Chat text scale — separate knob because the raw terminal
+                    // renders a fixed character grid while the chat reflows.
+                    SettingsSlider(
+                        label = "Chat font %",
+                        value = chatFontPercent,
+                        range = 70..160,
+                        step = 10,
+                        onValueChange = {
+                            chatFontPercent = it
+                            if (onTranscriptFontChange != null) onTranscriptFontChange(it)
+                            else settings.transcriptFontPercent = it
+                        }
                     )
 
                     SettingsSlider(

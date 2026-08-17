@@ -157,7 +157,11 @@ internal fun StatusBar(
                                 modifier = Modifier.fillMaxWidth(),
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
-                                Text("Font ${(fontScale * 100).toInt()}%", modifier = Modifier.weight(1f))
+                                // round, not truncate: 1.3f * 100 is 129.99999.
+                                Text(
+                                    "Font ${kotlin.math.round(fontScale * 100.0).toInt()}%",
+                                    modifier = Modifier.weight(1f),
+                                )
                                 TextButton(onClick = { onFontScaleDelta(-0.1f) }) { Text("A−") }
                                 TextButton(onClick = { onFontScaleDelta(0.1f) }) { Text("A+") }
                             }
