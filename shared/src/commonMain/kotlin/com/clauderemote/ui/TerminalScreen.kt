@@ -603,21 +603,54 @@ fun TerminalScreen(
                                     }
                                 }
                                 HorizontalDivider(color = c.border, modifier = Modifier.padding(vertical = 4.dp))
-                                // Font size
+                                // Font size — follows the view that's actually on
+                                // screen. Unconditionally driving the terminal size
+                                // here meant tapping A+ in Chat changed the hidden
+                                // raw grid and looked like a dead button, while the
+                                // control that did something sat in the transcript
+                                // status bar's "▾" menu.
+                                val chatFontActive = effectiveTerminalView == CRTerminalView.Transcript
                                 Row(
                                     verticalAlignment = Alignment.CenterVertically,
                                     modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp)
                                 ) {
-                                    Text("Font: ", style = CRType.bodyDim, color = c.textDim)
+                                    val stepChatFont = { delta: Float ->
+                                        onTranscriptFontScaleChange?.invoke(
+                                            (transcriptFontScale + delta).coerceIn(0.7f, 1.6f)
+                                        )
+                                    }
+                                    Text(
+                                        if (chatFontActive) "Font (chat): " else "Font (terminal): ",
+                                        style = CRType.bodyDim,
+                                        color = c.textDim,
+                                    )
                                     FilledTonalButton(
-                                        onClick = { currentFontSize = (currentFontSize - 1).coerceIn(8, 32); onFontSizeChange?.invoke(currentFontSize) },
+                                        onClick = {
+                                            if (chatFontActive) stepChatFont(-0.1f)
+                                            else {
+                                                currentFontSize = (currentFontSize - 1).coerceIn(8, 32)
+                                                onFontSizeChange?.invoke(currentFontSize)
+                                            }
+                                        },
                                         modifier = Modifier.size(32.dp), contentPadding = PaddingValues(0.dp)
                                     ) { Text("A-") }
                                     Spacer(Modifier.width(12.dp))
-                                    Text("$currentFontSize", style = CRType.cardTitle, color = c.text)
+                                    Text(
+                                        if (chatFontActive)
+                                            "${kotlin.math.round(transcriptFontScale * 100.0).toInt()}%"
+                                        else "$currentFontSize",
+                                        style = CRType.cardTitle,
+                                        color = c.text,
+                                    )
                                     Spacer(Modifier.width(12.dp))
                                     FilledTonalButton(
-                                        onClick = { currentFontSize = (currentFontSize + 1).coerceIn(8, 32); onFontSizeChange?.invoke(currentFontSize) },
+                                        onClick = {
+                                            if (chatFontActive) stepChatFont(0.1f)
+                                            else {
+                                                currentFontSize = (currentFontSize + 1).coerceIn(8, 32)
+                                                onFontSizeChange?.invoke(currentFontSize)
+                                            }
+                                        },
                                         modifier = Modifier.size(32.dp), contentPadding = PaddingValues(0.dp)
                                     ) { Text("A+") }
                                 }
