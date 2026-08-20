@@ -19,8 +19,10 @@ internal sealed interface TmuxLaunchDecision {
     data object Attach : TmuxLaunchDecision
 
     /**
-     * The session was closed on ANOTHER device (tmux gone, pushed out of the
-     * shared manifest, and the tmux server is provably up with live peers).
+     * The session was closed on ANOTHER device — either it carries a tombstone
+     * (an explicit close, recorded server-side before the pane was killed), or
+     * tmux is gone, it was pushed out of the shared manifest, and the tmux
+     * server is provably up with live peers.
      * The caller must remove it from storage, disconnect, and throw.
      */
     data object ForgetClosedElsewhere : TmuxLaunchDecision
@@ -96,6 +98,9 @@ internal object TmuxLaunchDecider {
      *   since their target may legitimately be new to sessions.json.
      * @param hasClaudeSessionId the session carries a claude session UUID.
      * @param tmuxExists probe: is the named tmux session alive?
+     * @param tombstoned probe: did some device record an explicit close of this
+     *   tmux name? Shares its SSH round-trip with [stillTracked] (one exec
+     *   answers both — see SessionPersistenceService.fetchCloseState).
      * @param stillTracked probe: is the tmux name still in the server's shared manifest?
      * @param hasLivePeers probe: is the tmux server provably up with ≥1 OTHER live session?
      * @param hasTranscript probe: did claude write a jsonl transcript for the UUID?
@@ -105,6 +110,7 @@ internal object TmuxLaunchDecider {
         checkClosedElsewhere: Boolean,
         hasClaudeSessionId: Boolean,
         tmuxExists: suspend () -> Boolean,
+        tombstoned: suspend () -> Boolean,
         stillTracked: suspend () -> Boolean,
         hasLivePeers: suspend () -> Boolean,
         hasTranscript: suspend () -> Boolean,
@@ -117,6 +123,19 @@ internal object TmuxLaunchDecider {
         val alive = tmuxExists()
 
         var afterSuspectedServerOutage = false
+        // A TOMBSTONE beats every other signal, and is checked before the
+        // manifest for a reason: the closing device writes it BEFORE killing the
+        // pane, whereas its manifest push only lands afterwards. The pane's
+        // death is what wakes this device up, so at that instant the manifest
+        // still lists the session as tracked — and this branch used to read
+        // that as "nobody closed it" and rebuild the pane with --resume, which
+        // is exactly how a session closed on one device reappeared on it a
+        // moment later. A tombstone is also POSITIVE evidence of a user close,
+        // so unlike the manifest-absence case below it needs no live-peer
+        // corroboration to rule out a whole-server outage.
+        if (!alive && checkClosedElsewhere && tombstoned()) {
+            return TmuxLaunchDecision.ForgetClosedElsewhere
+        }
         if (!alive && checkClosedElsewhere && !stillTracked()) {
             // Another device's forgetSession() already pushed this tmux name out
             // of the shared sessions.json — respect that instead of resurrecting
@@ -124,7 +143,7 @@ internal object TmuxLaunchDecider {
             //
             // BUT "!tmuxExists && !stillTracked" is AMBIGUOUS: a WHOLE-server
             // tmux death makes probeTmuxSession=false for EVERY session AND
-            // (with a wiped/empty manifest) stillTrackedOnServer=false too, so
+            // (with a wiped/empty manifest) fetchCloseState tracked=false too, so
             // this branch used to forget every session on a transient
             // server-wide outage (the repeated whole-server session loss).
             // Gate on positive liveness: only treat it as closed-elsewhere when

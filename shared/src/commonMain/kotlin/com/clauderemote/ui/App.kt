@@ -1493,7 +1493,10 @@ fun App(
                     val id = tabCloseConfirmId ?: return@TextButton
                     tabCloseConfirmId = null
                     scope.launch {
-                        sessionOrchestrator.forgetSession(id)
+                        // userInitiated: the user pressed Close in this dialog, so
+                        // the close is recorded durably and propagates to every
+                        // other device even if one of them is asleep right now.
+                        sessionOrchestrator.forgetSession(id, userInitiated = true)
                         if (tabManager.tabs.value.isEmpty()) currentScreen = Screen.LAUNCHER
                     }
                 }) { Text("Close") }

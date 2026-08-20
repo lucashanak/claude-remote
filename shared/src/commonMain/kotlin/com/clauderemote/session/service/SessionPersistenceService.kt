@@ -22,6 +22,16 @@ import kotlinx.coroutines.withContext
 private const val TAG = "SessionOrchestrator"
 
 /**
+ * What the server says about one tmux name at reconnect time.
+ *
+ * @param tracked the name is still in the shared restore manifest.
+ * @param tombstoned some device recorded an explicit close of this name — the
+ *   authoritative answer, since it is written before the pane is killed and
+ *   therefore cannot lose the race against a peer's auto-reconnect.
+ */
+internal data class RemoteCloseState(val tracked: Boolean, val tombstoned: Boolean)
+
+/**
  * Owns the SHARED server-side `sessions.json` (fetch/cache/push), the systemd
  * restore-service installer + restore/drift scripts, the per-session real
  * claude-session-id refresh pollers, and the forget/rename lifecycle edits.
@@ -753,6 +763,43 @@ DTIMER_EOF
         LINGER=${'$'}(loginctl show-user "${'$'}USER" --property=Linger --value 2>/dev/null || echo unknown)
         echo "LINGER=${'$'}LINGER"
     """.trimIndent()
+
+        /**
+         * Parse [ManifestCommands.closeState] output. Null means "the probe
+         * didn't answer" (no verdict line: transport truncation, no shell, a
+         * server without `flock`), which callers must treat as unknown and
+         * fail open.
+         *
+         * `tracked` deliberately fails OPEN on a corrupt manifest — a garbled
+         * sessions.json must never read as "this session was closed", because
+         * that deletes a live tab. A well-formed but empty manifest DOES mean
+         * untracked (that is the state right after a close).
+         */
+        internal fun parseCloseState(
+            raw: String,
+            tmuxSessionName: String,
+            json: kotlinx.serialization.json.Json,
+        ): RemoteCloseState? {
+            val lines = raw.lines()
+            val verdictIdx = lines.indexOfFirst { it.trimStart().startsWith(ManifestCommands.TOMBSTONED_PREFIX) }
+            if (verdictIdx < 0) return null
+            val tombstoned = lines[verdictIdx].trim()
+                .removePrefix(ManifestCommands.TOMBSTONED_PREFIX).trim() == "1"
+            val sepIdx = lines.drop(verdictIdx + 1)
+                .indexOfFirst { it.trim() == ManifestCommands.CLOSE_STATE_SEPARATOR }
+            val manifest = if (sepIdx < 0) "" else lines.drop(verdictIdx + 1 + sepIdx + 1).joinToString("\n").trim()
+            val tracked = if (manifest.isEmpty()) {
+                false
+            } else {
+                try {
+                    json.decodeFromString<List<PersistedSession>>(manifest)
+                        .any { it.tmuxSessionName == tmuxSessionName }
+                } catch (_: Exception) {
+                    true
+                }
+            }
+            return RemoteCloseState(tracked = tracked, tombstoned = tombstoned)
+        }
     }
 
     /**
@@ -858,15 +905,97 @@ DTIMER_EOF
     }
 
     /**
-     * True unless the server's authoritative sessions.json was fetched
-     * successfully AND no longer lists this tmux name — i.e. some device's
-     * forgetSession() removed it. Fail-open (true) on any fetch problem so a
-     * network blip can't be mistaken for "closed elsewhere" and wrongly drop
-     * a tab that's still legitimately tracked.
+     * Both server-side facts the reconnect decision needs about one tmux name,
+     * in a SINGLE exec: did some device tombstone it (a real user close), and
+     * is it still in the restore manifest.
+     *
+     * The tombstone half exists because the manifest ALONE cannot answer
+     * "closed elsewhere" without a race: the closing device kills the tmux
+     * pane, and the peer's attach dies (and its auto-reconnect fires) long
+     * before that device's manifest push lands. The peer then read a manifest
+     * that still listed the session, concluded "nobody closed it", and
+     * rebuilt the pane with `claude --resume` — the session the user just
+     * closed reappearing a moment later. [forgetSession] now writes the
+     * tombstone BEFORE killing tmux, so whatever the manifest says, the
+     * tombstone is already on disk by the time any peer can notice the death.
+     *
+     * Returns null when the probe itself failed (transport, no shell, no
+     * output). Callers MUST fail open on null — "still tracked, not
+     * tombstoned" — so a network blip can never be mistaken for a close and
+     * drop a tab that is still legitimately tracked.
      */
-    suspend fun stillTrackedOnServer(sshManager: SshManager, tmuxSessionName: String): Boolean {
-        val remote = fetchSessionsFromServer(sshManager) ?: return true
-        return remote.any { it.tmuxSessionName == tmuxSessionName }
+    suspend fun fetchCloseState(sshManager: SshManager, tmuxSessionName: String): RemoteCloseState? {
+        return withContext(Dispatchers.IO) {
+            try {
+                val sshSession = sshManager.getSession() ?: return@withContext null
+                val ch = sshSession.openChannel("exec") as com.jcraft.jsch.ChannelExec
+                ch.setCommand(ManifestCommands.closeState(tmuxSessionName))
+                ch.inputStream = null
+                val input = ch.inputStream
+                val out = try {
+                    ch.connect(3000)
+                    input.bufferedReader().readText()
+                } finally {
+                    try { ch.disconnect() } catch (_: Exception) {}
+                }
+                parseCloseState(out, tmuxSessionName, fetchJson)
+            } catch (e: Exception) {
+                FileLogger.error(TAG, "fetchCloseState failed: ${e.message}", e)
+                null
+            }
+        }
+    }
+
+    /**
+     * Record a close of [tmuxSessionName] on the server BEFORE its tmux pane
+     * is killed. [durable] marks a genuine user close (as opposed to the
+     * remote-scan prune deciding a tab's pane is gone), which also drops a
+     * `forgotten.d` marker so a device that was asleep during the close still
+     * learns about it after the drift daemon self-cleans the transient
+     * tombstone ~60 s later.
+     */
+    suspend fun writeTombstone(sshManager: SshManager, tmuxSessionName: String, durable: Boolean) {
+        runShellCommand(
+            sshManager,
+            ManifestCommands.tombstone(tmuxSessionName, durable),
+            "tombstone($tmuxSessionName, durable=$durable)",
+        )
+    }
+
+    /**
+     * Drop every tombstone for [tmuxSessionName]. Called when the user
+     * deliberately launches or attaches this tmux name — positive intent that
+     * the name is alive again, which un-poisons a reused name (see
+     * [ManifestCommands.clearTombstone]).
+     */
+    suspend fun clearTombstone(sshManager: SshManager, tmuxSessionName: String) {
+        runShellCommand(
+            sshManager,
+            ManifestCommands.clearTombstone(tmuxSessionName),
+            "clearTombstone($tmuxSessionName)",
+        )
+    }
+
+    /** Fire-and-wait exec for the small state-file commands above. */
+    private suspend fun runShellCommand(sshManager: SshManager, command: String, label: String) {
+        withContext(Dispatchers.IO) {
+            try {
+                val sshSession = sshManager.getSession() ?: return@withContext
+                val ch = sshSession.openChannel("exec") as com.jcraft.jsch.ChannelExec
+                ch.setCommand(command)
+                ch.inputStream = null
+                ch.connect(5000)
+                val deadline = System.currentTimeMillis() + 5000
+                while (!ch.isClosed && System.currentTimeMillis() < deadline) {
+                    kotlinx.coroutines.delay(50)
+                }
+                val exit = ch.exitStatus
+                ch.disconnect()
+                if (exit != 0) FileLogger.error(TAG, "$label exited with $exit", null)
+            } catch (e: Exception) {
+                FileLogger.error(TAG, "$label failed: ${e.message}", e)
+            }
+        }
     }
 
     /**
@@ -942,63 +1071,10 @@ DTIMER_EOF
             withContext(Dispatchers.IO) {
                 val sshSession = sshManager.getSession() ?: return@withContext
                 val ch = sshSession.openChannel("exec") as com.jcraft.jsch.ChannelExec
-                // MERGE, not overwrite. The previous `cat > tmp && mv` clobbered
-                // the shared sessions.json with only THIS client's sessions, so
-                // whichever client (Android vs desktop) synced last silently
-                // dropped the others' sessions — and the next reboot's restore
-                // service then only rebuilt that truncated subset.
-                //
-                // New semantics (under the same flock the drift daemon + restore
-                // use): keep the incoming list (this client wins for its own
-                // sessions) PLUS any existing entry whose tmux session is still
-                // LIVE on the server and isn't already in the incoming list.
-                // Killed/forgotten sessions (kill-session runs before this push)
-                // are no longer live and aren't in incoming, so they correctly
-                // drop out — no resurrection on reboot. Falls back to a plain
-                // overwrite when jq is unavailable (matches old behaviour).
-                //
-                // The incoming + scratch temp files are suffixed with the remote
-                // shell's PID ($$) so a burst of near-simultaneous pushes (the
-                // app fires several on a multi-tab reconnect) can't race on a
-                // shared path — without per-PID names an earlier push would
-                // `rm` the incoming file out from under a later one, which then
-                // merged against an empty incoming and collapsed sessions.json.
-                val safeServerId = serverId.replace("\"", "")
-                ch.setCommand(
-                    "set -u; D=\"\$HOME/.claude-remote\"; mkdir -p \"\$D\"; " +
-                    "LOCK=\"\$D/sessions.lock\"; touch \"\$LOCK\"; " +
-                    "SF=\"\$D/sessions.json\"; INC=\"\$D/.sessions.incoming.\$\$\"; " +
-                    "cat > \"\$INC\"; " +
-                    "if command -v jq >/dev/null 2>&1; then " +
-                      // WHOLE-SERVER-DEATH GUARD: the merge below prunes any OLD peer
-                      // entry whose tmux name isn't in the LIVE set. If tmux itself
-                      // errors (server gone) or no claude-server-* sessions are live,
-                      // LIVE is effectively empty and the merge would drop EVERY other
-                      // client's sessions from the shared manifest. Skip the push
-                      // entirely so a transient server death can't shrink the source of
-                      // truth — the incoming client's sessions (also dead right now)
-                      // get re-pushed once the server is actually back up.
-                      "if ! tmux list-sessions >/dev/null 2>&1; then " +
-                        "echo \"[\$(date -u +%FT%TZ)] push(merge): tmux down — skip (preserve shared manifest)\" >> \"\$D/push.log\"; " +
-                      "elif [ \"\$(tmux list-sessions -F '#{session_name}' 2>/dev/null | grep -c '^claude-server-')\" -eq 0 ]; then " +
-                        "echo \"[\$(date -u +%FT%TZ)] push(merge): no live claude-server-* — skip (preserve shared manifest)\" >> \"\$D/push.log\"; " +
-                      "else " +
-                        "LIVE=\$(tmux list-sessions -F '#{session_name}' 2>/dev/null | jq -R . | jq -s . 2>/dev/null); " +
-                        "[ -n \"\$LIVE\" ] || LIVE='[]'; " +
-                        "( flock -x 9; " +
-                          "OLD='[]'; [ -f \"\$SF\" ] && OLD=\$(cat \"\$SF\"); " +
-                          "MERGED=\$(jq -n --slurpfile inc \"\$INC\" --argjson old \"\$OLD\" --argjson live \"\$LIVE\" '" +
-                            "(\$inc[0] // []) as \$incoming " +
-                            "| (\$incoming | map(.tmuxSessionName)) as \$names " +
-                            "| \$incoming + (\$old | map(. as \$e | select(((\$names | index(\$e.tmuxSessionName)) | not) and (\$live | index(\$e.tmuxSessionName)))))" +
-                          "' 2>/dev/null); " +
-                          "if [ -n \"\$MERGED\" ]; then printf '%s' \"\$MERGED\" > \"\$SF.tmp.\$\$\" && mv \"\$SF.tmp.\$\$\" \"\$SF\"; else cp \"\$INC\" \"\$SF\"; fi " +
-                        ") 9<>\"\$LOCK\"; " +
-                      "fi; " +
-                    "else cp \"\$INC\" \"\$SF\"; fi; " +
-                    "rm -f \"\$INC\"; " +
-                    "echo \"[\$(date -u +%FT%TZ)] push(merge): ${payload.length} bytes for $safeServerId\" >> \"\$D/push.log\""
-                )
+                // The merge semantics (and why this is a merge at all) live in
+                // ManifestCommands.pushMerge, which is a pure builder so the
+                // shell can be bash -n'd by ManifestCommandSyntaxTest.
+                ch.setCommand(ManifestCommands.pushMerge(serverId, payload.length))
                 ch.inputStream = null
                 val os = ch.outputStream
                 ch.connect(5000)
@@ -1032,7 +1108,7 @@ DTIMER_EOF
      * resurrected on next app start, and re-syncs the server-side
      * sessions.json so systemd doesn't try to restore it after reboot.
      */
-    suspend fun forgetSession(sessionId: String) {
+    suspend fun forgetSession(sessionId: String, userInitiated: Boolean = false) {
         val session = tabManager.getTab(sessionId)
         // Capture identity up front so we can prune the UI's stale remote-tmux
         // snapshot even after the tab is torn down below.
@@ -1071,6 +1147,19 @@ DTIMER_EOF
                 }
                 try {
                     if (cleanupConn != null) {
+                        // TOMBSTONE FIRST — before the kill, not after. Killing
+                        // the pane is what every OTHER device notices: its
+                        // attach dies instantly and auto-reconnect fires within
+                        // a second, while this device still has a tmux kill and
+                        // a manifest push to go. With the tombstone written
+                        // afterwards, that peer probed a server that still
+                        // listed the session as tracked, concluded "nobody
+                        // closed it" and rebuilt the pane with `claude
+                        // --resume` — the close appeared to work and the
+                        // session came back moments later. Writing it first
+                        // makes the close visible to peers before the death
+                        // they react to.
+                        writeTombstone(cleanupConn, session.tmuxSessionName, durable = userInitiated)
                         try {
                             val killed = com.clauderemote.connection.TmuxManager.killSession(
                                 cleanupConn.getSession() ?: error("no ssh"),
@@ -1086,35 +1175,6 @@ DTIMER_EOF
                             pushSessionsToServer(cleanupConn, session.server.id)
                         } catch (e: Exception) {
                             FileLogger.error(TAG, "sessions.json push failed for ${session.server.id}: ${e.message}", e)
-                        }
-                        // Durable tombstone: also record the close in the server-side
-                        // `forgotten` file over this same cleanup connection. If the
-                        // sessions.json push above lost the merge race (or failed), the
-                        // drift daemon still drops this session from the restore manifest
-                        // and won't relaunch it — a close stays a close across reboot.
-                        // Written under the shared flock so it can't race the drift
-                        // daemon's tombstone self-clean.
-                        try {
-                            val ssh = cleanupConn.getSession()
-                            if (ssh != null) {
-                                val safeName = session.tmuxSessionName.replace("'", "")
-                                val ch = ssh.openChannel("exec") as com.jcraft.jsch.ChannelExec
-                                ch.setCommand(
-                                    "mkdir -p \"\$HOME/.claude-remote\"; " +
-                                    "L=\"\$HOME/.claude-remote/sessions.lock\"; touch \"\$L\"; " +
-                                    "flock -x \"\$L\" bash -c 'printf \"%s\\n\" \"\$0\" >> \"\$1\"' " +
-                                    "'$safeName' \"\$HOME/.claude-remote/forgotten\""
-                                )
-                                ch.inputStream = null
-                                ch.connect(5000)
-                                val deadline = System.currentTimeMillis() + 5000
-                                while (!ch.isClosed && System.currentTimeMillis() < deadline) {
-                                    kotlinx.coroutines.delay(50)
-                                }
-                                ch.disconnect()
-                            }
-                        } catch (e: Exception) {
-                            FileLogger.error(TAG, "forgotten tombstone write failed for $sessionId: ${e.message}", e)
                         }
                     }
                 } finally {

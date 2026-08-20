@@ -26,11 +26,13 @@ class TmuxLaunchDecisionTest {
      */
     private class Probes(
         val tmuxExists: Boolean? = null,
+        val tombstoned: Boolean? = null,
         val stillTracked: Boolean? = null,
         val hasLivePeers: Boolean? = null,
         val hasTranscript: Boolean? = null,
     ) {
         var tmuxExistsCalls = 0
+        var tombstonedCalls = 0
         var stillTrackedCalls = 0
         var hasLivePeersCalls = 0
         var hasTranscriptCalls = 0
@@ -44,6 +46,7 @@ class TmuxLaunchDecisionTest {
             checkClosedElsewhere = checkClosedElsewhere,
             hasClaudeSessionId = hasClaudeSessionId,
             tmuxExists = { tmuxExistsCalls++; answer("tmuxExists", tmuxExists) },
+            tombstoned = { tombstonedCalls++; answer("tombstoned", tombstoned) },
             stillTracked = { stillTrackedCalls++; answer("stillTracked", stillTracked) },
             hasLivePeers = { hasLivePeersCalls++; answer("hasLivePeers", hasLivePeers) },
             hasTranscript = { hasTranscriptCalls++; answer("hasTranscript", hasTranscript) },
@@ -68,6 +71,7 @@ class TmuxLaunchDecisionTest {
         checkClosedElsewhere: Boolean = false,
         hasClaudeSessionId: Boolean = true,
         tmuxExists: Boolean? = null,
+        tombstoned: Boolean? = null,
         stillTracked: Boolean? = null,
         hasLivePeers: Boolean? = null,
         hasTranscript: Boolean? = null,
@@ -77,7 +81,7 @@ class TmuxLaunchDecisionTest {
         isNew = isNew,
         checkClosedElsewhere = checkClosedElsewhere,
         hasClaudeSessionId = hasClaudeSessionId,
-        probes = Probes(tmuxExists, stillTracked, hasLivePeers, hasTranscript),
+        probes = Probes(tmuxExists, tombstoned, stillTracked, hasLivePeers, hasTranscript),
         expected = expected,
     )
 
@@ -110,21 +114,29 @@ class TmuxLaunchDecisionTest {
 
         // tmux gone but STILL in the shared manifest ⇒ nobody closed it; rebuild.
         // Liveness is not probed because the manifest already answered.
-        row("gone_stillTracked_transcript", tmuxExists = false, checkClosedElsewhere = true, stillTracked = true, hasTranscript = true, expected = TmuxLaunchDecision.Rebuild(resume = true, withSessionId = true)),
-        row("gone_stillTracked_noTranscript", tmuxExists = false, checkClosedElsewhere = true, stillTracked = true, hasTranscript = false, expected = TmuxLaunchDecision.Rebuild(resume = false, withSessionId = true)),
-        row("gone_stillTracked_noId", tmuxExists = false, checkClosedElsewhere = true, stillTracked = true, hasClaudeSessionId = false, expected = TmuxLaunchDecision.Rebuild(resume = false, withSessionId = false)),
+        row("gone_stillTracked_transcript", tmuxExists = false, checkClosedElsewhere = true, tombstoned = false, stillTracked = true, hasTranscript = true, expected = TmuxLaunchDecision.Rebuild(resume = true, withSessionId = true)),
+        row("gone_stillTracked_noTranscript", tmuxExists = false, checkClosedElsewhere = true, tombstoned = false, stillTracked = true, hasTranscript = false, expected = TmuxLaunchDecision.Rebuild(resume = false, withSessionId = true)),
+        row("gone_stillTracked_noId", tmuxExists = false, checkClosedElsewhere = true, tombstoned = false, stillTracked = true, hasClaudeSessionId = false, expected = TmuxLaunchDecision.Rebuild(resume = false, withSessionId = false)),
 
         // tmux gone, untracked, and the tmux server is PROVABLY up with other
         // live sessions ⇒ another device closed this one. Forget it — and don't
         // pay for a transcript probe on a session we're about to delete.
-        row("gone_untracked_livePeers_withId", tmuxExists = false, checkClosedElsewhere = true, stillTracked = false, hasLivePeers = true, expected = TmuxLaunchDecision.ForgetClosedElsewhere),
-        row("gone_untracked_livePeers_noId", tmuxExists = false, checkClosedElsewhere = true, stillTracked = false, hasLivePeers = true, hasClaudeSessionId = false, expected = TmuxLaunchDecision.ForgetClosedElsewhere),
+        row("gone_untracked_livePeers_withId", tmuxExists = false, checkClosedElsewhere = true, tombstoned = false, stillTracked = false, hasLivePeers = true, expected = TmuxLaunchDecision.ForgetClosedElsewhere),
+        row("gone_untracked_livePeers_noId", tmuxExists = false, checkClosedElsewhere = true, tombstoned = false, stillTracked = false, hasLivePeers = true, hasClaudeSessionId = false, expected = TmuxLaunchDecision.ForgetClosedElsewhere),
+
+        // tmux gone and TOMBSTONED ⇒ a device recorded an explicit close.
+        // Authoritative on its own: neither the manifest nor peer liveness may
+        // be consulted (the manifest still lists the session for the moment
+        // between the tombstone and the closing device's push, and a close of
+        // the LAST session on a server has no live peers to corroborate it).
+        row("gone_tombstoned_withId", tmuxExists = false, checkClosedElsewhere = true, tombstoned = true, expected = TmuxLaunchDecision.ForgetClosedElsewhere),
+        row("gone_tombstoned_noId", tmuxExists = false, checkClosedElsewhere = true, tombstoned = true, hasClaudeSessionId = false, expected = TmuxLaunchDecision.ForgetClosedElsewhere),
 
         // tmux gone, untracked, NO live peers ⇒ whole-server outage, NOT
         // closed-elsewhere. See wholeServerOutage* tests below.
-        row("gone_untracked_noPeers_transcript", tmuxExists = false, checkClosedElsewhere = true, stillTracked = false, hasLivePeers = false, hasTranscript = true, expected = TmuxLaunchDecision.Rebuild(resume = true, withSessionId = true, afterSuspectedServerOutage = true)),
-        row("gone_untracked_noPeers_noTranscript", tmuxExists = false, checkClosedElsewhere = true, stillTracked = false, hasLivePeers = false, hasTranscript = false, expected = TmuxLaunchDecision.Rebuild(resume = false, withSessionId = true, afterSuspectedServerOutage = true)),
-        row("gone_untracked_noPeers_noId", tmuxExists = false, checkClosedElsewhere = true, stillTracked = false, hasLivePeers = false, hasClaudeSessionId = false, expected = TmuxLaunchDecision.Rebuild(resume = false, withSessionId = false, afterSuspectedServerOutage = true)),
+        row("gone_untracked_noPeers_transcript", tmuxExists = false, checkClosedElsewhere = true, tombstoned = false, stillTracked = false, hasLivePeers = false, hasTranscript = true, expected = TmuxLaunchDecision.Rebuild(resume = true, withSessionId = true, afterSuspectedServerOutage = true)),
+        row("gone_untracked_noPeers_noTranscript", tmuxExists = false, checkClosedElsewhere = true, tombstoned = false, stillTracked = false, hasLivePeers = false, hasTranscript = false, expected = TmuxLaunchDecision.Rebuild(resume = false, withSessionId = true, afterSuspectedServerOutage = true)),
+        row("gone_untracked_noPeers_noId", tmuxExists = false, checkClosedElsewhere = true, tombstoned = false, stillTracked = false, hasLivePeers = false, hasClaudeSessionId = false, expected = TmuxLaunchDecision.Rebuild(resume = false, withSessionId = false, afterSuspectedServerOutage = true)),
     )
 
     @Test
@@ -143,6 +155,7 @@ class TmuxLaunchDecisionTest {
             val p = r.probes
             p.decide(r.isNew, r.checkClosedElsewhere, r.hasClaudeSessionId)
             assertTrue(p.tmuxExistsCalls <= 1, "${r.name}: tmuxExists probed ${p.tmuxExistsCalls}x")
+            assertTrue(p.tombstonedCalls <= 1, "${r.name}: tombstoned probed ${p.tombstonedCalls}x")
             assertTrue(p.stillTrackedCalls <= 1, "${r.name}: stillTracked probed ${p.stillTrackedCalls}x")
             assertTrue(p.hasLivePeersCalls <= 1, "${r.name}: hasLivePeers probed ${p.hasLivePeersCalls}x")
             assertTrue(p.hasTranscriptCalls <= 1, "${r.name}: hasTranscript probed ${p.hasTranscriptCalls}x")
@@ -156,6 +169,7 @@ class TmuxLaunchDecisionTest {
         val p = Probes() // every probe forbidden
         assertEquals(TmuxLaunchDecision.FreshLaunch, p.decide(isNew = true, checkClosedElsewhere = true, hasClaudeSessionId = true))
         assertEquals(0, p.tmuxExistsCalls)
+        assertEquals(0, p.tombstonedCalls)
         assertEquals(0, p.stillTrackedCalls)
         assertEquals(0, p.hasLivePeersCalls)
         assertEquals(0, p.hasTranscriptCalls)
@@ -166,6 +180,7 @@ class TmuxLaunchDecisionTest {
         val p = Probes(tmuxExists = true)
         assertEquals(TmuxLaunchDecision.Attach, p.decide(isNew = false, checkClosedElsewhere = true, hasClaudeSessionId = true))
         assertEquals(1, p.tmuxExistsCalls)
+        assertEquals(0, p.tombstonedCalls)
         assertEquals(0, p.stillTrackedCalls)
         assertEquals(0, p.hasLivePeersCalls)
         assertEquals(0, p.hasTranscriptCalls)
@@ -173,7 +188,7 @@ class TmuxLaunchDecisionTest {
 
     @Test
     fun stillTrackedSkipsTheLivenessProbe() = runTest {
-        val p = Probes(tmuxExists = false, stillTracked = true, hasTranscript = true)
+        val p = Probes(tmuxExists = false, tombstoned = false, stillTracked = true, hasTranscript = true)
         p.decide(isNew = false, checkClosedElsewhere = true, hasClaudeSessionId = true)
         assertEquals(1, p.stillTrackedCalls)
         assertEquals(0, p.hasLivePeersCalls)
@@ -183,13 +198,68 @@ class TmuxLaunchDecisionTest {
     fun checkClosedElsewhereFalseSkipsManifestAndLivenessProbes() = runTest {
         val p = Probes(tmuxExists = false, hasTranscript = true)
         p.decide(isNew = false, checkClosedElsewhere = false, hasClaudeSessionId = true)
+        assertEquals(0, p.tombstonedCalls)
         assertEquals(0, p.stillTrackedCalls)
+        assertEquals(0, p.hasLivePeersCalls)
+    }
+
+    /**
+     * A tombstone answers the question outright: the manifest and the liveness
+     * probe must not be consulted at all (they are forbidden in this bench, so
+     * touching either fails the test).
+     */
+    @Test
+    fun tombstoneShortCircuitsManifestAndLivenessProbes() = runTest {
+        val p = Probes(tmuxExists = false, tombstoned = true)
+        assertEquals(
+            TmuxLaunchDecision.ForgetClosedElsewhere,
+            p.decide(isNew = false, checkClosedElsewhere = true, hasClaudeSessionId = true),
+        )
+        assertEquals(1, p.tombstonedCalls)
+        assertEquals(0, p.stillTrackedCalls)
+        assertEquals(0, p.hasLivePeersCalls)
+        assertEquals(0, p.hasTranscriptCalls)
+    }
+
+    /**
+     * THE multi-device regression: closing a session on one device killed its
+     * tmux pane, which dropped the OTHER device's attach and fired its
+     * auto-reconnect within a second — before the closing device's manifest
+     * push had landed. Reading the still-stale manifest, the peer concluded
+     * nobody had closed anything and rebuilt the pane with `claude --resume`,
+     * so the session the user had just closed reappeared moments later. The
+     * tombstone is written BEFORE the pane is killed, so it is already there
+     * whatever the manifest says — and it must win.
+     */
+    @Test
+    fun tombstoneBeatsAStillStaleManifest() = runTest {
+        val p = Probes(tmuxExists = false, tombstoned = true, stillTracked = true, hasTranscript = true)
+        assertEquals(
+            TmuxLaunchDecision.ForgetClosedElsewhere,
+            p.decide(isNew = false, checkClosedElsewhere = true, hasClaudeSessionId = true),
+            "a tombstoned session must be forgotten even while the manifest still lists it",
+        )
+    }
+
+    /**
+     * Closing the LAST session on a server leaves no live peer to corroborate
+     * "closed elsewhere" — the case the liveness gate deliberately reads as a
+     * whole-server outage. A tombstone is positive evidence of a user close, so
+     * it must forget here too, without ever asking about peers.
+     */
+    @Test
+    fun tombstonedLastSessionOnServerIsForgottenWithoutPeerCorroboration() = runTest {
+        val p = Probes(tmuxExists = false, tombstoned = true, hasLivePeers = false, hasTranscript = true)
+        assertEquals(
+            TmuxLaunchDecision.ForgetClosedElsewhere,
+            p.decide(isNew = false, checkClosedElsewhere = true, hasClaudeSessionId = true),
+        )
         assertEquals(0, p.hasLivePeersCalls)
     }
 
     @Test
     fun forgetClosedElsewhereSkipsTheTranscriptProbe() = runTest {
-        val p = Probes(tmuxExists = false, stillTracked = false, hasLivePeers = true)
+        val p = Probes(tmuxExists = false, tombstoned = false, stillTracked = false, hasLivePeers = true)
         assertEquals(
             TmuxLaunchDecision.ForgetClosedElsewhere,
             p.decide(isNew = false, checkClosedElsewhere = true, hasClaudeSessionId = true),
@@ -217,7 +287,7 @@ class TmuxLaunchDecisionTest {
      */
     @Test
     fun wholeServerOutageRebuildsAndMustNeverForgetTheSession() = runTest {
-        val p = Probes(tmuxExists = false, stillTracked = false, hasLivePeers = false, hasTranscript = true)
+        val p = Probes(tmuxExists = false, tombstoned = false, stillTracked = false, hasLivePeers = false, hasTranscript = true)
         val decision = p.decide(isNew = false, checkClosedElsewhere = true, hasClaudeSessionId = true)
 
         assertTrue(
@@ -233,7 +303,7 @@ class TmuxLaunchDecisionTest {
     /** Same outage, session with no transcript yet: still a rebuild, still not forgotten. */
     @Test
     fun wholeServerOutageWithoutTranscriptStillRebuilds() = runTest {
-        val p = Probes(tmuxExists = false, stillTracked = false, hasLivePeers = false, hasTranscript = false)
+        val p = Probes(tmuxExists = false, tombstoned = false, stillTracked = false, hasLivePeers = false, hasTranscript = false)
         assertEquals(
             TmuxLaunchDecision.Rebuild(resume = false, withSessionId = true, afterSuspectedServerOutage = true),
             p.decide(isNew = false, checkClosedElsewhere = true, hasClaudeSessionId = true),
@@ -243,7 +313,7 @@ class TmuxLaunchDecisionTest {
     /** Same outage, session with no claudeSessionId: rebuild with no id argument. */
     @Test
     fun wholeServerOutageWithoutSessionIdStillRebuilds() = runTest {
-        val p = Probes(tmuxExists = false, stillTracked = false, hasLivePeers = false)
+        val p = Probes(tmuxExists = false, tombstoned = false, stillTracked = false, hasLivePeers = false)
         assertEquals(
             TmuxLaunchDecision.Rebuild(resume = false, withSessionId = false, afterSuspectedServerOutage = true),
             p.decide(isNew = false, checkClosedElsewhere = true, hasClaudeSessionId = false),

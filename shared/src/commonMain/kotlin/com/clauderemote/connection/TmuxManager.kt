@@ -71,9 +71,27 @@ object TmuxManager {
 
     /**
      * Kill a tmux session.
+     *
+     * Records a tombstone FIRST, so no caller can kill a pane without the
+     * close being visible to the other devices. The pane's death is what every
+     * other device reacts to — its attach drops and auto-reconnect fires within
+     * a second — and a peer that finds no tombstone rebuilds the pane with
+     * `claude --resume`, which is how a killed session came back a moment later.
      */
     suspend fun killSession(session: Session, sessionName: String): Boolean = withContext(Dispatchers.IO) {
         try {
+            try {
+                execCommand(
+                    session,
+                    com.clauderemote.session.service.ManifestCommands.tombstone(sessionName, durable = false),
+                )
+            } catch (e: Exception) {
+                // Best-effort: a missing tombstone only costs us the race guard,
+                // it must never block the kill the user asked for.
+                com.clauderemote.util.FileLogger.error(
+                    "TmuxManager", "tombstone before kill failed for $sessionName: ${e.message}", e
+                )
+            }
             // `-t '=name'`: plain `-t` prefix-matches, so killing "proj--cashy"
             // would also hit a live "proj--cashy-2" (measured on tmux 3.5a).
             // `=` forces an exact-name match for a target-session.

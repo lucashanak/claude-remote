@@ -604,6 +604,13 @@ class SessionOrchestrator(
             connectionRegistry.ssh(sessionId)?.let { conn ->
                 reconnectScope.launch {
                     persistence.ensureRestoreService(conn)
+                    // Launching (or deliberately attaching to) this tmux name is
+                    // positive intent that it is alive, so drop any tombstone
+                    // left by an earlier close of the SAME name. Must precede
+                    // the push: the push filters tombstoned names out of the
+                    // manifest, so a stale tombstone would otherwise keep this
+                    // brand-new session out of the restore manifest entirely.
+                    persistence.clearTombstone(conn, tmuxSessionName)
                     persistence.pushSessionsToServer(conn, server.id)
                 }
             }
@@ -946,12 +953,29 @@ class SessionOrchestrator(
         // reconnect-to-an-already-tracked-tab path; launchSession's
         // attach/history-resume callers pass false since their target may
         // legitimately be new to sessions.json.
+        //
+        // The tombstone and manifest questions are answered by ONE exec, fetched
+        // at most once and only if the decider actually asks (it doesn't when
+        // tmux is alive). Two separate probes would double an SSH round-trip on
+        // the reconnect path — often the worst possible moment for it.
+        var closeStateProbed = false
+        var closeState: com.clauderemote.session.service.RemoteCloseState? = null
+        val fetchCloseState: suspend () -> com.clauderemote.session.service.RemoteCloseState? = {
+            if (!closeStateProbed) {
+                closeStateProbed = true
+                closeState = persistence.fetchCloseState(sshManager, session.tmuxSessionName)
+            }
+            closeState
+        }
         val decision = TmuxLaunchDecider.decide(
             isNew = isNew,
             checkClosedElsewhere = checkClosedElsewhere,
             hasClaudeSessionId = session.claudeSessionId != null,
             tmuxExists = { tmuxProbes.probeTmuxSession(sshManager, session.tmuxSessionName) },
-            stillTracked = { persistence.stillTrackedOnServer(sshManager, session.tmuxSessionName) },
+            // Both fail OPEN when the probe couldn't answer: not tombstoned,
+            // still tracked — a network blip must never read as "closed".
+            tombstoned = { fetchCloseState()?.tombstoned == true },
+            stillTracked = { fetchCloseState()?.tracked ?: true },
             hasLivePeers = { serverHasOtherLiveSession(sshManager, session.tmuxSessionName) },
             hasTranscript = {
                 tmuxProbes.probeTranscriptExists(sshManager, session.folder, session.claudeSessionId!!)
@@ -959,7 +983,8 @@ class SessionOrchestrator(
         )
 
         if (decision is TmuxLaunchDecision.ForgetClosedElsewhere) {
-            FileLogger.log(TAG, "Tmux '${session.tmuxSessionName}' missing, untracked, and live peers exist — closed on another device, forgetting locally")
+            val why = if (closeState?.tombstoned == true) "tombstoned" else "untracked, and live peers exist"
+            FileLogger.log(TAG, "Tmux '${session.tmuxSessionName}' missing, $why — closed on another device, forgetting locally")
             sessionStorage?.remove(session.id)
             disconnectSession(session.id)
             throw SessionClosedElsewhereException()
@@ -1859,8 +1884,14 @@ class SessionOrchestrator(
      * not just disconnects). Removes the persisted record so it won't be
      * resurrected on next app start, and re-syncs the server-side
      * sessions.json so systemd doesn't try to restore it after reboot.
+     *
+     * [userInitiated] separates a real user close from the remote-scan prune
+     * guessing a pane is gone: only the former earns a DURABLE tombstone, which
+     * tells other devices about the close even days later. A wrong guess must
+     * not be able to durably kill a session on every device.
      */
-    suspend fun forgetSession(sessionId: String) = persistence.forgetSession(sessionId)
+    suspend fun forgetSession(sessionId: String, userInitiated: Boolean = false) =
+        persistence.forgetSession(sessionId, userInitiated)
 
     suspend fun renameTmuxSession(sessionId: String, oldName: String, newName: String) =
         persistence.renameTmuxSession(sessionId, oldName, newName)
