@@ -179,10 +179,15 @@ internal object ManifestCommands {
               // get re-pushed once the server is actually back up.
               "if ! tmux list-sessions >/dev/null 2>&1; then " +
                 "echo \"[\$(date -u +%FT%TZ)] push(merge): tmux down — skip (preserve shared manifest)\" >> \"\$D/push.log\"; " +
-              "elif [ \"\$(tmux list-sessions -F '#{session_name}' 2>/dev/null | grep -c '^claude-server-')\" -eq 0 ]; then " +
+              "elif [ \"\$(tmux -u list-sessions -F '#{session_name}' 2>/dev/null | grep -c '^claude-server-')\" -eq 0 ]; then " +
                 "echo \"[\$(date -u +%FT%TZ)] push(merge): no live claude-server-* — skip (preserve shared manifest)\" >> \"\$D/push.log\"; " +
               "else " +
-                "LIVE=\$(tmux list-sessions -F '#{session_name}' 2>/dev/null | jq -R . | jq -s . 2>/dev/null); " +
+                // `-u` is load-bearing here: this LIVE set decides which peer
+                // entries survive the merge. Read without it, a session whose
+                // alias has diacritics comes back '_'-mangled, fails to match its
+                // own manifest entry, and is pruned as dead — the reboot restore
+                // then never rebuilds it. See SessionOrchestrator.serverHasOtherLiveSession.
+                "LIVE=\$(tmux -u list-sessions -F '#{session_name}' 2>/dev/null | jq -R . | jq -s . 2>/dev/null); " +
                 "[ -n \"\$LIVE\" ] || LIVE='[]'; " +
                 "( flock -x 9; " +
                   "OLD='[]'; [ -f \"\$SF\" ] && OLD=\$(cat \"\$SF\"); " +

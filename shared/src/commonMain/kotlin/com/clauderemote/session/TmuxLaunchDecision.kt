@@ -65,7 +65,7 @@ internal object TmuxPeerLiveness {
     const val ANCHOR = "__anchor__"
 
     /**
-     * True iff [listSessionsOutput] (`tmux list-sessions -F '#{session_name}'`)
+     * True iff [listSessionsOutput] (`tmux -u list-sessions -F '#{session_name}'`)
      * names at least one live session that is ours, is not [excludeTmuxName],
      * and is not the [ANCHOR] keepalive.
      *

@@ -95,7 +95,10 @@ internal class RemoteOpsService(
                     // what actually protects the pair — display-message alone exits 0 even
                     // on an unresolvable target (measured on tmux 3.5a).
                     val checkCmd = "tmux has-session -t '=$escaped' 2>/dev/null && " +
-                        "tmux display-message -p -t '=$escaped:' '#{pane_current_path}' 2>/dev/null " +
+                        // `-u`: a folder with diacritics comes back '_'-mangled on an
+                        // exec channel (no locale) — see the note in
+                        // SessionOrchestrator.serverHasOtherLiveSession.
+                        "tmux -u display-message -p -t '=$escaped:' '#{pane_current_path}' 2>/dev/null " +
                         "|| echo __NO_SESSION__"
                     val ch = sess.openChannel("exec") as ChannelExec
                     ch.setCommand(checkCmd)

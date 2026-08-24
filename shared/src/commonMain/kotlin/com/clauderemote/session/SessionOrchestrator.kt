@@ -1070,7 +1070,20 @@ class SessionOrchestrator(
     internal suspend fun serverHasOtherLiveSession(sshManager: SshManager, excludeTmuxName: String): Boolean {
         return try {
             val jsch = sshManager.getSession() ?: return false
-            val out = execCapture(jsch, "tmux list-sessions -F '#{session_name}' 2>/dev/null")
+            // `tmux -u`: without it tmux decides UTF-8 support from the CLIENT's
+            // locale, and an SSH *exec* channel gets no locale of its own (Debian's
+            // /etc/default/locale is LANG=C here). A non-UTF-8 client makes tmux run
+            // every name it prints through utf8_sanitize(), which replaces each
+            // non-ASCII character with '_' — so a session aliased "doporučené kurzy"
+            // reads back as "doporu_en_-kurzy". The mangled string matches no tab and
+            // no manifest entry: the scan reports it as an unknown remote session, the
+            // manifest merge treats the real one as dead, and a "missing" session gets
+            // relaunched under the mangled name — one live session becomes two.
+            // `-u` forces UTF-8 regardless of locale, so it also works on servers with
+            // no UTF-8 locale installed. Writing/addressing is NOT affected (verified
+            // on tmux 3.5a: new-session -s and -t '=name' round-trip UTF-8 fine under
+            // `env -i`), so only the READ paths need this.
+            val out = execCapture(jsch, "tmux -u list-sessions -F '#{session_name}' 2>/dev/null")
             // Parsing lives in TmuxPeerLiveness so it is testable without SSH;
             // the exec round-trip and the fail-closed catch below stay here.
             TmuxPeerLiveness.hasOtherLivePeer(out, excludeTmuxName)

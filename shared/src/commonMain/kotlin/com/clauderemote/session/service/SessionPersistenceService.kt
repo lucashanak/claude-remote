@@ -401,7 +401,7 @@ fi
 # server no longer needs it, and leaving it visible makes the app treat it as a
 # real session and churn it (kill/relaunch). Safe — exit-empty=off keeps the
 # server alive at 0 sessions.
-if [ "${'$'}(tmux list-sessions -F '#{session_name}' 2>/dev/null | grep -c '^claude-server-')" -gt 0 ]; then
+if [ "${'$'}(tmux -u list-sessions -F '#{session_name}' 2>/dev/null | grep -c '^claude-server-')" -gt 0 ]; then
     tmux kill-session -t __anchor__ 2>/dev/null || true
 fi
 
@@ -453,11 +453,18 @@ find_claude_descendant() {
 # row per session into a temp table, then build the whole LIVE JSON array in a
 # SINGLE jq pass (was one jq fork per session).
 LIVE_TBL=${'$'}(mktemp "${'$'}HOME/.claude-remote/.drift.live.XXXXXX" 2>/dev/null || mktemp 2>/dev/null)
-for s in ${'$'}(tmux list-sessions -F '#{session_name}' 2>/dev/null); do
+# `tmux -u` on every read: this daemon runs from a systemd user unit, which has
+# NO locale at all, and a non-UTF-8 tmux client gets each non-ASCII character of
+# a session name (and of pane_current_path) replaced with '_' by utf8_sanitize().
+# Without -u this loop wrote '_'-mangled names into sessions.json as GROUND
+# TRUTH: the real session's entry vanished, the mangled one collapsed onto any
+# genuinely mangled twin (two identical rows in the manifest), and the next
+# client to read it relaunched the "missing" session under the broken name.
+for s in ${'$'}(tmux -u list-sessions -F '#{session_name}' 2>/dev/null); do
     case "${'$'}s" in claude-server-*) ;; *) continue;; esac
-    pane_pid=${'$'}(tmux list-panes -t "${'$'}s" -F '#{pane_pid}' 2>/dev/null | head -1)
+    pane_pid=${'$'}(tmux -u list-panes -t "${'$'}s" -F '#{pane_pid}' 2>/dev/null | head -1)
     [ -n "${'$'}pane_pid" ] || continue
-    folder=${'$'}(tmux display-message -p -t "${'$'}s" '#{pane_current_path}' 2>/dev/null)
+    folder=${'$'}(tmux -u display-message -p -t "${'$'}s" '#{pane_current_path}' 2>/dev/null)
     pid=${'$'}(find_claude_descendant "${'$'}pane_pid")
     sid=""; model="DEFAULT"; mode="YOLO"; acct=""
     if [ -n "${'$'}pid" ]; then

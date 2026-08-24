@@ -25,7 +25,10 @@ object TmuxManager {
      */
     suspend fun listSessions(session: Session): List<TmuxSession> = withContext(Dispatchers.IO) {
         try {
-            val output = execCommand(session, "tmux list-sessions -F '#{session_name}|#{session_windows}|#{session_attached}|#{session_created}' 2>/dev/null")
+            // `-u`: exec channels carry no locale, and a non-UTF-8 tmux client gets
+            // every non-ASCII character in a session name replaced with '_'. See the
+            // long note in SessionOrchestrator.serverHasOtherLiveSession.
+            val output = execCommand(session, "tmux -u list-sessions -F '#{session_name}|#{session_windows}|#{session_attached}|#{session_created}' 2>/dev/null")
             if (output.isBlank()) return@withContext emptyList()
 
             output.lines().filter { it.isNotBlank() }.mapNotNull { line ->

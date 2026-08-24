@@ -216,7 +216,7 @@ if os.path.exists(p):
 hooks = d.setdefault('hooks', {})
 stop = hooks.setdefault('Stop', [])
 marker = 'claude-remote-notify'
-cmd = \"echo claude-remote-notify \$(tmux display-message -p '#S' 2>/dev/null || echo unknown) \$(date +%s) >> /tmp/claude-notify\"
+cmd = \"echo claude-remote-notify \$(tmux -u display-message -p '#S' 2>/dev/null || echo unknown) \$(date +%s) >> /tmp/claude-notify\"
 want = {'matcher': '', 'hooks': [{'type': 'command', 'command': cmd}]}
 def has_marker(e):
     if not isinstance(e, dict): return False
