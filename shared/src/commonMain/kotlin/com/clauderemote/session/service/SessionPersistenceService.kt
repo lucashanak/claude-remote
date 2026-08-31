@@ -32,6 +32,16 @@ private const val TAG = "SessionOrchestrator"
 internal data class RemoteCloseState(val tracked: Boolean, val tombstoned: Boolean)
 
 /**
+ * One read of a server's shared state: the restore manifest plus every tmux
+ * name currently tombstoned (closed). Fetched together because the 15 s
+ * reconcile loop pays for the round-trip either way.
+ */
+internal data class ServerSnapshot(
+    val sessions: List<PersistedSession>,
+    val tombstoned: Set<String>,
+)
+
+/**
  * Owns the SHARED server-side `sessions.json` (fetch/cache/push), the systemd
  * restore-service installer + restore/drift scripts, the per-session real
  * claude-session-id refresh pollers, and the forget/rename lifecycle edits.
@@ -53,6 +63,13 @@ internal class SessionPersistenceService(
     private val terminalIO: TerminalIOService,
     private val isBackground: () -> Boolean,
     private val readRealSessionId: suspend (sshManager: SshManager, tmuxName: String) -> String?,
+    /**
+     * `tmux has-session` for one name. Wired to TmuxProbes.probeTmuxSession,
+     * which fails OPEN (true = alive) — required here: a probe that couldn't
+     * answer must never be read as "the pane is gone", because that deletes a
+     * live tab.
+     */
+    private val probeTmuxAlive: suspend (sshManager: SshManager, tmuxName: String) -> Boolean,
     private val onActivityUpdate: (sessionId: String, activity: SessionActivity) -> Unit,
     private val disconnectSession: suspend (sessionId: String) -> Unit,
     private val onForgotten: (serverId: String, tmuxSessionName: String) -> Unit,
@@ -61,7 +78,7 @@ internal class SessionPersistenceService(
     // 15 s reconcile loop, N−1 of the flock+cat fetches were redundant. Cache
     // the parsed snapshot per server with a TTL just under the loop period so
     // only the first session to tick pays the exec.
-    private class SessionsSnapshot(val at: Long, val list: List<PersistedSession>)
+    private class SessionsSnapshot(val at: Long, val snapshot: ServerSnapshot)
     private val sessionsJsonCache = java.util.concurrent.ConcurrentHashMap<String, SessionsSnapshot>()
     private val sessionsJsonMutex = Mutex()
 
@@ -109,14 +126,14 @@ internal class SessionPersistenceService(
         DUNIT="${'$'}HOME/.config/systemd/user/claude-remote-drift.service"
         DTIMER="${'$'}HOME/.config/systemd/user/claude-remote-drift.timer"
         LOCK="${'$'}HOME/.claude-remote/sessions.lock"
-        MARKER="claude-remote-restore-v16"
+        MARKER="claude-remote-restore-v17"
         touch "${'$'}LOCK"
         echo "[${'$'}(date -u +%FT%TZ)] install: invoked by client" >> "${'$'}HOME/.claude-remote/install.log"
         if ! grep -q "${'$'}MARKER" "${'$'}SCRIPT" 2>/dev/null; then
             echo "[${'$'}(date -u +%FT%TZ)] install: restore.sh missing ${'$'}MARKER — rewriting; prior marker line: ${'$'}(grep -m1 'claude-remote-restore-v' "${'$'}SCRIPT" 2>/dev/null || echo '<none/new file>')" >> "${'$'}HOME/.claude-remote/install.log"
             cat > "${'$'}SCRIPT" <<'RESTORE_EOF'
 #!/usr/bin/env bash
-# marker-compat (do NOT remove): claude-remote-restore-v6 claude-remote-restore-v7 claude-remote-restore-v8 claude-remote-restore-v9 claude-remote-restore-v10 claude-remote-restore-v11 claude-remote-restore-v12 claude-remote-restore-v13 claude-remote-restore-v14 claude-remote-restore-v15 claude-remote-restore-v16
+# marker-compat (do NOT remove): claude-remote-restore-v6 claude-remote-restore-v7 claude-remote-restore-v8 claude-remote-restore-v9 claude-remote-restore-v10 claude-remote-restore-v11 claude-remote-restore-v12 claude-remote-restore-v13 claude-remote-restore-v14 claude-remote-restore-v15 claude-remote-restore-v16 claude-remote-restore-v17
 # Makes any installed client's `grep -q ${'$'}MARKER` find its marker so it takes the
 # PRESENT no-op path and does NOT rewrite this file (reverting the fixes) nor run
 # the daemon-reload/enable reinstall that correlates with the tmux-server death.
@@ -207,6 +224,24 @@ parse_field() {
     local key="${'$'}1" line="${'$'}2"
     echo "${'$'}line" | sed -n "s/.*\"${'$'}key\":[[:space:]]*\"\([^\"]*\)\".*/\1/p"
 }
+# A tmux name the user CLOSED must never be restored, whichever source file
+# ${'$'}SRC came from. This is load-bearing for the fallbacks above: .bak and
+# manifests/highwater.json (the largest manifest ever seen) both predate the
+# close, so without this check a reboot resurrects every session ever closed —
+# highwater in particular never shrinks and so never forgets.
+# Two stores, same meaning: `forgotten` holds transient tombstones the drift
+# daemon consumes within a tick, `forgotten.d/<name>` durable markers a real
+# user close leaves behind (mtime = close time, honoured for TOMBSTONE_WINDOW).
+FORGOTTEN="${'$'}HOME/.claude-remote/forgotten"
+FORGOTTEN_D="${'$'}HOME/.claude-remote/forgotten.d"
+TOMBSTONE_WINDOW=14
+is_tombstoned() {
+    [ -f "${'$'}FORGOTTEN" ] && grep -qxF "${'$'}1" "${'$'}FORGOTTEN" && return 0
+    [ -f "${'$'}FORGOTTEN_D/${'$'}1" ] \
+        && [ -n "${'$'}(find "${'$'}FORGOTTEN_D/${'$'}1" -maxdepth 0 -mtime -${'$'}TOMBSTONE_WINDOW 2>/dev/null)" ] \
+        && return 0
+    return 1
+}
 if [ "${'$'}HAVE_JQ" = "1" ]; then
     COUNT=${'$'}(echo "${'$'}SNAP" | jq 'length')
     for i in ${'$'}(seq 0 ${'$'}((COUNT-1))); do
@@ -219,6 +254,7 @@ if [ "${'$'}HAVE_JQ" = "1" ]; then
         # the pre-existing ~/.claude login, which MUST run with CLAUDE_CONFIG_DIR
         # unset — see the ENVPFX note below.
         ACCT=${'$'}(echo "${'$'}SNAP" | jq -r ".[${'$'}i].accountSlug // empty")
+        is_tombstoned "${'$'}TMUX_NAME" && { echo "skip ${'$'}TMUX_NAME — closed by the user (tombstoned)"; continue; }
         tmux has-session -t="${'$'}TMUX_NAME" 2>/dev/null && continue
         FOLDER_EXP="${'$'}{FOLDER/#\~/${'$'}HOME}"
         case "${'$'}FOLDER_EXP" in /*) ;; *) FOLDER_EXP="${'$'}HOME/${'$'}FOLDER_EXP";; esac
@@ -296,7 +332,8 @@ else
             *claudeSessionId*) UUID=${'$'}(parse_field claudeSessionId "${'$'}line");;
             *accountSlug*)     ACCT=${'$'}(parse_field accountSlug "${'$'}line");;
             *\}*)
-                if [ -n "${'$'}{TMUX_NAME:-}" ] && [ -n "${'$'}{FOLDER:-}" ]; then
+                if [ -n "${'$'}{TMUX_NAME:-}" ] && [ -n "${'$'}{FOLDER:-}" ] \
+                   && ! is_tombstoned "${'$'}TMUX_NAME"; then
                     if ! tmux has-session -t="${'$'}TMUX_NAME" 2>/dev/null; then
                         FOLDER_EXP="${'$'}{FOLDER/#\~/${'$'}HOME}"
                         [ -d "${'$'}FOLDER_EXP" ] && {
@@ -330,7 +367,7 @@ RESTORE_EOF
             echo "[${'$'}(date -u +%FT%TZ)] install: drift.sh missing ${'$'}MARKER — rewriting; prior marker line: ${'$'}(grep -m1 'claude-remote-restore-v' "${'$'}DRIFT" 2>/dev/null || echo '<none/new file>')" >> "${'$'}HOME/.claude-remote/install.log"
             cat > "${'$'}DRIFT" <<'DRIFT_EOF'
 #!/usr/bin/env bash
-# marker-compat (do NOT remove): claude-remote-restore-v6 claude-remote-restore-v7 claude-remote-restore-v8 claude-remote-restore-v9 claude-remote-restore-v10 claude-remote-restore-v11 claude-remote-restore-v12 claude-remote-restore-v13 claude-remote-restore-v14 claude-remote-restore-v15 claude-remote-restore-v16
+# marker-compat (do NOT remove): claude-remote-restore-v6 claude-remote-restore-v7 claude-remote-restore-v8 claude-remote-restore-v9 claude-remote-restore-v10 claude-remote-restore-v11 claude-remote-restore-v12 claude-remote-restore-v13 claude-remote-restore-v14 claude-remote-restore-v15 claude-remote-restore-v16 claude-remote-restore-v17
 # Makes any installed client's `grep -q ${'$'}MARKER` find its marker so it takes the
 # PRESENT no-op path and does NOT rewrite this file (reverting the fixes) nor run
 # the daemon-reload/enable reinstall that correlates with the tmux-server death.
@@ -370,6 +407,8 @@ SF="${'$'}HOME/.claude-remote/sessions.restore.json"   # server-owned source of 
 SF_APP="${'$'}HOME/.claude-remote/sessions.json"        # mirror the app/client reads (drift keeps it in sync)
 LOCK="${'$'}HOME/.claude-remote/sessions.lock"
 FORGOTTEN="${'$'}HOME/.claude-remote/forgotten"          # tombstones: tmux names a client explicitly closed
+FORGOTTEN_D="${'$'}HOME/.claude-remote/forgotten.d"      # DURABLE tombstones: one file per USER close (mtime = close time)
+TOMBSTONE_WINDOW=14                                 # days a durable marker stays authoritative
 command -v tmux >/dev/null 2>&1 || { echo "no tmux"; exit 0; }
 command -v jq >/dev/null 2>&1 || { echo "no jq"; exit 0; }
 touch "${'$'}LOCK"
@@ -567,6 +606,25 @@ LIVE=${'$'}(echo "${'$'}LIVE" | jq -c 'map(.tmuxSessionName)')"
         [ -n "${'$'}FORGET" ] || FORGET="[]"
         FGLEN=${'$'}(echo "${'$'}FORGET" | jq 'length' 2>/dev/null || echo 0)
     fi
+    # DURABLE tombstones: `forgotten.d/<name>`, one file per close, written ONLY
+    # by an explicit user close (the app's prune — which merely GUESSES a pane is
+    # gone — writes the transient file above and nothing here). That provenance
+    # is the whole point: the mass-tombstone guard below exists because a client
+    # recovering from an outage could tombstone its entire fleet at once, and it
+    # cannot tell that apart from real closes when all it sees is a list of
+    # names. A durable marker carries the distinction, so it is honoured with NO
+    # count limit — otherwise closing four sessions in one minute (a completely
+    # ordinary thing to do with 45 of them) trips the guard, the transient file
+    # is thrown away, and SELF-HEAL relaunches every session the user just
+    # closed. That is exactly what happened on 2026-08-31T08:31:49Z.
+    DFG="[]"
+    DFGLEN=0
+    if [ -d "${'$'}FORGOTTEN_D" ]; then
+        DFG=${'$'}(find "${'$'}FORGOTTEN_D" -maxdepth 1 -type f -mtime -${'$'}TOMBSTONE_WINDOW -printf '%f\n' 2>/dev/null \
+            | jq -R . | jq -s 'map(select(length>0))' 2>/dev/null)
+        [ -n "${'$'}DFG" ] || DFG="[]"
+        DFGLEN=${'$'}(echo "${'$'}DFG" | jq 'length' 2>/dev/null || echo 0)
+    fi
     # MASS-TOMBSTONE GUARD: a human closes sessions ONE AT A TIME. More than 2
     # tombstones in a single tick means the CLIENT mass-forgot after an outage or
     # a PARTIAL recovery — its own forget-guard only blocks the all-dead case,
@@ -577,6 +635,14 @@ LIVE=${'$'}(echo "${'$'}LIVE" | jq -c 'map(.tmuxSessionName)')"
         echo "[${'$'}(date -u +%FT%TZ)] drift: REFUSING ${'$'}FGLEN tombstones at once (mass-forget after outage, not user closes) — moved aside"
         mv -f "${'$'}FORGOTTEN" "${'$'}FORGOTTEN.rejected.${'$'}(date -u +%Y%m%dT%H%M%SZ)" 2>/dev/null || : > "${'$'}FORGOTTEN"
         FORGET="[]"; FGLEN=0
+    fi
+    # Union AFTER the guard: rejecting a suspicious transient batch must never
+    # reject the durable markers, which are proof of intent rather than a list
+    # of names that happen to be missing.
+    if [ "${'$'}DFGLEN" -gt 0 ]; then
+        FORGET=${'$'}(jq -n --argjson t "${'$'}FORGET" --argjson d "${'$'}DFG" '${'$'}t + ${'$'}d | unique' 2>/dev/null)
+        [ -n "${'$'}FORGET" ] || FORGET="${'$'}DFG"
+        FGLEN=${'$'}(echo "${'$'}FORGET" | jq 'length' 2>/dev/null || echo 0)
     fi
     # Keep client metadata for sessions already in OLD (refresh only the live
     # claudeSessionId); add live sessions missing from OLD.
@@ -600,10 +666,17 @@ LIVE=${'$'}(echo "${'$'}LIVE" | jq -c 'map(.tmuxSessionName)')"
         # NEVER replace a non-empty manifest with an empty one — a live tmux
         # server that momentarily lists no claude-server-* sessions (crash,
         # race, shutdown the STATE probe missed) must not destroy the restore
-        # manifest. Exception: an empty result driven by tombstones (FGLEN>0)
-        # is a real "closed everything" and is allowed through, else a closed
-        # session would be resurrected on the next reboot.
-        if [ "${'$'}NEWLEN" -eq 0 ] && [ "${'$'}OLDLEN" -gt 0 ] && [ "${'$'}FGLEN" -eq 0 ]; then
+        # manifest. Exception: an empty result the TOMBSTONES fully explain is a
+        # real "closed everything" and is allowed through, else a closed session
+        # would be resurrected on the next reboot.
+        # The test is "every entry that vanished was tombstoned", not the older
+        # "FGLEN>0": durable markers linger for TOMBSTONE_WINDOW days, so a mere
+        # non-empty tombstone set would leave this protection switched off for a
+        # fortnight after any close — and then a whole-server outage could blank
+        # the manifest, which is the incident this guard was added for.
+        DROP_EXPLAINED=${'$'}(jq -n --argjson old "${'$'}OLD" --argjson forget "${'$'}FORGET" \
+            '((${'$'}old | map(.tmuxSessionName)) - ${'$'}forget | length) == 0' 2>/dev/null)
+        if [ "${'$'}NEWLEN" -eq 0 ] && [ "${'$'}OLDLEN" -gt 0 ] && [ "${'$'}{DROP_EXPLAINED:-false}" != "true" ]; then
             echo "[${'$'}(date -u +%FT%TZ)] drift: refusing to blank non-empty manifest (${'$'}OLDLEN entries) — likely shutdown/tmux restart"
         else
               # Roll an UNFILTERED backup. This used to strip tombstoned entries
@@ -671,6 +744,13 @@ if [ -f "${'$'}SF" ]; then
     MISSING=${'$'}(jq -r '.[].tmuxSessionName' "${'$'}SF" 2>/dev/null | while IFS= read -r n; do
         [ -n "${'$'}n" ] || continue
         [ -f "${'$'}FORGOTTEN" ] && grep -qxF "${'$'}n" "${'$'}FORGOTTEN" && continue
+        # Durable marker = the user closed this. Checked separately from the
+        # transient file because that one is consumed (and, on a rejected batch,
+        # deleted) within a tick, while this relaunch decision has to keep
+        # honouring the close for as long as the marker stands.
+        [ -f "${'$'}FORGOTTEN_D/${'$'}n" ] \
+            && [ -n "${'$'}(find "${'$'}FORGOTTEN_D/${'$'}n" -maxdepth 0 -mtime -${'$'}TOMBSTONE_WINDOW 2>/dev/null)" ] \
+            && continue
         ! tmux has-session -t="${'$'}n" 2>/dev/null && echo "${'$'}n"; done)
     if [ -n "${'$'}MISSING" ]; then
         echo "[${'$'}(date -u +%FT%TZ)] drift: self-heal — relaunching missing: ${'$'}(echo ${'$'}MISSING | tr '\n' ' ')"
@@ -782,6 +862,38 @@ DTIMER_EOF
          * that deletes a live tab. A well-formed but empty manifest DOES mean
          * untracked (that is the state right after a close).
          */
+        /**
+         * Parse [ManifestCommands.serverSnapshot] output: tombstoned tmux names,
+         * a `---` line, then the manifest.
+         *
+         * Null means the read failed (no separator: truncated transport, no
+         * shell, no flock) — callers must fail open and change nothing. A
+         * corrupt manifest yields an EMPTY session list but keeps the tombstone
+         * set: the two halves answer different questions and one being garbage
+         * must not suppress the other.
+         */
+        internal fun parseServerSnapshot(
+            raw: String,
+            json: kotlinx.serialization.json.Json,
+        ): ServerSnapshot? {
+            val lines = raw.lines()
+            val sepIdx = lines.indexOfFirst { it.trim() == ManifestCommands.CLOSE_STATE_SEPARATOR }
+            if (sepIdx < 0) return null
+            val tombstoned = lines.take(sepIdx).map { it.trim() }.filter { it.isNotEmpty() }.toSet()
+            val manifest = lines.drop(sepIdx + 1).joinToString("\n").trim()
+            val sessions = if (manifest.isEmpty()) {
+                emptyList()
+            } else {
+                try {
+                    json.decodeFromString<List<PersistedSession>>(manifest)
+                } catch (e: Exception) {
+                    FileLogger.error(TAG, "server snapshot: manifest unparseable (${e.message})", null)
+                    emptyList()
+                }
+            }
+            return ServerSnapshot(sessions = sessions, tombstoned = tombstoned)
+        }
+
         internal fun parseCloseState(
             raw: String,
             tmuxSessionName: String,
@@ -834,7 +946,29 @@ DTIMER_EOF
                 if (isBackground()) { kotlinx.coroutines.delay(15_000); continue }
                 try {
                     val remote = fetchSessionsCached(registry.serverIdOf(sessionId), sshManager)
-                    val entry = remote?.firstOrNull { it.tmuxSessionName == tmuxName }
+                    // CLOSED ON ANOTHER DEVICE, noticed without a disconnect.
+                    // Killing the pane drops this device's `tmux attach`, but
+                    // the SSH shell underneath survives — so onConnectionLost
+                    // never fires, autoReconnect never runs, and the only code
+                    // that checks for a close never got a chance. The tab then
+                    // sat there, live-looking, until something else broke the
+                    // connection (hours, on a desktop). This loop is already
+                    // talking to the server every 15 s, so let it answer the
+                    // question too.
+                    if (remote != null && remote.tombstoned.contains(tmuxName)) {
+                        // Two facts before deleting anything: the server says
+                        // closed AND the pane is really gone. probeTmuxAlive
+                        // fails OPEN (alive), so a flaky link keeps the tab.
+                        if (!probeTmuxAlive(sshManager, tmuxName)) {
+                            FileLogger.log(TAG, "Tmux '$tmuxName' tombstoned and gone — closed on another device, forgetting locally")
+                            sessionStorage.remove(sessionId)
+                            val serverId = tabManager.getTab(sessionId)?.server?.id
+                            disconnectSession(sessionId)
+                            if (serverId != null) onForgotten(serverId, tmuxName)
+                            return@launch
+                        }
+                    }
+                    val entry = remote?.sessions?.firstOrNull { it.tmuxSessionName == tmuxName }
                     // Prefer the LIVE pane's running Claude pid over the server's
                     // sessions.json record. The server entry is seeded with the
                     // client-generated launch UUID and the drift daemon may not
@@ -879,31 +1013,26 @@ DTIMER_EOF
     }
 
     /**
-     * Read the server's authoritative sessions.json under a shared file
-     * lock (so we never read mid-write from the drift daemon or restore.sh).
-     * Returns null on transport failure, empty list on missing file or
-     * parse error.
+     * Read the server's shared state — the manifest AND the tombstone set —
+     * under a shared file lock (so we never read mid-write from the drift
+     * daemon or restore.sh). Returns null on transport failure, empty
+     * sessions on a missing file or parse error.
      */
-    private suspend fun fetchSessionsFromServer(sshManager: SshManager): List<PersistedSession>? {
+    private suspend fun fetchSessionsFromServer(sshManager: SshManager): ServerSnapshot? {
         return withContext(Dispatchers.IO) {
             try {
                 val sshSession = sshManager.getSession() ?: return@withContext null
                 val ch = sshSession.openChannel("exec") as com.jcraft.jsch.ChannelExec
-                ch.setCommand(
-                    "touch \"\$HOME/.claude-remote/sessions.lock\"; " +
-                    "flock -s \"\$HOME/.claude-remote/sessions.lock\" " +
-                    "cat \"\$HOME/.claude-remote/sessions.json\" 2>/dev/null"
-                )
+                ch.setCommand(ManifestCommands.serverSnapshot())
                 ch.inputStream = null
                 val input = ch.inputStream
                 val out = try {
                     ch.connect(3000)
-                    input.bufferedReader().readText().trim()
+                    input.bufferedReader().readText()
                 } finally {
                     try { ch.disconnect() } catch (_: Exception) {}
                 }
-                if (out.isEmpty()) emptyList()
-                else fetchJson.decodeFromString<List<PersistedSession>>(out)
+                parseServerSnapshot(out, fetchJson)
             } catch (e: Exception) {
                 FileLogger.error(TAG, "fetchSessionsFromServer failed: ${e.message}", e)
                 null
@@ -1014,17 +1143,17 @@ DTIMER_EOF
     private suspend fun fetchSessionsCached(
         serverId: String?,
         sshManager: SshManager,
-    ): List<PersistedSession>? {
+    ): ServerSnapshot? {
         if (serverId == null) return fetchSessionsFromServer(sshManager)
         val ttl = 12_000L // just under the 15 s loop period
         sessionsJsonCache[serverId]?.let {
-            if (System.currentTimeMillis() - it.at < ttl) return it.list
+            if (System.currentTimeMillis() - it.at < ttl) return it.snapshot
         }
         return sessionsJsonMutex.withLock {
             // Re-check under the lock — another session's tick may have just
             // refreshed it while we waited.
             sessionsJsonCache[serverId]?.let {
-                if (System.currentTimeMillis() - it.at < ttl) return@withLock it.list
+                if (System.currentTimeMillis() - it.at < ttl) return@withLock it.snapshot
             }
             val fresh = fetchSessionsFromServer(sshManager)
             if (fresh != null) {

@@ -113,6 +113,27 @@ internal object ManifestCommands {
     }
 
     /**
+     * The per-server snapshot the 15 s reconcile loop reads: every tombstoned
+     * tmux name, then a `---` line, then the raw manifest.
+     *
+     * Both halves in ONE exec because that loop already runs per server and its
+     * cost is measured in radio wakeups on a phone. The tombstone half is what
+     * lets a device notice a close made on ANOTHER device without waiting for
+     * its own connection to drop — until this existed, a peer whose `tmux
+     * attach` merely exited (its SSH shell stays alive, so nothing fires
+     * onConnectionLost) kept showing a closed session for hours.
+     */
+    fun serverSnapshot(): String =
+        "set -u; D=\"\$HOME/.claude-remote\"; mkdir -p \"\$D\"; " +
+            "LOCK=\"\$D/sessions.lock\"; touch \"\$LOCK\"; " +
+            "( flock -s 9; " +
+            "cat \"\$D/forgotten\" 2>/dev/null; " +
+            "find \"\$D/forgotten.d\" -maxdepth 1 -type f -mtime -$TOMBSTONE_DAYS -printf '%f\\n' 2>/dev/null; " +
+            "echo $CLOSE_STATE_SEPARATOR; " +
+            "cat \"\$D/sessions.json\" 2>/dev/null; " +
+            ") 9<>\"\$LOCK\""
+
+    /**
      * Drop every tombstone for [tmuxName] — transient and durable. Called when
      * the user deliberately launches/attaches this tmux name: that is positive
      * intent that the name is alive again, and without it a reused name would

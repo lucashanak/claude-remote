@@ -160,6 +160,9 @@ class SessionOrchestrator(
     private val persistence = com.clauderemote.session.service.SessionPersistenceService(
         reconnectScope, connectionRegistry, tabManager, serverStorage, sessionStorage,
         transcriptService, terminalIO, { isInBackground }, ::readRealSessionId,
+        // Lambda, not a method reference: tmuxProbes is declared BELOW this
+        // property, so a reference would capture an uninitialised field.
+        { ssh, tmux -> tmuxProbes.probeTmuxSession(ssh, tmux) },
         { id, act -> statusService.updateActivity(id, act) },
         ::disconnectSession,
         { sid, tmux -> onSessionForgotten?.invoke(sid, tmux) },

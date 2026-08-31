@@ -77,6 +77,49 @@ class CloseStateParseTest {
         assertTrue(parse("TOMBSTONED:1\n---\nnot json at all")?.tombstoned == true)
     }
 
+    // ---- parseServerSnapshot: the 15 s loop's read of manifest + tombstones ----
+
+    private fun snapshot(raw: String) = SessionPersistenceService.parseServerSnapshot(raw, json)
+
+    @Test
+    fun snapshotSplitsTombstonesFromTheManifest() {
+        val state = snapshot("claude-a\nclaude-b\n---\n${manifest(name, "claude-a")}\n")!!
+        assertEquals(setOf("claude-a", "claude-b"), state.tombstoned)
+        assertEquals(listOf(name, "claude-a"), state.sessions.map { it.tmuxSessionName })
+    }
+
+    /** No tombstones is the normal case and must not read as a failed probe. */
+    @Test
+    fun snapshotWithNoTombstonesIsStillValid() {
+        val state = snapshot("---\n${manifest(name)}\n")!!
+        assertTrue(state.tombstoned.isEmpty())
+        assertEquals(1, state.sessions.size)
+    }
+
+    /**
+     * Missing separator ⇒ the read failed ⇒ null. This one is load-bearing: the
+     * caller deletes a tab when a name appears in `tombstoned`, so garbage that
+     * parsed as "empty tombstone set" would merely stall, but garbage that
+     * parsed as a NAME would delete a live session.
+     */
+    @Test
+    fun snapshotWithoutSeparatorIsUnknown() {
+        assertNull(snapshot(""))
+        assertNull(snapshot("bash: flock: command not found\n"))
+    }
+
+    /**
+     * A corrupt manifest must NOT suppress the tombstones — the two halves
+     * answer different questions, and a close must still propagate while the
+     * manifest is being repaired.
+     */
+    @Test
+    fun snapshotKeepsTombstonesWhenTheManifestIsCorrupt() {
+        val state = snapshot("claude-a\n---\n[{\"id\":\"broken\",\n")!!
+        assertEquals(setOf("claude-a"), state.tombstoned)
+        assertTrue(state.sessions.isEmpty())
+    }
+
     /** Login banners / MOTD noise before the verdict must not hide it. */
     @Test
     fun leadingNoiseIsTolerated() {

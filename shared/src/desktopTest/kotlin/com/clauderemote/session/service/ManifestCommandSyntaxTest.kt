@@ -86,6 +86,7 @@ class ManifestCommandSyntaxTest {
             "closeState" to ManifestCommands.closeState(NAME),
             "clearTombstone" to ManifestCommands.clearTombstone(NAME),
             "pushMerge" to ManifestCommands.pushMerge("server-1", 1234),
+            "serverSnapshot" to ManifestCommands.serverSnapshot(),
         )
         for ((label, command) in commands) assertBashSyntaxValid(command, label)
     }
@@ -181,6 +182,42 @@ class ManifestCommandSyntaxTest {
                 SessionPersistenceService.parseCloseState(out, other, json)?.tombstoned == false,
                 "a transient tombstone must not outlive drift's self-clean:\n$out",
             )
+        } finally {
+            home.deleteRecursively()
+        }
+    }
+
+    /**
+     * The per-server snapshot the 15 s reconcile loop reads. It is what lets a
+     * peer device notice a close WITHOUT its connection dropping, so it must
+     * report both tombstone stores and the manifest from one exec.
+     */
+    @Test
+    fun serverSnapshotReportsBothTombstoneStoresAndTheManifest() {
+        if (!bashAvailable() || !flockAvailable()) {
+            println("bash/flock unavailable — skipping serverSnapshotReportsBothTombstoneStoresAndTheManifest")
+            return
+        }
+        val home = File.createTempFile("manifest-home", "").apply { delete(); mkdirs() }
+        try {
+            val d = File(home, ".claude-remote").apply { mkdirs() }
+            File(d, "sessions.json").writeText(
+                """[{"id":"s1","serverId":"srv","folder":"/w","tmuxSessionName":"$NAME"}]"""
+            )
+            File(d, "forgotten").writeText("claude-transient\n")
+            File(d, "forgotten.d").mkdirs()
+            File(d, "forgotten.d/claude-durable").createNewFile()
+            File(d, "forgotten.d/claude-expired").apply {
+                createNewFile()
+                setLastModified(System.currentTimeMillis() - 20L * 24 * 3600 * 1000)
+            }
+
+            val state = SessionPersistenceService.parseServerSnapshot(
+                run(ManifestCommands.serverSnapshot(), home), json,
+            ) ?: fail("no separator in snapshot output")
+
+            assertEquals(setOf("claude-transient", "claude-durable"), state.tombstoned)
+            assertEquals(listOf(NAME), state.sessions.map { it.tmuxSessionName })
         } finally {
             home.deleteRecursively()
         }
