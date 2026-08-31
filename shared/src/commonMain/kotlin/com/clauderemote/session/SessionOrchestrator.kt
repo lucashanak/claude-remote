@@ -765,6 +765,12 @@ class SessionOrchestrator(
             // reconnect false-positives are covered by suppressFor().
             notificationService.promptDetector.onOutput(session.id, text)
 
+            // This device's tmux attach just ended — see [onAttachExited]. Must
+            // run before the burst skip below: the marker usually arrives in one
+            // small chunk right before the replacement shell prompt, and a
+            // burst-skipped chunk would drop the only notice we get.
+            if (AttachExitDetector.sawAttachExit(text)) onAttachExited(session)
+
             // Skip the remaining expensive processing during data bursts
             // (tmux attach/scrollback).
             val now = System.currentTimeMillis()
@@ -940,6 +946,44 @@ class SessionOrchestrator(
             "tmux set-option -w -t '=$escaped:' window-size latest 2>/dev/null; " +
             "tmux set-option -g history-limit 100000 2>/dev/null; " +
             "tmux attach-session -t '=$escaped'"
+    }
+
+    // Last confirmation-probe per session, for AttachExitDetector.shouldProbe.
+    private val attachExitProbes = java.util.concurrent.ConcurrentHashMap<String, Long>()
+
+    /**
+     * React to this device's `tmux attach` ending.
+     *
+     * The case that matters: another device closed the session. Killing the pane
+     * ends our attach but leaves the SSH shell alive, so no reconnect ever
+     * fires and the tab lingers showing a bare shell prompt (reported from a
+     * phone that still had a session the desktop had closed). The 15 s reconcile
+     * loop also catches this, but only in the FOREGROUND — on a phone the app is
+     * usually backgrounded at the moment of the close, so without this the user
+     * still opens the app to a dead tab.
+     *
+     * Confirm before acting, and act only when the session is really gone:
+     * [AttachExitDetector.MARKER] can occur in ordinary output, and issuing the
+     * recovery command while still attached would type it into the user's live
+     * Claude prompt. probeTmuxSession fails OPEN (alive), so a probe that cannot
+     * answer changes nothing.
+     *
+     * Recovery itself is delegated to [reconnectSession], which already probes
+     * the tombstone + manifest and picks the one right outcome: forget the tab
+     * when the user closed it elsewhere, or rebuild with `--resume` when the
+     * pane died for any other reason.
+     */
+    private fun onAttachExited(session: ClaudeSession) {
+        val now = System.currentTimeMillis()
+        if (!AttachExitDetector.shouldProbe(now, attachExitProbes[session.id])) return
+        attachExitProbes[session.id] = now
+        reconnectScope.launch {
+            if (tabManager.getTab(session.id) == null) return@launch
+            val ssh = connectionRegistry.ssh(session.id) ?: return@launch
+            if (tmuxProbes.probeTmuxSession(ssh, session.tmuxSessionName)) return@launch
+            FileLogger.log(TAG, "Attach for '${session.tmuxSessionName}' exited and the session is gone — resolving")
+            reconnectSession(session.id)
+        }
     }
 
     private suspend fun sendTmuxCommand(
@@ -1299,6 +1343,12 @@ class SessionOrchestrator(
                 onTerminalOutput?.invoke(session.id, text)
             }
             notificationService.promptDetector.onOutput(session.id, text)
+
+            // This device's tmux attach just ended — see [onAttachExited]. Must
+            // run before the burst skip below: the marker usually arrives in one
+            // small chunk right before the replacement shell prompt, and a
+            // burst-skipped chunk would drop the only notice we get.
+            if (AttachExitDetector.sawAttachExit(text)) onAttachExited(session)
         }
 
         val success = moshManager.connect(
@@ -1352,6 +1402,12 @@ class SessionOrchestrator(
             terminalIO.append(session.id, text)
             if (tabManager.activeTabId.value == session.id) onTerminalOutput?.invoke(session.id, text)
             notificationService.promptDetector.onOutput(session.id, text)
+
+            // This device's tmux attach just ended — see [onAttachExited]. Must
+            // run before the burst skip below: the marker usually arrives in one
+            // small chunk right before the replacement shell prompt, and a
+            // burst-skipped chunk would drop the only notice we get.
+            if (AttachExitDetector.sawAttachExit(text)) onAttachExited(session)
         }
 
         // Carrier SSH connection — used only for bootstrap + the local forward.

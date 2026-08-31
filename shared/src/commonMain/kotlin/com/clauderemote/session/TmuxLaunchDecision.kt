@@ -80,6 +80,38 @@ internal object TmuxPeerLiveness {
 }
 
 /**
+ * Detects that THIS device's `tmux attach` has ended, from the terminal stream.
+ *
+ * Why the terminal stream is the only witness: when another device closes a
+ * session, the pane is killed and tmux prints [MARKER] to every attached
+ * client, which then exits — but the SSH shell underneath survives, so the app
+ * sees no connection loss, `onConnectionLost` never fires, and nothing runs the
+ * closed-elsewhere check. The tab kept looking healthy while showing a bare
+ * `lucas@Debian:~$` prompt, sometimes for hours, and tapping it just sat there.
+ *
+ * The marker alone is NOT proof — a session's own output can contain the
+ * literal text — so the caller must confirm with a `tmux has-session` probe and
+ * act only when the session is genuinely gone. That ordering matters: acting on
+ * a false positive while still attached would type the recovery command into
+ * the user's live Claude prompt.
+ */
+internal object AttachExitDetector {
+
+    /** What tmux prints to a client whose session went away (or was detached). */
+    const val MARKER = "[exited]"
+
+    fun sawAttachExit(chunk: String): Boolean = chunk.contains(MARKER)
+
+    /**
+     * Rate-limit the confirmation probe: the marker can arrive repeatedly (the
+     * shell that replaces the attach may echo scrollback containing it), and
+     * each check costs an SSH round-trip.
+     */
+    fun shouldProbe(nowMs: Long, lastProbeMs: Long?, minGapMs: Long = 5_000): Boolean =
+        lastProbeMs == null || nowMs - lastProbeMs >= minGapMs
+}
+
+/**
  * Pure decision function for [TmuxLaunchDecision].
  *
  * Every probe is an SSH round-trip, sometimes over a cellular link, so they are
