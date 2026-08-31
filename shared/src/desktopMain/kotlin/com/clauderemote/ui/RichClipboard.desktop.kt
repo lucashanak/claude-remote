@@ -19,12 +19,22 @@ private class HtmlAndPlainTransferable(
     override fun getTransferDataFlavors(): Array<DataFlavor> =
         arrayOf(htmlFlavor, DataFlavor.stringFlavor)
 
-    override fun isDataFlavorSupported(flavor: DataFlavor): Boolean =
-        flavor == htmlFlavor || flavor == DataFlavor.stringFlavor
+    /**
+     * Match text/html by MIME TYPE + representation class, not by identity. A
+     * paste target constructs its own DataFlavor, and `text/html;class=String`
+     * with a different (or absent) charset parameter is not `==` to ours — an
+     * identity check answered "unsupported" and the target silently fell back
+     * to plain text, i.e. no formatting for exactly the paste we built this for.
+     */
+    private fun isHtmlString(flavor: DataFlavor): Boolean =
+        flavor.isMimeTypeEqual("text/html") && flavor.representationClass == String::class.java
 
-    override fun getTransferData(flavor: DataFlavor): Any = when (flavor) {
-        htmlFlavor -> html
-        DataFlavor.stringFlavor -> plain
+    override fun isDataFlavorSupported(flavor: DataFlavor): Boolean =
+        isHtmlString(flavor) || flavor == DataFlavor.stringFlavor
+
+    override fun getTransferData(flavor: DataFlavor): Any = when {
+        isHtmlString(flavor) -> html
+        flavor == DataFlavor.stringFlavor -> plain
         else -> throw java.awt.datatransfer.UnsupportedFlavorException(flavor)
     }
 }
