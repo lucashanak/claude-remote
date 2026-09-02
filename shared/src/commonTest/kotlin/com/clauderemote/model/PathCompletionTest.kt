@@ -222,4 +222,45 @@ class PathCompletionTest {
         val result = PathCompletion.suggest("other", tree, recents = listOf("~/other"))
         assertEquals(result.map { it.path }.distinct(), result.map { it.path })
     }
+
+    // --- suggest: a root input is "list children", not "match this name" ---
+    //
+    // `SshServer.defaultFolder` is "~", so this IS the field's default state.
+    // The segment-match branch cannot serve it: "~" has no siblings and matches
+    // no folder NAME, so typeahead and Tab were dead until the first keystroke.
+
+    @Test
+    fun suggest_tildeListsTheRootsChildren() {
+        val tree = RemoteDirScan.parse(
+            "~",
+            buildString {
+                appendLine(RemoteDirScan.ROOT_MARKER)
+                appendLine("/home/lucas")
+                appendLine(RemoteDirScan.DIRS_MARKER)
+                appendLine("1700000000.0 /home/lucas/claude-remote")
+                appendLine("1600000000.0 /home/lucas/downloads")
+                appendLine(RemoteDirScan.PROJ_MARKER)
+                appendLine("/home/lucas/claude-remote")
+            },
+        )
+        val suggestions = PathCompletion.suggest("~", tree)
+        assertEquals(listOf("~/claude-remote", "~/downloads"), suggestions.map { it.path })
+        // And Tab has something to complete to, which it did not before.
+        assertEquals("~/", PathCompletion.commonPrefix(suggestions.map { it.path }))
+    }
+
+    @Test
+    fun suggest_absoluteRootListsItsChildren() {
+        val tree = RemoteDirScan.parse(
+            "/",
+            buildString {
+                appendLine(RemoteDirScan.ROOT_MARKER)
+                appendLine("/")
+                appendLine(RemoteDirScan.DIRS_MARKER)
+                appendLine("1700000000.0 /srv")
+                appendLine(RemoteDirScan.PROJ_MARKER)
+            },
+        )
+        assertEquals(listOf("/srv"), PathCompletion.suggest("/", tree).map { it.path })
+    }
 }

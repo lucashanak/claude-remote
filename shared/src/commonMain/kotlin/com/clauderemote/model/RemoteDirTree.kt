@@ -519,8 +519,13 @@ object PathCompletion {
             return (fromRecents + fromTree).distinctBy { it.path }.take(limit)
         }
 
-        // Trailing slash means "inside this directory", not "matching this name".
-        if (raw.endsWith("/")) {
+        // "Inside this directory" rather than "matching this name" — a trailing
+        // slash asks for it explicitly, and a root does too: `~` has no siblings
+        // to match against and "~" matches no folder NAME, so the segment branch
+        // below returns nothing for it. Since `SshServer.defaultFolder` is "~",
+        // that left typeahead and Tab dead on every fresh server until the first
+        // keystroke — in the field's default state.
+        if (raw.endsWith("/") || RemotePath.isRoot(raw)) {
             val dir = RemotePath.normalize(raw)
             return tree.children(dir).map { PathSuggestion(it.path, kindOf(it)) }.take(limit)
         }

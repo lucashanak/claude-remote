@@ -922,7 +922,11 @@ fun App(
                                     }
                                     }
                                 } catch (_: Exception) {
-                                    RemoteDirTree.empty(path)
+                                    // null, NOT an empty tree: the Connect screen
+                                    // has to tell "the listing failed" apart from
+                                    // "this folder has no subfolders", or one dead
+                                    // tunnel reads as an empty home directory.
+                                    null
                                 }
                             },
                             onKillTmux = { sessionName ->

@@ -48,7 +48,10 @@ fun ConnectScreen(
     onKillTmux: ((String) -> Unit)? = null,
     // ONE scan returns a whole subtree (dirs + mtimes + project markers) rather
     // than a listing per click — see RemoteDirScan for why that mattered.
-    onScanFolders: (suspend (String) -> RemoteDirTree)? = null,
+    // Returns null when the attempt FAILED, which is not the same answer as
+    // an empty tree — the UI has to be able to say "couldn't list" rather
+    // than claim the folder has no subfolders.
+    onScanFolders: (suspend (String) -> RemoteDirTree?)? = null,
     // Multi-account support: accounts are loaded lazily (a suspend callback,
     // matching onBrowseFolders' idiom) rather than threading the whole
     // SessionOrchestrator through, and folder policy is read directly since it
@@ -106,23 +109,48 @@ fun ConnectScreen(
     var dirTree by remember(server.id) { mutableStateOf(RemoteDirTree.empty(server.defaultFolder)) }
     var scanning by remember { mutableStateOf(false) }
     var pickerOpen by remember { mutableStateOf(false) }
-    // Directories we have already tried. A FAILED scan leaves no listing
-    // behind, so without this the picker's "listing missing → request it"
-    // effect would re-fire on every tree update and hammer a dead connection.
-    // The refresh button passes force=true, which is the way back in.
-    val attempted = remember(server.id) { mutableSetOf<String>() }
+    // Directories whose scan FAILED. A failure leaves no listing behind, so
+    // without this the picker's "listing missing → request it" effect would
+    // re-fire on every update and hammer a dead connection. It is also what
+    // lets the UI say "couldn't list this" instead of "no subfolders", and what
+    // makes the browse button retry for real after a failure rather than being
+    // a silent no-op.
+    var failedScans by remember(server.id) { mutableStateOf<Set<String>>(emptySet()) }
+    // Bumped whenever a scan finishes, win or lose. The effects that re-request
+    // a missing listing key on THIS rather than on the tree: keying on the tree
+    // only works because `RemoteDirTree` has no `equals` and so compares by
+    // identity, which is far too subtle an invariant to rest recovery on —
+    // someone giving the model a natural `equals` would deadlock the picker at
+    // "No subfolders" with no clue why.
+    var scanGeneration by remember(server.id) { mutableStateOf(0) }
     val scan: (String, Boolean) -> Unit = { target, force ->
         val key = RemotePath.normalize(target)
-        val needed = force || (!dirTree.hasListing(key) && key !in attempted)
+        val needed = force || (!dirTree.hasListing(key) && key !in failedScans)
         if (onScanFolders != null && !scanning && needed) {
-            attempted += key
             scanning = true
             scope.launch {
-                val fetched = try { onScanFolders.invoke(key) } catch (_: Exception) { null }
-                if (fetched != null) {
-                    dirTree = if (dirTree.isEmpty) fetched else dirTree.merge(fetched)
+                try {
+                    // `ch.connect` bounds only the channel OPEN; the read itself
+                    // is unbounded, and the keepalive only kills a link that has
+                    // gone silent — a genuinely slow `find` (an NFS mount, say)
+                    // would just keep the picker spinning.
+                    val fetched = kotlinx.coroutines.withTimeoutOrNull(15_000) {
+                        onScanFolders.invoke(key)
+                    }
+                    if (fetched != null) {
+                        dirTree = if (dirTree.isEmpty) fetched else dirTree.merge(fetched)
+                        failedScans = failedScans - key
+                    } else {
+                        failedScans = failedScans + key
+                    }
+                } catch (_: Exception) {
+                    failedScans = failedScans + key
+                } finally {
+                    // In a finally so a cancellation or an unexpected throw
+                    // cannot latch the spinner on and block every later scan.
+                    scanning = false
+                    scanGeneration++
                 }
-                scanning = false
             }
         }
     }
@@ -167,6 +195,7 @@ fun ConnectScreen(
         selectedMode.cliFlag?.let { append(" $it") }
     }
 
+    Box(modifier = Modifier.fillMaxSize()) {
     Scaffold(
         containerColor = c.bg,
         topBar = {
@@ -211,6 +240,14 @@ fun ConnectScreen(
                     // path by hand no longer leaves a stale listing behind it,
                     // because there is no listing bound to the field any more.
                     var fieldFocused by remember { mutableStateOf(false) }
+                    // `onFocusChanged` alone was not enough: a scan already in
+                    // flight when the field got focus discarded that request
+                    // (one scan at a time), leaving typeahead empty until the
+                    // user clicked away and back. Re-ask whenever a scan
+                    // finishes while we still have no listing for this path.
+                    LaunchedEffect(fieldFocused, scanGeneration, folder) {
+                        if (fieldFocused) scan(folder, false)
+                    }
                     val suggestions = remember(folder, dirTree, fieldFocused) {
                         if (!fieldFocused) emptyList()
                         else PathCompletion.suggest(folder, dirTree, server.recentFolders)
@@ -253,7 +290,10 @@ fun ConnectScreen(
                         trailingIcon = if (onScanFolders != null) {{
                             IconButton(onClick = {
                                 pickerOpen = true
-                                scan(folder, false)
+                                // Force after a failure: otherwise the guard that
+                                // stops the retry loop also makes this button do
+                                // nothing at all, with no spinner and no message.
+                                scan(folder, RemotePath.normalize(folder) in failedScans)
                             }) {
                                 if (scanning) {
                                     CircularProgressIndicator(
@@ -488,25 +528,32 @@ fun ConnectScreen(
             Spacer(Modifier.height(16.dp))
         }
 
-        // The picker is a sibling of the scrolling form, not a popup anchored
-        // to the field: an anchored menu is what made the old browser clip and
-        // draw over the cards beneath it.
-        if (pickerOpen && onScanFolders != null) {
-            RemotePathPicker(
-                initialPath = folder,
-                tree = dirTree,
-                loading = scanning,
-                recents = server.recentFolders.take(6),
-                onRequestListing = { target -> scan(target, false) },
-                onRefresh = { target -> scan(target, true) },
-                onPick = { picked ->
-                    folder = picked
-                    pickerOpen = false
-                },
-                onDismiss = { pickerOpen = false },
-            )
-        }
       }
+    }
+
+    // Composed OUTSIDE the Scaffold, not inside its content: within the content
+    // the scrim began below the TopAppBar, so Back stayed visible and clickable
+    // behind a supposedly modal overlay — tapping it left the screen with the
+    // picker still composed. It is a sibling of the whole screen rather than a
+    // popup anchored to the field; an anchored menu is exactly what made the old
+    // browser clip and draw over the cards beneath it.
+    if (pickerOpen && onScanFolders != null) {
+        RemotePathPicker(
+            initialPath = folder,
+            tree = dirTree,
+            loading = scanning,
+            recents = server.recentFolders.take(6),
+            scanGeneration = scanGeneration,
+            loadFailed = { path -> RemotePath.normalize(path) in failedScans },
+            onRequestListing = { target -> scan(target, false) },
+            onRefresh = { target -> scan(target, true) },
+            onPick = { picked ->
+                folder = picked
+                pickerOpen = false
+            },
+            onDismiss = { pickerOpen = false },
+        )
+    }
     }
 }
 

@@ -68,6 +68,10 @@ fun RemotePathPicker(
     tree: RemoteDirTree,
     loading: Boolean,
     recents: List<String>,
+    /** Bumped by the caller whenever a scan finishes; see [scanGeneration] use below. */
+    scanGeneration: Int,
+    /** True when the last attempt to list the directory we are showing FAILED. */
+    loadFailed: (String) -> Boolean,
     onRequestListing: (String) -> Unit,
     onRefresh: (String) -> Unit,
     onPick: (String) -> Unit,
@@ -83,10 +87,28 @@ fun RemotePathPicker(
 
     // Navigating is free once the subtree is cached; only an unscanned directory
     // (deeper than the last scan reached) costs a round trip.
-    LaunchedEffect(cwd, tree) {
+    //
+    // Keyed on [scanGeneration] rather than on `tree`: keying on the tree works
+    // only because `RemoteDirTree` compares by identity for want of an `equals`,
+    // and resting recovery on that would turn adding a natural `equals` into a
+    // silent deadlock here.
+    LaunchedEffect(cwd, scanGeneration) {
         if (!tree.hasListing(cwd)) onRequestListing(cwd)
     }
     LaunchedEffect(filter, cwd) { selectedIndex = 0 }
+
+    // Android's system Back has to close the picker, not the screen behind it.
+    // Escape already does this for a keyboard; without this, Back on a phone
+    // navigated away and left the modal's owner gone from under it.
+    PlatformBackHandler(enabled = true) {
+        // Back walks OUT of the tree first, matching the breadcrumb, and only
+        // dismisses once there is nowhere left to go up to — the same shape as
+        // Backspace in the filter field.
+        val parent = RemotePath.parent(cwd)
+        if (filter.isNotEmpty()) filter = ""
+        else if (parent != null) cwd = parent
+        else onDismiss()
+    }
 
     val rows: List<RemoteDirEntry> = remember(tree, cwd, filter, showHidden) {
         val all = tree.children(cwd).filter { showHidden || !it.isHidden }
@@ -257,18 +279,26 @@ fun RemotePathPicker(
                                         selectedIndex = (selectedIndex - 1).coerceAtLeast(0)
                                         true
                                     }
-                                    // Enter descends, matching a row click.
-                                    Key.Enter, Key.DirectionRight -> { openSelected(); true }
+                                    // Enter descends, matching a row click. It
+                                    // never moves a caret, so it needs no guard.
+                                    Key.Enter -> { openSelected(); true }
                                     // Committing is always explicit — Tab is the
                                     // keyboard twin of the "Use" buttons.
                                     Key.Tab -> {
                                         onPick(rows.getOrNull(selectedIndex)?.path ?: cwd)
                                         true
                                     }
-                                    // Only leave the field when it is empty, so
-                                    // Backspace still edits the filter first.
-                                    Key.DirectionLeft -> { goUp(); true }
-                                    Key.Backspace -> if (filter.isEmpty()) { goUp(); true } else false
+                                    // Navigation keys only navigate once the
+                                    // filter is empty; while there is text they
+                                    // belong to the caret. Taking Left
+                                    // unconditionally meant spotting a typo,
+                                    // pressing Left to fix it, and instead
+                                    // jumping up a directory with the filter
+                                    // wiped.
+                                    Key.DirectionRight ->
+                                        if (filter.isEmpty()) { openSelected(); true } else false
+                                    Key.DirectionLeft, Key.Backspace ->
+                                        if (filter.isEmpty()) { goUp(); true } else false
                                     Key.Escape -> { onDismiss(); true }
                                     else -> false
                                 }
@@ -312,8 +342,16 @@ fun RemotePathPicker(
                 Box(modifier = Modifier.weight(1f, fill = false)) {
                     when {
                         rows.isEmpty() && loading && !tree.hasListing(cwd) -> PickerNotice("Loading…")
+                        // A failure must never render as "No subfolders" — one
+                        // dropped tunnel used to be indistinguishable from an
+                        // empty home directory, with no way back but Refresh.
+                        rows.isEmpty() && loadFailed(cwd) -> PickerNotice(
+                            "Couldn't list this folder.",
+                            actionLabel = "Retry",
+                            onAction = { onRefresh(cwd) },
+                        )
                         rows.isEmpty() && filter.isNotBlank() -> PickerNotice("No folder matches \"$filter\"")
-                        rows.isEmpty() && hiddenCount > 0 -> PickerNotice("Only hidden folders here — Show .")
+                        rows.isEmpty() && hiddenCount > 0 -> PickerNotice("Only hidden folders here — Show hidden")
                         rows.isEmpty() -> PickerNotice("No subfolders")
                         else -> LazyColumn(
                             modifier = Modifier.fillMaxWidth(),
@@ -461,8 +499,30 @@ private fun FolderRow(
 }
 
 @Composable
-private fun PickerNotice(text: String) {
-    Box(Modifier.fillMaxWidth().padding(24.dp), contentAlignment = Alignment.Center) {
-        Text(text, style = CRType.bodyDim, color = CRTheme.colors.textDim)
+private fun PickerNotice(
+    text: String,
+    actionLabel: String? = null,
+    onAction: (() -> Unit)? = null,
+) {
+    val c = CRTheme.colors
+    Column(
+        Modifier.fillMaxWidth().padding(24.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        Text(text, style = CRType.bodyDim, color = c.textDim)
+        if (actionLabel != null && onAction != null) {
+            val shape = RoundedCornerShape(6.dp)
+            Text(
+                actionLabel,
+                style = CRType.cardTitle,
+                color = c.accent,
+                modifier = Modifier
+                    .clip(shape)
+                    .background(c.tintAccent, shape)
+                    .clickable(onClick = onAction)
+                    .padding(horizontal = 12.dp, vertical = 6.dp),
+            )
+        }
     }
 }
