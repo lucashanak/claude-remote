@@ -138,6 +138,17 @@ fun App(
         transcriptFontPercent = appSettings.transcriptFontPercent
     }
 
+    // Sink for "hand this text to the user": Android puts it in the share sheet
+    // (onShareLog), desktop has no share sheet so it falls back to the native
+    // save dialog (onSaveFile). Desktop passes only the latter, which is why
+    // Export servers used to be a dead button there and the log viewer's share
+    // icon never showed up at all.
+    val shareText: ((text: String, suggestedName: String) -> Unit)? =
+        onShareLog?.let { share -> { text: String, _: String -> share(text) } }
+            ?: onSaveFile?.let { save ->
+                { text: String, name: String -> save(text.encodeToByteArray(), name) }
+            }
+
     // Collect new StateFlows from orchestrator
     val sessionActivities by sessionOrchestrator.sessionActivities.collectAsState()
     val connectionLabels by sessionOrchestrator.connectionLabels.collectAsState()
@@ -502,6 +513,14 @@ fun App(
 
     fun refreshServers() {
         serverList = serverStorage.loadServers()
+    }
+
+    // The server list can also change from outside this composition — the
+    // platform "Import servers" picker writes straight to storage — so re-read
+    // it whenever the launcher comes back into view. Without this, imported
+    // servers stayed invisible until some unrelated edit refreshed the list.
+    LaunchedEffect(currentScreen) {
+        if (currentScreen == Screen.LAUNCHER) refreshServers()
     }
 
     fun downloadUpdate(info: UpdateInfo) {
@@ -1314,12 +1333,14 @@ fun App(
                         onAppearanceChange = updateAppearance,
                         onBack = { currentScreen = Screen.LAUNCHER },
                         onCheckUpdate = { checkForUpdate() },
-                        onExportServers = {
-                            val json = kotlinx.serialization.json.Json { prettyPrint = true }
-                                .encodeToString(kotlinx.serialization.builtins.ListSerializer(
-                                    com.clauderemote.model.SshServer.serializer()
-                                ), serverStorage.loadServers())
-                            onShareLog?.invoke(json)
+                        onExportServers = shareText?.let { emit ->
+                            {
+                                val json = kotlinx.serialization.json.Json { prettyPrint = true }
+                                    .encodeToString(kotlinx.serialization.builtins.ListSerializer(
+                                        com.clauderemote.model.SshServer.serializer()
+                                    ), serverStorage.loadServers())
+                                emit(json, "claude-remote-servers.json")
+                            }
                         },
                         onImportServers = onImportServers,
                         onViewLog = { currentScreen = Screen.LOG_VIEWER },
@@ -1332,7 +1353,9 @@ fun App(
                 Screen.LOG_VIEWER -> {
                     LogViewerScreen(
                         onBack = { currentScreen = Screen.LAUNCHER },
-                        onShare = onShareLog
+                        onShare = shareText?.let { emit ->
+                            { text: String -> emit(text, "claude-remote-log.txt") }
+                        }
                     )
                 }
 

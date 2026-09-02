@@ -33,6 +33,19 @@ class ServerStorage(private val prefs: KeyValueStore) {
         saveServers(servers)
     }
 
+    /**
+     * Merge servers from an exported JSON list; returns how many were added.
+     * Decoding uses the same lenient [json] as everything else here, so an
+     * export from a different app build survives an enum value this one
+     * doesn't know. Throws on text that isn't a server list at all, so the
+     * platform importers can tell the user instead of failing silently.
+     */
+    fun importServers(text: String): Int {
+        val imported = json.decodeFromString<List<SshServer>>(text)
+        imported.forEach { addServer(it) }
+        return imported.size
+    }
+
     fun updateServer(server: SshServer) {
         val servers = loadServers().toMutableList()
         val index = servers.indexOfFirst { it.id == server.id }

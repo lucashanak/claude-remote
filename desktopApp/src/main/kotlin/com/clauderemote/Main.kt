@@ -261,6 +261,65 @@ private var sshConnector: SshTtyConnector? = null
 // not the source of truth (a stale value here can't strand the terminal inverted).
 @Volatile private var terminalInvertColors: Boolean = false
 
+/**
+ * "Jump to latest" state for the JediTerm viewport, mirroring Android's
+ * SshTerminalHandle: [scrolledUp] is true when the viewport isn't at the live
+ * bottom, [pendingOutput] when new output landed while it was scrolled up. The
+ * pill in TerminalScreen shows only when both hold, so a plain scroll-back in a
+ * quiet session doesn't nag.
+ */
+private object TerminalScroll {
+    val scrolledUp = mutableStateOf(false)
+    val pendingOutput = mutableStateOf(false)
+
+    /** Latched while off-bottom output arrives; cleared on return to the bottom. */
+    private var sawOutputWhileScrolled = false
+
+    /**
+     * JediTerm parks the live screen at `value + extent == maximum` and counts
+     * history in NEGATIVE values (its own scroll-to-bottom sets value 0), so
+     * this is the OS-independent "am I at the bottom" test.
+     */
+    private fun atBottom(): Boolean {
+        val model = termWidget?.terminalPanel?.verticalScrollModel ?: return true
+        return model.value + model.extent >= model.maximum
+    }
+
+    /** EDT only — reads a Swing model and writes Compose state. */
+    private fun refresh() {
+        val bottom = atBottom()
+        if (bottom) sawOutputWhileScrolled = false
+        scrolledUp.value = !bottom
+        pendingOutput.value = !bottom && sawOutputWhileScrolled
+    }
+
+    /** Called for every SSH chunk, so it must stay cheap while at the bottom. */
+    fun onOutput() {
+        if (!scrolledUp.value) return
+        javax.swing.SwingUtilities.invokeLater {
+            if (!atBottom()) {
+                sawOutputWhileScrolled = true
+                refresh()
+            }
+        }
+    }
+
+    fun jumpToLatest() {
+        javax.swing.SwingUtilities.invokeLater {
+            val panel = termWidget?.terminalPanel ?: return@invokeLater
+            val model = panel.verticalScrollModel
+            model.value = model.maximum - model.extent
+            panel.repaint()
+            refresh()
+        }
+    }
+
+    /** Follow the viewport. JediTerm mutates this model on the EDT. */
+    fun observe(panel: com.jediterm.terminal.ui.TerminalPanel) {
+        panel.verticalScrollModel.addChangeListener { refresh() }
+    }
+}
+
 fun main() = application {
     // Init logging
     val logDir = File(System.getProperty("user.home"), ".claude-remote")
@@ -286,6 +345,8 @@ fun main() = application {
 
     sessionOrchestrator.onTerminalOutput = { _, data ->
         connector.feedOutput(data)
+        // Latch "new output while scrolled up" for the Jump-to-latest pill.
+        TerminalScroll.onOutput()
     }
     sessionOrchestrator.onTabSwitched = tabSwitched@{ sessionId, bufferedOutput ->
         val widget = termWidget ?: return@tabSwitched
@@ -349,10 +410,7 @@ fun main() = application {
     // path that KDE Plasma, GNOME, XFCE et al. implement natively. macOS/Windows
     // keep the AWT tray balloon, which works acceptably there.
     sessionOrchestrator.onClaudeNeedsInput = { _, hint, _, _ ->
-        if (appSettings.notificationsEnabled) {
-            if (IS_LINUX) sendLinuxNotification(hint)
-            else sendTrayNotification(hint)
-        }
+        if (appSettings.notificationsEnabled) sendDesktopNotification(hint)
     }
 
     val appIcon = remember {
@@ -523,7 +581,7 @@ fun main() = application {
                 // (AWT FileDialog is unreliable inside a Compose window there),
                 // NSOpenPanel via java.awt.FileDialog on macOS. See
                 // pickFilesForAttach for the full rationale and safety nets.
-                pickFilesForAttach(callback)
+                pickFilesForAttach(callback = callback)
             },
             onSaveFile = { bytes, suggestedName ->
                 // Show the native save dialog on the EDT, then write bytes on a
@@ -556,6 +614,27 @@ fun main() = application {
                     }
                 }
             },
+            onTestNotification = {
+                // Same call the real "Claude is waiting" alert makes, so the
+                // test proves the whole chain (notify-send on Linux, tray
+                // balloon on macOS/Windows) rather than a parallel code path.
+                sendDesktopNotification("Toto je testovací notifikace.")
+            },
+            onImportServers = {
+                pickTextFile("Import Servers") { name, json ->
+                    try {
+                        val count = serverStorage.importServers(json)
+                        FileLogger.log("Main", "Imported $count servers from $name")
+                        showDesktopMessage("Imported $count servers.")
+                    } catch (e: Exception) {
+                        FileLogger.error("Main", "Import failed: ${e.message}", e)
+                        showDesktopMessage("Import failed: ${e.message}")
+                    }
+                }
+            },
+            onPickKeyFile = { callback ->
+                pickTextFile("Import Private Key") { _, text -> callback(text) }
+            },
             onOpenUrl = { url ->
                 // Do NOT log `url` — it carries the login/OAuth seam.
                 try {
@@ -576,6 +655,12 @@ fun main() = application {
             // chrome. Waiting for a recomposition to reach the SwingPanel took
             // seconds on an idle terminal, so repaint straight on the EDT and
             // update the live flag the settings provider reads on every paint.
+            // "Jump to latest" pill: reading the states here ties recomposition
+            // to the JediTerm scroll model, the same way Android reads them off
+            // its terminal handle.
+            terminalScrolledUp = TerminalScroll.scrolledUp.value,
+            terminalPendingOutput = TerminalScroll.pendingOutput.value,
+            onJumpToLatest = { TerminalScroll.jumpToLatest() },
             onInvertColorsChanged = { invert ->
                 invertColorsState.value = invert
                 javax.swing.SwingUtilities.invokeLater {
@@ -699,6 +784,15 @@ private fun openReleasesPage() {
 }
 
 /**
+ * Send a desktop notification through whichever backend the running OS renders
+ * acceptably. Both the real "Claude is waiting" alerts and the Settings test
+ * button go through here, so the test exercises the same chain as the real thing.
+ */
+private fun sendDesktopNotification(hint: String) {
+    if (IS_LINUX) sendLinuxNotification(hint) else sendTrayNotification(hint)
+}
+
+/**
  * Fire a native Linux notification via `notify-send` (freedesktop D-Bus). The
  * `-i claude-remote` icon and desktop-entry hint make KDE/GNOME attribute it to
  * the app. If notify-send is missing we skip rather than fall back to the AWT
@@ -751,11 +845,14 @@ private fun sendTrayNotification(hint: String) {
  * [callback] is always invoked exactly once with the selected (bytes, name)
  * pairs, or an empty list on cancel/failure.
  */
-private fun pickFilesForAttach(callback: (List<Pair<ByteArray, String>>) -> Unit) {
+private fun pickFilesForAttach(
+    title: String = "Attach File",
+    callback: (List<Pair<ByteArray, String>>) -> Unit,
+) {
     if (IS_LINUX) {
         // zenity/kdialog block until the user is done, so run off the EDT.
         Thread {
-            val portalFiles = pickFilesViaPortal()
+            val portalFiles = pickFilesViaPortal(title)
             if (portalFiles != null) {
                 callback(portalFiles.mapNotNull { f ->
                     try { f.readBytes() to f.name } catch (_: Exception) { null }
@@ -763,12 +860,12 @@ private fun pickFilesForAttach(callback: (List<Pair<ByteArray, String>>) -> Unit
             } else {
                 // No portal tool installed — fall back to the AWT dialog.
                 FileLogger.log("Main", "No zenity/kdialog found; using AWT FileDialog")
-                pickFilesViaAwt(callback)
+                pickFilesViaAwt(title, callback)
             }
         }.apply { isDaemon = true }.start()
         return
     }
-    pickFilesViaAwt(callback)
+    pickFilesViaAwt(title, callback)
 }
 
 /**
@@ -776,15 +873,20 @@ private fun pickFilesForAttach(callback: (List<Pair<ByteArray, String>>) -> Unit
  * user cancelled, or null if neither `zenity` nor `kdialog` is available (so the
  * caller can fall back to AWT).
  */
-private fun pickFilesViaPortal(): List<File>? {
+private fun pickFilesViaPortal(title: String): List<File>? {
     // zenity: newline-separated absolute paths on stdout (robust with spaces).
     runPortal(
-        listOf("zenity", "--file-selection", "--multiple", "--separator=\n", "--title=Attach File")
+        listOf("zenity", "--file-selection", "--multiple", "--separator=\n", "--title=$title")
     )?.let { out ->
         return out.split("\n").map { it.trim() }.filter { it.isNotEmpty() }.map { File(it) }
     }
     // kdialog (KDE): single file to avoid space-separated multi-path parsing.
-    runPortal(listOf("kdialog", "--getopenfilename", System.getProperty("user.home") ?: "."))
+    runPortal(
+        listOf(
+            "kdialog", "--title", title,
+            "--getopenfilename", System.getProperty("user.home") ?: ".",
+        )
+    )
         ?.let { out ->
             val path = out.trim()
             return if (path.isEmpty()) emptyList() else listOf(File(path))
@@ -809,6 +911,35 @@ private fun runPortal(cmd: List<String>): String? = try {
 }
 
 /**
+ * Pick one file and hand its contents back as UTF-8 text on the EDT (Compose
+ * Desktop's UI thread), since the portal picker answers on a worker thread and
+ * the callbacks below write Compose state. Does nothing if the user cancels.
+ */
+private fun pickTextFile(title: String, onText: (name: String, text: String) -> Unit) {
+    pickFilesForAttach(title) { files ->
+        val picked = files.firstOrNull() ?: return@pickFilesForAttach
+        javax.swing.SwingUtilities.invokeLater { onText(picked.second, picked.first.decodeToString()) }
+    }
+}
+
+/**
+ * Modal message box — the desktop stand-in for Android's Toast, for the few
+ * one-shot outcomes the shared UI has nowhere to render (server import result).
+ */
+private fun showDesktopMessage(message: String) {
+    javax.swing.SwingUtilities.invokeLater {
+        try {
+            javax.swing.JOptionPane.showMessageDialog(
+                appDialogParent(), message, "Claude Remote",
+                javax.swing.JOptionPane.INFORMATION_MESSAGE,
+            )
+        } catch (e: Throwable) {
+            FileLogger.error("Main", "Message dialog failed: ${e.message}", e)
+        }
+    }
+}
+
+/**
  * The app's showing top-level window, to parent native FileDialogs on.
  *
  * We used to derive the parent from the JediTerm SwingPanel's window ancestor,
@@ -822,7 +953,7 @@ private fun appDialogParent(): java.awt.Frame? =
     java.awt.Frame.getFrames().firstOrNull { it.isShowing }
 
 /** The original AWT FileDialog picker (native NSOpenPanel on macOS). */
-private fun pickFilesViaAwt(callback: (List<Pair<ByteArray, String>>) -> Unit) {
+private fun pickFilesViaAwt(title: String, callback: (List<Pair<ByteArray, String>>) -> Unit) {
     javax.swing.SwingUtilities.invokeLater {
         var fired = false
         fun fire(pairs: List<Pair<ByteArray, String>>) {
@@ -832,7 +963,7 @@ private fun pickFilesViaAwt(callback: (List<Pair<ByteArray, String>>) -> Unit) {
         }
         try {
             val parent = appDialogParent()
-            val dialog = java.awt.FileDialog(parent, "Attach File", java.awt.FileDialog.LOAD)
+            val dialog = java.awt.FileDialog(parent, title, java.awt.FileDialog.LOAD)
             dialog.isMultipleMode = true
             dialog.isVisible = true
             val files = dialog.files
@@ -972,6 +1103,7 @@ private fun DesktopTerminalView(
                     widget.start()
                     termWidget = widget
 
+                    TerminalScroll.observe(widget.terminalPanel)
                     installNativeSelectionCopy(widget.terminalPanel)
                     installSelectionGuard(widget.terminalPanel)
                     installDragScroller(widget.terminalPanel)

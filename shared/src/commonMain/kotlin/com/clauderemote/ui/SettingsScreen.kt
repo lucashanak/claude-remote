@@ -415,8 +415,13 @@ fun SettingsScreen(
             }
 
             // ── Voice (Android only) ───────────────────────────────────────
-            SectionHeader("Voice")
-            WakeWordSettingsCard(settings)
+            // The desktop actual of WakeWordSettingsCard is empty (no STT/TTS
+            // there yet), so keep the header off desktop too — otherwise the
+            // screen shows a "Voice" heading with nothing underneath it.
+            if (isMobile) {
+                SectionHeader("Voice")
+                WakeWordSettingsCard(settings)
+            }
 
             // ── About ───────────────────────────────────────────────────────
             SectionHeader("About")
