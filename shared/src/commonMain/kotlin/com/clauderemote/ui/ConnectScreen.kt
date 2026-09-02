@@ -10,14 +10,19 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.clickable
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
-import androidx.compose.material.icons.filled.KeyboardArrowDown
-import androidx.compose.material.icons.filled.KeyboardArrowUp
+import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material3.*
+import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.ui.input.key.type
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.text.style.TextOverflow
-import androidx.compose.material3.MenuAnchorType
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -41,7 +46,9 @@ fun ConnectScreen(
     appSettings: AppSettings,
     onBack: () -> Unit,
     onKillTmux: ((String) -> Unit)? = null,
-    onBrowseFolders: (suspend (String) -> List<String>)? = null,
+    // ONE scan returns a whole subtree (dirs + mtimes + project markers) rather
+    // than a listing per click — see RemoteDirScan for why that mattered.
+    onScanFolders: (suspend (String) -> RemoteDirTree)? = null,
     // Multi-account support: accounts are loaded lazily (a suspend callback,
     // matching onBrowseFolders' idiom) rather than threading the whole
     // SessionOrchestrator through, and folder policy is read directly since it
@@ -90,9 +97,35 @@ fun ConnectScreen(
         mutableStateOf(TmuxNameParser.build(server.name, server.defaultFolder, appSettings.defaultClaudeMode == ClaudeMode.YOLO))
     }
     var useExistingTmux by remember { mutableStateOf(false) }
-    var browseFolders by remember { mutableStateOf<List<String>>(emptyList()) }
-    var browseLoading by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
+
+    // ── Folder browsing ────────────────────────────────────────────────────
+    // The cached subtree. Navigation inside it is free; only a directory deeper
+    // than the last scan reached costs another round trip, and its result is
+    // merged in rather than replacing what we already know.
+    var dirTree by remember(server.id) { mutableStateOf(RemoteDirTree.empty(server.defaultFolder)) }
+    var scanning by remember { mutableStateOf(false) }
+    var pickerOpen by remember { mutableStateOf(false) }
+    // Directories we have already tried. A FAILED scan leaves no listing
+    // behind, so without this the picker's "listing missing → request it"
+    // effect would re-fire on every tree update and hammer a dead connection.
+    // The refresh button passes force=true, which is the way back in.
+    val attempted = remember(server.id) { mutableSetOf<String>() }
+    val scan: (String, Boolean) -> Unit = { target, force ->
+        val key = RemotePath.normalize(target)
+        val needed = force || (!dirTree.hasListing(key) && key !in attempted)
+        if (onScanFolders != null && !scanning && needed) {
+            attempted += key
+            scanning = true
+            scope.launch {
+                val fetched = try { onScanFolders.invoke(key) } catch (_: Exception) { null }
+                if (fetched != null) {
+                    dirTree = if (dirTree.isEmpty) fetched else dirTree.merge(fetched)
+                }
+                scanning = false
+            }
+        }
+    }
 
     LaunchedEffect(folder, selectedMode, sessionAlias) {
         if (!useExistingTmux) {
@@ -160,10 +193,10 @@ fun ConnectScreen(
             )
         }
     ) { padding ->
+      Box(modifier = Modifier.fillMaxSize().padding(padding)) {
         Column(
             modifier = Modifier
                 .fillMaxSize()
-                .padding(padding)
                 .verticalScroll(rememberScrollState())
                 .padding(horizontal = m.sectionPad, vertical = m.sectionTopGap),
             verticalArrangement = Arrangement.spacedBy(m.cardGap)
@@ -172,189 +205,132 @@ fun ConnectScreen(
             SectionLabel("Folder", c.textDim)
             CRCard {
                 Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                    var browseOpen by remember { mutableStateOf(false) }
-                    // Subdirs minus hidden entries (.git, .claude, .venv, …).
-                    val visibleSubdirs = remember(browseFolders) {
-                        browseFolders.filterNot { it.substringAfterLast('/').startsWith(".") }
+                    // The path field is the fast path: shell-like Tab completion
+                    // over the cached tree plus live validation. Browsing is one
+                    // tap away but no longer the only way in — and editing the
+                    // path by hand no longer leaves a stale listing behind it,
+                    // because there is no listing bound to the field any more.
+                    var fieldFocused by remember { mutableStateOf(false) }
+                    val suggestions = remember(folder, dirTree, fieldFocused) {
+                        if (!fieldFocused) emptyList()
+                        else PathCompletion.suggest(folder, dirTree, server.recentFolders)
+                            .filterNot { it.path == RemotePath.normalize(folder) }
+                            .take(6)
                     }
-                    // Navigate to a folder: update the path and refresh subdirs.
-                    val navigateTo: (String) -> Unit = { target ->
-                        folder = target
-                        browseLoading = true
-                        scope.launch {
-                            browseFolders = onBrowseFolders?.invoke(target) ?: emptyList()
-                            browseLoading = false
-                        }
+                    // Tab advances to where the candidates diverge, exactly like
+                    // shell completion; with one candidate that completes it.
+                    val completeToCommonPrefix: () -> Unit = {
+                        val prefix = PathCompletion.commonPrefix(suggestions.map { it.path })
+                        if (prefix.length > folder.length) folder = prefix
+                        else suggestions.firstOrNull()?.let { folder = it.path }
                     }
-                    // Parent of the current folder; "~" / "/" have no parent.
-                    val parentFolder = remember(folder) {
-                        folder.trimEnd('/').substringBeforeLast('/', "~").ifBlank { "~" }
-                    }
-                    val atRoot = folder.trimEnd('/').let { it == "~" || it == "" || it == "/" }
 
-                    Box {
-                        OutlinedTextField(
-                            value = folder,
-                            onValueChange = { folder = it },
-                            label = { Text("Remote path") },
-                            modifier = Modifier.fillMaxWidth(),
-                            singleLine = true,
-                            keyboardOptions = launchKeyboardOptions,
-                            keyboardActions = launchKeyboardActions,
-                            colors = crTextFieldColors(),
-                            trailingIcon = if (onBrowseFolders != null) {{
-                                IconButton(
-                                    onClick = {
-                                        browseOpen = !browseOpen
-                                        if (browseOpen && browseFolders.isEmpty() && !browseLoading) {
-                                            browseLoading = true
-                                            scope.launch {
-                                                browseFolders = onBrowseFolders.invoke(folder)
-                                                browseLoading = false
-                                            }
-                                        }
-                                    }
+                    OutlinedTextField(
+                        value = folder,
+                        onValueChange = { folder = it },
+                        label = { Text("Remote path") },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .onFocusChanged { state ->
+                                fieldFocused = state.isFocused
+                                // Scan on intent rather than on screen entry, so
+                                // opening Connect and hitting Launch straight away
+                                // still costs no extra handshake.
+                                if (state.isFocused) scan(folder, false)
+                            }
+                            .onPreviewKeyEvent { event ->
+                                if (event.type == KeyEventType.KeyDown &&
+                                    event.key == Key.Tab && suggestions.isNotEmpty()
                                 ) {
-                                    if (browseLoading) {
-                                        CircularProgressIndicator(
-                                            modifier = Modifier.size(18.dp),
-                                            strokeWidth = 2.dp,
-                                            color = c.accent
-                                        )
-                                    } else {
-                                        Icon(
-                                            if (browseOpen) Icons.Filled.KeyboardArrowUp
-                                            else Icons.Filled.KeyboardArrowDown,
-                                            contentDescription = if (browseOpen) "Collapse" else "Browse folders",
-                                            tint = c.textDim
-                                        )
-                                    }
+                                    completeToCommonPrefix()
+                                    true
+                                } else false
+                            },
+                        singleLine = true,
+                        keyboardOptions = launchKeyboardOptions,
+                        keyboardActions = launchKeyboardActions,
+                        colors = crTextFieldColors(),
+                        trailingIcon = if (onScanFolders != null) {{
+                            IconButton(onClick = {
+                                pickerOpen = true
+                                scan(folder, false)
+                            }) {
+                                if (scanning) {
+                                    CircularProgressIndicator(
+                                        modifier = Modifier.size(18.dp),
+                                        strokeWidth = 2.dp,
+                                        color = c.accent
+                                    )
+                                } else {
+                                    Icon(
+                                        Icons.Filled.Folder,
+                                        contentDescription = "Browse folders",
+                                        tint = c.textDim
+                                    )
                                 }
-                            }} else null
-                        )
-                        if (onBrowseFolders != null) {
-                            DropdownMenu(
-                                expanded = browseOpen,
-                                onDismissRequest = { browseOpen = false },
-                                modifier = Modifier
-                                    .clip(RoundedCornerShape(m.cardRadius))
-                                    .background(c.surface2)
-                                    .border(1.dp, c.border, RoundedCornerShape(m.cardRadius))
-                                    .heightIn(max = 380.dp)
-                                    .widthIn(min = 280.dp, max = 360.dp)
-                            ) {
-                                // Sticky header: current path + refresh.
+                            }
+                        }} else null
+                    )
+
+                    if (suggestions.isNotEmpty()) {
+                        val suggestShape = RoundedCornerShape(m.cardRadius)
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(suggestShape)
+                                .background(c.surface2)
+                                .border(1.dp, c.border, suggestShape)
+                        ) {
+                            suggestions.forEach { suggestion ->
                                 Row(
                                     modifier = Modifier
                                         .fillMaxWidth()
-                                        .padding(start = 14.dp, end = 6.dp, top = 6.dp, bottom = 6.dp),
-                                    horizontalArrangement = Arrangement.spacedBy(6.dp),
-                                    verticalAlignment = Alignment.CenterVertically
+                                        .clickable { folder = suggestion.path }
+                                        .padding(horizontal = 12.dp, vertical = 8.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
                                 ) {
-                                    Column(modifier = Modifier.weight(1f)) {
-                                        Text(
-                                            "CURRENT FOLDER",
-                                            style = CRType.sectionH,
-                                            color = c.textDim
-                                        )
-                                        Text(
-                                            folder.ifBlank { "~" },
-                                            style = CRType.mono,
-                                            color = c.text,
-                                            maxLines = 1,
-                                            overflow = TextOverflow.Ellipsis
-                                        )
+                                    Icon(
+                                        Icons.Filled.Folder,
+                                        null,
+                                        tint = if (suggestion.kind == RemoteDirKind.FOLDER) c.textDim else c.accent,
+                                        modifier = Modifier.size(15.dp)
+                                    )
+                                    Text(
+                                        suggestion.path,
+                                        style = CRType.mono,
+                                        color = c.text,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
+                                        modifier = Modifier.weight(1f)
+                                    )
+                                    val tag = when (suggestion.kind) {
+                                        RemoteDirKind.RECENT -> "recent"
+                                        RemoteDirKind.PROJECT -> "git"
+                                        RemoteDirKind.FOLDER -> null
                                     }
-                                    IconButton(
-                                        onClick = {
-                                            browseLoading = true
-                                            scope.launch {
-                                                browseFolders = onBrowseFolders.invoke(folder)
-                                                browseLoading = false
-                                            }
-                                        },
-                                        modifier = Modifier.size(36.dp)
-                                    ) {
-                                        if (browseLoading) {
-                                            CircularProgressIndicator(
-                                                modifier = Modifier.size(16.dp),
-                                                strokeWidth = 2.dp,
-                                                color = c.accent
-                                            )
-                                        } else {
-                                            Text("↻", color = c.accent, style = CRType.cardTitle)
-                                        }
-                                    }
-                                }
-                                HorizontalDivider(color = c.border.copy(alpha = 0.5f))
-
-                                // Up one level — hidden at "~" / "/".
-                                if (!atRoot) {
-                                    DropdownMenuItem(
-                                        contentPadding = PaddingValues(horizontal = 14.dp, vertical = 10.dp),
-                                        text = {
-                                            Row(
-                                                verticalAlignment = Alignment.CenterVertically,
-                                                horizontalArrangement = Arrangement.spacedBy(10.dp)
-                                            ) {
-                                                Text("⬆", style = CRType.cardTitle, color = c.accent)
-                                                Text(
-                                                    ".. (up one level)",
-                                                    style = CRType.cardTitle,
-                                                    color = c.textDim
-                                                )
-                                            }
-                                        },
-                                        onClick = { navigateTo(parentFolder) }
-                                    )
-                                    HorizontalDivider(color = c.border.copy(alpha = 0.3f))
-                                }
-
-                                if (browseLoading && visibleSubdirs.isEmpty()) {
-                                    DropdownMenuItem(
-                                        enabled = false,
-                                        contentPadding = PaddingValues(horizontal = 14.dp, vertical = 10.dp),
-                                        text = { Text("Loading…", style = CRType.bodyDim, color = c.textDim) },
-                                        onClick = {}
-                                    )
-                                } else if (visibleSubdirs.isEmpty()) {
-                                    DropdownMenuItem(
-                                        enabled = false,
-                                        contentPadding = PaddingValues(horizontal = 14.dp, vertical = 10.dp),
-                                        text = { Text("No visible subfolders", style = CRType.bodyDim, color = c.textDim) },
-                                        onClick = {}
-                                    )
-                                } else {
-                                    visibleSubdirs.forEach { sub ->
-                                        DropdownMenuItem(
-                                            contentPadding = PaddingValues(horizontal = 14.dp, vertical = 11.dp),
-                                            text = {
-                                                Row(
-                                                    modifier = Modifier.fillMaxWidth(),
-                                                    verticalAlignment = Alignment.CenterVertically,
-                                                    horizontalArrangement = Arrangement.spacedBy(10.dp)
-                                                ) {
-                                                    Text("🗀", style = CRType.cardTitle, color = c.accent)
-                                                    Text(
-                                                        sub.substringAfterLast('/').ifBlank { sub },
-                                                        style = CRType.cardTitle,
-                                                        color = c.text,
-                                                        maxLines = 1,
-                                                        overflow = TextOverflow.Ellipsis,
-                                                        modifier = Modifier.weight(1f)
-                                                    )
-                                                    Text("▸", style = CRType.pill, color = c.textDim)
-                                                }
-                                            },
-                                            onClick = {
-                                                browseOpen = true
-                                                navigateTo(sub)
-                                            }
-                                        )
+                                    if (tag != null) {
+                                        Text(tag, style = CRType.pill, color = c.textDim)
                                     }
                                 }
                             }
                         }
+                    }
+
+                    // Only claim a folder is missing when its parent was actually
+                    // listed. Anything deeper than the scan reached is unknown,
+                    // not absent, and a false "no such folder" would be worse
+                    // than no hint at all.
+                    val pathMissing = remember(folder, dirTree) {
+                        val parent = RemotePath.parent(folder)
+                        parent != null && dirTree.hasListing(parent) && !dirTree.contains(folder)
+                    }
+                    if (pathMissing) {
+                        Text(
+                            "No such folder on ${server.name} — it will be created only if Claude does it.",
+                            style = CRType.bodyDim,
+                            color = c.approval
+                        )
                     }
 
                     // Recent folders as quick-jump chips under the field.
@@ -511,6 +487,26 @@ fun ConnectScreen(
 
             Spacer(Modifier.height(16.dp))
         }
+
+        // The picker is a sibling of the scrolling form, not a popup anchored
+        // to the field: an anchored menu is what made the old browser clip and
+        // draw over the cards beneath it.
+        if (pickerOpen && onScanFolders != null) {
+            RemotePathPicker(
+                initialPath = folder,
+                tree = dirTree,
+                loading = scanning,
+                recents = server.recentFolders.take(6),
+                onRequestListing = { target -> scan(target, false) },
+                onRefresh = { target -> scan(target, true) },
+                onPick = { picked ->
+                    folder = picked
+                    pickerOpen = false
+                },
+                onDismiss = { pickerOpen = false },
+            )
+        }
+      }
     }
 }
 
@@ -645,7 +641,7 @@ private fun TmuxRadioRow(
 }
 
 @Composable
-private fun crTextFieldColors() = OutlinedTextFieldDefaults.colors(
+internal fun crTextFieldColors() = OutlinedTextFieldDefaults.colors(
     unfocusedBorderColor = CRTheme.colors.border,
     focusedBorderColor = CRTheme.colors.accent,
     cursorColor = CRTheme.colors.accent,

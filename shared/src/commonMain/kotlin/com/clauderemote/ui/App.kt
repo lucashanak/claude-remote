@@ -860,20 +860,40 @@ fun App(
                             tmuxSessions = tmuxSessions,
                             appSettings = appSettings,
                             onBack = { currentScreen = Screen.LAUNCHER },
-                            onBrowseFolders = { path ->
+                            // ONE exec brings back the whole subtree with the
+                            // mtimes and project markers the picker ranks by.
+                            // This used to be an `ls` per click, and because no
+                            // pooled transport exists yet on the Connect screen
+                            // each of those paid a full SSH handshake — seconds
+                            // per click over the Cloudflare tunnel.
+                            onScanFolders = { path ->
                                 try {
                                     com.clauderemote.connection.SshSessionHelper.withSession(server) { sess ->
-                                        val ch = sess.openChannel("exec") as com.jcraft.jsch.ChannelExec
-                                        ch.setCommand("ls -1d ${path.trimEnd('/')}/*/ 2>/dev/null | head -50")
-                                        ch.inputStream = null
-                                        val input = ch.inputStream
-                                        ch.connect(5000)
-                                        val output = input.bufferedReader().readText()
-                                        ch.disconnect()
-                                        output.lines().filter { it.isNotBlank() }.map { it.trimEnd('/') }
+                                        fun exec(cmd: String): String {
+                                            val ch = sess.openChannel("exec") as com.jcraft.jsch.ChannelExec
+                                            ch.setCommand(cmd)
+                                            ch.inputStream = null
+                                            val input = ch.inputStream
+                                            ch.connect(8000)
+                                            val output = input.bufferedReader().readText()
+                                            ch.disconnect()
+                                            return output
+                                        }
+                                        val scanned = RemoteDirScan.parse(
+                                            path, exec(RemoteDirScan.command(path))
+                                        )
+                                        // `find -printf` is GNU-only, so a BSD or
+                                        // macOS server returns an empty dirs
+                                        // section — retry one level with `ls` on
+                                        // the same (already open) transport.
+                                        if (scanned.isEmpty) {
+                                            RemoteDirScan.parseFallback(
+                                                path, exec(RemoteDirScan.fallbackCommand(path))
+                                            )
+                                        } else scanned
                                     }
                                 } catch (_: Exception) {
-                                    emptyList()
+                                    RemoteDirTree.empty(path)
                                 }
                             },
                             onKillTmux = { sessionName ->
