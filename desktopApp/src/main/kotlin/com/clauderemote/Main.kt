@@ -400,6 +400,15 @@ fun main() = application {
                 window.rootPane.putClientProperty("apple.awt.windowAppearance", "NSAppearanceNameDarkAqua")
             }
         }
+        // Compose-observable mirror of the invert-colors pref, driven by App's
+        // onInvertColorsChanged. AppSettings is a plain prefs wrapper, so reading
+        // appSettings.invertColors inside terminalContent recomposed NOTHING when
+        // the toggle flipped — the SwingPanel only picked the new value up on the
+        // next unrelated recomposition, which is why the terminal lagged the
+        // chrome by seconds. Now the toggle drives this state directly.
+        val invertColorsState = androidx.compose.runtime.remember {
+            androidx.compose.runtime.mutableStateOf(appSettings.invertColors)
+        }
         App(
             serverStorage = serverStorage,
             appSettings = appSettings,
@@ -563,13 +572,25 @@ fun main() = application {
                 FileLogger.log("TermGeom", "applyFontSize $size")
                 javax.swing.SwingUtilities.invokeLater { termWidget?.applyFontSize() }
             },
+            // Flip the heavyweight terminal at the same instant as the Compose
+            // chrome. Waiting for a recomposition to reach the SwingPanel took
+            // seconds on an idle terminal, so repaint straight on the EDT and
+            // update the live flag the settings provider reads on every paint.
+            onInvertColorsChanged = { invert ->
+                invertColorsState.value = invert
+                javax.swing.SwingUtilities.invokeLater {
+                    terminalInvertColors = INVERT_TERMINAL_AT_SOURCE && invert
+                    termWidget?.let { it.terminalPanel.repaint(); it.repaint() }
+                }
+            },
             terminalContent = { modifier ->
                 DesktopTerminalView(
                     modifier = modifier,
                     connector = connector,
                     appSettings = appSettings,
-                    // Read here so the SwingPanel recomposes when the toggle flips.
-                    invertColors = appSettings.invertColors
+                    // Compose state, so the SwingPanel really does recompose when
+                    // the toggle flips (a bare appSettings read never did).
+                    invertColors = invertColorsState.value
                 )
             }
         )
