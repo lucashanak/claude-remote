@@ -880,32 +880,70 @@ fun App(
                                     // animate, and on Android that is an ANR.
                                     withContext(Dispatchers.IO) {
                                     com.clauderemote.connection.SshSessionHelper.withSession(server) { sess ->
-                                        fun exec(cmd: String): String {
+                                        // runInterruptible, not a plain blocking
+                                        // call. kotlinx cancellation is
+                                        // cooperative and this chain has no
+                                        // suspension point, so the caller's 15s
+                                        // withTimeoutOrNull would mark the job
+                                        // cancelled and then sit waiting for the
+                                        // read regardless — a timeout in name
+                                        // only. This maps cancellation onto
+                                        // Thread.interrupt(), which the channel's
+                                        // stream honours: it is a
+                                        // PipedInputStream (jsch 0.2.21:
+                                        // PassiveInputStream -> MyPipedInputStream
+                                        // -> java.io.PipedInputStream), whose
+                                        // read() waits in wait(1000) loops and
+                                        // turns InterruptedException into
+                                        // InterruptedIOException — an IOException
+                                        // the catch below already handles.
+                                        suspend fun exec(cmd: String): String =
+                                            kotlinx.coroutines.runInterruptible(Dispatchers.IO) {
                                             val ch = sess.openChannel("exec") as com.jcraft.jsch.ChannelExec
-                                            ch.setCommand(cmd)
-                                            ch.inputStream = null
-                                            val input = ch.inputStream
-                                            ch.connect(8000)
-                                            // Bounded read: MAX_DIRS is enforced
-                                            // only by `head` INSIDE the remote
-                                            // command, i.e. only by a cooperative
-                                            // server. A wedged or hostile one
-                                            // that streams forever would OOM the
-                                            // client through readText().
-                                            val cap = RemoteDirScan.MAX_OUTPUT_CHARS
-                                            val reader = input.bufferedReader()
-                                            val sb = StringBuilder()
-                                            val buf = CharArray(8192)
-                                            while (sb.length < cap) {
-                                                val n = reader.read(
-                                                    buf, 0, minOf(buf.size, cap - sb.length)
-                                                )
-                                                if (n < 0) break
-                                                sb.appendRange(buf, 0, n)
+                                            try {
+                                                ch.setCommand(cmd)
+                                                // Two unrelated JSch calls hide
+                                                // behind one Kotlin property name:
+                                                // setInputStream is the remote
+                                                // STDIN (we send nothing) and
+                                                // getInputStream is its STDOUT.
+                                                // Spelled out so the asymmetry
+                                                // does not read as a typo. The
+                                                // getter must precede connect().
+                                                ch.setInputStream(null)
+                                                val input = ch.getInputStream()
+                                                ch.connect(8000)
+                                                // Bounded read: MAX_DIRS is
+                                                // enforced only by `head` INSIDE
+                                                // the remote command, i.e. only by
+                                                // a cooperative server. A wedged or
+                                                // hostile one that streams forever
+                                                // would OOM the client through
+                                                // readText().
+                                                val cap = RemoteDirScan.MAX_OUTPUT_CHARS
+                                                val reader = input.bufferedReader()
+                                                val sb = StringBuilder()
+                                                val buf = CharArray(8192)
+                                                while (sb.length < cap) {
+                                                    val n = reader.read(
+                                                        buf, 0, minOf(buf.size, cap - sb.length)
+                                                    )
+                                                    if (n < 0) break
+                                                    sb.appendRange(buf, 0, n)
+                                                }
+                                                sb.toString()
+                                            } finally {
+                                                // The CHANNEL only, never the
+                                                // session: withSession may have
+                                                // handed us a pooled transport
+                                                // other features are using, and it
+                                                // owns that lifetime. In a finally
+                                                // because a throwing or interrupted
+                                                // read used to leak the channel —
+                                                // disconnect sat on the success
+                                                // path alone.
+                                                try { ch.disconnect() } catch (_: Exception) {}
                                             }
-                                            val output = sb.toString()
-                                            ch.disconnect()
-                                            return output
                                         }
                                         val scanned = RemoteDirScan.parse(
                                             path, exec(RemoteDirScan.command(path))

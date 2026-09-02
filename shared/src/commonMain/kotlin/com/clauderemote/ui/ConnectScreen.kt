@@ -3,7 +3,6 @@ package com.clauderemote.ui
 import com.clauderemote.model.TmuxNameParser
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
-import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -123,6 +122,10 @@ fun ConnectScreen(
     // someone giving the model a natural `equals` would deadlock the picker at
     // "No subfolders" with no clue why.
     var scanGeneration by remember(server.id) { mutableStateOf(0) }
+    // Remembered rather than sliced inline at the call site: allocating a fresh
+    // list every recomposition made the picker recompose on every keystroke in
+    // the path field and on every `launching` flip.
+    val pickerRecents = remember(server.recentFolders) { server.recentFolders.take(6) }
     val scan: (String, Boolean) -> Unit = { target, force ->
         val key = RemotePath.normalize(target)
         val needed = force || (!dirTree.hasListing(key) && key !in failedScans)
@@ -261,19 +264,25 @@ fun ConnectScreen(
                     // Tab advances to where the candidates diverge, exactly like
                     // shell completion; with one candidate that completes it.
                     val completeToCommonPrefix: () -> Unit = {
+                        val typed = RemotePath.normalize(folder)
                         val prefix = PathCompletion.commonPrefix(suggestions.map { it.path })
-                        // Length alone is not enough: the candidates may share a
-                        // prefix that is longer than what was typed yet does not
-                        // EXTEND it (a whole-tree fuzzy hit elsewhere), and
-                        // swapping the text for that would move the user
-                        // somewhere they never asked to go. Case is ignored so
-                        // typing "~/cl" still corrects itself to "~/CLAUDE…".
-                        if (prefix.length > folder.length &&
-                            prefix.startsWith(folder, ignoreCase = true)
-                        ) {
-                            folder = prefix
-                        } else {
-                            suggestions.firstOrNull()?.let { folder = it.path }
+                        when {
+                            // Already a real directory: Tab goes INTO it, the way
+                            // a shell does. It used to fall through to the
+                            // sibling branch — because `suggestions` filters the
+                            // exact match out — so Tab on "~/ai" silently
+                            // retargeted the field to "~/ai-experiments".
+                            dirTree.contains(typed) && !folder.endsWith("/") ->
+                                folder = "$typed/"
+                            // Length alone is not enough: candidates can share a
+                            // prefix longer than what was typed that does not
+                            // EXTEND it (a whole-tree fuzzy hit elsewhere), and
+                            // swapping the text for that moves the user somewhere
+                            // they never asked to go. Case-insensitive, so "~/cl"
+                            // still corrects itself to "~/CLAUDE…".
+                            prefix.length > folder.length &&
+                                prefix.startsWith(folder, ignoreCase = true) -> folder = prefix
+                            else -> suggestions.firstOrNull()?.let { folder = it.path }
                         }
                     }
 
@@ -566,7 +575,7 @@ fun ConnectScreen(
             initialPath = folder,
             tree = dirTree,
             loading = scanning,
-            recents = server.recentFolders.take(6),
+            recents = pickerRecents,
             scanGeneration = scanGeneration,
             loadFailed = { path -> RemotePath.normalize(path) in failedScans },
             onRequestListing = { target -> scan(target, false) },
@@ -660,10 +669,6 @@ private fun FolderChip(label: String, onClick: () -> Unit) {
             .background(c.surface2, shape)
             .border(1.dp, c.border, shape)
             .padding(horizontal = 10.dp, vertical = 5.dp)
-            .then(Modifier.then(
-                androidx.compose.ui.Modifier
-                    .then(Modifier)
-            ))
     ) {
         TextButton(onClick = onClick, contentPadding = PaddingValues(0.dp)) {
             Text(label, style = CRType.mono, color = c.text)

@@ -82,8 +82,14 @@ fun RemotePathPicker(
 
     var cwd by remember { mutableStateOf(RemotePath.normalize(initialPath)) }
     var filter by remember { mutableStateOf("") }
-    var selectedIndex by remember { mutableStateOf(0) }
     var showHidden by remember { mutableStateOf(false) }
+    // The highlight is held as a PATH and the index derived from it. Holding an
+    // index meant a refresh or deepen scan that merged in a listing with one
+    // fewer entry silently slid the highlight onto a DIFFERENT folder — and then
+    // Enter descended into it, or Tab committed it. Toggling hidden folders did
+    // the same, and the index could point past the end until the next arrow key
+    // healed it.
+    var selectedPath by remember { mutableStateOf<String?>(null) }
 
     // Navigating is free once the subtree is cached; only an unscanned directory
     // (deeper than the last scan reached) costs a round trip.
@@ -95,7 +101,7 @@ fun RemotePathPicker(
     LaunchedEffect(cwd, scanGeneration) {
         if (!tree.hasListing(cwd)) onRequestListing(cwd)
     }
-    LaunchedEffect(filter, cwd) { selectedIndex = 0 }
+    LaunchedEffect(filter, cwd) { selectedPath = null }
 
     // Android's system Back has to close the picker, not the screen behind it.
     // Escape already does this for a keyboard; without this, Back on a phone
@@ -117,6 +123,9 @@ fun RemotePathPicker(
             PathCompletion.fuzzyMatch(entry.name, filter)?.let { it.score to entry }
         }.sortedByDescending { it.first }.map { it.second }
     }
+    // Falls back to the first row whenever the selected path is gone from the
+    // current listing, which is the only sane answer once it no longer exists.
+    val selectedIndex = rows.indexOfFirst { it.path == selectedPath }.let { if (it < 0) 0 else it }
     val hiddenCount = remember(tree, cwd) { tree.children(cwd).count { it.isHidden } }
     val truncated = tree.truncated
 
@@ -147,6 +156,13 @@ fun RemotePathPicker(
                 // itself cut off. The parent's own max-height still clamps it, so
                 // "as tall as the content, up to the screen" needs no second
                 // layout path.
+                // Composed outside the Scaffold now, so nothing applies window
+                // insets for us any more: without these the panel can sit under
+                // the status bar or a camera cutout, and — worse, since this has
+                // a text field — the soft keyboard covers the filter and the
+                // "Use this folder" button with no way to scroll them back.
+                .safeDrawingPadding()
+                .imePadding()
                 .padding(top = if (isMobile) 24.dp else 56.dp, start = 16.dp, end = 16.dp, bottom = 24.dp)
                 .widthIn(min = 320.dp, max = 760.dp)
                 .heightIn(max = if (isMobile) Dp.Infinity else 620.dp)
@@ -269,14 +285,13 @@ fun RemotePathPicker(
                                 if (event.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
                                 when (event.key) {
                                     Key.DirectionDown -> {
-                                        // coerceAtLeast keeps this at 0 for an
-                                        // empty list, where `rows.size - 1` is -1.
-                                        selectedIndex = (selectedIndex + 1)
-                                            .coerceAtMost(rows.size - 1).coerceAtLeast(0)
+                                        selectedPath = rows.getOrNull(selectedIndex + 1)?.path
+                                            ?: selectedPath
                                         true
                                     }
                                     Key.DirectionUp -> {
-                                        selectedIndex = (selectedIndex - 1).coerceAtLeast(0)
+                                        selectedPath = rows.getOrNull(selectedIndex - 1)?.path
+                                            ?: selectedPath
                                         true
                                     }
                                     // Enter descends, matching a row click. It
