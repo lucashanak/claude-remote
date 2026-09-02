@@ -258,7 +258,14 @@ object RemoteDirScan {
             // `cd` + `pwd` expands `~` and resolves symlinks the same way the
             // launched session's `cd` will, so the picker cannot hand back a
             // path that then fails at launch.
-            append("cd $r 2>/dev/null && pwd || exit 0; ")
+            //
+            // `--` matters: quoting does not stop `cd` parsing a leading dash as
+            // an OPTION, so a path typed as `-P` or `--` used to make `cd`
+            // succeed into $HOME and `find` fall back to `.`, quietly listing
+            // the home directory under bogus `./…` paths. Failing cleanly (which
+            // `|| exit 0` turns into an empty listing) beats looking like it
+            // worked.
+            append("cd -- $r 2>/dev/null && pwd || exit 0; ")
             append("echo '$DIRS_MARKER'; ")
             // Dot-directories are PRINTED but not DESCENDED into, so `~/.claude`
             // stays reachable (the old picker filtered dot entries out entirely
