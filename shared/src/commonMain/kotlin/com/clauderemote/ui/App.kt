@@ -911,16 +911,24 @@ fun App(
                                             path, exec(RemoteDirScan.command(path))
                                         )
                                         // `find -printf` is GNU-only, so a BSD or
-                                        // macOS server returns an empty dirs
-                                        // section — retry one level with `ls` on
-                                        // the same (already open) transport.
-                                        if (scanned.isEmpty) {
+                                        // macOS server returns NO dirs section at
+                                        // all — retry one level with `ls` on the
+                                        // same (already open) transport. Gated on
+                                        // `parsed`, not on emptiness: a GNU server
+                                        // reporting a genuinely empty directory is
+                                        // a real answer, and treating it as a
+                                        // failure spent a second exec every time.
+                                        if (!scanned.parsed) {
                                             RemoteDirScan.parseFallback(
                                                 path, exec(RemoteDirScan.fallbackCommand(path))
                                             )
                                         } else scanned
                                     }
                                     }
+                                } catch (e: kotlinx.coroutines.CancellationException) {
+                                    // Never swallowed: it is how the caller's
+                                    // scope tears this down, not a scan failure.
+                                    throw e
                                 } catch (_: Exception) {
                                     // null, NOT an empty tree: the Connect screen
                                     // has to tell "the listing failed" apart from

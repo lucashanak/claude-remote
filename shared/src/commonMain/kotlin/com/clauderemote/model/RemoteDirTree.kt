@@ -47,9 +47,26 @@ class RemoteDirTree(
     val root: String,
     private val childrenByParent: Map<String, List<RemoteDirEntry>>,
     private val listedParents: Set<String>,
+    /**
+     * The scan hit [RemoteDirScan.MAX_DIRS], so some directories are missing.
+     * Recorded at parse time rather than inferred from the entry count, which
+     * counted across every merged scan: three 1200-entry deepen scans used to
+     * claim truncation that never happened, and a genuinely truncated scan
+     * stopped claiming it once a merge replaced its entries.
+     */
+    val truncated: Boolean = false,
+    /**
+     * False when the output had no dirs section at all — the marker was absent,
+     * so this was not a scan we can read (a BSD `find` with no `-printf`, or a
+     * `cd` that failed). Distinct from a scan that read fine and found nothing,
+     * which is what makes it safe to gate the `ls` fallback on: gating on
+     * "empty" instead spent a second exec on every genuinely empty directory.
+     */
+    val parsed: Boolean = true,
 ) {
     companion object {
-        fun empty(root: String = "~") = RemoteDirTree(root, emptyMap(), emptySet())
+        fun empty(root: String = "~") =
+            RemoteDirTree(root, emptyMap(), emptySet(), truncated = false, parsed = false)
     }
 
     val isEmpty: Boolean get() = childrenByParent.isEmpty()
@@ -73,15 +90,36 @@ class RemoteDirTree(
     }
 
     /**
-     * Overlay [other] on top of this tree — used when a lazy deepen scan brings
-     * back a subtree. The newer listing wins for any parent both cover, since it
-     * is the more recent read of that directory.
+     * Overlay [other] on top of this tree — used when a lazy deepen scan or a
+     * refresh brings back a subtree.
+     *
+     * [other] is AUTHORITATIVE for its whole subtree, so everything this tree
+     * knew strictly beneath `other.root` is evicted first rather than merely
+     * overwritten per-parent. Without that, refreshing `~/a` left a since-deleted
+     * `~/a/gone` in the tree: still offered by whole-tree completion, and still
+     * making `contains` true, which suppressed the "no such folder" hint for a
+     * path that no longer existed.
+     *
+     * The root becomes the SHALLOWER of the two. Keeping this tree's root meant
+     * the first successful scan won forever, so a session that happened to start
+     * by scanning `~/foo` left `root` at `~/foo` — and [PathCompletion]'s
+     * blank-input branch then offered `~/foo`'s children as the "top level".
      */
-    fun merge(other: RemoteDirTree): RemoteDirTree = RemoteDirTree(
-        root = root,
-        childrenByParent = childrenByParent + other.childrenByParent,
-        listedParents = listedParents + other.listedParents,
-    )
+    fun merge(other: RemoteDirTree): RemoteDirTree {
+        val scope = RemotePath.normalize(other.root)
+        fun underScope(path: String) = path == scope || path.startsWith("$scope/")
+        return RemoteDirTree(
+            root = if (isAncestorOrSame(scope, root)) scope else root,
+            childrenByParent = childrenByParent.filterKeys { !underScope(it) } + other.childrenByParent,
+            listedParents = listedParents.filterNot { underScope(it) }.toSet() + other.listedParents,
+            truncated = truncated || other.truncated,
+            parsed = parsed || other.parsed,
+        )
+    }
+
+    /** True when [maybeAncestor] is [path] itself or a directory above it. */
+    private fun isAncestorOrSame(maybeAncestor: String, path: String): Boolean =
+        path == maybeAncestor || path.startsWith("$maybeAncestor/")
 }
 
 /** One clickable breadcrumb segment: the label to draw and the path to jump to. */
@@ -255,9 +293,11 @@ object RemoteDirScan {
             // and `>>>` a redirect, so an unquoted `echo <<<CR-ROOT>>>` never
             // prints the marker at all and the whole scan parses as empty.
             append("echo '$ROOT_MARKER'; ")
-            // `cd` + `pwd` expands `~` and resolves symlinks the same way the
-            // launched session's `cd` will, so the picker cannot hand back a
-            // path that then fails at launch.
+            // `cd` + `pwd` expands `~` the same way the launched session's `cd`
+            // will, so the picker cannot hand back a path that then fails at
+            // launch. `pwd` is logical (-L) by default and deliberately left
+            // that way: it does NOT resolve symlinks, which matches the `cd` the
+            // session itself performs.
             //
             // `--` matters: quoting does not stop `cd` parsing a leading dash as
             // an OPTION, so a path typed as `-P` or `--` used to make `cd`
@@ -280,9 +320,18 @@ object RemoteDirScan {
                     "-o \\( -type d $printDir \\) 2>/dev/null | head -$MAX_DIRS; "
             )
             append("echo '$PROJ_MARKER'; ")
+            // The dot-dir prune comes AFTER the marker branch, never before:
+            // `.claude` is itself a marker, so pruning dot-directories first
+            // would eat it and stop `~` being recognised as a project. In this
+            // order the projects pass stops descending into `~/.config`,
+            // `~/.local` and friends like the dirs pass already does — measured
+            // 0.19s to 0.08s on a real home directory, and it drops exactly the
+            // projects buried inside dot-directories, which the dirs pass never
+            // listed anyway, so they were badges on unreachable rows.
             append(
                 "find $r -mindepth 1 -maxdepth ${depth + 1} \\( $prunePlain \\) -prune " +
-                    "-o \\( $markers \\) -prune -printf '%h\\n' 2>/dev/null | head -$MAX_PROJECTS"
+                    "-o \\( $markers \\) -prune -printf '%h\\n' " +
+                    "-o \\( -type d -name '.*' -prune \\) 2>/dev/null | head -$MAX_PROJECTS"
             )
         }
     }
@@ -318,6 +367,8 @@ object RemoteDirScan {
         val rootIdx = lines.indexOfFirst { it.trim() == ROOT_MARKER }
         val dirsIdx = lines.indexOfFirst { it.trim() == DIRS_MARKER }
         val projIdx = lines.indexOfFirst { it.trim() == PROJ_MARKER }
+        // No dirs section: not output we can read. `empty` carries parsed=false,
+        // which is what tells the caller to try the `ls` fallback.
         if (dirsIdx < 0) return RemoteDirTree.empty(root)
 
         val absoluteRoot = if (rootIdx >= 0 && rootIdx + 1 < dirsIdx) {
@@ -333,11 +384,10 @@ object RemoteDirScan {
 
         val projects = projLines.mapNotNull { toDisplayPath(root, absoluteRoot, it) }.toSet()
 
-        // A directory is a project either because it holds a marker, or because
-        // the marker directory itself was listed under it — `find` prunes at the
-        // marker, so `~/repo/.git` never appears in the dirs section, but a
-        // parent listed in the projects section still identifies `~/repo`.
-        val parsed = mutableListOf<RemoteDirEntry>()
+        // Project-ness comes solely from the projects section: `find` prunes AT
+        // the marker, so `~/repo/.git` never appears among the dirs, and the
+        // `%h` line for it is the only evidence that `~/repo` is a project.
+        val entries = mutableListOf<RemoteDirEntry>()
         for (line in dirLines) {
             if (line.isBlank()) continue
             val sep = line.indexOf(' ')
@@ -345,14 +395,14 @@ object RemoteDirScan {
             val mtime = line.substring(0, sep).substringBefore('.').toLongOrNull() ?: 0L
             val path = toDisplayPath(root, absoluteRoot, line.substring(sep + 1)) ?: continue
             if (path == root) continue
-            parsed += RemoteDirEntry(
+            entries += RemoteDirEntry(
                 path = path,
                 name = RemotePath.name(path),
                 isProject = path in projects,
                 mtimeSeconds = mtime,
             )
         }
-        return buildTree(root, parsed, depth)
+        return buildTree(root, entries, depth, truncated = dirLines.size >= MAX_DIRS)
     }
 
     /**
@@ -362,9 +412,15 @@ object RemoteDirScan {
      * `/home/luc` would also swallow `/home/lucas/x`.
      */
     private fun toDisplayPath(root: String, absoluteRoot: String?, raw: String): String? {
-        val p = raw.trim().trimEnd('/')
-        if (p.isBlank()) return null
-        val base = absoluteRoot?.takeIf { it.isNotBlank() } ?: return RemotePath.normalize(p)
+        // Normalized BEFORE the comparison, not after: `find` echoes whatever
+        // shape its argument had, so a `$HOME` with a doubled or trailing slash
+        // yields paths that no longer share a literal prefix with the `pwd` the
+        // command reported. Since an out-of-root path is now dropped rather than
+        // passed through, that mismatch would render an empty picker.
+        val p = RemotePath.normalize(raw)
+        if (p.isBlank() || raw.isBlank()) return null
+        val base = absoluteRoot?.takeIf { it.isNotBlank() }
+            ?.let { RemotePath.normalize(it) } ?: return p
         return when {
             p == base -> root
             p.startsWith("$base/") -> RemotePath.normalize(root + p.removePrefix(base))
@@ -402,7 +458,7 @@ object RemoteDirScan {
             if (path == root) return@mapNotNull null
             RemoteDirEntry(path, RemotePath.name(path), isProject = false, mtimeSeconds = 0L)
         }
-        return buildTree(root, entries, depth = 1)
+        return buildTree(root, entries, depth = 1, truncated = entries.size >= MAX_DIRS)
     }
 
     /**
@@ -415,6 +471,7 @@ object RemoteDirScan {
         root: String,
         entries: List<RemoteDirEntry>,
         depth: Int,
+        truncated: Boolean,
     ): RemoteDirTree {
         val byParent = mutableMapOf<String, MutableList<RemoteDirEntry>>()
         for (entry in entries) {
@@ -447,7 +504,7 @@ object RemoteDirScan {
         }
 
         val sorted = byParent.mapValues { (_, kids) -> kids.sortedWith(ENTRY_ORDER) }
-        return RemoteDirTree(root, sorted, listed)
+        return RemoteDirTree(root, sorted, listed, truncated = truncated, parsed = true)
     }
 
     /** Path segments of [path] beneath [root]; 0 when they are the same directory. */

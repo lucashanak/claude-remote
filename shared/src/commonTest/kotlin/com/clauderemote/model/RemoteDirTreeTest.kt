@@ -358,18 +358,80 @@ class RemoteDirTreeTest {
     }
 
     @Test
-    fun merge_listedParentsIsTheUnionOfBoth() {
-        val old = RemoteDirTree("~", mapOf("~" to listOf(RemoteDirEntry("~/bar", "bar", false, 50))), setOf("~", "~/bar"))
-        val fresh = RemoteDirTree("~", mapOf("~/foo" to emptyList()), setOf("~/foo"))
-        val merged = old.merge(fresh)
+    fun merge_keepsListingsOutsideTheRefreshedSubtree() {
+        // A deepen scan of "~/foo" is authoritative only for "~/foo" — what we
+        // already knew about the rest of the tree has to survive it.
+        val old = RemoteDirTree(
+            "~",
+            mapOf("~" to listOf(RemoteDirEntry("~/bar", "bar", false, 50))),
+            setOf("~", "~/bar"),
+        )
+        val deepened = RemoteDirTree("~/foo", mapOf("~/foo" to emptyList()), setOf("~/foo"))
+        val merged = old.merge(deepened)
 
         assertTrue(merged.hasListing("~"))
         assertTrue(merged.hasListing("~/bar"))
         assertTrue(merged.hasListing("~/foo"))
-        // "~/bar" is still known even though it dropped out of childrenByParent
-        // for "~" in this particular merge scenario — contains() falls back to
-        // the union of listedParents, not just the current children map.
         assertTrue(merged.contains("~/bar"))
+    }
+
+    @Test
+    fun merge_aRefreshEvictsWhatUsedToBeUnderTheRefreshedDirectory() {
+        // Refreshing "~/a" after "~/a/gone" was deleted on the server must drop
+        // it. Left behind it kept being offered by whole-tree completion and
+        // kept `contains` true, which suppressed the "no such folder" hint for a
+        // path that no longer existed.
+        val stale = RemoteDirTree(
+            "~",
+            mapOf(
+                "~" to listOf(RemoteDirEntry("~/a", "a", false, 10)),
+                "~/a" to listOf(
+                    RemoteDirEntry("~/a/gone", "gone", false, 10),
+                    RemoteDirEntry("~/a/stay", "stay", false, 10),
+                ),
+                "~/a/gone" to emptyList(),
+            ),
+            setOf("~", "~/a", "~/a/gone", "~/a/stay"),
+        )
+        val refreshed = RemoteDirTree(
+            "~/a",
+            mapOf("~/a" to listOf(RemoteDirEntry("~/a/stay", "stay", false, 10))),
+            setOf("~/a", "~/a/stay"),
+        )
+        val merged = stale.merge(refreshed)
+
+        assertEquals(listOf("~/a/stay"), merged.children("~/a").map { it.path })
+        assertFalse(merged.contains("~/a/gone"))
+        assertTrue(merged.allEntries().none { it.name == "gone" })
+        // Its sibling and everything above the refreshed directory survive.
+        assertTrue(merged.contains("~/a/stay"))
+        assertTrue(merged.hasListing("~"))
+    }
+
+    @Test
+    fun merge_takesTheShallowerRoot() {
+        // The first successful scan used to own `root` forever, so a session
+        // that happened to start inside "~/foo" left PathCompletion offering
+        // "~/foo"'s children as the top level.
+        val deep = RemoteDirTree("~/foo", mapOf("~/foo" to emptyList()), setOf("~/foo"))
+        val shallow = RemoteDirTree("~", mapOf("~" to emptyList()), setOf("~"))
+        assertEquals("~", deep.merge(shallow).root)
+    }
+
+    @Test
+    fun merge_keepsItsOwnRootWhenTheIncomingScanIsDeeper() {
+        val shallow = RemoteDirTree("~", mapOf("~" to emptyList()), setOf("~"))
+        val deep = RemoteDirTree("~/foo", mapOf("~/foo" to emptyList()), setOf("~/foo"))
+        assertEquals("~", shallow.merge(deep).root)
+    }
+
+    @Test
+    fun merge_truncationIsSticky() {
+        // Once a scan has been cut short some folders are missing, and a later
+        // untruncated deepen elsewhere does not make that untrue.
+        val cut = RemoteDirTree("~", emptyMap(), setOf("~"), truncated = true)
+        val whole = RemoteDirTree("~/foo", emptyMap(), setOf("~/foo"))
+        assertTrue(cut.merge(whole).truncated)
     }
 
     // --- RemoteDirTree.contains ---
@@ -610,5 +672,53 @@ class RemoteDirTreeTest {
         // The original root's listing survives the merge.
         assertTrue(merged.hasListing("~"))
         assertEquals("~", merged.root)
+    }
+
+    // --- truncated / parsed: facts recorded by the scan, not inferred ---
+
+    @Test
+    fun parse_marksTruncationWhenTheDirsSectionHitsTheCap() {
+        val output = buildString {
+            appendLine(RemoteDirScan.ROOT_MARKER)
+            appendLine("/home/lucas")
+            appendLine(RemoteDirScan.DIRS_MARKER)
+            repeat(RemoteDirScan.MAX_DIRS) { appendLine("1700000000.0 /home/lucas/d$it") }
+            appendLine(RemoteDirScan.PROJ_MARKER)
+        }
+        assertTrue(RemoteDirScan.parse("~", output).truncated)
+    }
+
+    @Test
+    fun parse_doesNotMarkTruncationForAModestListing() {
+        val output = buildString {
+            appendLine(RemoteDirScan.ROOT_MARKER)
+            appendLine("/home/lucas")
+            appendLine(RemoteDirScan.DIRS_MARKER)
+            appendLine("1700000000.0 /home/lucas/one")
+            appendLine(RemoteDirScan.PROJ_MARKER)
+        }
+        assertFalse(RemoteDirScan.parse("~", output).truncated)
+    }
+
+    @Test
+    fun parse_setsParsedFalseOnlyWhenTheDirsSectionIsAbsent() {
+        // "parsed" is what gates the `ls` fallback. An empty-but-present dirs
+        // section is a real answer ("no subfolders") and must NOT trigger it,
+        // which gating on emptiness got wrong — it spent a second exec on every
+        // genuinely empty directory.
+        val readableButEmpty = buildString {
+            appendLine(RemoteDirScan.ROOT_MARKER)
+            appendLine("/home/lucas")
+            appendLine(RemoteDirScan.DIRS_MARKER)
+            appendLine(RemoteDirScan.PROJ_MARKER)
+        }
+        val parsedEmpty = RemoteDirScan.parse("~", readableButEmpty)
+        assertTrue(parsedEmpty.parsed)
+        assertTrue(parsedEmpty.hasListing("~"))
+        assertTrue(parsedEmpty.isEmpty)
+
+        // No dirs marker at all: not output we can read.
+        assertFalse(RemoteDirScan.parse("~", "garbage from some other command").parsed)
+        assertFalse(RemoteDirTree.empty("~").parsed)
     }
 }

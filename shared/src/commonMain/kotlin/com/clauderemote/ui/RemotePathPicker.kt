@@ -118,7 +118,7 @@ fun RemotePathPicker(
         }.sortedByDescending { it.first }.map { it.second }
     }
     val hiddenCount = remember(tree, cwd) { tree.children(cwd).count { it.isHidden } }
-    val truncated = remember(tree) { tree.allEntries().size >= RemoteDirScan.MAX_DIRS }
+    val truncated = tree.truncated
 
     val navigateInto: (RemoteDirEntry) -> Unit = { entry ->
         cwd = entry.path

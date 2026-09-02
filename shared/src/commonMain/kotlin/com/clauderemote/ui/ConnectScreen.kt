@@ -47,7 +47,7 @@ fun ConnectScreen(
     onBack: () -> Unit,
     onKillTmux: ((String) -> Unit)? = null,
     // ONE scan returns a whole subtree (dirs + mtimes + project markers) rather
-    // than a listing per click — see RemoteDirScan for why that mattered.
+    // than the per-click listing this replaced — see RemoteDirScan for why.
     // Returns null when the attempt FAILED, which is not the same answer as
     // an empty tree — the UI has to be able to say "couldn't list" rather
     // than claim the folder has no subfolders.
@@ -143,6 +143,10 @@ fun ConnectScreen(
                     } else {
                         failedScans = failedScans + key
                     }
+                } catch (e: kotlinx.coroutines.CancellationException) {
+                    // Rethrown rather than recorded as a scan failure: this is
+                    // the composition going away, not the server saying no.
+                    throw e
                 } catch (_: Exception) {
                     failedScans = failedScans + key
                 } finally {
@@ -258,8 +262,19 @@ fun ConnectScreen(
                     // shell completion; with one candidate that completes it.
                     val completeToCommonPrefix: () -> Unit = {
                         val prefix = PathCompletion.commonPrefix(suggestions.map { it.path })
-                        if (prefix.length > folder.length) folder = prefix
-                        else suggestions.firstOrNull()?.let { folder = it.path }
+                        // Length alone is not enough: the candidates may share a
+                        // prefix that is longer than what was typed yet does not
+                        // EXTEND it (a whole-tree fuzzy hit elsewhere), and
+                        // swapping the text for that would move the user
+                        // somewhere they never asked to go. Case is ignored so
+                        // typing "~/cl" still corrects itself to "~/CLAUDE…".
+                        if (prefix.length > folder.length &&
+                            prefix.startsWith(folder, ignoreCase = true)
+                        ) {
+                            folder = prefix
+                        } else {
+                            suggestions.firstOrNull()?.let { folder = it.path }
+                        }
                     }
 
                     OutlinedTextField(
@@ -285,7 +300,16 @@ fun ConnectScreen(
                             },
                         singleLine = true,
                         keyboardOptions = launchKeyboardOptions,
-                        keyboardActions = launchKeyboardActions,
+                        // Enter accepts the top suggestion while the list is
+                        // open, and only launches once there is nothing to
+                        // accept. Launching straight from a field with an open
+                        // typeahead meant Enter could start a session on a
+                        // half-typed path — and it contradicted Enter's meaning
+                        // everywhere else in this feature, where it descends.
+                        keyboardActions = KeyboardActions(onGo = {
+                            val top = suggestions.firstOrNull()
+                            if (top != null) folder = top.path else launch()
+                        }),
                         colors = crTextFieldColors(),
                         trailingIcon = if (onScanFolders != null) {{
                             IconButton(onClick = {
