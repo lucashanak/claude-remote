@@ -214,6 +214,14 @@ object RemoteDirScan {
     const val MAX_PROJECTS = 500
 
     /**
+     * Client-side ceiling on the scan's output. [MAX_DIRS] is enforced by `head`
+     * INSIDE the remote command, so it binds only a cooperative server; this is
+     * what binds an uncooperative one. Roughly 1M chars covers the 3000 paths
+     * the command can legitimately emit many times over.
+     */
+    const val MAX_OUTPUT_CHARS = 1_000_000
+
+    /**
      * Directories never worth descending into for a "where do I launch Claude"
      * picker, and expensive to walk. Pruning them is what keeps a depth-3 scan
      * of a home directory cheap.
@@ -296,7 +304,7 @@ object RemoteDirScan {
      * absolute prefix echoed by the command is rewritten back to it so the
      * field, the breadcrumb and `server.recentFolders` all speak one form.
      */
-    fun parse(displayRoot: String, output: String): RemoteDirTree {
+    fun parse(displayRoot: String, output: String, depth: Int = DEFAULT_DEPTH): RemoteDirTree {
         val root = RemotePath.normalize(displayRoot)
         val lines = output.lines()
 
@@ -337,7 +345,7 @@ object RemoteDirScan {
                 mtimeSeconds = mtime,
             )
         }
-        return buildTree(root, parsed)
+        return buildTree(root, parsed, depth)
     }
 
     /**
@@ -349,11 +357,24 @@ object RemoteDirScan {
     private fun toDisplayPath(root: String, absoluteRoot: String?, raw: String): String? {
         val p = raw.trim().trimEnd('/')
         if (p.isBlank()) return null
-        if (absoluteRoot.isNullOrBlank() || root == absoluteRoot) return RemotePath.normalize(p)
+        val base = absoluteRoot?.takeIf { it.isNotBlank() } ?: return RemotePath.normalize(p)
         return when {
-            p == absoluteRoot -> root
-            p.startsWith("$absoluteRoot/") -> RemotePath.normalize(root + p.removePrefix(absoluteRoot))
-            else -> RemotePath.normalize(p)
+            p == base -> root
+            p.startsWith("$base/") -> RemotePath.normalize(root + p.removePrefix(base))
+            // A `find` rooted at `base` cannot legitimately print a path outside
+            // it, so anything else is a forgery and is dropped rather than
+            // passed through. Directory names may contain newlines, and `find`
+            // prints them raw, so a name like "x\n1700000000 /etc/foo\ny" arrives
+            // as an extra LINE that parses as a perfectly well-formed entry. It
+            // used to be kept verbatim, filed under parent "/", which then
+            // suppressed the "no such folder" hint and got offered by
+            // completion — i.e. it could nudge the user into launching a session
+            // somewhere an attacker chose. Planting such a name needs only a
+            // hostile `git clone` or an unpacked archive, not a compromised
+            // server. (The residue is that a forged line can still impersonate a
+            // SECTION MARKER and truncate the listing; that costs the user
+            // folders they cannot see, never a path they can act on.)
+            else -> null
         }
     }
 
@@ -374,7 +395,7 @@ object RemoteDirScan {
             if (path == root) return@mapNotNull null
             RemoteDirEntry(path, RemotePath.name(path), isProject = false, mtimeSeconds = 0L)
         }
-        return buildTree(root, entries)
+        return buildTree(root, entries, depth = 1)
     }
 
     /**
@@ -383,18 +404,51 @@ object RemoteDirScan {
      * The scan root is always marked as listed even when it has no children, so
      * an empty directory shows "no subfolders" instead of a stuck spinner.
      */
-    private fun buildTree(root: String, entries: List<RemoteDirEntry>): RemoteDirTree {
+    private fun buildTree(
+        root: String,
+        entries: List<RemoteDirEntry>,
+        depth: Int,
+    ): RemoteDirTree {
         val byParent = mutableMapOf<String, MutableList<RemoteDirEntry>>()
-        val listed = mutableSetOf(root)
         for (entry in entries) {
             val parent = RemotePath.parent(entry.path) ?: continue
             byParent.getOrPut(parent) { mutableListOf() }.add(entry)
-            // Any directory we saw was scanned, so its (possibly empty) listing
-            // is known — that is what stops the picker refetching a leaf.
-            listed += entry.path
         }
+
+        // A directory's listing is known only if the walk actually DESCENDED
+        // into it — not merely if we saw its name.
+        //
+        // Marking every seen directory as listed is a trap: the picker asks for
+        // a listing only when it has none, so a directory wrongly marked listed
+        // shows "No subfolders" forever and never asks. That silently broke the
+        // three cases at the edge of every scan — everything below `maxdepth`,
+        // every dot-directory (printed but pruned, so `~/.claude` was reachable
+        // to select but not to browse), and, worst, EVERY folder on a BSD/macOS
+        // server, since the `ls` fallback only ever sees one level. It also made
+        // ConnectScreen's "no such folder" hint fire on paths that merely lay
+        // deeper than the scan reached.
+        val listed = mutableSetOf(root)
+        // Any parent whose children we saw was necessarily descended into.
+        listed += byParent.keys
+        for (entry in entries) {
+            // Dot-directories are printed but pruned, so their listing is never
+            // known from this scan even though they sit above the depth limit.
+            if (entry.isHidden) continue
+            // Below the limit and not pruned: the walk went in, so an absence
+            // from byParent genuinely means "empty", not "not fetched".
+            if (relativeDepth(root, entry.path) < depth) listed += entry.path
+        }
+
         val sorted = byParent.mapValues { (_, kids) -> kids.sortedWith(ENTRY_ORDER) }
         return RemoteDirTree(root, sorted, listed)
+    }
+
+    /** Path segments of [path] beneath [root]; 0 when they are the same directory. */
+    private fun relativeDepth(root: String, path: String): Int {
+        if (path == root) return 0
+        val rest = path.removePrefix(root).trim('/')
+        if (rest.isBlank()) return 0
+        return rest.count { it == '/' } + 1
     }
 
     /**

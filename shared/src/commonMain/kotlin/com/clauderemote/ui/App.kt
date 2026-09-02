@@ -868,6 +868,17 @@ fun App(
                             // per click over the Cloudflare tunnel.
                             onScanFolders = { path ->
                                 try {
+                                    // Dispatchers.IO is not optional here. The
+                                    // caller is a rememberCoroutineScope(), i.e.
+                                    // Main, and withSession only wraps connect()
+                                    // in IO — block(sess) runs on the CALLER's
+                                    // context, and on the pooled-reuse path it
+                                    // returns before any dispatch at all. Without
+                                    // this the channel connect and the read would
+                                    // block the UI thread for the whole
+                                    // handshake: the spinner could not even
+                                    // animate, and on Android that is an ANR.
+                                    withContext(Dispatchers.IO) {
                                     com.clauderemote.connection.SshSessionHelper.withSession(server) { sess ->
                                         fun exec(cmd: String): String {
                                             val ch = sess.openChannel("exec") as com.jcraft.jsch.ChannelExec
@@ -875,7 +886,24 @@ fun App(
                                             ch.inputStream = null
                                             val input = ch.inputStream
                                             ch.connect(8000)
-                                            val output = input.bufferedReader().readText()
+                                            // Bounded read: MAX_DIRS is enforced
+                                            // only by `head` INSIDE the remote
+                                            // command, i.e. only by a cooperative
+                                            // server. A wedged or hostile one
+                                            // that streams forever would OOM the
+                                            // client through readText().
+                                            val cap = RemoteDirScan.MAX_OUTPUT_CHARS
+                                            val reader = input.bufferedReader()
+                                            val sb = StringBuilder()
+                                            val buf = CharArray(8192)
+                                            while (sb.length < cap) {
+                                                val n = reader.read(
+                                                    buf, 0, minOf(buf.size, cap - sb.length)
+                                                )
+                                                if (n < 0) break
+                                                sb.appendRange(buf, 0, n)
+                                            }
+                                            val output = sb.toString()
                                             ch.disconnect()
                                             return output
                                         }
@@ -891,6 +919,7 @@ fun App(
                                                 path, exec(RemoteDirScan.fallbackCommand(path))
                                             )
                                         } else scanned
+                                    }
                                     }
                                 } catch (_: Exception) {
                                     RemoteDirTree.empty(path)

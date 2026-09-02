@@ -454,7 +454,10 @@ class RemoteDirTreeTest {
 
     @Test
     fun parseFallback_absoluteRootPrefixOnlyMatchesAtAPathBoundary() {
-        // "/home/luc" must not swallow "/home/lucas/x".
+        // "/home/luc" must not swallow "/home/lucas/x" by bare prefix. Since
+        // that path is not under the scan root either, it is dropped outright
+        // rather than kept under a fabricated parent — see the out-of-root test
+        // below for why keeping it was a problem.
         val output = buildString {
             appendLine(RemoteDirScan.ROOT_MARKER)
             appendLine("/home/luc")
@@ -462,6 +465,150 @@ class RemoteDirTreeTest {
             appendLine("/home/lucas/x/")
         }
         val tree = RemoteDirScan.parseFallback("~", output)
-        assertEquals(listOf("/home/lucas/x"), tree.children("/home/lucas").map { it.path })
+        assertEquals(emptyList(), tree.children("/home/lucas").map { it.path })
+        assertEquals(emptyList(), tree.children("~").map { it.path })
+        assertFalse(tree.contains("/home/lucas/x"))
+    }
+
+    // --- Crafted server output ---
+    //
+    // Directory names may contain newlines and `find` prints them raw, so one
+    // planted name (a hostile `git clone` is enough — no server compromise)
+    // arrives as EXTRA LINES that parse as well-formed entries.
+
+    @Test
+    fun parse_dropsEntriesOutsideTheScanRoot() {
+        val output = buildString {
+            appendLine(RemoteDirScan.ROOT_MARKER)
+            appendLine("/home/lucas")
+            appendLine(RemoteDirScan.DIRS_MARKER)
+            appendLine("1700000000.0 /home/lucas/real")
+            // What a directory named "x\n1700000000 /etc/passwd_dir\ny" injects.
+            appendLine("1700000000.0 /etc/passwd_dir")
+            appendLine(RemoteDirScan.PROJ_MARKER)
+        }
+        val tree = RemoteDirScan.parse("~", output)
+
+        assertEquals(listOf("~/real"), tree.children("~").map { it.path })
+        // Not filed under a fabricated "/" parent, and not discoverable — this is
+        // what kept it out of completion and out of `contains`, which would
+        // otherwise have suppressed the "no such folder" warning for it.
+        assertEquals(emptyList(), tree.children("/").map { it.path })
+        assertFalse(tree.contains("/etc/passwd_dir"))
+        assertTrue(tree.allEntries().none { it.path.startsWith("/etc") })
+    }
+
+    @Test
+    fun parse_dropsForgedProjectEntriesOutsideTheScanRoot() {
+        val output = buildString {
+            appendLine(RemoteDirScan.ROOT_MARKER)
+            appendLine("/home/lucas")
+            appendLine(RemoteDirScan.DIRS_MARKER)
+            appendLine("1700000000.0 /home/lucas/real")
+            appendLine(RemoteDirScan.PROJ_MARKER)
+            appendLine("/etc/passwd_dir")
+        }
+        val tree = RemoteDirScan.parse("~", output)
+        // The forged project path is dropped, so it cannot mark anything.
+        assertEquals(listOf("~/real"), tree.children("~").map { it.path })
+        assertTrue(tree.children("~").none { it.isProject })
+    }
+
+    // --- hasListing: only directories the walk DESCENDED into ---
+    //
+    // The picker asks for a listing only when it has none, so a directory
+    // wrongly marked "listed" renders "No subfolders" forever and never asks.
+    // These pin the three edges where that used to happen.
+
+    private fun depthScan() = RemoteDirScan.parse(
+        "~",
+        buildString {
+            appendLine(RemoteDirScan.ROOT_MARKER)
+            appendLine("/home/lucas")
+            appendLine(RemoteDirScan.DIRS_MARKER)
+            appendLine("1700000000.0 /home/lucas/a")
+            appendLine("1700000000.0 /home/lucas/a/b")
+            appendLine("1700000000.0 /home/lucas/a/b/c")
+            appendLine("1700000000.0 /home/lucas/empty")
+            appendLine("1700000000.0 /home/lucas/.claude")
+            appendLine(RemoteDirScan.PROJ_MARKER)
+        },
+        depth = 3,
+    )
+
+    @Test
+    fun hasListing_trueForADirectoryWhoseChildrenWereSeen() {
+        val tree = depthScan()
+        assertTrue(tree.hasListing("~"))
+        assertTrue(tree.hasListing("~/a"))
+        assertTrue(tree.hasListing("~/a/b"))
+    }
+
+    @Test
+    fun hasListing_trueForAnEmptyDirectoryAboveTheDepthLimit() {
+        // Descended into and found empty — "no subfolders" is the truth here,
+        // and refetching it would be a wasted round trip.
+        val tree = depthScan()
+        assertTrue(tree.hasListing("~/empty"))
+        assertEquals(emptyList(), tree.children("~/empty").map { it.path })
+    }
+
+    @Test
+    fun hasListing_falseAtTheDepthLimitSoLazyDeepenStillFires() {
+        // "~/a/b/c" sits AT maxdepth: it was printed but never descended into,
+        // so its children are unknown, not absent.
+        val tree = depthScan()
+        assertFalse(tree.hasListing("~/a/b/c"))
+    }
+
+    @Test
+    fun hasListing_falseForADotDirectoryEvenAboveTheDepthLimit() {
+        // Dot-directories are printed but pruned, so `~/.claude` is reachable to
+        // select AND still browsable — it must not claim to be listed.
+        val tree = depthScan()
+        assertTrue(tree.children("~").any { it.path == "~/.claude" })
+        assertFalse(tree.hasListing("~/.claude"))
+    }
+
+    @Test
+    fun parseFallback_marksOnlyTheRootAsListed() {
+        // The `ls` fallback sees exactly one level. Marking its children listed
+        // made every folder on a BSD/macOS server show "No subfolders".
+        val output = buildString {
+            appendLine(RemoteDirScan.ROOT_MARKER)
+            appendLine("/home/lucas")
+            appendLine(RemoteDirScan.DIRS_MARKER)
+            appendLine("/home/lucas/claude-remote/")
+            appendLine("/home/lucas/rag/")
+        }
+        val tree = RemoteDirScan.parseFallback("~", output)
+        assertTrue(tree.hasListing("~"))
+        assertFalse(tree.hasListing("~/claude-remote"))
+        assertFalse(tree.hasListing("~/rag"))
+    }
+
+    @Test
+    fun hasListing_afterMergingADeepenScanTheDeepenedDirectoryIsListed() {
+        // The lazy-deepen round trip is what closes the gap: scan "~/a/b/c" and
+        // merge it in, and the picker stops asking.
+        val shallow = depthScan()
+        assertFalse(shallow.hasListing("~/a/b/c"))
+
+        val deepened = RemoteDirScan.parse(
+            "~/a/b/c",
+            buildString {
+                appendLine(RemoteDirScan.ROOT_MARKER)
+                appendLine("/home/lucas/a/b/c")
+                appendLine(RemoteDirScan.DIRS_MARKER)
+                appendLine("1700000000.0 /home/lucas/a/b/c/deep")
+                appendLine(RemoteDirScan.PROJ_MARKER)
+            },
+        )
+        val merged = shallow.merge(deepened)
+        assertTrue(merged.hasListing("~/a/b/c"))
+        assertEquals(listOf("~/a/b/c/deep"), merged.children("~/a/b/c").map { it.path })
+        // The original root's listing survives the merge.
+        assertTrue(merged.hasListing("~"))
+        assertEquals("~", merged.root)
     }
 }
