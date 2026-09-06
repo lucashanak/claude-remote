@@ -173,7 +173,18 @@ internal object DesktopSpeech {
             return "Could not start ${cmd.program}: ${it.message ?: "unknown error"}"
         }
         val playback = Playback(process, cmd.program)
-        current.set(playback)
+        // CLAIM, don't clobber. Two cards tapped within the spawn window (a
+        // PATH scan plus a fork) can interleave so that the slower caller's
+        // `set` overwrites the faster one's handle — after which stop() can
+        // never find the playback that is actually talking, its button stays
+        // stuck "speaking", and the next utterance talks over it. Losing the
+        // claim means someone newer owns the speaker, so this caller kills its
+        // own process and returns quietly, exactly as if it had been
+        // superseded a moment later.
+        if (!current.compareAndSet(null, playback)) {
+            runCatching { process.destroy() }
+            return null
+        }
         // Claim the stop that arrived while we were spawning.
         if (stopSeq.get() != seqAtStart) stop()
         FileLogger.log(TAG, "speak via ${cmd.program} (${text.length} chars, rate ${ratePct}%)")

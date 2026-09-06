@@ -45,6 +45,28 @@ class DataMeterTest {
         assertNull(parseProcNetDev(virtualOnly))
     }
 
+    /**
+     * The case this project actually hits: sessions ride a Tailscale or
+     * Cloudflare tunnel, so the same bytes appear on tailscale0/tun0 AND on the
+     * physical NIC underneath. Counting both doubles exactly the traffic the
+     * meter exists to investigate.
+     */
+    @Test
+    fun `parseProcNetDev excludes tunnel interfaces so tunnelled bytes are counted once`() {
+        val withTunnels = """
+            Inter-|   Receive                                                |  Transmit
+             face |bytes    packets errs drop fifo frame compressed multicast|bytes    packets errs drop fifo colls carrier compressed
+                lo: 1000 10 0 0 0 0 0 0 1000 10 0 0 0 0 0 0
+              eth0: 5000 50 0 0 0 0 0 0 7000 70 0 0 0 0 0 0
+        tailscale0: 4000 40 0 0 0 0 0 0 6000 60 0 0 0 0 0 0
+              tun0: 3000 30 0 0 0 0 0 0 2000 20 0 0 0 0 0 0
+               wg0: 1500 15 0 0 0 0 0 0 1200 12 0 0 0 0 0 0
+        """.trimIndent()
+        val (rx, tx) = parseProcNetDev(withTunnels)!!
+        assertEquals(5000L, rx, "only the physical interface should count")
+        assertEquals(7000L, tx, "only the physical interface should count")
+    }
+
     @Test
     fun `parseProcNetDev with only loopback returns null`() {
         val loOnly = """

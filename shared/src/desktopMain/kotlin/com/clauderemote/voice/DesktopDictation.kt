@@ -84,10 +84,41 @@ internal class DesktopDictation(
         // Empty frame = end of audio: the server settles the remaining tokens
         // and answers `finished`, which fires onFinal and closes the socket.
         runCatching { ws?.send("") }
+        // ...but only if it answers. A server that never sends `finished`
+        // would leave this socket open forever — the 20s ping keeps it alive,
+        // Soniox bills streaming time, and desktop builds one OkHttpClient per
+        // session so the threads never go away either. Give the settle a
+        // bounded window, then close regardless.
+        timer.schedule({ shutdownTransport() }, FINISH_GRACE_MS, TimeUnit.MILLISECONDS)
+    }
+
+    /**
+     * Closes the socket and releases the per-session OkHttp client. Idempotent:
+     * both the settle timeout and a normal `finished` reply land here.
+     */
+    private fun shutdownTransport() {
+        runCatching { ws?.close(1000, null) }
+        ws = null
+        runCatching {
+            http.dispatcher.executorService.shutdown()
+            http.connectionPool.evictAll()
+        }
+        // The scheduler is per-session too. shutdown() (not shutdownNow) so a
+        // teardown running ON this executor finishes the task it is inside.
+        runCatching { timer.shutdown() }
     }
 
     private inner class Listener : WebSocketListener() {
         override fun onOpen(webSocket: WebSocket, response: Response) {
+            // The connect takes a few hundred milliseconds, which is long
+            // enough for the user to tap stop or navigate away first. Without
+            // this check the microphone would still be opened afterwards — the
+            // capture loop exits on its own, but the OS mic indicator lights
+            // for an instant AFTER the user asked us to stop listening.
+            if (stopped) {
+                runCatching { webSocket.close(1000, null) }
+                return
+            }
             FileLogger.log(TAG, "WS open")
             webSocket.send(sonioxDictationConfig(apiKey))
             startCapture(webSocket)
@@ -163,7 +194,7 @@ internal class DesktopDictation(
         val settled = synchronized(this) { finalText.toString() }.trim()
         FileLogger.log(TAG, "final (${settled.length} chars, $bytesSent sent bytes)")
         onFinal(settled)
-        runCatching { webSocket.close(1000, null) }
+        shutdownTransport()
     }
 
     /**
@@ -224,6 +255,8 @@ internal class DesktopDictation(
         private const val SAMPLE_RATE = 16000
         private const val FRAME_BYTES = 3200 // 100 ms @ 16 kHz mono 16-bit
         private const val NO_SPEECH_GUARD_MS = 12000L
+        /** How long the server gets to answer `finished` before we close anyway. */
+        private const val FINISH_GRACE_MS = 5000L
     }
 }
 

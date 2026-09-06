@@ -196,23 +196,23 @@ actual fun SpeakerButton(
     val scope = rememberCoroutineScope()
     var speaking by remember { mutableStateOf(false) }
     val textState = rememberUpdatedState(text)
-    val speakingState = rememberUpdatedState(speaking)
 
-    DisposableEffect(Unit) {
-        onDispose {
-            // Only ours: the process is app-wide, so an unconditional stop here
-            // would silence whichever card is actually reading when this one
-            // scrolls out of the list.
-            if (speakingState.value) DesktopSpeech.stop()
-        }
-    }
+    // NO stop-on-dispose. This button lives inside a LazyColumn item, so the
+    // card leaves composition as soon as it scrolls out of view — and the
+    // transcript auto-follows new output, so that happens on its own while you
+    // are listening. Killing playback there cut the reading off mid-sentence
+    // with nothing to show for it. Android's SpeakerButton has no dispose hook
+    // either; playback is app-wide and ends when it finishes, when Stop is
+    // tapped, or when another card starts reading.
 
     IconButton(
         onClick = {
             if (speaking) {
                 // Killing the process makes speakBlocking return, which clears
                 // `speaking` below — one place resets the state, always.
-                DesktopSpeech.stop()
+                // Off the Compose thread: stopping spd-say also forks
+                // `spd-say -C`, and a fork on the render thread drops a frame.
+                scope.launch { withContext(Dispatchers.IO) { DesktopSpeech.stop() } }
                 return@IconButton
             }
             // Read the words, not the markdown syntax (*, `, #, …).

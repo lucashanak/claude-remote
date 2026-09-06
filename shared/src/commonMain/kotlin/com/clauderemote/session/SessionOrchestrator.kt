@@ -60,7 +60,13 @@ class SessionOrchestrator(
         // go (terminal is DECODED — compressed on the wire; transcript is the
         // on-wire base64/gzip payload; appRx/Tx is the real app-wide traffic).
         reconnectScope.launch {
-            var pTerm = 0L; var pTr = 0L; var pPoll = 0L; var pRx = 0L; var pTx = 0L
+            var pTerm = 0L; var pTr = 0L; var pPoll = 0L
+            // NULL, not 0: these counters are cumulative since BOOT, so a first
+            // delta measured against zero reports the machine's whole uptime as
+            // one minute's traffic — on desktop, where the counter is
+            // machine-wide, that is tens of gigabytes in the first line. The
+            // first sample only seeds the baseline.
+            var pRx: Long? = null; var pTx: Long? = null
             while (true) {
                 kotlinx.coroutines.delay(60_000) // throws on scope cancel → loop ends
                 val term = com.clauderemote.util.DataMeter.terminalBytes()
@@ -78,9 +84,18 @@ class SessionOrchestrator(
                 val conn = connectionRegistry.liveTransportCount()
                 val mode = if (isInBackground) "bg" else "fg"
                 val netStr = if (net != null) {
-                    val dRx = (net.rx - pRx) / 1024; val dTx = (net.tx - pTx) / 1024
+                    val basedRx = pRx; val basedTx = pTx
                     pRx = net.rx; pTx = net.tx
-                    if (net.appScoped) {
+                    // A machine-wide sum is NOT monotonic: bring a VPN down,
+                    // unplug a USB NIC or toggle Wi-Fi and the interface (with
+                    // its counters) disappears from the total, so the next
+                    // delta goes hugely negative. Per-UID counters can't do
+                    // that, so nothing downstream guards against it. Treat a
+                    // decrease as a re-seed rather than logging nonsense.
+                    val dRx = if (basedRx == null || net.rx < basedRx) -1L else (net.rx - basedRx) / 1024
+                    val dTx = if (basedTx == null || net.tx < basedTx) -1L else (net.tx - basedTx) / 1024
+                    if (dRx < 0 || dTx < 0) ""
+                    else if (net.appScoped) {
                         // Residual = real traffic not attributed to counted content —
                         // i.e. SSH/ET/CF keepalives + channel framing. Only meaningful
                         // when the counter is scoped to this app (Android); a

@@ -31,14 +31,28 @@ actual fun platformNetBytes(): NetBytes? = try {
  *  `netstat` must not block the poller. Returns null on timeout/failure. */
 private fun runNetstatIbn(): String? {
     val p = ProcessBuilder("netstat", "-ibn").redirectErrorStream(true).start()
-    return try {
-        if (!p.waitFor(2, TimeUnit.SECONDS)) {
-            p.destroyForcibly()
-            null
-        } else {
-            p.inputStream.bufferedReader().readText()
+    // DRAIN FIRST. Waiting before reading deadlocks as soon as netstat writes
+    // more than the pipe buffer holds — a Mac with a handful of utun/awdl/
+    // bridge interfaces, each printing a row per address family, gets there
+    // easily. The wait would then time out on every single poll and the meter
+    // would report nothing, forever, while killing a child each minute. The
+    // watchdog keeps the timeout guarantee that reading-first gives up.
+    val watchdog = Thread {
+        try {
+            Thread.sleep(2_000)
+        } catch (_: InterruptedException) {
+            return@Thread
         }
+        if (p.isAlive) p.destroyForcibly()
+    }.apply { isDaemon = true; start() }
+    return try {
+        val out = p.inputStream.bufferedReader().readText()
+        p.waitFor(1, TimeUnit.SECONDS)
+        out.ifBlank { null }
+    } catch (_: Exception) {
+        null
     } finally {
+        watchdog.interrupt()
         if (p.isAlive) p.destroyForcibly()
     }
 }
@@ -48,7 +62,19 @@ private fun runNetstatIbn(): String? {
 // counting them alongside the physical interface double- or triple-counts
 // that traffic on a box running containers/VMs (this dev box does). Real
 // physical/Wi-Fi interfaces (eth*, en*, wlan*, wl*) are never named this way.
-private val VIRTUAL_IFACE_PREFIXES = listOf("veth", "docker", "br-", "virbr")
+private val VIRTUAL_IFACE_PREFIXES = listOf(
+    // Container/VM plumbing: a veth pair and the bridge it hangs off both see
+    // the bytes that also cross the physical NIC.
+    "veth", "docker", "br-", "virbr", "vnet", "vmbr",
+    // TUNNELS, and these are the ones that matter here: this app routes its
+    // sessions over Tailscale or a Cloudflare tunnel, so the encapsulated
+    // bytes appear once on tailscale0/tun0/wg0 and again on the physical
+    // interface underneath. Counting both doubles exactly the traffic the
+    // meter exists to investigate.
+    "tailscale", "tun", "tap", "wg",
+    // A bond's members carry the same frames as the bond device.
+    "bond",
+)
 
 /**
  * Parses `/proc/net/dev`. Format (stable since Linux 2.6):
@@ -106,9 +132,11 @@ internal fun parseNetstatIbn(text: String): Pair<Long, Long>? {
     val lines = text.lines()
     if (lines.isEmpty()) return null
     val header = lines[0].trim().split(Regex("\\s+"))
-    val ibytesFromEnd = header.size - header.indexOf("Ibytes")
-    val obytesFromEnd = header.size - header.indexOf("Obytes")
-    if (header.indexOf("Ibytes") < 0 || header.indexOf("Obytes") < 0) return null
+    val ibytesCol = header.indexOf("Ibytes")
+    val obytesCol = header.indexOf("Obytes")
+    if (ibytesCol < 0 || obytesCol < 0) return null
+    val ibytesFromEnd = header.size - ibytesCol
+    val obytesFromEnd = header.size - obytesCol
     var rx = 0L
     var tx = 0L
     val seen = HashSet<String>()

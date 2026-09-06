@@ -22,6 +22,22 @@ class SecondaryClickTest {
         assertFalse(isSecondaryPress(PointerEventType.Press, secondaryButtonPressed = false))
     }
 
+    /**
+     * Right button held, then LEFT clicked: that second press still reports
+     * the secondary button as down, so without the held-state check the menu
+     * would reopen under the user's left click.
+     */
+    @Test
+    fun doesNotReopenWhileTheRightButtonIsAlreadyHeld() {
+        assertFalse(
+            isSecondaryPress(PointerEventType.Press, secondaryButtonPressed = true, alreadyOpen = true),
+        )
+        // ...but a fresh right-click after releasing still opens it.
+        assertTrue(
+            isSecondaryPress(PointerEventType.Press, secondaryButtonPressed = true, alreadyOpen = false),
+        )
+    }
+
     @Test
     fun ignoresRightButtonReleaseAndMove() {
         // Only the initial PRESS should open the menu — a release or a drag

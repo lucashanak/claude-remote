@@ -267,7 +267,12 @@ class MainActivity : FragmentActivity() {
             val fg = isAppInForeground
             FileLogger.log("Notify", "Claude needs input: '$hint' fg=$fg activeTab=$isActiveTab keepAlive=${KeepAliveService.isRunning} notif=${appSettings.notificationsEnabled}")
             KeepAliveService.updateDescription(title)
-            if ((!fg || !isActiveTab) && appSettings.notificationsEnabled) {
+            if (com.clauderemote.session.service.NotificationPolicy.shouldNotify(
+                    appForeground = fg,
+                    isActiveTab = isActiveTab,
+                    notificationsEnabled = appSettings.notificationsEnabled,
+                )
+            ) {
                 FileLogger.log("Notify", "Sending alert for '$title'")
                 // Use the body the orchestrator resolved for THIS completion
                 // (cleaned of markdown) so the notification — and the watch —
