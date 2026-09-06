@@ -12,12 +12,17 @@ import androidx.compose.runtime.rememberUpdatedState
  * True when a raw pointer press is the RIGHT mouse button — the predicate
  * [secondaryClick] fires on, pulled out standalone so it's testable without
  * constructing a real Compose `PointerEvent`.
+ *
+ * [secondaryAlreadyHeld] is the button state carried over from the previous
+ * event, not menu state: a press while the right button is already down is a
+ * SECOND button going down (right held, then left clicked), which must not
+ * re-fire.
  */
 internal fun isSecondaryPress(
     type: PointerEventType,
     secondaryButtonPressed: Boolean,
-    alreadyOpen: Boolean = false,
-): Boolean = type == PointerEventType.Press && secondaryButtonPressed && !alreadyOpen
+    secondaryAlreadyHeld: Boolean = false,
+): Boolean = type == PointerEventType.Press && secondaryButtonPressed && !secondaryAlreadyHeld
 
 /**
  * Fires [onClick] on a right mouse button press — the desktop equivalent of a
@@ -26,9 +31,9 @@ internal fun isSecondaryPress(
  * composable that already handles long-press for mobile via
  * `combinedClickable`'s `onLongClick`.
  *
- * Factored out of TranscriptCards' CopyButton (the first place this pattern
- * was needed, for the "Copy for Slack" menu) so every desktop context-menu
- * trigger shares one implementation.
+ * The same pattern is inlined in TranscriptCards' CopyButton (where it first
+ * appeared, for the "Copy for Slack" menu); that call site predates this
+ * helper and has not been migrated to it.
  */
 @Composable
 fun Modifier.secondaryClick(enabled: Boolean = true, onClick: () -> Unit): Modifier {
@@ -49,7 +54,7 @@ fun Modifier.secondaryClick(enabled: Boolean = true, onClick: () -> Unit): Modif
             while (true) {
                 val event = awaitPointerEvent(PointerEventPass.Initial)
                 val down = event.buttons.isSecondaryPressed
-                if (isSecondaryPress(event.type, down, alreadyOpen = secondaryHeld)) {
+                if (isSecondaryPress(event.type, down, secondaryAlreadyHeld = secondaryHeld)) {
                     current.value()
                     event.changes.forEach { it.consume() }
                 }

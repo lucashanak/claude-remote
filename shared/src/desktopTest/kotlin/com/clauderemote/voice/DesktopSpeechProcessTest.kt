@@ -38,10 +38,17 @@ class DesktopSpeechProcessTest {
         false
     }
 
-    private fun requirePosixTools(name: String): Boolean {
-        if (posixToolsAvailable()) return true
-        println("POSIX stand-ins (cat/sh/sleep/grep) unavailable — skipping $name")
-        return false
+    /**
+     * A JUnit assumption, not an early return: an early return reports the test
+     * as PASSED, and a green test that never ran is exactly the failure mode
+     * this module keeps environment-dependent work out of the unit suite to
+     * avoid. An unmet assumption reports it as skipped, honestly.
+     */
+    private fun requirePosixTools() {
+        org.junit.Assume.assumeTrue(
+            "POSIX stand-ins (cat/sh/sleep/grep) unavailable",
+            posixToolsAvailable(),
+        )
     }
 
     private fun waitUntil(timeoutMs: Long, condition: () -> Boolean): Boolean {
@@ -55,7 +62,7 @@ class DesktopSpeechProcessTest {
 
     @Test
     fun `a clean run reports no error and leaves nothing speaking`() {
-        if (!requirePosixTools("a clean run reports no error and leaves nothing speaking")) return
+        requirePosixTools()
         // `cat` consumes the text on stdin and exits 0 — the same shape as
         // `say` / `espeak --stdin`.
         val error = DesktopSpeech.speakBlocking(
@@ -69,7 +76,7 @@ class DesktopSpeechProcessTest {
 
     @Test
     fun `a synthesiser that fails is reported, not swallowed and not hung`() {
-        if (!requirePosixTools("a synthesiser that fails is reported, not swallowed and not hung")) return
+        requirePosixTools()
         val error = DesktopSpeech.speakBlocking(
             "hello",
             100,
@@ -100,7 +107,7 @@ class DesktopSpeechProcessTest {
 
     @Test
     fun `stop ends the call promptly and without an error`() {
-        if (!requirePosixTools("stop ends the call promptly and without an error")) return
+        requirePosixTools()
         val result = AtomicReference<String?>("not finished")
         val worker = Thread {
             result.set(
@@ -125,7 +132,7 @@ class DesktopSpeechProcessTest {
 
     @Test
     fun `a stop that lands while the process is starting still wins`() {
-        if (!requirePosixTools("a stop that lands while the process is starting still wins")) return
+        requirePosixTools()
         // The resolver runs inside the spawn window, so stopping from it is the
         // race: the process does not exist yet, so there is nothing to kill.
         val startedAt = System.currentTimeMillis()
@@ -143,7 +150,7 @@ class DesktopSpeechProcessTest {
 
     @Test
     fun `starting a second utterance kills the first`() {
-        if (!requirePosixTools("starting a second utterance kills the first")) return
+        requirePosixTools()
         val first = AtomicReference<String?>("not finished")
         val worker = Thread {
             first.set(
@@ -173,7 +180,7 @@ class DesktopSpeechProcessTest {
 
     @Test
     fun `the text really reaches the process stdin`() {
-        if (!requirePosixTools("the text really reaches the process stdin")) return
+        requirePosixTools()
         // Round-trips the payload through a child process so a broken stdin
         // write (the whole delivery mechanism for say/espeak) can't pass.
         val marker = "spoken-payload-42"

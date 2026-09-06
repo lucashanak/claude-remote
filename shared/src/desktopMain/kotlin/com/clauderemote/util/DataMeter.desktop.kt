@@ -37,18 +37,25 @@ private fun runNetstatIbn(): String? {
     // easily. The wait would then time out on every single poll and the meter
     // would report nothing, forever, while killing a child each minute. The
     // watchdog keeps the timeout guarantee that reading-first gives up.
+    val killed = java.util.concurrent.atomic.AtomicBoolean(false)
     val watchdog = Thread {
         try {
             Thread.sleep(2_000)
         } catch (_: InterruptedException) {
             return@Thread
         }
-        if (p.isAlive) p.destroyForcibly()
+        if (p.isAlive) {
+            killed.set(true)
+            p.destroyForcibly()
+        }
     }.apply { isDaemon = true; start() }
     return try {
         val out = p.inputStream.bufferedReader().readText()
         p.waitFor(1, TimeUnit.SECONDS)
-        out.ifBlank { null }
+        // A killed netstat leaves a TRUNCATED table, which parses cleanly into
+        // a silently under-counted sum. No number is better than a wrong one
+        // the reader cannot distinguish from a real drop in traffic.
+        if (killed.get()) null else out.ifBlank { null }
     } catch (_: Exception) {
         null
     } finally {
@@ -62,6 +69,9 @@ private fun runNetstatIbn(): String? {
 // counting them alongside the physical interface double- or triple-counts
 // that traffic on a box running containers/VMs (this dev box does). Real
 // physical/Wi-Fi interfaces (eth*, en*, wlan*, wl*) are never named this way.
+private val MAC_VIRTUAL_IFACE_PREFIXES =
+    listOf("utun", "ipsec", "gif", "stf", "bridge", "vmenet", "llw", "ap")
+
 private val VIRTUAL_IFACE_PREFIXES = listOf(
     // Container/VM plumbing: a veth pair and the bridge it hangs off both see
     // the bytes that also cross the physical NIC.
@@ -147,6 +157,11 @@ internal fun parseNetstatIbn(text: String): Pair<Long, Long>? {
         val obytesIdx = fields.size - obytesFromEnd
         if (fields.isEmpty() || ibytesIdx < 1 || obytesIdx < 1) continue
         val iface = fields[0]
+        // Same double-count as Linux, different names: utun* is what Tailscale
+        // and every macOS VPN present, and the encapsulated bytes cross en0
+        // underneath. ipsec*/gif*/bridge*/vmenet* are the other tunnels and
+        // bridges that carry already-counted traffic.
+        if (MAC_VIRTUAL_IFACE_PREFIXES.any { iface.startsWith(it) }) continue
         if (iface.isEmpty() || iface == "lo0" || !seen.add(iface)) continue
         val rxBytes = fields[ibytesIdx].toLongOrNull() ?: continue
         val txBytes = fields[obytesIdx].toLongOrNull() ?: continue

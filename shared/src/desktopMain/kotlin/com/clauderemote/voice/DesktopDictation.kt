@@ -89,7 +89,10 @@ internal class DesktopDictation(
         // Soniox bills streaming time, and desktop builds one OkHttpClient per
         // session so the threads never go away either. Give the settle a
         // bounded window, then close regardless.
-        timer.schedule({ shutdownTransport() }, FINISH_GRACE_MS, TimeUnit.MILLISECONDS)
+        // runCatching, like armSilence: shutdownTransport may already have
+        // retired the executor, and this runs on the click path — a rejected
+        // schedule must never throw out of stop() and leave the button stuck.
+        runCatching { timer.schedule({ shutdownTransport() }, FINISH_GRACE_MS, TimeUnit.MILLISECONDS) }
     }
 
     /**
@@ -116,7 +119,7 @@ internal class DesktopDictation(
             // capture loop exits on its own, but the OS mic indicator lights
             // for an instant AFTER the user asked us to stop listening.
             if (stopped) {
-                runCatching { webSocket.close(1000, null) }
+                shutdownTransport()
                 return
             }
             FileLogger.log(TAG, "WS open")
@@ -179,9 +182,13 @@ internal class DesktopDictation(
     }
 
     private fun cancelSilence() {
+        // Cancel the TASK, never the executor. Shutting the scheduler down here
+        // made every later schedule throw RejectedExecutionException — which is
+        // why the re-arm below is wrapped in runCatching, and why the grace
+        // teardown stop() schedules could never run. Retiring the executor is
+        // shutdownTransport's job, once, at the end.
         silenceTask?.cancel(false)
         silenceTask = null
-        runCatching { timer.shutdownNow() }
     }
 
     /** Terminal path: emit the settled transcript exactly once and shut everything down. */

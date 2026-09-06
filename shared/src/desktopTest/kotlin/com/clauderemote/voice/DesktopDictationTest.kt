@@ -14,6 +14,32 @@ class DesktopDictationTest {
 
     private fun mulaw(sample: Int): Int = linearToMulaw(sample).toInt() and 0xFF
 
+    /**
+     * stop() must be safe on a session that never opened a socket or a
+     * microphone — that is the ordinary path when the user taps the mic and
+     * changes their mind, and it is reached from a click handler, a
+     * LaunchedEffect and onDispose alike.
+     *
+     * A regression here is not cosmetic: cancelling the silence timer used to
+     * shut the whole scheduler down, so the grace teardown stop() schedules was
+     * rejected and the exception escaped into Compose — the Stop button needed
+     * two taps and the socket the teardown exists to close stayed open.
+     */
+    @Test
+    fun `stop is safe and idempotent on a session that never started`() {
+        val errors = mutableListOf<String>()
+        val dictation = DesktopDictation(
+            apiKey = "",
+            silenceMs = 1500,
+            onPartial = {},
+            onFinal = {},
+            onError = { errors += it },
+        )
+        dictation.stop()
+        dictation.stop()
+        assertTrue(errors.isEmpty(), "stop() must not report an error: $errors")
+    }
+
     @Test
     fun `mulaw matches the G711 reference vectors`() {
         assertEquals(0xFF, mulaw(0))

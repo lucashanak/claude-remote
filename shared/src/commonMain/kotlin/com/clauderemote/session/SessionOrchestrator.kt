@@ -84,7 +84,7 @@ class SessionOrchestrator(
                 val conn = connectionRegistry.liveTransportCount()
                 val mode = if (isInBackground) "bg" else "fg"
                 val netStr = if (net != null) {
-                    val basedRx = pRx; val basedTx = pTx
+                    val baseRx = pRx; val baseTx = pTx
                     pRx = net.rx; pTx = net.tx
                     // A machine-wide sum is NOT monotonic: bring a VPN down,
                     // unplug a USB NIC or toggle Wi-Fi and the interface (with
@@ -92,10 +92,15 @@ class SessionOrchestrator(
                     // delta goes hugely negative. Per-UID counters can't do
                     // that, so nothing downstream guards against it. Treat a
                     // decrease as a re-seed rather than logging nonsense.
-                    val dRx = if (basedRx == null || net.rx < basedRx) -1L else (net.rx - basedRx) / 1024
-                    val dTx = if (basedTx == null || net.tx < basedTx) -1L else (net.tx - basedTx) / 1024
-                    if (dRx < 0 || dTx < 0) ""
-                    else if (net.appScoped) {
+                    val dRx = if (baseRx == null || net.rx < baseRx) null else (net.rx - baseRx) / 1024
+                    val dTx = if (baseTx == null || net.tx < baseTx) null else (net.tx - baseTx) / 1024
+                    // Say WHICH of the two silent cases this is: a first sample
+                    // has no baseline yet, a later one means the counter went
+                    // backwards. Logging "" for both left it reading like the
+                    // platform has no counter at all.
+                    if (dRx == null || dTx == null) {
+                        if (baseRx == null) " | net=baseline" else " | net=reseed"
+                    } else if (net.appScoped) {
                         // Residual = real traffic not attributed to counted content —
                         // i.e. SSH/ET/CF keepalives + channel framing. Only meaningful
                         // when the counter is scoped to this app (Android); a

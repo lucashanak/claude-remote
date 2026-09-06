@@ -5,6 +5,7 @@ import java.io.File
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.atomic.AtomicReference
+import kotlinx.coroutines.launch
 
 /**
  * Read-aloud on desktop is the OS speech synthesiser driven as a child
@@ -125,6 +126,11 @@ internal object DesktopSpeech {
     private class Playback(val process: Process, val program: String)
 
     private val current = AtomicReference<Playback?>(null)
+    // Spawning `spd-say -C` forks a process; doing that on the Compose thread
+    // drops a frame, and it must outlive whatever composable asked for it.
+    private val stopScope = kotlinx.coroutines.CoroutineScope(
+        kotlinx.coroutines.SupervisorJob() + kotlinx.coroutines.Dispatchers.IO,
+    )
     private val warnedNoEngine = AtomicBoolean(false)
     // Bumped by every stop, including one that finds nothing running: spawning
     // takes a few milliseconds, and a stop landing inside that window has no
@@ -182,7 +188,12 @@ internal object DesktopSpeech {
         // own process and returns quietly, exactly as if it had been
         // superseded a moment later.
         if (!current.compareAndSet(null, playback)) {
-            runCatching { process.destroy() }
+            // Cancel it the same way stop() does. Killing the client alone
+            // leaves anything already queued in speech-dispatcher AUDIBLE, so
+            // the losing utterance would talk over the winner — the exact
+            // outcome this claim exists to prevent.
+            cancelPlayback(playback)
+            FileLogger.log(TAG, "dropped ${cmd.program} utterance — another card took the speaker")
             return null
         }
         // Claim the stop that arrived while we were spawning.
@@ -203,14 +214,35 @@ internal object DesktopSpeech {
         return "${cmd.program} exited with $exit"
     }
 
+    /**
+     * Stop, off the caller's thread and off any composable's lifetime. The
+     * button used to launch this in its own coroutine scope, which a scroll can
+     * dispose mid-dispatch — dropping the stop entirely, with nothing left to
+     * stop it afterwards. Stopping is app-global, so its scope is too.
+     */
+    fun stopAsync() {
+        stopScope.launch { stop() }
+    }
+
     /** Kills the live utterance, if any. Safe to call when nothing is speaking. */
     fun stop() {
         stopSeq.incrementAndGet()
         val playback = current.getAndSet(null) ?: return
+        cancelPlayback(playback)
+    }
+
+    /** Kills a playback and silences whatever it already handed to the OS. */
+    private fun cancelPlayback(playback: Playback) {
+        // Closing stdin first: every other path leaves the pipe through
+        // `outputStream.use`, and a synthesiser reading stdin can otherwise sit
+        // waiting for an EOF that the destroy alone does not deliver.
+        runCatching { playback.process.outputStream.close() }
         runCatching { playback.process.destroy() }
         // spd-say is only a client: the words are queued inside the
         // speech-dispatcher daemon and keep playing after the client dies, so
-        // stopping means telling the daemon to cancel too.
+        // stopping means telling the daemon to cancel too. Note this cancels
+        // EVERY speech-dispatcher client on the machine — a screen reader
+        // included; spd-say exposes no per-client cancel.
         if (playback.program == "spd-say") {
             runCatching {
                 ProcessBuilder("spd-say", "-C")

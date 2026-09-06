@@ -212,7 +212,7 @@ actual fun SpeakerButton(
                 // `speaking` below — one place resets the state, always.
                 // Off the Compose thread: stopping spd-say also forks
                 // `spd-say -C`, and a fork on the render thread drops a frame.
-                scope.launch { withContext(Dispatchers.IO) { DesktopSpeech.stop() } }
+                DesktopSpeech.stopAsync()
                 return@IconButton
             }
             // Read the words, not the markdown syntax (*, `, #, …).

@@ -30,11 +30,11 @@ class SecondaryClickTest {
     @Test
     fun doesNotReopenWhileTheRightButtonIsAlreadyHeld() {
         assertFalse(
-            isSecondaryPress(PointerEventType.Press, secondaryButtonPressed = true, alreadyOpen = true),
+            isSecondaryPress(PointerEventType.Press, secondaryButtonPressed = true, secondaryAlreadyHeld = true),
         )
         // ...but a fresh right-click after releasing still opens it.
         assertTrue(
-            isSecondaryPress(PointerEventType.Press, secondaryButtonPressed = true, alreadyOpen = false),
+            isSecondaryPress(PointerEventType.Press, secondaryButtonPressed = true, secondaryAlreadyHeld = false),
         )
     }
 
