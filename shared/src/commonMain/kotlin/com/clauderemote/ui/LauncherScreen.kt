@@ -217,9 +217,9 @@ fun LauncherScreen(
                         SessionLauncherCard(
                             session = s,
                             onClick = { onResumeSession(s) },
-                            onLongPress = if (isMobile && onSessionLongPress != null) {
-                                { onSessionLongPress(s) }
-                            } else null,
+                            // Passed through unconditionally: SessionRow itself
+                            // decides mobile long-press vs desktop right-click.
+                            onLongPress = onSessionLongPress?.let { lp -> { lp(s) } },
                         )
                     }
                 }
@@ -343,9 +343,9 @@ fun LauncherScreen(
                             SessionLauncherCard(
                                 session = s,
                                 onClick = { onResumeSession(s) },
-                                onLongPress = if (isMobile && onSessionLongPress != null) {
-                                    { onSessionLongPress(s) }
-                                } else null,
+                                // Passed through unconditionally: SessionRow itself
+                                // decides mobile long-press vs desktop right-click.
+                                onLongPress = onSessionLongPress?.let { lp -> { lp(s) } },
                             )
                         } else if (r != null) {
                             RemoteSessionCard(remote = r, onClick = { onAttachRemote?.invoke(r) })
@@ -383,10 +383,12 @@ fun LauncherScreen(
                             health = serverHealth[server.id] ?: ServerHealth.UNKNOWN,
                             onConnect = { onConnectServer(server) },
                             onQuickConnect = onQuickConnect?.let { qc -> { qc(server) } },
-                            // Mobile: long-press opens the server context menu
-                            // (Edit / Quick connect / Delete) instead of firing
-                            // Quick Connect directly — so Edit is reachable.
-                            onLongPress = if (isMobile) onServerLongPress?.let { lp -> { lp(server) } } else null,
+                            // Long-press (mobile) or right-click (desktop) opens
+                            // the server context menu (Edit / Quick connect /
+                            // Delete) instead of firing Quick Connect directly
+                            // — so Edit is reachable either way. ServerLauncherCard
+                            // itself decides which gesture applies per platform.
+                            onLongPress = onServerLongPress?.let { lp -> { lp(server) } },
                             onEdit = { onEditServer(server) },
                             onDuplicate = onDuplicateServer?.let { dup -> { dup(server) } },
                             onDelete = { onDeleteServer(server) },
@@ -527,7 +529,12 @@ private fun SessionRow(
     val m = CRTheme.metrics
 
     CRCard(
-        modifier = Modifier.combinedClickable(onClick = onClick, onLongClick = onLongPress),
+        modifier = Modifier
+            // Long-press-to-open-menu is a mobile gesture only — a mouse
+            // press-and-hold isn't something anyone tries, so desktop stays
+            // silent here and gets the menu via secondaryClick below instead.
+            .combinedClickable(onClick = onClick, onLongClick = if (isMobile) onLongPress else null)
+            .secondaryClick(enabled = onLongPress != null) { onLongPress?.invoke() },
     ) {
         if (m.sessionCardOneLine) {
             // Dense: single row — folder · alias (folder first)
@@ -654,14 +661,18 @@ private fun ServerLauncherCard(
     val m = CRTheme.metrics
     var showDeleteConfirm by remember { mutableStateOf(false) }
 
-    // Long-press opens the context menu when provided (mobile); otherwise it
-    // falls back to Quick Connect (desktop keeps the old gesture / its buttons).
-    val longClick = onLongPress ?: onQuickConnect
+    // Long-press opens the context menu on mobile; otherwise it falls back to
+    // Quick Connect (desktop's old press-and-hold gesture / its buttons).
+    // Desktop reaches the actual context menu via right-click instead, wired
+    // below with secondaryClick — onLongPress itself is no longer mobile-gated
+    // by the caller, so it must be gated here to keep this fallback intact.
+    val mobileLongClick = if (isMobile) onLongPress else null
+    val longClick = mobileLongClick ?: onQuickConnect
     val clickModifier = if (longClick != null) {
         Modifier.combinedClickable(onClick = onConnect, onLongClick = longClick)
     } else {
         Modifier.clickable(onClick = onConnect)
-    }
+    }.secondaryClick(enabled = onLongPress != null) { onLongPress?.invoke() }
 
     CRCard(modifier = clickModifier) {
         if (m.sessionCardOneLine) {

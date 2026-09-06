@@ -229,8 +229,11 @@ internal fun SessionSidePanel(
                             renameText = label
                             renamingItem = item
                         } else null,
-                        onLongPress = if (isMobile && onSessionLongPress != null && item.tab != null) {
-                            { onSessionLongPress(item.tab.id) }
+                        // Passed through unconditionally (still requires a tab):
+                        // SidePanelSessionRow itself decides mobile long-press
+                        // vs desktop right-click.
+                        onLongPress = if (item.tab != null) {
+                            onSessionLongPress?.let { lp -> { lp(item.tab.id) } }
                         } else null,
                     )
                 }
@@ -324,8 +327,11 @@ private fun SidePanelSessionRow(
                     if (item.isConnected && item.tab != null) onTabSwitch(item.tab.id)
                     else if (item.remote != null) onAttachRemote?.invoke(item.remote)
                 },
-                onLongClick = onLongPress,
+                // Long-press-to-open-menu is a mobile gesture only; desktop
+                // opens the same menu via right-click (secondaryClick below).
+                onLongClick = if (isMobile) onLongPress else null,
             )
+            .secondaryClick(enabled = onLongPress != null) { onLongPress?.invoke() }
             .height(IntrinsicSize.Min),
         verticalAlignment = Alignment.CenterVertically,
     ) {

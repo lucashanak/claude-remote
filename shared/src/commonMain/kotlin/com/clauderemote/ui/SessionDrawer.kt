@@ -224,9 +224,10 @@ fun SessionDrawer(
                                                 onPick(s.id)
                                                 onClose()
                                             },
-                                            onLongPress = if (isMobile && onLongPressSession != null) {
-                                                { onLongPressSession(s.id) }
-                                            } else null,
+                                            // Passed through unconditionally: DrawerItem
+                                            // itself decides mobile long-press vs desktop
+                                            // right-click.
+                                            onLongPress = onLongPressSession?.let { lp -> { lp(s.id) } },
                                         )
                                     } else if (r != null) {
                                         DrawerRemoteItem(
@@ -362,7 +363,11 @@ private fun DrawerItem(
         modifier = Modifier
             .fillMaxWidth()
             .background(bg)
-            .combinedClickable(onClick = onClick, onLongClick = onLongPress),
+            // Long-press-to-open-menu is a mobile gesture only; desktop opens
+            // the same menu via right-click (secondaryClick below) instead —
+            // Android never reports a secondary button, so that's inert there.
+            .combinedClickable(onClick = onClick, onLongClick = if (isMobile) onLongPress else null)
+            .secondaryClick(enabled = onLongPress != null) { onLongPress?.invoke() },
         verticalAlignment = Alignment.CenterVertically,
     ) {
         // Left accent bar for active item
