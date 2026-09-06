@@ -78,12 +78,19 @@ class SessionOrchestrator(
                 val conn = connectionRegistry.liveTransportCount()
                 val mode = if (isInBackground) "bg" else "fg"
                 val netStr = if (net != null) {
-                    val dRx = (net.first - pRx) / 1024; val dTx = (net.second - pTx) / 1024
-                    pRx = net.first; pTx = net.second
-                    // Residual = real traffic not attributed to counted content —
-                    // i.e. SSH/ET/CF keepalives + channel framing.
-                    val residual = (dRx + dTx) - dTerm - dTr - dPoll
-                    " | appRx=${dRx}KB appTx=${dTx}KB overhead≈${residual}KB"
+                    val dRx = (net.rx - pRx) / 1024; val dTx = (net.tx - pTx) / 1024
+                    pRx = net.rx; pTx = net.tx
+                    if (net.appScoped) {
+                        // Residual = real traffic not attributed to counted content —
+                        // i.e. SSH/ET/CF keepalives + channel framing. Only meaningful
+                        // when the counter is scoped to this app (Android); a
+                        // machine-wide count (desktop) would attribute every other
+                        // process's traffic to us, so no residual is printed there.
+                        val residual = (dRx + dTx) - dTerm - dTr - dPoll
+                        " | appRx=${dRx}KB appTx=${dTx}KB overhead≈${residual}KB"
+                    } else {
+                        " | sysRx=${dRx}KB sysTx=${dTx}KB"
+                    }
                 } else ""
                 FileLogger.log(TAG, "data/60s: $mode sessions=$sessions(et=$etCount) conn=$conn | content term=${dTerm}KB tr=${dTr}KB poll=${dPoll}KB$netStr")
                 pTerm = term; pTr = tr; pPoll = pl

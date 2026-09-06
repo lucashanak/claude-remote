@@ -10,8 +10,11 @@ import java.util.concurrent.atomic.AtomicLong
  *    zlib-compresses these on the wire, so real data is a fraction of this.
  *  - [transcriptBytes] are the on-wire streamd payload (base64, and gzipped
  *    once the compressed protocol is negotiated) — close to real data.
- *  - [platformNetBytes] is the app-wide real RX/TX where the platform exposes
- *    it (Android TrafficStats); null on desktop.
+ *  - [platformNetBytes] is the real RX/TX where the platform exposes it —
+ *    per-app on Android (TrafficStats, per-UID), machine-wide on desktop (no
+ *    per-process counter without native APIs). See [NetBytes.appScoped]:
+ *    callers MUST check it before treating the numbers as this app's own
+ *    traffic, since a machine-wide count also includes every other process.
  */
 object DataMeter {
     private val terminal = AtomicLong()
@@ -30,5 +33,18 @@ object DataMeter {
     fun pollBytes(): Long = poll.get()
 }
 
-/** App-wide (rx, tx) byte counters, or null if the platform doesn't expose them. */
-expect fun platformNetBytes(): Pair<Long, Long>?
+/**
+ * Cumulative-since-boot (rx, tx) byte counters.
+ *
+ * [appScoped] tells callers whether [rx]/[tx] are scoped to this app's own
+ * traffic (true — Android, per-UID via TrafficStats) or to the whole machine
+ * (false — desktop, summed across all non-loopback interfaces since the JVM
+ * has no cheap per-process counter). A residual/"overhead" calculation that
+ * subtracts known app traffic from these counters is only meaningful when
+ * [appScoped] is true; on a machine-wide count it would attribute every other
+ * process's traffic to this app and must not be computed.
+ */
+data class NetBytes(val rx: Long, val tx: Long, val appScoped: Boolean)
+
+/** Real RX/TX byte counters, or null if the platform doesn't expose them. */
+expect fun platformNetBytes(): NetBytes?
