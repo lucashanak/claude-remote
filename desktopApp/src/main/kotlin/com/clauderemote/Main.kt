@@ -11,6 +11,7 @@ import com.clauderemote.session.RowSnapshot
 import com.clauderemote.session.ScreenStateSnapshot
 import com.clauderemote.session.SessionOrchestrator
 import com.clauderemote.session.TabManager
+import com.clauderemote.session.service.NotificationPolicy
 import com.clauderemote.storage.AppSettings
 import com.clauderemote.storage.PlatformPreferences
 import com.clauderemote.storage.ServerStorage
@@ -404,13 +405,29 @@ fun main() = application {
         else readJediTermFullText(termWidget)
     }
 
+    // Named (rather than inline in the Window(...) call below) so the
+    // notification-suppression rule can read windowState.isMinimized.
+    val windowState = rememberWindowState(width = 1000.dp, height = 700.dp)
+    // Whether the app window is focused, mirroring Android's isAppInForeground.
+    // Wired up from inside the Window content below (a WindowFocusListener on
+    // the real AWT window — WindowState itself carries no focus flag). Read
+    // here via the `by remember` delegate, which is just a State getter and
+    // works fine from this plain (non-composable) callback lambda.
+    var windowFocused by remember { mutableStateOf(true) }
+
     // Desktop notifications. On Linux the AWT SystemTray balloon renders as an
     // ugly, text-less mini window (the toolkit has no real freedesktop backend),
     // so we use `notify-send` — the universal D-Bus (org.freedesktop.Notifications)
     // path that KDE Plasma, GNOME, XFCE et al. implement natively. macOS/Windows
     // keep the AWT tray balloon, which works acceptably there.
-    sessionOrchestrator.onClaudeNeedsInput = { _, hint, _, _ ->
-        if (appSettings.notificationsEnabled) sendDesktopNotification(hint)
+    sessionOrchestrator.onClaudeNeedsInput = { _, hint, isActiveTab, _ ->
+        // Same suppression rule Android's MainActivity applies: don't notify
+        // about a session the user is already looking at. A minimized window
+        // counts as not-foreground even if it never lost AWT focus.
+        val appForeground = windowFocused && !windowState.isMinimized
+        if (NotificationPolicy.shouldNotify(appForeground, isActiveTab, appSettings.notificationsEnabled)) {
+            sendDesktopNotification(hint)
+        }
     }
 
     val appIcon = remember {
@@ -450,8 +467,21 @@ fun main() = application {
         },
         title = "Claude Remote",
         icon = appIcon?.let { androidx.compose.ui.graphics.painter.BitmapPainter(it) },
-        state = rememberWindowState(width = 1000.dp, height = 700.dp)
+        state = windowState
     ) {
+        // Track window focus for the notification-suppression rule above.
+        // WindowFocusListener is the direct AWT signal Compose Desktop
+        // exposes for this — one listener wired/torn down here rather than
+        // scattered per-callback.
+        DisposableEffect(window) {
+            val listener = object : java.awt.event.WindowFocusListener {
+                override fun windowGainedFocus(e: java.awt.event.WindowEvent) { windowFocused = true }
+                override fun windowLostFocus(e: java.awt.event.WindowEvent) { windowFocused = false }
+            }
+            window.addWindowFocusListener(listener)
+            windowFocused = window.isFocused
+            onDispose { window.removeWindowFocusListener(listener) }
+        }
         // Force dark titlebar on macOS so it matches the app chrome.
         if (System.getProperty("os.name").lowercase().contains("mac")) {
             androidx.compose.runtime.SideEffect {
