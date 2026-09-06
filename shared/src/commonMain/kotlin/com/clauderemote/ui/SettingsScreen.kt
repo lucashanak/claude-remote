@@ -12,6 +12,7 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import com.clauderemote.model.ClaudeMode
 import com.clauderemote.model.ClaudeModel
@@ -414,13 +415,17 @@ fun SettingsScreen(
                 )
             }
 
-            // ── Voice (Android only) ───────────────────────────────────────
-            // The desktop actual of WakeWordSettingsCard is empty (no STT/TTS
-            // there yet), so keep the header off desktop too — otherwise the
-            // screen shows a "Voice" heading with nothing underneath it.
+            // ── Voice ───────────────────────────────────────────────────────
+            // Mobile gets the full card: engine pickers, server config, the
+            // on-device voices, the wake word. Desktop has none of those
+            // choices to make — read-aloud is the OS synthesiser and dictation
+            // is Soniox — so it gets its own short card with the three
+            // settings its buttons actually read.
+            SectionHeader("Voice")
             if (isMobile) {
-                SectionHeader("Voice")
                 WakeWordSettingsCard(settings)
+            } else {
+                DesktopVoiceCard(settings)
             }
 
             // ── About ───────────────────────────────────────────────────────
@@ -490,6 +495,65 @@ fun SettingsScreen(
             }
 
             Spacer(Modifier.height(32.dp))
+        }
+    }
+}
+
+// ── Desktop voice card ─────────────────────────────────────────────────────────
+
+/**
+ * The desktop half of Voice. Desktop preferences are a local file and are NOT
+ * synced from the phone, so without this the Soniox key could only be set by
+ * hand-editing ~/.claude-remote/settings.properties — and the mic button,
+ * which hides itself while the key is blank, could never appear at all.
+ *
+ * Only three settings are here because only three are read on desktop:
+ * read-aloud drives the OS synthesiser (`say`, `spd-say`, `espeak-ng`), which
+ * needs no key, no server and no voice list — just a speed.
+ */
+@Composable
+private fun DesktopVoiceCard(settings: AppSettings) {
+    val c = CRTheme.colors
+    var sonioxKey by remember { mutableStateOf(settings.sonioxApiKey) }
+    var silenceSec by remember { mutableStateOf(settings.dictationSilenceMs / 1000) }
+    var speechRatePct by remember { mutableStateOf(settings.ttsSpeechRatePct) }
+
+    CRCard {
+        Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            Text(
+                "Read aloud uses the system speech synthesiser (say on macOS, " +
+                    "spd-say or espeak-ng on Linux). Dictation streams to Soniox " +
+                    "and needs an API key.",
+                style = CRType.bodyDim,
+                color = c.textDim,
+            )
+            OutlinedTextField(
+                value = sonioxKey,
+                onValueChange = { sonioxKey = it; settings.sonioxApiKey = it },
+                label = { Text("Soniox API key") },
+                singleLine = true,
+                visualTransformation = PasswordVisualTransformation(),
+                modifier = Modifier.fillMaxWidth(),
+            )
+            Text(
+                "The mic button appears next to the prompt once a key is set — " +
+                    "go back to a session to pick it up.",
+                style = CRType.monoTiny,
+                color = c.textDim.copy(alpha = 0.7f),
+            )
+            SettingsSlider(
+                label = "Dictation silence (s)",
+                value = silenceSec,
+                range = 1..10,
+                onValueChange = { silenceSec = it; settings.dictationSilenceMs = it * 1000 },
+            )
+            SettingsSlider(
+                label = "Reading speed %",
+                value = speechRatePct,
+                range = 50..300,
+                step = 10,
+                onValueChange = { speechRatePct = it; settings.ttsSpeechRatePct = it },
+            )
         }
     }
 }
