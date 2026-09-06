@@ -192,7 +192,12 @@ internal object DesktopSpeech {
             // leaves anything already queued in speech-dispatcher AUDIBLE, so
             // the losing utterance would talk over the winner — the exact
             // outcome this claim exists to prevent.
-            cancelPlayback(playback)
+            // Kill the client ONLY. `spd-say -C` is a global cancel with no
+            // per-client scope, so firing it here would wipe the daemon's queue
+            // — including the winner's message, which is the one the user asked
+            // for last. Overlapping audio in this sub-10ms race is the lesser
+            // evil; silence is not.
+            cancelPlayback(playback, cancelQueued = false)
             FileLogger.log(TAG, "dropped ${cmd.program} utterance — another card took the speaker")
             return null
         }
@@ -231,11 +236,16 @@ internal object DesktopSpeech {
         cancelPlayback(playback)
     }
 
-    /** Kills a playback and silences whatever it already handed to the OS. */
-    private fun cancelPlayback(playback: Playback) {
-        // Closing stdin first: every other path leaves the pipe through
-        // `outputStream.use`, and a synthesiser reading stdin can otherwise sit
-        // waiting for an EOF that the destroy alone does not deliver.
+    /**
+     * Kills a playback. [cancelQueued] additionally silences what the process
+     * already handed to the OS — right when the user asked for silence, wrong
+     * when someone else's utterance is already playing (see the lost-claim
+     * path, which passes false).
+     */
+    private fun cancelPlayback(playback: Playback, cancelQueued: Boolean = true) {
+        // Closing stdin first releases the fd promptly and gives a
+        // stdin-reading synthesiser a clean EOF; the destroy below is what
+        // actually ends it (SIGTERM), so this is hygiene, not a requirement.
         runCatching { playback.process.outputStream.close() }
         runCatching { playback.process.destroy() }
         // spd-say is only a client: the words are queued inside the
@@ -243,7 +253,7 @@ internal object DesktopSpeech {
         // stopping means telling the daemon to cancel too. Note this cancels
         // EVERY speech-dispatcher client on the machine — a screen reader
         // included; spd-say exposes no per-client cancel.
-        if (playback.program == "spd-say") {
+        if (cancelQueued && playback.program == "spd-say") {
             runCatching {
                 ProcessBuilder("spd-say", "-C")
                     .redirectErrorStream(true)

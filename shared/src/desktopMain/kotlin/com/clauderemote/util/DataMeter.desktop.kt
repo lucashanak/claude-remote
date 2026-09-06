@@ -69,8 +69,16 @@ private fun runNetstatIbn(): String? {
 // counting them alongside the physical interface double- or triple-counts
 // that traffic on a box running containers/VMs (this dev box does). Real
 // physical/Wi-Fi interfaces (eth*, en*, wlan*, wl*) are never named this way.
+// Every entry here must be traffic that ALSO crosses a physical interface and
+// would otherwise be counted twice: the tunnels (utun* is what Tailscale and
+// every macOS VPN present), the software bridges, and a link aggregate over
+// its members. NOT listed: llw0/ap1 — like awdl0 they are separate Apple
+// peer-to-peer radio paths carrying their own traffic to another device, not
+// an encapsulation of bytes leaving via en0, so excluding them would drop real
+// traffic from a total whose whole point is to be machine-wide (and would
+// contradict counting awdl0, which DataMeterTest pins).
 private val MAC_VIRTUAL_IFACE_PREFIXES =
-    listOf("utun", "ipsec", "gif", "stf", "bridge", "vmenet", "llw", "ap")
+    listOf("utun", "ipsec", "gif", "stf", "bridge", "vmenet", "bond")
 
 private val VIRTUAL_IFACE_PREFIXES = listOf(
     // Container/VM plumbing: a veth pair and the bridge it hangs off both see

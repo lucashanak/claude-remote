@@ -111,7 +111,14 @@ class SessionOrchestrator(
                     } else {
                         " | sysRx=${dRx}KB sysTx=${dTx}KB"
                     }
-                } else ""
+                } else {
+                    // A missed sample must clear the baseline, not keep it: the
+                    // next successful poll would otherwise report TWO minutes of
+                    // traffic under a line that says data/60s. Dropping it makes
+                    // the next line an honest baseline instead.
+                    pRx = null; pTx = null
+                    ""
+                }
                 FileLogger.log(TAG, "data/60s: $mode sessions=$sessions(et=$etCount) conn=$conn | content term=${dTerm}KB tr=${dTr}KB poll=${dPoll}KB$netStr")
                 pTerm = term; pTr = tr; pPoll = pl
             }
