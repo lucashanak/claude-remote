@@ -20,6 +20,10 @@ import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.combinedClickable
+import androidx.compose.ui.input.pointer.PointerEventPass
+import androidx.compose.ui.input.pointer.PointerEventType
+import androidx.compose.ui.input.pointer.isSecondaryPressed
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.ui.semantics.Role
@@ -115,14 +119,32 @@ private fun CopyButton(
     }
     Box {
         Box(
-            modifier = modifier.combinedClickable(
-                onClick = { copyFormatted() },
-                // Long-press is the only extra affordance that costs no room in
-                // a metadata row this tight; plain cards have no second option
-                // so they keep the simple tap.
-                onLongClick = if (rich) ({ menuOpen = true }) else null,
-                role = Role.Button,
-            ),
+            modifier = modifier
+                .combinedClickable(
+                    onClick = { copyFormatted() },
+                    // Long-press is the only extra affordance that costs no room
+                    // in a metadata row this tight; plain cards have no second
+                    // option so they keep the simple tap.
+                    onLongClick = if (rich) ({ menuOpen = true }) else null,
+                    role = Role.Button,
+                )
+                // Desktop opens menus with the RIGHT button, and press-and-hold
+                // with a mouse is not something anyone tries. Without this the
+                // Slack variant would be unreachable on the platform people
+                // actually paste into Slack from. Android never reports a
+                // secondary button, so this is inert there.
+                .pointerInput(rich) {
+                    if (!rich) return@pointerInput
+                    awaitPointerEventScope {
+                        while (true) {
+                            val event = awaitPointerEvent(PointerEventPass.Initial)
+                            if (event.type == PointerEventType.Press && event.buttons.isSecondaryPressed) {
+                                menuOpen = true
+                                event.changes.forEach { it.consume() }
+                            }
+                        }
+                    }
+                },
             contentAlignment = Alignment.Center,
         ) {
             Icon(
