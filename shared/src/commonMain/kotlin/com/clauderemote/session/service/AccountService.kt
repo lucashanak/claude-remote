@@ -495,6 +495,16 @@ internal class AccountService(
             "probe() { printf '===%s\\n' \"\$1\"; " +
             "if [ -z \"\$2\" ]; then \$TO claude auth status --json 2>/dev/null || true; " +
             "else CLAUDE_CONFIG_DIR=\"\$2\" \$TO claude auth status --json 2>/dev/null || true; fi; " +
+            // Renewal deadline for this login, appended as one more JSON-ish
+            // fragment the block parser already knows how to read. `auth status`
+            // does NOT report it, and it is the only thing that says how long
+            // the login has left — the app otherwise learns about an expiry
+            // exactly when Claude prints its 3-day banner into a pane the user
+            // may not be looking at (and never sees at all in Chat view).
+            // grep -o of the single field: the surrounding file holds the
+            // access and refresh TOKENS, which must never leave the server.
+            "CRED=\"\${2:-\$HOME/.claude}/.credentials.json\"; " +
+            "grep -o '\"refreshTokenExpiresAt\"[[:space:]]*:[[:space:]]*[0-9]*' \"\$CRED\" 2>/dev/null | head -1; " +
             "printf '\\n'; }; " +
             "probe ${ClaudeAccount.DEFAULT_SLUG} \"\"; " +
             "if [ -d \"\$ROOT\" ]; then for d in \"\$ROOT\"/*; do " +

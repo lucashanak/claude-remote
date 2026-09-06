@@ -18,6 +18,11 @@ import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.ContentCopy
+import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.combinedClickable
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.ui.semantics.Role
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.filled.Search
@@ -66,7 +71,14 @@ import androidx.compose.ui.unit.Density
 import kotlinx.coroutines.launch
 
 /** Small per-message button that copies [text] to the clipboard, with a brief
- *  check-mark confirmation. */
+ *  check-mark confirmation.
+ *
+ *  On [rich] content a LONG PRESS opens a second option, "Copy for Slack".
+ *  Slack, Teams and Discord drop `<table>` and everything inside it without
+ *  inserting any separator, so a copied table lands there as one run-together
+ *  string; that variant rewrites tables as aligned text in a code fence, the
+ *  one shape those targets render faithfully. See [MarkdownTables]. */
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun CopyButton(
     text: String,
@@ -79,29 +91,59 @@ private fun CopyButton(
 ) {
     val richCopy = rememberRichCopy()
     var copied by remember { mutableStateOf(false) }
+    var menuOpen by remember { mutableStateOf(false) }
     LaunchedEffect(copied) {
         if (copied) {
             kotlinx.coroutines.delay(1500)
             copied = false
         }
     }
-    IconButton(
-        onClick = {
-            // plain = the markdown source (readable + reusable). html = the
-            // rendered fragment ONLY for rich content; a blank html means
-            // plain-only copy (no HTML flavour) — right for user prompts, tool
-            // results and thinking where markdown→HTML is meaningless.
-            richCopy(text, if (rich) MarkdownHtml.toHtml(text) else "")
-            copied = true
-        },
-        modifier = modifier,
-    ) {
-        Icon(
-            imageVector = if (copied) Icons.Default.Check else Icons.Default.ContentCopy,
-            contentDescription = "Copy message",
-            tint = if (copied) CRTheme.colors.ready else tint,
-            modifier = Modifier.size(15.dp),
-        )
+    // plain = the markdown source (readable + reusable). html = the rendered
+    // fragment ONLY for rich content; a blank html means plain-only copy — right
+    // for user prompts, tool results and thinking where markdown→HTML is
+    // meaningless.
+    fun copyFormatted() {
+        richCopy(text, if (rich) MarkdownHtml.toHtml(text) else "")
+        copied = true
+    }
+    // Both flavours come from ONE transformed source, so a plain paste
+    // (⌘⇧V) gets the aligned table too, not just the rich one.
+    fun copyForSlack() {
+        val flattened = MarkdownTables.alignTablesAsCodeBlocks(text)
+        richCopy(flattened, MarkdownHtml.toHtml(flattened))
+        copied = true
+    }
+    Box {
+        Box(
+            modifier = modifier.combinedClickable(
+                onClick = { copyFormatted() },
+                // Long-press is the only extra affordance that costs no room in
+                // a metadata row this tight; plain cards have no second option
+                // so they keep the simple tap.
+                onLongClick = if (rich) ({ menuOpen = true }) else null,
+                role = Role.Button,
+            ),
+            contentAlignment = Alignment.Center,
+        ) {
+            Icon(
+                imageVector = if (copied) Icons.Default.Check else Icons.Default.ContentCopy,
+                contentDescription = "Copy message",
+                tint = if (copied) CRTheme.colors.ready else tint,
+                modifier = Modifier.size(15.dp),
+            )
+        }
+        if (rich) {
+            DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
+                DropdownMenuItem(
+                    text = { Text("Copy formatted", style = CRType.mono) },
+                    onClick = { menuOpen = false; copyFormatted() },
+                )
+                DropdownMenuItem(
+                    text = { Text("Copy for Slack (tables aligned)", style = CRType.mono) },
+                    onClick = { menuOpen = false; copyForSlack() },
+                )
+            }
+        }
     }
 }
 

@@ -21,6 +21,18 @@ data class ClaudeAccount(
      * [claudeConfigDirFor].
      */
     val isDefault: Boolean = false,
+    /**
+     * Epoch ms at which this login's REFRESH token dies, or 0 when the probe
+     * couldn't read it. This is the deadline behind Claude's own
+     * "Your login expires in N days · run /login to renew" banner: the access
+     * token (`expiresAt`) rolls over on its own every few hours, the refresh
+     * token does not.
+     *
+     * Read from the account's `.credentials.json` on the server. Only this
+     * NUMBER crosses the wire — see AccountService's probe, which greps the
+     * field out rather than shipping the file.
+     */
+    val loginExpiresAtMs: Long = 0L,
 ) {
     /** Primary UI label. Falls back to the slug for an account we couldn't probe. */
     val label: String get() = email.ifBlank { slug }
@@ -47,9 +59,42 @@ data class ClaudeAccount(
     val subtitle: String
         get() = listOf(orgName, subscriptionType).filter { it.isNotBlank() }.joinToString(" · ")
 
+    /**
+     * Whole days until this login must be renewed, or null when [loginExpiresAtMs]
+     * is unknown. Negative means it has already lapsed — surfaced as "expired"
+     * rather than clamped to 0, because "renew today" and "you are locked out"
+     * are different messages.
+     *
+     * Rounded DOWN so it never over-promises: 23 hours left reads as 0 days.
+     */
+    fun loginExpiresInDays(nowMs: Long): Int? {
+        if (loginExpiresAtMs <= 0L) return null
+        val remaining = loginExpiresAtMs - nowMs
+        return if (remaining < 0) {
+            // -1 day at the moment of lapse (floor of a negative), not 0.
+            ((remaining - DAY_MS + 1) / DAY_MS).toInt()
+        } else {
+            (remaining / DAY_MS).toInt()
+        }
+    }
+
+    /** True once the login is inside [LOGIN_EXPIRY_WARN_DAYS] (or already lapsed). */
+    fun loginNeedsRenewal(nowMs: Long): Boolean =
+        loginExpiresInDays(nowMs)?.let { it <= LOGIN_EXPIRY_WARN_DAYS } == true
+
     companion object {
         /** Slug reserved for the default `~/.claude` login. */
         const val DEFAULT_SLUG = "default"
+
+        private const val DAY_MS = 24L * 60 * 60 * 1000
+
+        /**
+         * How early to start nagging. Claude's own banner appears at 3 days;
+         * this is deliberately wider so the warning survives a weekend away
+         * from the phone, and so a second account you rarely open still gets
+         * noticed before it locks you out mid-session.
+         */
+        const val LOGIN_EXPIRY_WARN_DAYS = 7
 
         /** Server-side root holding one config dir per non-default account. */
         const val ACCOUNTS_ROOT = "~/.claude-remote/accounts"
