@@ -1,6 +1,7 @@
 package com.clauderemote.session.service
 
 import com.clauderemote.model.ClaudeAccount
+import com.clauderemote.model.UsageBucket
 import com.clauderemote.model.claudeConfigDirFor
 import com.clauderemote.session.CostCalculator
 import com.clauderemote.session.TabManager
@@ -72,6 +73,17 @@ internal class UsageService(
     val sessionResetMin: kotlinx.coroutines.flow.StateFlow<Map<String, Int>> = _sessionResetMin
     private val _weekResetMin = kotlinx.coroutines.flow.MutableStateFlow<Map<String, Int>>(emptyMap())
     val weekResetMin: kotlinx.coroutines.flow.StateFlow<Map<String, Int>> = _weekResetMin
+
+    /**
+     * EVERY rate-limit window the usage endpoint reported, keyed by [usageKey] —
+     * the 5h and weekly pair the chips already show, plus the per-model caps
+     * (Fable's weekly limit) that had nowhere to go before. Fed only by the
+     * endpoint, never by the statusline scrape, so a bucket here is always a
+     * first-party number.
+     */
+    private val _usageBuckets =
+        kotlinx.coroutines.flow.MutableStateFlow<Map<String, List<UsageBucket>>>(emptyMap())
+    val usageBuckets: kotlinx.coroutines.flow.StateFlow<Map<String, List<UsageBucket>>> = _usageBuckets
 
     // Per-SERVER periodic polling jobs (keyed by server id). Usage (ccusage is
     // account-wide) and latency (all sessions share the physical link) are
@@ -215,38 +227,30 @@ internal class UsageService(
         try {
             if (json.isBlank() || json.trim() == "{}") return
 
-            val fiveHourObj = Regex("\"five_hour\"\\s*:\\s*\\{([^}]*)\\}").find(json)?.groupValues?.get(1)
-            val sevenDayObj = Regex("\"seven_day\"\\s*:\\s*\\{([^}]*)\\}").find(json)?.groupValues?.get(1)
+            val buckets = parseUsageBuckets(json, System.currentTimeMillis())
+            if (buckets.isNotEmpty()) _usageBuckets.update { it + (key to buckets) }
 
-            val utilRegex = Regex("\"utilization\"\\s*:\\s*([\\d.]+)")
-            val resetRegex = Regex("\"resets_at\"\\s*:\\s*\"([^\"]+)\"")
-
-            val fiveHour = fiveHourObj?.let { utilRegex.find(it)?.groupValues?.get(1) }
-                ?.toDoubleOrNull()?.roundToInt()?.coerceIn(0, 100)
-            val weekly = sevenDayObj?.let { utilRegex.find(it)?.groupValues?.get(1) }
-                ?.toDoubleOrNull()?.roundToInt()?.coerceIn(0, 100)
-            val fiveHourResetsAt = fiveHourObj?.let { resetRegex.find(it)?.groupValues?.get(1) }
-            val weeklyResetsAt = sevenDayObj?.let { resetRegex.find(it)?.groupValues?.get(1) }
+            // The chips' two windows come out of the SAME parse — a second pair
+            // of regexes over the same payload could only ever drift from it.
+            val fiveHourBucket = buckets.firstOrNull { it.key == UsageBucket.KEY_FIVE_HOUR }
+            val weeklyBucket = buckets.firstOrNull { it.key == UsageBucket.KEY_SEVEN_DAY }
+            val fiveHour = fiveHourBucket?.percent
+            val weekly = weeklyBucket?.percent
 
             val update = mutableMapOf<String, Int>()
             fiveHour?.let { update["session"] = it }
             weekly?.let { update["week"] = it }
-            fiveHourResetsAt?.let { iso ->
-                isoToEpochMillis(iso)?.let { ms ->
-                    update["session_reset_min"] =
-                        ((ms - System.currentTimeMillis()) / 60000).toInt().coerceAtLeast(0)
-                }
-            }
-            weeklyResetsAt?.let { iso ->
-                isoToEpochMillis(iso)?.let { ms ->
-                    update["week_reset_min"] =
-                        ((ms - System.currentTimeMillis()) / 60000).toInt().coerceAtLeast(0)
-                }
-            }
+            fiveHourBucket?.resetMin?.let { update["session_reset_min"] = it }
+            weeklyBucket?.resetMin?.let { update["week_reset_min"] = it }
 
             if (update.isEmpty()) return
             applyStatusline(key, update)
-            FileLogger.log(TAG, "RateLimit[$key]: 5h=${fiveHour}% wk=${weekly}%")
+            // Log the model caps by their RAW key: the payload's naming is the
+            // one thing this parser can't pin down from here, and the log is
+            // what tells us when a bucket gets renamed.
+            val extra = _usageBuckets.value[key].orEmpty().filter { it.isModelCap }
+                .joinToString(" ") { "${it.key}=${it.percent}%" }
+            FileLogger.log(TAG, "RateLimit[$key]: 5h=${fiveHour}% wk=${weekly}%${if (extra.isBlank()) "" else " $extra"}")
         } catch (e: Exception) {
             FileLogger.error(TAG, "RateLimit parse failed: ${e.message}", e)
         }
@@ -281,6 +285,41 @@ internal class UsageService(
      * key's serverId field — no string prefix matching, so a server whose id is a
      * prefix of another's is never caught in the sweep.
      */
+    /**
+     * Fetch one login's rate limits ONCE and publish them, for a screen that
+     * wants numbers for accounts nothing is currently polling.
+     *
+     * Deliberately not a poll loop: this endpoint's quota belongs to the ACCOUNT
+     * and is shared with the OMC statusline, so putting every listed login on a
+     * 60s timer would trip 429s for the logins the user is actually working
+     * under (see the backoff in [startServerRateLimitPolling]). The all-accounts
+     * page therefore fetches on open and on an explicit refresh, and otherwise
+     * renders whatever the running pollers publish.
+     *
+     * @return false when there was no live connection, the probe timed out, or
+     *   the endpoint answered 429 — the caller shows the last known numbers.
+     */
+    suspend fun fetchRateLimitsOnce(serverId: String, accountSlug: String?): Boolean {
+        val sshSession = registry.liveServerSession(serverId) ?: return false
+        return try {
+            val output = execReadWithWatchdog(
+                sshSession,
+                rateLimitCmd(serverConfigDir(accountSlug)),
+                totalMs = 10_000,
+            )
+            if (isRateLimited(output)) {
+                FileLogger.log(TAG, "one-shot usage fetch 429 for ${usageKey(serverId, accountSlug)}")
+                false
+            } else {
+                parseRateLimitJson(usageKey(serverId, accountSlug), output)
+                true
+            }
+        } catch (e: Exception) {
+            FileLogger.log(TAG, "one-shot usage fetch failed: ${e.message}")
+            false
+        }
+    }
+
     fun stopPolling(serverId: String) {
         usagePollingJobs.remove(serverId)?.cancel()
         rateLimitPollingJobs.keys.filter { it.serverId == serverId }.forEach { key ->
@@ -303,6 +342,39 @@ internal class UsageService(
         private const val RATE_LIMIT_POLL_MS = 60_000L
         private const val RATE_LIMIT_BACKOFF_MS = 120_000L
         private const val RATE_LIMIT_BACKOFF_MAX_MS = 600_000L
+
+        // Leading `-` is captured so a nonsensical negative clamps to 0 instead
+        // of matching the digits after the sign and reading as +3%.
+        private val BUCKET_UTIL_REGEX = Regex("\"utilization\"\\s*:\\s*(-?[\\d.]+)")
+        private val BUCKET_RESET_REGEX = Regex("\"resets_at\"\\s*:\\s*\"([^\"]+)\"")
+
+        /**
+         * Every `{utilization, resets_at}` window in a usage payload, ordered for
+         * display. Key-agnostic (see [UsageBucket]): a bucket the endpoint adds or
+         * renames shows up without a code change, which is the point — the
+         * premium-model cap's key has already moved once with the model lineup.
+         *
+         * `[^{}]*` bounds each match to an INNERMOST object, so an enclosing
+         * wrapper object can't swallow its siblings into one bogus bucket, and an
+         * object with no `utilization` (e.g. an `error` body) is dropped rather
+         * than reported as 0%.
+         */
+        internal fun parseUsageBuckets(json: String, nowMs: Long): List<UsageBucket> =
+            UsageBucket.order(
+                Regex("\"([a-z0-9_]+)\"\\s*:\\s*\\{([^{}]*)\\}")
+                    .findAll(json)
+                    .mapNotNull { m ->
+                        val body = m.groupValues[2]
+                        val pct = BUCKET_UTIL_REGEX.find(body)?.groupValues?.get(1)
+                            ?.toDoubleOrNull()?.roundToInt()?.coerceIn(0, 100)
+                            ?: return@mapNotNull null
+                        val resetMin = BUCKET_RESET_REGEX.find(body)?.groupValues?.get(1)
+                            ?.let { iso -> isoToEpochMillis(iso) }
+                            ?.let { ms -> ((ms - nowMs) / 60000).toInt().coerceAtLeast(0) }
+                        UsageBucket(key = m.groupValues[1], percent = pct, resetMin = resetMin)
+                    }
+                    .toList()
+            )
 
         fun usageKey(serverId: String, accountSlug: String?): String =
             if (accountSlug.isNullOrBlank() || accountSlug == ClaudeAccount.DEFAULT_SLUG) serverId

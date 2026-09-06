@@ -113,6 +113,7 @@ fun buildPaletteActions(
     // Navigation
     actions.add(PaletteAction("nav_settings", "Open Settings", "Navigation") { onNavigate("settings") })
     actions.add(PaletteAction("nav_dashboard", "Open Usage Dashboard", "Navigation") { onNavigate("dashboard") })
+    actions.add(PaletteAction("nav_account_usage", "Open Usage by Account", "Navigation") { onNavigate("account-usage") })
     actions.add(PaletteAction("nav_logs", "Open Logs", "Navigation") { onNavigate("logs") })
     actions.add(PaletteAction("nav_launcher", "Back to Launcher", "Navigation") { onNavigate("launcher") })
 

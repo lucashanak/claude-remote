@@ -259,6 +259,19 @@ class SessionOrchestrator(
     val sessionResetMin: kotlinx.coroutines.flow.StateFlow<Map<String, Int>> get() = usageService.sessionResetMin
     val weekResetMin: kotlinx.coroutines.flow.StateFlow<Map<String, Int>> get() = usageService.weekResetMin
 
+    /** Every rate-limit window per login (5h, weekly, model caps) — owned by usageService. */
+    val usageBuckets: kotlinx.coroutines.flow.StateFlow<Map<String, List<com.clauderemote.model.UsageBucket>>>
+        get() = usageService.usageBuckets
+
+    /**
+     * One-shot usage fetch for a login nothing is polling — used by the
+     * all-accounts usage page on open and on refresh. Returns false when the
+     * numbers couldn't be refreshed (no connection, timeout, or a 429 from a
+     * quota shared with the statusline), leaving the last known values on screen.
+     */
+    suspend fun refreshAccountUsage(serverId: String, accountSlug: String?): Boolean =
+        usageService.fetchRateLimitsOnce(serverId, accountSlug)
+
     /**
      * Key into the four usage maps above for one LOGIN on one server. The 5h and
      * weekly limits belong to the account, not the machine, so a session running
@@ -292,6 +305,10 @@ class SessionOrchestrator(
     // Active Claude `/login` OAuth flow detected on the current screen, or null —
     // owned by notificationService (fed by InputPromptDetector.onLoginDetected).
     val loginFlow: kotlinx.coroutines.flow.StateFlow<com.clauderemote.model.LoginFlowState?> get() = notificationService.loginFlow
+
+    /** Sessions showing Claude's "login expires in N days" banner, by session id. */
+    val loginExpiryWarnings: kotlinx.coroutines.flow.StateFlow<Map<String, com.clauderemote.model.LoginExpiryWarning>>
+        get() = notificationService.loginExpiryWarnings
 
     /** Clear the login card for [sessionId] (user submitted the code or cancelled). */
     fun clearLoginFlow(sessionId: String) = notificationService.clearLoginFlow(sessionId)

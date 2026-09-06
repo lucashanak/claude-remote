@@ -230,6 +230,18 @@ fun AccountsScreen(
                                             accountColorStorage.set(account.slug, accent)
                                             accountColors = accountColorStorage.assign(accounts.map { it.slug })
                                         },
+                                        onRelogin = selectedServer?.let { srv ->
+                                            {
+                                                // Same path as the add flow, minus provisioning —
+                                                // the dir already exists (and the default account
+                                                // must never get one).
+                                                scope.launch {
+                                                    pendingLoginSlug = account.slug
+                                                    sessionOrchestrator.startClaudeAccountLogin(srv.id, account.slug)
+                                                }
+                                                Unit
+                                            }
+                                        },
                                     )
                                 }
                             }
@@ -432,8 +444,15 @@ private fun AccountRow(
     onRemove: (() -> Unit)?,
     selectedColor: com.clauderemote.ui.theme.CRAccent? = null,
     onPickColor: ((com.clauderemote.ui.theme.CRAccent) -> Unit)? = null,
+    /** Re-run the OAuth login for THIS account (renewal, or repairing a logged-out dir). */
+    onRelogin: (() -> Unit)? = null,
+    nowMs: Long = System.currentTimeMillis(),
 ) {
     val c = CRTheme.colors
+    // Renewal state from the account's own refresh-token deadline (read by the
+    // probe from .credentials.json). Unknown ⇒ no badge at all: an account we
+    // couldn't read must not be nagged about, only one we know is running out.
+    val expiryDays = account.loginExpiresInDays(nowMs)
     Row(
         modifier = Modifier.fillMaxWidth(),
         horizontalArrangement = Arrangement.SpaceBetween,
@@ -448,10 +467,34 @@ private fun AccountRow(
                 if (account.isDefault) {
                     Pill(text = "DEFAULT", background = c.tintAccent, foreground = c.accent)
                 }
+                // Only inside the warning window — a login with three weeks left
+                // is not news, and a badge on every row would train the user to
+                // ignore the one that matters.
+                if (expiryDays != null && expiryDays <= ClaudeAccount.LOGIN_EXPIRY_WARN_DAYS) {
+                    val expired = expiryDays < 0
+                    Pill(
+                        text = if (expired) "VYPRŠELO" else "${expiryDays}D",
+                        background = if (expired) c.tintRed else c.tintYellow,
+                        foreground = if (expired) c.disconnected else c.working,
+                    )
+                }
             }
-            if (account.subtitle.isNotBlank()) {
+            val subtitleParts = listOfNotNull(
+                account.subtitle.takeIf { it.isNotBlank() },
+                expiryDays?.let { d ->
+                    when {
+                        d < 0 -> "přihlášení vypršelo"
+                        d == 0 -> "přihlášení vyprší dnes"
+                        d == 1 -> "přihlášení vyprší za 1 den"
+                        d in 2..4 -> "přihlášení vyprší za $d dny"
+                        else -> "přihlášení vyprší za $d dní"
+                    }
+                },
+            )
+            if (subtitleParts.isNotEmpty()) {
                 Text(
-                    account.subtitle, style = CRType.bodyDim, color = c.textDim,
+                    subtitleParts.joinToString(" · "), style = CRType.bodyDim,
+                    color = if (expiryDays != null && expiryDays <= ClaudeAccount.LOGIN_EXPIRY_WARN_DAYS) c.working else c.textDim,
                     maxLines = 1, overflow = TextOverflow.Ellipsis,
                 )
             }
@@ -477,6 +520,19 @@ private fun AccountRow(
                             .clickable { onPickColor(accent) },
                     )
                 }
+            }
+        }
+        if (onRelogin != null) {
+            // The only way to re-authenticate an EXISTING account. Until this
+            // existed, `startLogin` was reachable from "+ Add account" alone, so
+            // renewing a seat meant either doing it inside a session or removing
+            // and re-adding the account (which throws away its config dir).
+            TextButton(onClick = onRelogin) {
+                Text(
+                    if (expiryDays != null && expiryDays <= ClaudeAccount.LOGIN_EXPIRY_WARN_DAYS) "Obnovit" else "Přihlásit",
+                    style = CRType.pill,
+                    color = c.accent,
+                )
             }
         }
         if (onRemove != null) {

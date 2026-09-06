@@ -301,6 +301,41 @@ class InputPromptDetectorParsingTest {
         assertEquals("Hello", InputPromptDetector.stripAnsi(input))
     }
 
+    // ---- parseLoginExpiry ----
+
+    @Test
+    fun loginExpiryBannerIsRecognisedWithItsDayCount() {
+        // Verbatim from a real session banner (Claude Code v2.1.243).
+        val screen = " ⚠ Your login expires in 3 days · run /login to renew"
+        val w = InputPromptDetector.parseLoginExpiry("s1", screen)
+        assertEquals("s1", w?.sessionId)
+        assertEquals(3, w?.days)
+    }
+
+    @Test
+    fun loginExpiryBannerSurvivesColourAndSingularWording() {
+        val colored = "[33m ⚠ Your login expires in 1 day · run /login to renew[0m"
+        assertEquals(1, InputPromptDetector.parseLoginExpiry("s2", colored)?.days)
+    }
+
+    @Test
+    fun aRewordedBannerStillWarnsEvenWithoutADayCount() {
+        // The banner is scraped TUI chrome, so the day count is treated as a
+        // bonus: losing the number must not lose the warning.
+        val w = InputPromptDetector.parseLoginExpiry("s3", "⚠ Your login expires soon · run /login to renew")
+        assertEquals("s3", w?.sessionId)
+        assertNull(w?.days)
+    }
+
+    @Test
+    fun ordinaryScreensDoNotWarn() {
+        assertNull(InputPromptDetector.parseLoginExpiry("s4", "❯ write me a haiku about tmux"))
+        assertNull(InputPromptDetector.parseLoginExpiry("s5", ""))
+        // "/login" alone (e.g. the slash-command palette listing it) is NOT a
+        // warning — the anchor is the expiry wording.
+        assertNull(InputPromptDetector.parseLoginExpiry("s6", "/login    Authentication"))
+    }
+
     @Test
     fun stripAnsi_endToEnd_coloredStatuslineStillParsesAfterFeeding() {
         // feedRecentOutput strips ANSI internally before buffering; a

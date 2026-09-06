@@ -147,6 +147,8 @@ fun TerminalScreen(
     hookActiveSessions: Set<String> = emptySet(),
     reconnectStatus: Map<String, com.clauderemote.session.ReconnectInfo> = emptyMap(),
     loginFlow: com.clauderemote.model.LoginFlowState? = null,
+    /** Claude's renewal banner for the ACTIVE session, when it is on screen. */
+    loginExpiry: com.clauderemote.model.LoginExpiryWarning? = null,
     onOpenLoginUrl: (String) -> Unit = {},
     onSubmitLoginCode: (String) -> Unit = {},
     onCancelLogin: () -> Unit = {},
@@ -818,6 +820,44 @@ fun TerminalScreen(
                                 TextButton(onClick = { onReconnect(activeSession.id) }) {
                                     Text("Reconnect", color = c.accent)
                                 }
+                            }
+                        }
+                    }
+                }
+
+                // Renewal warning. Claude prints "Your login expires in N days ·
+                // run /login to renew" into the session banner, which is raw
+                // terminal chrome — it never reaches the transcript, so in Chat
+                // view the user had no way to learn their seat was about to
+                // lapse. Suppressed while the login card is up, since at that
+                // point the renewal is already under way.
+                val expiryWarning = loginExpiry?.takeIf {
+                    it.sessionId == activeSession?.id &&
+                        !(loginFlow != null && loginFlow.sessionId == activeSession?.id)
+                }
+                if (expiryWarning != null) {
+                    // Yellow, matching Claude's own warning colour for this
+                    // banner — and deliberately not red: nothing is broken yet.
+                    Surface(color = c.tintYellow) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 6.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        ) {
+                            Text(
+                                when (val d = expiryWarning.days) {
+                                    null -> "Přihlášení brzy vyprší"
+                                    0 -> "Přihlášení vyprší dnes"
+                                    1 -> "Přihlášení vyprší za 1 den"
+                                    in 2..4 -> "Přihlášení vyprší za $d dny"
+                                    else -> "Přihlášení vyprší za $d dní"
+                                } + (activeAccountLabel?.let { " · $it" } ?: ""),
+                                style = CRType.bodyDim,
+                                color = c.text,
+                                modifier = Modifier.weight(1f),
+                            )
+                            if (onLogin != null) {
+                                TextButton(onClick = onLogin) { Text("Obnovit", color = c.accent) }
                             }
                         }
                     }

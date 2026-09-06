@@ -1,5 +1,6 @@
 package com.clauderemote.session
 
+import com.clauderemote.model.LoginExpiryWarning
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -68,6 +69,21 @@ class InputPromptDetector(
      * or null when it has cleared. Never logs the URL (it carries the auth code seam).
      */
     var onLoginDetected: ((sessionId: String, url: String?) -> Unit)? = null
+
+    /**
+     * Fires with the day count when Claude's own "Your login expires in N days ·
+     * run /login to renew" banner is on screen, or null when it has cleared.
+     *
+     * Worth scraping even though [AccountService] reads the real deadline out of
+     * `.credentials.json`: the banner is per-SESSION and appears in the pane the
+     * user is looking at, while the credentials read is per-account and only
+     * refreshes when the accounts list is loaded. It is also the only signal
+     * that survives a login the app doesn't know about (an account logged in
+     * from a shell). `days` inside the warning is null when the banner is
+     * present but its count didn't parse — the warning still shows, just
+     * without a number; a null WARNING means no banner on screen.
+     */
+    var onLoginExpiryWarning: ((sessionId: String, warning: LoginExpiryWarning?) -> Unit)? = null
 
     /** Fired on every quiescence check (WORKING / IDLE / UNKNOWN) so UI can update activity dots. */
     var onStateChange: ((sessionId: String, state: ClaudeState) -> Unit)? = null
@@ -144,6 +160,14 @@ class InputPromptDetector(
         } else {
             onLoginDetected?.invoke(sessionId, null)
         }
+
+        // Expiry warning. Claude prints it in the session banner, which is near
+        // the TOP of the screen and scrolls away, so unlike the login markers it
+        // is read from the full screen when one is available. Nothing else in
+        // the app sees it: it is terminal chrome, not transcript content, so a
+        // user living in Chat view would never be warned at all.
+        val expiryHaystack = fullScreenReader?.invoke(sessionId) ?: bottomText
+        onLoginExpiryWarning?.invoke(sessionId, parseLoginExpiry(sessionId, expiryHaystack))
 
         when (classified) {
             ClaudeState.UNKNOWN -> scheduleRecheck(state, sessionId)
@@ -430,6 +454,29 @@ class InputPromptDetector(
         // Claude /login prints an OAuth authorize URL; recovered from the
         // de-wrapped full screen so the hard row-wrapping doesn't split it.
         private val LOGIN_URL_REGEX = Regex("""https://[^\s]*oauth/authorize[^\s]*""")
+
+        /**
+         * Claude's renewal banner: "Your login expires in 3 days · run /login to
+         * renew", with "in 1 day" and "today"/"soon" variants.
+         *
+         * Matched loosely on purpose — this is scraped TUI chrome, not an API.
+         * The anchor is "login expires" (plus the `/login` call-to-action as an
+         * alternative anchor); the day count is optional so a reworded banner
+         * still warns instead of going silent, which is the failure mode that
+         * matters here.
+         */
+        private val LOGIN_EXPIRY_REGEX =
+            Regex("""login\s+expires?\b|expires?\s+in\s+\d+\s+days?\s*[·|-]?\s*run\s+/login""", RegexOption.IGNORE_CASE)
+        private val LOGIN_EXPIRY_DAYS_REGEX =
+            Regex("""expires?\s+in\s+(\d+)\s+days?""", RegexOption.IGNORE_CASE)
+
+        /** The banner as a warning, or null when it isn't on screen. */
+        internal fun parseLoginExpiry(sessionId: String, screen: String): LoginExpiryWarning? {
+            val text = stripAnsi(screen)
+            if (!LOGIN_EXPIRY_REGEX.containsMatchIn(text)) return null
+            val days = LOGIN_EXPIRY_DAYS_REGEX.find(text)?.groupValues?.get(1)?.toIntOrNull()
+            return LoginExpiryWarning(sessionId, days)
+        }
 
         fun stripAnsi(text: String): String = ANSI_REGEX.replace(text, "")
 

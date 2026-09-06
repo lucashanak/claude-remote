@@ -124,11 +124,18 @@ internal class AccountService(
             FileLogger.error(TAG, "startLogin refused: bad slug '$slug'", null)
             return@withContext false
         }
-        // Provision FIRST and unconditionally: launching `claude` against a
-        // missing/unseeded dir makes it run the onboarding wizard (which then
-        // demands a second login) and lets it create REAL settings.json/plugins/
-        // where the symlinks belong. provisionAccount is idempotent.
-        if (!provisionAccount(serverId, slug)) return@withContext false
+        // Provision FIRST: launching `claude` against a missing/unseeded dir
+        // makes it run the onboarding wizard (which then demands a second
+        // login) and lets it create REAL settings.json/plugins/ where the
+        // symlinks belong. provisionAccount is idempotent.
+        //
+        // Except for the DEFAULT login, which lives in ~/.claude and has no dir
+        // under accounts/ at all: provisioning it would create the stray
+        // `accounts/default` that parseAccounts then has to dedupe away, and
+        // its `claude auth login` deliberately runs with CLAUDE_CONFIG_DIR
+        // unset (see ClaudeConfig.configDirPrefix). Renewing the default seat
+        // is a normal thing to want — it is the one every fresh install uses.
+        if (slug != ClaudeAccount.DEFAULT_SLUG && !provisionAccount(serverId, slug)) return@withContext false
         try {
             withServerSession(serverId) { sess ->
                 execReadWithWatchdog(
@@ -461,10 +468,18 @@ internal class AccountService(
         orgName = jsonString(json, "orgName"),
         subscriptionType = jsonString(json, "subscriptionType"),
         isDefault = slug == ClaudeAccount.DEFAULT_SLUG,
+        // Appended by the probe from .credentials.json; absent on an account
+        // that has never logged in (or whose credentials the probe couldn't
+        // read), which reads as "unknown" rather than "expired".
+        loginExpiresAtMs = jsonLong(json, "refreshTokenExpiresAt"),
     )
 
     private fun jsonString(json: String, key: String): String =
         Regex("\"$key\"\\s*:\\s*\"([^\"]*)\"").find(json)?.groupValues?.get(1) ?: ""
+
+    /** Unquoted numeric field; 0 when absent or unparseable ("unknown"). */
+    private fun jsonLong(json: String, key: String): Long =
+        Regex("\"$key\"\\s*:\\s*(\\d+)").find(json)?.groupValues?.get(1)?.toLongOrNull() ?: 0L
 
         /**
          * An SSH exec channel gets a NON-login shell, so `~/.local/bin` (where

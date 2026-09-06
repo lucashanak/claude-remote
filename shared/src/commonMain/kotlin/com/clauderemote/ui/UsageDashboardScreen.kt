@@ -38,7 +38,13 @@ fun UsageDashboardScreen(
     weekUsagePercent: Int?,
     usageTokens: CostCalculator.UsageTokens?,
     daily: List<Float> = emptyList(),
-    onBack: () -> Unit
+    onBack: () -> Unit,
+    /**
+     * Opens the per-account page. The bars on THIS screen can only show the
+     * active session's login, so with several seats provisioned they answer
+     * "how much is left" for one account and say nothing about the others.
+     */
+    onPerAccountUsage: (() -> Unit)? = null,
 ) {
     val c = CRTheme.colors
     val m = CRTheme.metrics
@@ -134,6 +140,12 @@ fun UsageDashboardScreen(
                     percent = weekUsagePercent,
                     description = if (weekUsagePercent != null) "${weekUsagePercent}% used" else "No data"
                 )
+                if (onPerAccountUsage != null) {
+                    TextButton(
+                        onClick = onPerAccountUsage,
+                        contentPadding = PaddingValues(horizontal = 0.dp),
+                    ) { Text("Usage podle účtů (5h, weekly, Fable) →", color = c.accent) }
+                }
             }
 
             // ── Cost breakdown ──────────────────────────────────────────────

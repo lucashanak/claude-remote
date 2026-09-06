@@ -78,6 +78,11 @@ internal class NotificationService(
                 next
             }
         }
+        onLoginExpiryWarning = { sid, warning ->
+            _loginExpiryWarnings.update { cur ->
+                if (warning == null) cur - sid else cur + (sid to warning)
+            }
+        }
     }
 
     // Sessions whose idle/working state is driven by the Claude Code Stop hook
@@ -197,6 +202,18 @@ internal class NotificationService(
 
     /** Clear the login card for [sessionId] (user submitted the code or cancelled). */
     fun clearLoginFlow(sessionId: String) { _loginFlow.update { if (it?.sessionId == sessionId) null else it } }
+
+    /**
+     * Sessions currently showing Claude's renewal banner, keyed by session id.
+     * A MAP rather than the single value [loginFlow] uses: every session on the
+     * expiring login shows the banner, and the user may be looking at any of
+     * them. Entries clear themselves on the next screen check once the banner
+     * is gone (i.e. right after a successful `/login`).
+     */
+    private val _loginExpiryWarnings =
+        kotlinx.coroutines.flow.MutableStateFlow<Map<String, com.clauderemote.model.LoginExpiryWarning>>(emptyMap())
+    val loginExpiryWarnings: kotlinx.coroutines.flow.StateFlow<Map<String, com.clauderemote.model.LoginExpiryWarning>> =
+        _loginExpiryWarnings
 
     // ---- Claude Code Stop-hook integration ----
 

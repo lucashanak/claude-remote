@@ -54,7 +54,8 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 enum class Screen {
-    LAUNCHER, CONNECT, TERMINAL, SETTINGS, LOG_VIEWER, USAGE_DASHBOARD, HISTORY, ACCOUNTS
+    LAUNCHER, CONNECT, TERMINAL, SETTINGS, LOG_VIEWER, USAGE_DASHBOARD, HISTORY, ACCOUNTS,
+    ACCOUNT_USAGE,
 }
 
 @Composable
@@ -164,6 +165,7 @@ fun App(
     val serverHealth by sessionOrchestrator.serverHealth.collectAsState()
     val reconnectStatus by sessionOrchestrator.reconnectStatus.collectAsState()
     val loginFlow by sessionOrchestrator.loginFlow.collectAsState()
+    val loginExpiryWarnings by sessionOrchestrator.loginExpiryWarnings.collectAsState()
 
     var serverList by remember { mutableStateOf(serverStorage.loadServers()) }
     val tabs by tabManager.tabs.collectAsState()
@@ -1299,6 +1301,7 @@ fun App(
                         hookActiveSessions = hookActiveSessions,
                         reconnectStatus = reconnectStatus,
                         loginFlow = loginFlow,
+                        loginExpiry = activeTabId?.let { loginExpiryWarnings[it] },
                         onOpenLoginUrl = { url -> onOpenUrl?.invoke(url) },
                         onSubmitLoginCode = { code ->
                             val clean = code.filterNot { it.isWhitespace() }
@@ -1325,6 +1328,7 @@ fun App(
                             currentScreen = when (target) {
                                 "settings" -> Screen.SETTINGS
                                 "dashboard" -> Screen.USAGE_DASHBOARD
+                                "account-usage" -> Screen.ACCOUNT_USAGE
                                 "logs" -> Screen.LOG_VIEWER
                                 "launcher" -> Screen.LAUNCHER
                                 else -> Screen.LAUNCHER
@@ -1480,7 +1484,18 @@ fun App(
                         sessionUsagePercent = activeServerId?.let { sessionUsagePercents[it] },
                         weekUsagePercent = activeServerId?.let { weekUsagePercents[it] },
                         usageTokens = usageTokensState,
-                        onBack = { currentScreen = Screen.LAUNCHER }
+                        onBack = { currentScreen = Screen.LAUNCHER },
+                        onPerAccountUsage = { currentScreen = Screen.ACCOUNT_USAGE },
+                    )
+                }
+
+                Screen.ACCOUNT_USAGE -> {
+                    AccountUsageScreen(
+                        servers = serverList,
+                        sessionOrchestrator = sessionOrchestrator,
+                        accountColorStorage = accountColorStorage,
+                        onBack = { currentScreen = Screen.USAGE_DASHBOARD },
+                        onManageAccounts = { currentScreen = Screen.ACCOUNTS },
                     )
                 }
 

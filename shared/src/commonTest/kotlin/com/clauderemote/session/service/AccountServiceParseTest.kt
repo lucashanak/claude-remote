@@ -86,6 +86,45 @@ class AccountServiceParseTest {
     }
 
     @Test
+    fun readsTheRenewalDeadlineAppendedByTheProbe() {
+        // The probe greps ONE field out of .credentials.json and appends it to the
+        // block; `auth status` itself never reports it. Shape is exactly what
+        // `grep -o '"refreshTokenExpiresAt"[[:space:]]*:[[:space:]]*[0-9]*'` emits.
+        val out = "===default\n" + statusJson("me@example.com", "Mine") + "\n" +
+            "\"refreshTokenExpiresAt\":1789693630335\n"
+        val a = parse(out).single()
+        assertEquals(1789693630335L, a.loginExpiresAtMs)
+        // 10 days out ⇒ 10 whole days left, and not yet worth nagging about.
+        val tenDaysEarlier = 1789693630335L - 10L * 24 * 60 * 60 * 1000
+        assertEquals(10, a.loginExpiresInDays(tenDaysEarlier))
+        assertTrue(!a.loginNeedsRenewal(tenDaysEarlier))
+        // Inside the warn window, and past it.
+        val twoDaysEarlier = 1789693630335L - 2L * 24 * 60 * 60 * 1000
+        assertTrue(a.loginNeedsRenewal(twoDaysEarlier))
+        assertTrue(a.loginNeedsRenewal(1789693630335L + 1))
+    }
+
+    @Test
+    fun aLoginWithNoReadableDeadlineIsUnknownNotExpired() {
+        // No credentials file (never logged in, or unreadable) must not render as
+        // "expired" — that would nag the user to re-login on every listing.
+        val a = parse("===default\n" + statusJson("me@example.com", "Mine") + "\n").single()
+        assertEquals(0L, a.loginExpiresAtMs)
+        assertEquals(null, a.loginExpiresInDays(1789693630335L))
+        assertTrue(!a.loginNeedsRenewal(1789693630335L))
+    }
+
+    @Test
+    fun anExpiredLoginReportsNegativeDays() {
+        val out = "===old\n\"refreshTokenExpiresAt\":1000000000000\n"
+        val a = parse(out).single()
+        // Exactly at the deadline is still "today", one ms past it is -1.
+        assertEquals(0, a.loginExpiresInDays(1000000000000L))
+        assertEquals(-1, a.loginExpiresInDays(1000000000001L))
+        assertEquals(-2, a.loginExpiresInDays(1000000000000L + 24L * 60 * 60 * 1000 + 1))
+    }
+
+    @Test
     fun loggedOutAccountKeepsItsSlugAndHasNoLabels() {
         val out = "===stale-account\n" +
             """{"loggedIn": false, "authMethod": "none", "apiProvider": "firstParty"}""" + "\n"
