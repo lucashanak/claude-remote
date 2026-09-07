@@ -321,11 +321,15 @@ private object TerminalScroll {
     }
 }
 
+// LocalWindowExceptionHandlerFactory and friends (used below to log Compose's
+// own render exceptions) are still experimental in Compose 1.7.
+@OptIn(androidx.compose.ui.ExperimentalComposeUiApi::class)
 fun main() = application {
     // Init logging
     val logDir = File(System.getProperty("user.home"), ".claude-remote")
     logDir.mkdirs()
     FileLogger.init(logDir, System.getProperty("jpackage.app-version") ?: "dev")
+    installCrashLogging()
 
     val prefs = PlatformPreferences()
     val serverStorage = ServerStorage(prefs)
@@ -482,6 +486,23 @@ fun main() = application {
             windowFocused = window.isFocused
             onDispose { window.removeWindowFocusListener(listener) }
         }
+        // A Compose exception during composition, layout or draw goes to
+        // WindowExceptionHandler, whose default shows a modal Swing "Error"
+        // dialog and logs NOTHING — the dialog then blocks the EDT, so the app
+        // looks frozen with a half-painted frame and the shipped log has no
+        // trace of why. Log it first, then hand it to the default so the
+        // visible behaviour is unchanged.
+        androidx.compose.runtime.CompositionLocalProvider(
+            androidx.compose.ui.window.LocalWindowExceptionHandlerFactory provides
+                androidx.compose.ui.window.WindowExceptionHandlerFactory { w ->
+                    val default = androidx.compose.ui.window.DefaultWindowExceptionHandlerFactory
+                        .exceptionHandler(w)
+                    androidx.compose.ui.window.WindowExceptionHandler { t ->
+                        FileLogger.error("Desktop", "Compose window exception: ${t.message}", t)
+                        default.onException(t)
+                    }
+                }
+        ) {
         // Force dark titlebar on macOS so it matches the app chrome.
         if (System.getProperty("os.name").lowercase().contains("mac")) {
             androidx.compose.runtime.SideEffect {
@@ -709,6 +730,25 @@ fun main() = application {
                 )
             }
         )
+        }
+    }
+}
+
+/**
+ * Send crashes on ordinary threads to the shipped log. Android has done this
+ * since its App.kt; desktop had nothing, so a background-thread crash left the
+ * same silence a Compose one did. Chains to whatever handler was already set
+ * rather than replacing it.
+ */
+private fun installCrashLogging() {
+    val previous = Thread.getDefaultUncaughtExceptionHandler()
+    Thread.setDefaultUncaughtExceptionHandler { thread, throwable ->
+        try {
+            FileLogger.error("Crash", "Uncaught on ${thread.name}: ${throwable.message}", throwable)
+        } catch (_: Throwable) {
+            // Never let logging a crash cause another one.
+        }
+        previous?.uncaughtException(thread, throwable)
     }
 }
 

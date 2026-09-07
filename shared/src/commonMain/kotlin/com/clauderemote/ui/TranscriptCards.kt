@@ -13,6 +13,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.selection.DisableSelection
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material.icons.Icons
@@ -156,14 +157,21 @@ private fun CopyButton(
         }
         if (rich) {
             DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
-                DropdownMenuItem(
-                    text = { Text("Copy formatted", style = CRType.mono) },
-                    onClick = { menuOpen = false; copyFormatted() },
-                )
-                DropdownMenuItem(
-                    text = { Text("Copy for Slack (tables aligned)", style = CRType.mono) },
-                    onClick = { menuOpen = false; copyForSlack() },
-                )
+                // A DropdownMenu is a Popup: its own layout root, but the
+                // transcript's SelectionContainer reaches it through the
+                // inherited locals. Menu labels are nothing anyone wants to
+                // select, so keep them out of that registrar entirely rather
+                // than risk the cross-root crash described at the table dialog.
+                DisableSelection {
+                    DropdownMenuItem(
+                        text = { Text("Copy formatted", style = CRType.mono) },
+                        onClick = { menuOpen = false; copyFormatted() },
+                    )
+                    DropdownMenuItem(
+                        text = { Text("Copy for Slack (tables aligned)", style = CRType.mono) },
+                        onClick = { menuOpen = false; copyForSlack() },
+                    )
+                }
             }
         }
     }
@@ -1114,36 +1122,53 @@ private fun CRMarkdownTable(model: com.mikepenz.markdown.compose.components.Mark
             properties = DialogProperties(usePlatformDefaultWidth = false),
         ) {
             Surface(modifier = Modifier.fillMaxSize(), color = c.bg) {
-                Column(modifier = Modifier.fillMaxSize()) {
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(12.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Text("Tabulka", style = CRType.cardTitle, color = c.text)
-                        Spacer(Modifier.weight(1f))
-                        Text(
-                            "✕",
+                // The dialog's OWN selection scope. A Dialog inherits
+                // composition locals from its call site, so without this the
+                // Texts below register with the transcript's SelectionContainer
+                // out in the main window — a registrar whose selectables would
+                // then span two layout roots. The first selection sorts them,
+                // Compose maps one root's coordinates into the other's, and
+                // NodeCoordinator.findCommonAncestor kills the frame with
+                // "layouts are not part of the same hierarchy". On desktop that
+                // surfaces as Compose's modal Error dialog, which blocks the
+                // EDT and freezes the whole app.
+                SelectionContainer {
+                    Column(modifier = Modifier.fillMaxSize()) {
+                        // Title bar out of the selection scope: the table cells
+                        // are what people copy, and a drag on ✕ should close the
+                        // dialog rather than start a selection.
+                        DisableSelection {
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(12.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text("Tabulka", style = CRType.cardTitle, color = c.text)
+                                Spacer(Modifier.weight(1f))
+                                Text(
+                                    "✕",
+                                    modifier = Modifier
+                                        .clickable { expanded = false }
+                                        .padding(8.dp),
+                                    style = CRType.cardTitle,
+                                    color = c.text
+                                )
+                            }
+                        }
+                        Box(
                             modifier = Modifier
-                                .clickable { expanded = false }
-                                .padding(8.dp),
-                            style = CRType.cardTitle,
-                            color = c.text
-                        )
-                    }
-                    Box(
-                        modifier = Modifier
-                            .fillMaxSize()
-                            .verticalScroll(rememberScrollState())
-                    ) {
-                        TableGrid(
-                            header = cleanedHeader,
-                            body = cleanedBody,
-                            numCols = numCols,
-                            maxColWidth = 520.dp,
-                            modifier = Modifier.horizontalScroll(rememberScrollState()),
-                        )
+                                .fillMaxSize()
+                                .verticalScroll(rememberScrollState())
+                        ) {
+                            TableGrid(
+                                header = cleanedHeader,
+                                body = cleanedBody,
+                                numCols = numCols,
+                                maxColWidth = 520.dp,
+                                modifier = Modifier.horizontalScroll(rememberScrollState()),
+                            )
+                        }
                     }
                 }
             }
