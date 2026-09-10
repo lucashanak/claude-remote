@@ -57,25 +57,90 @@ object WearNotifier {
     }
 
     /**
+     * Tělo notifikace pro session. Preference (drží se kontraktu s
+     * telefonem): `summary` (jednořádkové LLM shrnutí) → `notifyBody` (tělo,
+     * které telefon vyřešil pro právě dokončený tah) → useknutá
+     * `lastMessage`. Surová `lastMessage` bývá klidně 7000+ znaků a na
+     * hodinkách je k ničemu; navíc je to jen snapshot v okamžiku pushe, takže
+     * je ze všech tří nejnáchylnější na zastarání.
+     *
+     * Public, protože [WearDataListenerService] podle hashe tohohle textu
+     * pozná, že dorazilo OPRAVENÉ tělo pro tentýž tah, a notifikaci přepíše.
+     */
+    fun bodyFor(session: WearSessionInfo): String {
+        session.summary?.takeIf { it.isNotBlank() }?.let { return it }
+        session.notifyBody?.takeIf { it.isNotBlank() }?.let { return truncate(it) }
+        val last = session.lastMessage?.takeIf { it.isNotBlank() } ?: return ""
+        return truncate(last)
+    }
+
+    private fun truncate(text: String): String =
+        if (text.length > 100) text.take(100) + "…" else text
+
+    /**
+     * Stabilní id notifikace pro session. Vlastní bázový offset, disjunktní
+     * od telefonního `0x4000_0000 or (hash and 0x3FFF_FFFF)` v AlertNotifier:
+     * oba moduly mají stejný applicationId, takže při zapnutém bridgingu by
+     * si holý `sessionId.hashCode()` a telefonní id mohly kolidovat a jedna
+     * notifikace by přepsala druhou. Hodinky drží 0x2000_0000..0x3FFF_FFFF,
+     * telefon 0x4000_0000..0x7FFF_FFFF.
+     *
+     * Šířka masky (2^29 kbelíků místo dřívějších 32768) není kosmetika: při
+     * 32768 kbelících má už ~21 souběžných session přes půl procenta šanci
+     * na kolizi, a kolize znamená, že jedna session přepíše notifikaci druhé.
+     */
+    private fun notifIdFor(sessionId: String): Int = 0x2000_0000 or (sessionId.hashCode() and 0x1FFF_FFFF)
+
+    /**
+     * Visí notifikace pro tuhle session ještě na zápěstí? `getActiveNotifications`
+     * vrací jen notifikace téhle appky a přežije i restart procesu (drží je
+     * systém), takže je to spolehlivější než cokoliv vlastního.
+     *
+     * Při chybě vrací false = "nevisí", takže se tichá oprava radši zahodí,
+     * než aby zabzučela za něco vyřízeného: `setOnlyAlertOnce` totiž ztiší
+     * jen AKTUALIZACI už zobrazené notifikace, na znovuvyvěšení té smetené
+     * nemá vliv.
+     */
+    fun isShowing(context: Context, sessionId: String): Boolean {
+        val nm = context.getSystemService(NotificationManager::class.java) ?: return false
+        val id = notifIdFor(sessionId)
+        return runCatching { nm.activeNotifications.any { it.id == id } }
+            .onFailure { e -> WearLog.w(context, TAG, "activeNotifications failed: ${e.message}") }
+            .getOrDefault(false)
+    }
+
+    /**
      * Posts (or replaces — stable id keyed on the session) the notification
      * for a session that's waiting on the user. Shape depends on the kind of
      * wait: APPROVAL_NEEDED gets Y/N action buttons + a full-screen wake,
      * WAITING_FOR_INPUT gets an inline text reply.
+     *
+     * [silentUpdate] mapuje na `setOnlyAlertOnce` — na už vyvěšenou
+     * notifikaci se jen přepíše text, bez druhého bzučení (oprava
+     * zastaralého těla). Na PRVNÍM vyvěšení nemá flag žádný efekt, takže jím
+     * nelze omylem ztišit celý první alert.
+     * [bodyOverride] používá chybová cesta z [WearActionReceiver] —
+     * notifikace se vrátí i s napsaným textem, aby šlo odeslání zopakovat.
+     * [replacesActivity] je aktivita, ve které notifikace pro tuhle session
+     * právě visí (null = nevisí / nevíme) — viz kanálový trik níž.
      */
-    fun notifySession(context: Context, session: WearSessionInfo) {
+    fun notifySession(
+        context: Context,
+        session: WearSessionInfo,
+        silentUpdate: Boolean = false,
+        bodyOverride: String? = null,
+        replacesActivity: String? = null,
+    ) {
         ensureChannels(context)
         // notify() is a silent no-op without POST_NOTIFICATIONS on API 33+;
         // don't crash on the missing permission, just log and bail (the app
         // requests it on launch — see MainActivity.requestNotificationPermission).
-        if (Build.VERSION.SDK_INT >= 33 &&
-            ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) !=
-            PackageManager.PERMISSION_GRANTED
-        ) {
+        if (!canPost(context)) {
             WearLog.w(context, TAG, "notifySession skipped for ${session.id}: POST_NOTIFICATIONS not granted")
             return
         }
 
-        val notifId = session.id.hashCode()
+        val notifId = notifIdFor(session.id)
         val contentPending = PendingIntent.getActivity(
             context,
             requestCode(session.id, "content"),
@@ -83,15 +148,10 @@ object WearNotifier {
             PendingIntent.FLAG_UPDATE_CURRENT or immutableFlag(),
         )
 
-        // Notification body: preferuj LLM `summary` (krátké, jednořádkové) —
-        // surová `lastMessage` bývá klidně 7000+ znaků a na hodinkách je k
-        // ničemu. Když summary chybí (starší phone build / vypnuto / selhalo
-        // shrnutí), spadni na useknutou lastMessage jako dřív.
-        val body = session.summary?.takeIf { it.isNotBlank() }
-            ?: session.lastMessage?.take(100)?.let { if ((session.lastMessage?.length ?: 0) > 100) "$it…" else it }
-            ?: ""
+        val body = bodyOverride ?: bodyFor(session)
 
-        val builder = NotificationCompat.Builder(context, channelFor(session.activity))
+        val channel = channelFor(session.activity)
+        val builder = NotificationCompat.Builder(context, channel)
             // A mipmap (color launcher icon) as the status-bar small icon
             // isn't the textbook monochrome silhouette, but it's the only
             // in-repo icon and matches the app's identity; InstallResultReceiver
@@ -103,18 +163,100 @@ object WearNotifier {
             .setStyle(NotificationCompat.BigTextStyle().bigText(body))
             .setContentIntent(contentPending)
             .setAutoCancel(true)
+            .setOnlyAlertOnce(silentUpdate)
 
         when (session.activity) {
             "APPROVAL_NEEDED" -> buildApproval(context, builder, session)
             "WAITING_FOR_INPUT" -> buildReply(context, builder, session)
         }
 
+        // Kanál už vyvěšené notifikace NELZE změnit tím, že se na stejné id
+        // vyvěsí znovu — tenhle projekt to má draze zaplacené na telefonu
+        // (viz AlertNotifier kdoc: alert zůstal tiše viset na LOW kanálu a
+        // nikdy nezazvonil). Přesně to potká upgrade WAITING -> APPROVAL:
+        // tlačítka Ano/Ne i full-screen intent by naskočily, ale eskalace na
+        // IMPORTANCE_HIGH ne. Když se kanál mění, notifikaci proto nejdřív
+        // zruš, ať vznikne opravdu nový záznam.
+        // ...jenže zrušení + vyvěšení je z pohledu systému NOVÁ notifikace,
+        // takže setOnlyAlertOnce už nic neztiší. Ruš proto jen při
+        // eskalaci, kde o zabzučení stojíme (WAITING -> APPROVAL). Opačný
+        // směr (APPROVAL -> WAITING při přepnutí tabu na telefonu) nechej
+        // viset na původním kanálu a jen tiše přepiš obsah — tam by nový
+        // záznam znamenal bzučení za degradaci požadavku.
+        val channelChanged = replacesActivity != null && channelFor(replacesActivity) != channel
+        if (channelChanged && !silentUpdate) {
+            NotificationManagerCompat.from(context).cancel(notifId)
+        }
         NotificationManagerCompat.from(context).notify(notifId, builder.build())
-        WearLog.i(context, TAG, "Posted notification for ${session.id} (${session.activity})")
+        WearLog.i(
+            context, TAG,
+            "Posted notification for ${session.id} (${session.activity}) " +
+                "silentUpdate=$silentUpdate channelChanged=$channelChanged",
+        )
+    }
+
+    /**
+     * Odeslání na telefon selhalo — vrať notifikaci zpět. Dřív se rušila
+     * bezpodmínečně, takže po "No phone connected" zůstalo zápěstí prázdné a
+     * nadiktovaná odpověď byla nenávratně pryč. Když session pořád známe,
+     * vyvěsíme ji v plné podobě včetně akce "Odpovědět", takže jde rovnou
+     * zkusit znovu; napsaný text jde do těla, aby ho šlo přečíst. Když ji
+     * neznáme (proces mezitím přišel o repository), aspoň holé oznámení, že
+     * se to neodeslalo.
+     *
+     * [unconfirmed] rozlišuje "opravdu to selhalo" od "vypršel timeout, ale
+     * odeslání může doběhnout" — v druhém případě se hlásí "Nepotvrzeno",
+     * aby uživatel neposílal totéž podruhé.
+     */
+    fun notifySendFailure(
+        context: Context,
+        sessionId: String,
+        pendingText: String?,
+        error: String,
+        unconfirmed: Boolean = false,
+    ) {
+        val body = buildString {
+            // "Nepotvrzeno" ≠ "Neodesláno": po vypršení timeoutu může
+            // round-trip přes Play Services doběhnout a odpověď DORAZIT.
+            // Tvrdit v tu chvíli "neodesláno" svádí uživatele odeslat to
+            // znovu, takže by Claude dostal totéž dvakrát.
+            append(if (unconfirmed) "⚠ Nepotvrzeno: " else "⚠ Neodesláno: ")
+            append(error)
+            if (!pendingText.isNullOrBlank()) {
+                append("\n")
+                append(pendingText)
+            }
+        }
+        val session = SessionRepository.sessions.value.firstOrNull { it.id == sessionId }
+        if (session != null) {
+            notifySession(context, session, silentUpdate = false, bodyOverride = body)
+            return
+        }
+        ensureChannels(context)
+        if (!canPost(context)) {
+            WearLog.w(context, TAG, "notifySendFailure skipped for $sessionId: POST_NOTIFICATIONS not granted")
+            return
+        }
+        val builder = NotificationCompat.Builder(context, CHANNEL_WAITING)
+            .setSmallIcon(R.mipmap.ic_launcher)
+            .setContentTitle("Claude Remote")
+            .setContentText(body)
+            .setStyle(NotificationCompat.BigTextStyle().bigText(body))
+            .setContentIntent(
+                PendingIntent.getActivity(
+                    context,
+                    requestCode(sessionId, "content"),
+                    deepLinkIntent(context, sessionId),
+                    PendingIntent.FLAG_UPDATE_CURRENT or immutableFlag(),
+                )
+            )
+            .setAutoCancel(true)
+        NotificationManagerCompat.from(context).notify(notifIdFor(sessionId), builder.build())
+        WearLog.i(context, TAG, "Posted send-failure notification for $sessionId: $error")
     }
 
     fun cancelSession(context: Context, sessionId: String) {
-        NotificationManagerCompat.from(context).cancel(sessionId.hashCode())
+        NotificationManagerCompat.from(context).cancel(notifIdFor(sessionId))
     }
 
     /**
@@ -155,7 +297,22 @@ object WearNotifier {
             wakeIntent,
             PendingIntent.FLAG_UPDATE_CURRENT or immutableFlag(),
         )
-        builder.setFullScreenIntent(fullScreenPending, true)
+        // canUseFullScreenIntent() existuje až od API 34 — pod ním se
+        // omezení USE_FULL_SCREEN_INTENT na volací/budíkové appky netýká,
+        // takže to ber jako povolené. Stejný gate (a stejný warning) jako
+        // InstallResultReceiver: bez něj se schválení tiše degraduje na
+        // heads-up, spící hodinky se neprobudí a v logu o tom není ani řádka.
+        val nm = context.getSystemService(NotificationManager::class.java)
+        val canUseFsi = Build.VERSION.SDK_INT < Build.VERSION_CODES.UPSIDE_DOWN_CAKE ||
+            (nm != null && nm.canUseFullScreenIntent())
+        if (canUseFsi) {
+            builder.setFullScreenIntent(fullScreenPending, true)
+        } else {
+            WearLog.w(
+                context, TAG,
+                "canUseFullScreenIntent() false — approval for ${session.id} falls back to heads-up only",
+            )
+        }
 
         // I approval jde diktovat: Soniox nejde spustit z notifikace (chce
         // appku v popředí + mic), tak deep-linkni do detailu a rovnou nastartuj.
@@ -228,6 +385,14 @@ object WearNotifier {
     // Distinct request codes per (session, action) — a shared code would let
     // one session's PendingIntent overwrite another's extras on FLAG_UPDATE_CURRENT.
     private fun requestCode(sessionId: String, action: String): Int = (sessionId + ":" + action).hashCode()
+
+    // notify() je bez POST_NOTIFICATIONS na API 33+ tichý no-op; nepadat na
+    // chybějícím oprávnění, jen zalogovat a nevyvěsit (MainActivity o něj
+    // žádá při startu a odmítnutí ukazuje v seznamu session).
+    private fun canPost(context: Context): Boolean =
+        Build.VERSION.SDK_INT < 33 ||
+            ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) ==
+            PackageManager.PERMISSION_GRANTED
 
     // S+ requires callers to declare mutability explicitly; below that the
     // flag doesn't exist, so pass 0.

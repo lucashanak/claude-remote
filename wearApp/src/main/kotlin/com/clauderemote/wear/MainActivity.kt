@@ -56,6 +56,8 @@ import androidx.wear.input.RemoteInputIntentHelper
 import com.google.android.gms.wearable.DataMapItem
 import com.google.android.gms.wearable.MessageClient
 import com.google.android.gms.wearable.Wearable
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
 import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.json.Json
 
@@ -65,7 +67,38 @@ private const val KEY_REPLY = "reply_text"
 // unknown keys so an older/newer phone build can't break decoding.
 private val HISTORY_JSON = Json { ignoreUnknownKeys = true }
 
+/**
+ * Bylo POST_NOTIFICATIONS odmítnuto? Bez něj je `notify()` na API 33+ tichý
+ * no-op: dlaždice i seznam v appce jedou dál, ale zápěstí ztichne a nikde se
+ * uživatel nedozví proč. Držíme to jako flow, ať to jde ukázat v seznamu
+ * session.
+ */
+object NotificationPermissionState {
+    private val _denied = MutableStateFlow(false)
+    val denied: StateFlow<Boolean> = _denied
+
+    fun refresh(context: Context) {
+        if (android.os.Build.VERSION.SDK_INT < 33) {
+            _denied.value = false
+            return
+        }
+        _denied.value = ContextCompat.checkSelfPermission(
+            context, android.Manifest.permission.POST_NOTIFICATIONS,
+        ) != PackageManager.PERMISSION_GRANTED
+    }
+}
+
 class MainActivity : ComponentActivity() {
+    // Registrace musí proběhnout dřív, než Activity dosáhne STARTED — proto
+    // inicializátor pole, ne volání v onCreate. Nahrazuje dřívější
+    // requestPermissions() bez onRequestPermissionsResult, kde se odpověď
+    // uživatele zahodila.
+    private val notificationPermissionLauncher =
+        registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+            NotificationPermissionState.refresh(this)
+            WearLog.i(this, "WearMainActivity", "POST_NOTIFICATIONS granted=$granted")
+        }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         requestNotificationPermission()
@@ -102,16 +135,22 @@ class MainActivity : ComponentActivity() {
      * install-confirm notifications never appeared. Ask once on launch.
      */
     private fun requestNotificationPermission() {
+        NotificationPermissionState.refresh(this)
         if (android.os.Build.VERSION.SDK_INT < 33) return
-        if (ContextCompat.checkSelfPermission(
-                this, android.Manifest.permission.POST_NOTIFICATIONS,
-            ) == PackageManager.PERMISSION_GRANTED
-        ) return
+        if (!NotificationPermissionState.denied.value) return
         runCatching {
-            androidx.core.app.ActivityCompat.requestPermissions(
-                this, arrayOf(android.Manifest.permission.POST_NOTIFICATIONS), 1001,
-            )
+            notificationPermissionLauncher.launch(android.Manifest.permission.POST_NOTIFICATIONS)
+        }.onFailure { e ->
+            WearLog.w(this, "WearMainActivity", "POST_NOTIFICATIONS request failed: ${e.message}")
         }
+    }
+
+    // Uživatel mohl oprávnění přehodit v systémovém nastavení, aniž by appka
+    // umřela — po návratu do popředí se stav přečte znovu, ať banner v
+    // seznamu nelže.
+    override fun onResume() {
+        super.onResume()
+        NotificationPermissionState.refresh(this)
     }
 }
 
@@ -166,6 +205,7 @@ private fun SessionListScreen(
 ) {
     val context = LocalContext.current
     val hasLoaded by SessionRepository.hasLoaded.collectAsState()
+    val notificationsDenied by NotificationPermissionState.denied.collectAsState()
 
     // Optimistic default (true) so the banner doesn't flash on app start
     // before the first node probe below has a chance to run.
@@ -210,6 +250,18 @@ private fun SessionListScreen(
         ) {
             if (!phoneConnected) {
                 item { Text("⚠ Telefon není připojen", color = Color(0xFFFF5C5C)) }
+            }
+            // Bez POST_NOTIFICATIONS je notify() tichý no-op — seznam a
+            // dlaždice jedou dál, ale zápěstí ztichne. Bez tohohle řádku
+            // nebylo jak se to dozvědět.
+            if (notificationsDenied) {
+                item {
+                    Text(
+                        "⚠ Notifikace jsou vypnuté v nastavení hodinek",
+                        color = Color(0xFFFFB74D),
+                        fontSize = 13.sp,
+                    )
+                }
             }
             // Záměrně BEZ "aktualizováno před X": telefon pushuje jen při
             // ZMĚNĚ session (+ DataItem dedup), takže čas od posledního pushe
@@ -721,7 +773,15 @@ private fun fetchInitialSessions(context: Context) {
                 val json = item?.let { DataMapItem.fromDataItem(it).dataMap.getString(WearDataListenerService.KEY_JSON) }
                 if (json != null) {
                     val payload = WearDataListenerService.WEAR_JSON.decodeFromString<WearSessionsPayload>(json)
-                    SonioxKeyStore.update(payload.sonioxApiKey, payload.sonioxVoice, payload.ttsSpeedPct)
+                    // Všechny ČTYŘI hodnoty — bez poslední by se dictationSilenceMs
+                    // vrátilo na default 4000 a přepsalo to, co telefon nasynchronizoval
+                    // (SonioxKeyStore.update bere jakoukoli hodnotu v 1000..10000).
+                    SonioxKeyStore.update(
+                        payload.sonioxApiKey,
+                        payload.sonioxVoice,
+                        payload.ttsSpeedPct,
+                        payload.dictationSilenceMs,
+                    )
                     SessionRepository.update(payload.sessions)
                     WearLog.i(context, "WearMainActivity", "fetchInitialSessions: loaded ${payload.sessions.size} sessions")
                 }

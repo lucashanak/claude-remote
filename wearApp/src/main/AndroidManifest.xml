@@ -36,6 +36,21 @@
             android:name="com.google.android.wearable.standalone"
             android:value="true" />
 
+        <!-- Telefonní i hodinkový modul mají stejné applicationId
+             ("com.clauderemote.android"), takže Wear OS bridging je páruje
+             jako jednu appku a KAŽDÝ telefonní alert se sám propsal na
+             zápěstí — vedle notifikace, kterou si hodinky posílají samy.
+             Jedno dokončení = dvě notifikace, každá s jiným tělem a jinými
+             akcemi. NO_BRIDGING nechává telefonní alert na telefonu a
+             zápěstí patří hodinkové notifikaci, která je bohatší (Ano/Ne,
+             inline odpověď, 🎤 Diktovat, full-screen probuzení).
+             Kompromis: bez nainstalované hodinkové appky by uživateli na
+             zápěstí nepřišlo nic — což je tady jedno, protože tohle
+             nastavení čte právě jen ta hodinková appka. -->
+        <meta-data
+            android:name="com.google.android.wearable.notificationBridgeMode"
+            android:value="NO_BRIDGING" />
+
         <activity
             android:name="com.clauderemote.wear.MainActivity"
             android:exported="true"

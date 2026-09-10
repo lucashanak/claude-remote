@@ -23,6 +23,15 @@ data class WearSessionInfo(
     // vygenerovat nebo je vypnuté) — default null drží zpětnou kompatibilitu
     // se staršími phone builds díky `ignoreUnknownKeys` na WEAR_JSON.
     val summary: String? = null,
+    // Tělo, které telefon vyřešil pro PRÁVĚ dokončený tah (nebo null). Na
+    // rozdíl od `lastMessage` (snapshot `lastAssistantText` v okamžiku pushe)
+    // je tohle text, kvůli kterému telefon session označil za "čeká na vás",
+    // takže nepodléhá závodu mezi překlopením aktivity a doběhnutím
+    // transkriptu. Preference na hodinkách: `summary` → `notifyBody` →
+    // useknutá `lastMessage` (viz WearNotifier.bodyFor).
+    // Trailing default + ignoreUnknownKeys drží kompatibilitu se staršími
+    // phone buildy.
+    val notifyBody: String? = null,
 )
 
 @Serializable
