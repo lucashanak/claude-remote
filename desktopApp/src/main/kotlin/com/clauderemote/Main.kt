@@ -424,13 +424,30 @@ fun main() = application {
     // so we use `notify-send` — the universal D-Bus (org.freedesktop.Notifications)
     // path that KDE Plasma, GNOME, XFCE et al. implement natively. macOS/Windows
     // keep the AWT tray balloon, which works acceptably there.
-    sessionOrchestrator.onClaudeNeedsInput = { _, hint, isActiveTab, _ ->
-        // Same suppression rule Android's MainActivity applies: don't notify
-        // about a session the user is already looking at. A minimized window
-        // counts as not-foreground even if it never lost AWT focus.
-        val appForeground = windowFocused && !windowState.isMinimized
-        if (NotificationPolicy.shouldNotify(appForeground, isActiveTab, appSettings.notificationsEnabled)) {
-            sendDesktopNotification(hint)
+    // Installed ONCE rather than reallocated on every recomposition of the
+    // application body. The lambda captures `windowFocused` and `windowState`
+    // as Compose State (the `by remember` delegate is a getter, and
+    // WindowState.isMinimized is state-backed), so it still reads the CURRENT
+    // values when it fires, not the values at wiring time.
+    LaunchedEffect(Unit) {
+        DesktopPresence.install()
+        sessionOrchestrator.onClaudeNeedsInput = { sessionId, hint, isActiveTab, body ->
+            // Same suppression rule Android's MainActivity applies: don't notify
+            // about a session the user is already looking at. A minimized window
+            // counts as not-foreground even if it never lost AWT focus — and so
+            // does a locked, screensaved or long-idle desktop, which on Linux
+            // never delivers a focus-lost event at all (see DesktopPresence).
+            val appForeground =
+                windowFocused && !windowState.isMinimized && DesktopPresence.userPresent
+            if (NotificationPolicy.shouldNotify(appForeground, isActiveTab, appSettings.notificationsEnabled)) {
+                // Say WHICH session finished and WHAT it said — the phone has
+                // done both since MainActivity:264; the desktop used to show a
+                // fixed "Claude Remote" title and the generic hint, which on a
+                // multi-session desktop identifies nothing.
+                val title = tabManager.getTab(sessionId)?.tabTitle?.takeIf { it.isNotBlank() }
+                    ?: "Claude Remote"
+                sendDesktopNotification(title, notificationBody(body, hint))
+            }
         }
     }
 
@@ -669,7 +686,7 @@ fun main() = application {
                 // Same call the real "Claude is waiting" alert makes, so the
                 // test proves the whole chain (notify-send on Linux, tray
                 // balloon on macOS/Windows) rather than a parallel code path.
-                sendDesktopNotification("Toto je testovací notifikace.")
+                sendDesktopNotification("Claude Remote", "Toto je testovací notifikace.")
             },
             onImportServers = {
                 pickTextFile("Import Servers") { name, json ->
@@ -853,13 +870,173 @@ private fun openReleasesPage() {
     }
 }
 
+/** Longest notification body we send; freedesktop daemons elide past ~200 anyway. */
+private const val NOTIFY_BODY_MAX = 300
+
+/**
+ * Turn the assistant's raw markdown [raw] into a notification body, falling back
+ * to the generic [hint] when the orchestrator could not confirm a fresh message.
+ *
+ * Shares [speakableFromMarkdown] with Android and the read-aloud path so both
+ * platforms strip exactly the same things (code fences, headings, emphasis, link
+ * syntax), then collapses the remaining whitespace — a notification body is one
+ * or two lines, not a document — and caps the length.
+ */
+private fun notificationBody(raw: String?, hint: String): String {
+    val cleaned = raw
+        ?.let { com.clauderemote.voice.speakableFromMarkdown(it) }
+        ?.replace(Regex("\\s+"), " ")
+        ?.trim()
+        ?.takeIf { it.isNotEmpty() }
+        ?: return hint
+    return if (cleaned.length <= NOTIFY_BODY_MAX) cleaned
+    else cleaned.take(NOTIFY_BODY_MAX - 1).trimEnd() + "\u2026"
+}
+
+/**
+ * Is the human actually at the machine? AWT focus alone is not enough on Linux:
+ * locking the screen or starting a screensaver does not deliver a focus-lost
+ * event, so a maximized window on the active tab would count as "foreground"
+ * forever and every completion would be suppressed (review finding M10).
+ *
+ * Two independent signals, both fail-OPEN (unknown ⇒ present, i.e. keep the
+ * existing suppression behaviour rather than spamming):
+ *  - the freedesktop `org.freedesktop.ScreenSaver.GetActive` property, polled
+ *    over D-Bus on a daemon thread (KDE, GNOME and XFCE all implement it;
+ *    absent or erroring ⇒ treated as unlocked, and the poll backs off);
+ *  - time since the last AWT key/mouse event anywhere in the app — past
+ *    [IDLE_MS] the user has walked away whatever the window manager thinks.
+ *    If the listener could not be installed at all the idle rule is dropped
+ *    rather than left stuck at "last input was at startup", which would make
+ *    every session look idle five minutes in.
+ */
+private object DesktopPresence {
+    private const val IDLE_MS = 5 * 60 * 1000L
+    private const val POLL_MS = 30_000L
+    /** Poll interval once the screensaver service has proved unreachable. */
+    private const val POLL_BACKOFF_MS = 10 * 60 * 1000L
+    private const val MAX_FAILURES = 3
+
+    @Volatile private var lastInputAt = System.currentTimeMillis()
+    @Volatile private var screenLocked = false
+    /** False when [install] could not attach the AWT listener — see class doc. */
+    @Volatile private var idleTrackingOk = true
+    private val installed = java.util.concurrent.atomic.AtomicBoolean(false)
+
+    /** True when the user is plausibly at the desk looking at this app. */
+    val userPresent: Boolean
+        get() = !screenLocked &&
+            (!idleTrackingOk || (System.currentTimeMillis() - lastInputAt) < IDLE_MS)
+
+    /** Idempotent — safe to call from a recomposed effect. */
+    fun install() {
+        if (!installed.compareAndSet(false, true)) return
+        try {
+            java.awt.Toolkit.getDefaultToolkit().addAWTEventListener(
+                { lastInputAt = System.currentTimeMillis() },
+                java.awt.AWTEvent.KEY_EVENT_MASK or
+                    java.awt.AWTEvent.MOUSE_EVENT_MASK or
+                    java.awt.AWTEvent.MOUSE_MOTION_EVENT_MASK
+            )
+        } catch (e: Exception) {
+            // Without events lastInputAt freezes at startup, so the idle rule
+            // would flip to "away" forever. Drop the signal instead.
+            idleTrackingOk = false
+            FileLogger.log("Desktop", "AWT idle tracking unavailable: ${e.message}")
+        }
+        if (!IS_LINUX) return
+        Thread {
+            // Warm the notification-daemon capability cache off the alert path
+            // so the first notification doesn't pay for the busctl round-trip.
+            notifyBodyMarkupSupported
+            var failures = 0
+            while (true) {
+                val active = queryScreenSaverActive()
+                screenLocked = active == true
+                if (active == null) {
+                    failures++
+                    if (failures == MAX_FAILURES) {
+                        FileLogger.log(
+                            "Desktop",
+                            "org.freedesktop.ScreenSaver unreachable — backing off lock polling"
+                        )
+                    }
+                } else {
+                    failures = 0
+                }
+                try {
+                    Thread.sleep(if (failures >= MAX_FAILURES) POLL_BACKOFF_MS else POLL_MS)
+                } catch (_: InterruptedException) {
+                    return@Thread
+                }
+            }
+        }.apply { isDaemon = true; name = "screensaver-poll" }.start()
+    }
+
+    /**
+     * `busctl --user call … GetActive` prints `b true` / `b false`. Returns null
+     * when we could not find out — no busctl, no screensaver service, a hung bus
+     * — which the caller treats as unlocked and counts towards the backoff, so a
+     * box that will never answer is not forked at every [POLL_MS].
+     */
+    private fun queryScreenSaverActive(): Boolean? {
+        val out = busctlCall(
+            "org.freedesktop.ScreenSaver", "/org/freedesktop/ScreenSaver",
+            "org.freedesktop.ScreenSaver", "GetActive"
+        ) ?: return null
+        val value = out.substringAfter("b ", "").trim()
+        return when {
+            value.startsWith("true") -> true
+            value.startsWith("false") -> false
+            else -> null
+        }
+    }
+}
+
+/**
+ * Run one `busctl --user call` and return its stdout, or null if busctl is
+ * missing, the call failed, or it did not answer within three seconds.
+ */
+private fun busctlCall(service: String, path: String, iface: String, member: String): String? = try {
+    val proc = ProcessBuilder("busctl", "--user", "call", service, path, iface, member)
+        .redirectErrorStream(true)
+        .start()
+    if (!proc.waitFor(3, java.util.concurrent.TimeUnit.SECONDS)) {
+        proc.destroyForcibly()
+        null
+    } else {
+        val out = proc.inputStream.bufferedReader().readText().trim()
+        if (proc.exitValue() == 0) out else null
+    }
+} catch (_: Exception) {
+    null
+}
+
+/**
+ * Does the running notification daemon render markup in the body? It is an
+ * advertised capability, not a given: escaping unconditionally shows a literal
+ * `&amp;` to users of a daemon that does not parse markup. Asked once over
+ * D-Bus (`GetCapabilities` returns e.g. `as 5 "actions" "body" "body-markup" …`)
+ * and cached; when we cannot ask, assume markup — that is the behaviour every
+ * mainstream daemon (KDE, GNOME, dunst, mako) has.
+ */
+private val notifyBodyMarkupSupported: Boolean by lazy {
+    val caps = busctlCall(
+        "org.freedesktop.Notifications", "/org/freedesktop/Notifications",
+        "org.freedesktop.Notifications", "GetCapabilities"
+    )
+    val supported = caps == null || caps.contains("\"body-markup\"")
+    FileLogger.log("Desktop", "Notification body-markup supported: $supported")
+    supported
+}
+
 /**
  * Send a desktop notification through whichever backend the running OS renders
  * acceptably. Both the real "Claude is waiting" alerts and the Settings test
  * button go through here, so the test exercises the same chain as the real thing.
  */
-private fun sendDesktopNotification(hint: String) {
-    if (IS_LINUX) sendLinuxNotification(hint) else sendTrayNotification(hint)
+private fun sendDesktopNotification(title: String, body: String) {
+    if (IS_LINUX) sendLinuxNotification(title, body) else sendTrayNotification(title, body)
 }
 
 /**
@@ -868,22 +1045,37 @@ private fun sendDesktopNotification(hint: String) {
  * the app. If notify-send is missing we skip rather than fall back to the AWT
  * balloon — the user would rather have no notification than the ugly one.
  */
-private fun sendLinuxNotification(hint: String) {
+private fun sendLinuxNotification(title: String, body: String) {
     try {
         ProcessBuilder(
             "notify-send",
             "-a", "Claude Remote",
             "-i", "claude-remote",
             "-h", "string:desktop-entry:claude-remote",
-            "Claude Remote", hint
+            // `--` so a summary or body that happens to start with `-` is read
+            // as a positional argument and not as an option.
+            "--",
+            title, if (notifyBodyMarkupSupported) escapeNotifyMarkup(body) else body
         ).start()
     } catch (e: Exception) {
         FileLogger.log("Desktop", "notify-send unavailable, notification skipped: ${e.message}")
     }
 }
 
+/**
+ * A daemon advertising `body-markup` parses a small HTML subset in the body, so
+ * a literal `&`, `<` or `>` coming out of an assistant message either renders
+ * wrong or swallows the rest of the line. Escape the three characters that
+ * matter; `&` first, or we would double-escape the ones we just introduced.
+ * Only called when [notifyBodyMarkupSupported].
+ */
+private fun escapeNotifyMarkup(text: String): String = text
+    .replace("&", "&amp;")
+    .replace("<", "&lt;")
+    .replace(">", "&gt;")
+
 /** AWT SystemTray balloon — used on macOS/Windows where it renders acceptably. */
-private fun sendTrayNotification(hint: String) {
+private fun sendTrayNotification(title: String, body: String) {
     try {
         if (java.awt.SystemTray.isSupported()) {
             val tray = java.awt.SystemTray.getSystemTray()
@@ -896,7 +1088,7 @@ private fun sendTrayNotification(hint: String) {
                 tray.add(trayIcon)
             }
             tray.trayIcons.firstOrNull()?.displayMessage(
-                "Claude Remote", hint, java.awt.TrayIcon.MessageType.INFO
+                title, body, java.awt.TrayIcon.MessageType.INFO
             )
         }
     } catch (e: Exception) {
