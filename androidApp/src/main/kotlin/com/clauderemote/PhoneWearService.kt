@@ -61,6 +61,10 @@ class PhoneWearService : WearableListenerService() {
         Handler(Looper.getMainLooper()).postDelayed({
             OrchestratorHolder.orchestrator?.sendClaudeCommand(req.sessionId, "\r")
         }, 60)
+        // The wrist answered, so the phone's alert for that session is spent.
+        // Without this the bridged copy also stays on the watch, still
+        // offering Reply for a question that has already been answered.
+        AlertNotifier.clear(this, req.sessionId)
     }
 
     private fun handleApprove(data: ByteArray) {
@@ -78,6 +82,8 @@ class PhoneWearService : WearableListenerService() {
         // (TerminalScreen.kt), which send "y\r"/"n\r" in one shot since it's
         // a single keystroke, not dictated text needing a settle delay.
         orchestrator.sendClaudeCommand(req.sessionId, "$answer\r")
+        // Same as /reply: the approval is answered, so drop the alert.
+        AlertNotifier.clear(this, req.sessionId)
     }
 
     private fun handleHistoryRequest(data: ByteArray, sourceNodeId: String) {

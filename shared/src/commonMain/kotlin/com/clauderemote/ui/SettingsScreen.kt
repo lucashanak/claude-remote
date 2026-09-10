@@ -54,6 +54,14 @@ fun SettingsScreen(
     onFontSizeChange: ((Int) -> Unit)? = null,
     /** Same for the chat text scale, in percent. */
     onTranscriptFontChange: ((Int) -> Unit)? = null,
+    /**
+     * Whether the OS has notifications for this app switched off. On Android
+     * 13+ a denied POST_NOTIFICATIONS makes `notify()` a silent no-op — no
+     * exception, no alert — so the in-app toggle can read "on" while nothing
+     * ever appears. Platforms that don't know (desktop) leave the default and
+     * the row stays hidden.
+     */
+    notificationsBlocked: () -> Boolean = { false },
 ) {
     val c = CRTheme.colors
 
@@ -395,6 +403,16 @@ fun SettingsScreen(
                         checked = notifyTaskComplete,
                         onCheckedChange = { notifyTaskComplete = it; settings.notifyOnTaskComplete = it }
                     )
+                    if (notificationsBlocked()) {
+                        Text(
+                            "Notifikace jsou blokované v nastavení systému",
+                            style = CRType.bodyDim,
+                            // Opaque red. `tintRed` is a 15 %-alpha BACKGROUND
+                            // tint elsewhere in the app and is unreadable as
+                            // text on the dark surface.
+                            color = c.disconnected,
+                        )
+                    }
                     if (onTestNotification != null) {
                         OutlinedButton(
                             onClick = onTestNotification,

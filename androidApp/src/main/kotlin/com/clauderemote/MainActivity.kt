@@ -37,6 +37,31 @@ import java.io.File
  */
 private const val RESTORE_WAIT_MS = 30_000L
 
+/** requestPermissions code for POST_NOTIFICATIONS. */
+private const val NOTIFICATION_PERMISSION_REQUEST = 1001
+
+/**
+ * Process-scoped scope for the notification-summary work. Not GlobalScope
+ * (an uncaught exception there takes the process down) and not lifecycleScope
+ * (a backgrounded or finishing Activity must still get its alert out) — a
+ * SupervisorJob on IO keeps one failed summarize from cancelling the rest.
+ */
+private val notifyScope = kotlinx.coroutines.CoroutineScope(
+    kotlinx.coroutines.SupervisorJob() + Dispatchers.IO
+)
+
+/**
+ * Per-session alert counter. Every completion takes a number before its
+ * summary is launched; the summary is only allowed to replace the visible
+ * notification while that number is still the newest one. Without it a slow
+ * summary for an OLD completion lands after — and overwrites — the alert for
+ * a newer one, since both post to the same notification id.
+ */
+private val alertSeq = java.util.concurrent.ConcurrentHashMap<String, Long>()
+
+private fun nextAlertSeq(sessionId: String): Long =
+    alertSeq.compute(sessionId) { _, v -> (v ?: 0L) + 1L }!!
+
 class MainActivity : FragmentActivity() {
 
     private lateinit var serverStorage: ServerStorage
@@ -159,14 +184,49 @@ class MainActivity : FragmentActivity() {
 
     @Volatile private var isAppInForeground = false
 
+    /**
+     * Whether the OS has notifications for this app switched off. Compose
+     * state, not a plain read: the user leaves for system settings, flips it,
+     * and comes back, so the Settings warning row has to re-evaluate on resume
+     * rather than at whatever moment it first composed.
+     */
+    private val notificationsBlockedState = androidx.compose.runtime.mutableStateOf(false)
+
+    private fun refreshNotificationsBlocked() {
+        notificationsBlockedState.value = AlertNotifier.notificationsBlocked(applicationContext)
+    }
+
     private fun requestNotificationPermission() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             if (ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS)
                 != PackageManager.PERMISSION_GRANTED) {
                 ActivityCompat.requestPermissions(
-                    this, arrayOf(Manifest.permission.POST_NOTIFICATIONS), 1001
+                    this, arrayOf(Manifest.permission.POST_NOTIFICATIONS), NOTIFICATION_PERMISSION_REQUEST
                 )
             }
+        }
+    }
+
+    /**
+     * Log what the user actually chose for POST_NOTIFICATIONS. A denial is
+     * otherwise invisible: on 33+ `notify()` does not throw when the
+     * permission is missing, it is a silent no-op, so the logs used to claim
+     * the alert was posted while nothing appeared. SettingsScreen surfaces the
+     * blocked state; this makes it diagnosable from the shipped log too.
+     */
+    override fun onRequestPermissionsResult(
+        requestCode: Int,
+        permissions: Array<out String>,
+        grantResults: IntArray,
+    ) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (requestCode == NOTIFICATION_PERMISSION_REQUEST) {
+            val granted = grantResults.firstOrNull() == PackageManager.PERMISSION_GRANTED
+            FileLogger.log(
+                "Notify",
+                "POST_NOTIFICATIONS ${if (granted) "granted" else "DENIED"} — " +
+                    "system notifications enabled=${!AlertNotifier.notificationsBlocked(this)}",
+            )
         }
     }
 
@@ -221,6 +281,11 @@ class MainActivity : FragmentActivity() {
         OrchestratorHolder.orchestrator = sessionOrchestrator
         // Keep the Wear companion app's session list in sync (Data Layer).
         WearSync.start(applicationContext, tabManager, sessionOrchestrator)
+        // WearSync already observes the tab list to prune its own per-session
+        // maps; ride that signal so the alert counters don't outlive their
+        // tabs either.
+        WearSync.setPruneHook { liveIds -> alertSeq.keys.retainAll(liveIds) }
+        refreshNotificationsBlocked()
         com.clauderemote.connection.MoshManager.init(this)
         com.clauderemote.connection.EtManager.init(this)
         val sshKeyManager = com.clauderemote.connection.SshKeyManager(prefs)
@@ -266,7 +331,33 @@ class MainActivity : FragmentActivity() {
             val title = tab?.tabTitle ?: "Session"
             val fg = isAppInForeground
             FileLogger.log("Notify", "Claude needs input: '$hint' fg=$fg activeTab=$isActiveTab keepAlive=${KeepAliveService.isRunning} notif=${appSettings.notificationsEnabled}")
-            KeepAliveService.updateDescription(title)
+            // Use the body the orchestrator resolved for THIS completion
+            // (cleaned of markdown) so the notification — and the watch —
+            // show what Claude actually said, not just the generic hint. It
+            // is null when the transcript couldn't be confirmed fresh, in
+            // which case we fall back to the hint (never the stale prior
+            // turn, which the orchestrator now gates out).
+            val notifBody = body
+                ?.let { com.clauderemote.voice.speakableFromMarkdown(it) }
+                ?.takeIf { it.isNotBlank() }
+            val alertText = notifBody ?: hint
+
+            // The watch is a DIFFERENT surface: hand it this turn's resolved
+            // body and push immediately, outside the phone's own policy gate.
+            // A suppressed phone alert (app foreground on the finishing tab)
+            // must still refresh the wrist, which otherwise keeps whatever
+            // text the debounced activity-change push happened to capture —
+            // typically the PREVIOUS turn's answer, and permanently so.
+            WearSync.setResolvedBody(sessionId, notifBody)
+            // No body means this came from the screen detector, not the Stop
+            // hook, so nothing in the payload changes and the watch would read
+            // the push as "nothing happened" — deterministically so for a
+            // second approval prompt inside one debounce window. Mark the
+            // detection itself as the event; the Stop path needs no mark
+            // because its resolved body already moves the stamp.
+            if (notifBody == null) WearSync.markPromptEvent(sessionId)
+            WearSync.pushNow()
+
             if (com.clauderemote.session.service.NotificationPolicy.shouldNotify(
                     appForeground = fg,
                     isActiveTab = isActiveTab,
@@ -274,34 +365,39 @@ class MainActivity : FragmentActivity() {
                 )
             ) {
                 FileLogger.log("Notify", "Sending alert for '$title'")
-                // Use the body the orchestrator resolved for THIS completion
-                // (cleaned of markdown) so the notification — and the watch —
-                // show what Claude actually said, not just the generic hint. It
-                // is null when the transcript couldn't be confirmed fresh, in
-                // which case we fall back to the hint (never the stale prior
-                // turn, which the orchestrator now gates out).
-                val notifBody = body
-                    ?.let { com.clauderemote.voice.speakableFromMarkdown(it) }
-                    ?.takeIf { it.isNotBlank() }
-                    ?: hint
-                if (appSettings.llmSummaryEnabled && appSettings.llmSummaryPhone) {
-                    // Summarize the phone notification too. Off-main + best-effort
-                    // (12 s timeout inside summaryFor); post once the LLM answers,
-                    // falling back to the raw body on null/failure. summaryFor
-                    // shares WearSync's per-(session,text) cache with the watch
-                    // push, so the same message is summarized at most once.
-                    // GlobalScope (not lifecycleScope) so a backgrounded/finishing
-                    // Activity still gets the notification out.
-                    GlobalScope.launch(Dispatchers.IO) {
-                        val summary = runCatching { WearSync.summaryFor(sessionId, notifBody) }.getOrNull()
-                        AlertNotifier.post(applicationContext, sessionId, title, summary ?: notifBody)
+                // Retitle the persistent keep-alive notification only when we
+                // are actually notifying about this session — otherwise it
+                // announces completions the user deliberately isn't being
+                // told about.
+                KeepAliveService.updateDescription(title)
+                // Post the raw body NOW. The summariser allows 6 s connect +
+                // 12 s read, and waiting for it used to mean no alert at all
+                // for that whole window.
+                val seq = nextAlertSeq(sessionId)
+                AlertNotifier.post(applicationContext, sessionId, title, alertText, alertText)
+                // Only when a real body was resolved. With notifBody null the
+                // alert text is the generic hint ("Claude čeká na vstup"),
+                // which has nothing to summarize — and summarizing it would
+                // spend an LLM call and a cache slot on it.
+                if (appSettings.llmSummaryEnabled && appSettings.llmSummaryPhone && notifBody != null) {
+                    // Then replace it with the one-sentence summary, but only
+                    // while this is still the newest completion for the
+                    // session. summaryFor shares WearSync's per-(session,text)
+                    // cache with the watch push, so the same message is
+                    // summarized at most once. The full body stays the
+                    // read-aloud text — "Přehrát" should give the real answer,
+                    // not a summary of it.
+                    notifyScope.launch {
+                        runCatching {
+                            val summary = WearSync.summaryFor(sessionId, alertText)
+                            if (summary != null && alertSeq[sessionId] == seq) {
+                                AlertNotifier.post(applicationContext, sessionId, title, summary, alertText)
+                            }
+                        }.onFailure {
+                            FileLogger.log("Notify", "Summary post failed for $sessionId: ${it.message}")
+                        }
                     }
-                } else {
-                    AlertNotifier.post(applicationContext, sessionId, title, notifBody)
                 }
-                // Push the freshest message to the watch now — don't wait for
-                // WearSync's periodic debounced collector.
-                WearSync.pushNow()
             }
         }
 
@@ -385,6 +481,7 @@ class MainActivity : FragmentActivity() {
                         "Toto je testovací notifikace. Zkus „Odpovědět“ a „Přehrát“.",
                     )
                 },
+                notificationsBlocked = { notificationsBlockedState.value },
                 onPickKeyFile = { callback ->
                     keyFileCallback = callback
                     keyFilePicker.launch("*/*")
@@ -474,6 +571,7 @@ class MainActivity : FragmentActivity() {
     override fun onResume() {
         super.onResume()
         isAppInForeground = true
+        refreshNotificationsBlocked()
         // Re-apply invert layer on resume (layer can be lost across config changes).
         window.decorView.post { applyInvertLayer(appSettings.invertColors) }
         KeepAliveService.onAppForeground()

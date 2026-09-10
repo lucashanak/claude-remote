@@ -74,6 +74,9 @@ fun App(
     onGetCurrentApk: (() -> ByteArray)? = null,
     onShareLog: ((String) -> Unit)? = null,
     onTestNotification: (() -> Unit)? = null,
+    // Whether the OS has notifications for this app switched off — surfaced as
+    // a warning row in Settings. Android wires this; desktop keeps the default.
+    notificationsBlocked: () -> Boolean = { false },
     onTerminalScreenVisible: (() -> Unit)? = null,
     onPickKeyFile: ((callback: (String) -> Unit) -> Unit)? = null,
     onImportServers: (() -> Unit)? = null,
@@ -1448,6 +1451,7 @@ fun App(
                         onImportServers = onImportServers,
                         onViewLog = { currentScreen = Screen.LOG_VIEWER },
                         onTestNotification = onTestNotification,
+                        notificationsBlocked = notificationsBlocked,
                         onFontSizeChange = applyTerminalFontSize,
                         onTranscriptFontChange = applyTranscriptFontPercent,
                     )
