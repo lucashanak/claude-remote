@@ -247,6 +247,11 @@ class TranscriptStream(
         val safeUuid = uuid.replace("'", "'\\''")
         try {
             doPoll(safeFolder, safeUuid)
+        } catch (c: kotlinx.coroutines.CancellationException) {
+            // Cancellation is not a poll failure. Swallowing it left callers
+            // that wrap this in withTimeoutOrNull looping past their own
+            // deadline — the notification body poll being the one that matters.
+            throw c
         } catch (t: Throwable) {
             FileLogger.log(TAG, "pollNow error: ${t.message}")
         }

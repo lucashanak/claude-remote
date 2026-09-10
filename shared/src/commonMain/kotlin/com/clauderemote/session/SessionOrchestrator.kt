@@ -162,6 +162,7 @@ class SessionOrchestrator(
         reconnectScope, connectionRegistry, tabManager, { isInBackground },
         { id, act -> statusService.updateActivity(id, act) },
         { id -> transcriptService.lastAssistantEntry(id) },
+        { id -> transcriptService.entries(id) },
         { id -> transcriptService.streamOrNull(id) },
         { sid, hint, active, body -> onClaudeNeedsInput?.invoke(sid, hint, active, body) },
     )
@@ -716,7 +717,7 @@ class SessionOrchestrator(
         // which is why the chat only refreshed after an app restart.
         transcriptService.clearConfirmedUuid(id)
         val tail = terminalIO.bufferTail(id)
-        notificationService.promptDetector.suppressFor(2000)
+        notificationService.promptDetector.suppressFor(id, 2000)
         onTabSwitched?.invoke(id, tail)
     }
 
@@ -944,7 +945,7 @@ class SessionOrchestrator(
 
         // Tmux
         sendTmuxCommand(sshManager, session, isNewTmuxSession, checkClosedElsewhere)
-        notificationService.promptDetector.suppressFor(3000) // suppress during tmux screen redraw
+        notificationService.promptDetector.suppressFor(session.id, 3000) // suppress during tmux screen redraw
 
         // Apply the effective terminal dimensions — TerminalView won't fire
         // onResize when its size hasn't changed, and a session that (re)connected
@@ -1272,6 +1273,13 @@ class SessionOrchestrator(
                                     transportResolver.maybeCountTsEarlyDeath(session)
                                     transportResolver.maybeCountCfEarlyDeath(session)
                                     tabManager.updateTabStatus(session.id, SessionStatus.DISCONNECTED)
+                                    // Activity too, matching the first-connect
+                                    // handler. The watch skips any transition
+                                    // touching DISCONNECTED; without this the
+                                    // session stayed WORKING across the drop and
+                                    // the reconnect read as WORKING -> ready,
+                                    // buzzing the wrist with the pre-drop answer.
+                                    statusService.updateActivity(session.id, SessionActivity.DISCONNECTED)
                                     reconnectScope.launch { autoReconnect(session, emit) }
                                 },
                                 initialCols = terminalIO.effectiveSize(session.id).first,
@@ -1290,7 +1298,7 @@ class SessionOrchestrator(
                     sshManager.sendInput("\u0003\n") // Ctrl-C + Enter to clear
                     kotlinx.coroutines.delay(100)
                     sendTmuxCommand(sshManager, session, false, checkClosedElsewhere = true)
-                    notificationService.promptDetector.suppressFor(3000) // suppress during tmux screen redraw after reconnect
+                    notificationService.promptDetector.suppressFor(session.id, 3000) // suppress during tmux screen redraw after reconnect
 
                     // Re-send terminal dimensions — the TerminalView hasn't
                     // changed size so onResize won't fire. A session reconnecting
@@ -1304,7 +1312,13 @@ class SessionOrchestrator(
                     }
 
                     tabManager.updateTabStatus(session.id, SessionStatus.ACTIVE)
-                    statusService.updateActivity(session.id, SessionActivity.WAITING_FOR_INPUT)
+                    // IDLE, not WAITING_FOR_INPUT: reconnecting clears "Offline"
+                    // but proves nothing about whether Claude finished a turn.
+                    // Asserting a completion here is what made the watch notify
+                    // on every reconnect with a cached answer up to 30 h old.
+                    // The statusline parse in emit() and the Stop hook set the
+                    // real state as soon as there is evidence for one.
+                    statusService.updateActivity(session.id, SessionActivity.IDLE)
                     onSessionActive?.invoke(session)
                     // Restart ALL per-session loops, not just watcher+refresh —
                     // usage/git/latency pollers may have died during the outage.
@@ -1479,6 +1493,12 @@ class SessionOrchestrator(
                 effective,
                 onOutput = { },
                 onConnectionLost = {
+                    // Outside the carrierReady gate: the link is down either
+                    // way, and the watch skips any transition touching
+                    // DISCONNECTED. Leaving the old activity in place for a drop
+                    // during bootstrap is what let the reconnect read as
+                    // WORKING -> ready and buzz the wrist with a cached answer.
+                    statusService.updateActivity(session.id, SessionActivity.DISCONNECTED)
                     if (carrierReady.get()) {
                         // Carrier transport died (e.g. a Starlink IP change killed
                         // the CF WebSocket). The et CLIENT process is still alive and
@@ -1683,6 +1703,7 @@ class SessionOrchestrator(
                             onOutput = { },
                             onConnectionLost = {
                                 tabManager.updateTabStatus(session.id, SessionStatus.DISCONNECTED)
+                                statusService.updateActivity(session.id, SessionActivity.DISCONNECTED)
                                 reconnectScope.launch { reconnectEtCarrier(session, emit) }
                             },
                             initialCols = terminalIO.effectiveSize(session.id).first,
@@ -1725,7 +1746,8 @@ class SessionOrchestrator(
                         jsch.setPortForwardingL(localPort, "127.0.0.1", etPort)
                     }
                     tabManager.updateTabStatus(session.id, SessionStatus.ACTIVE)
-                    statusService.updateActivity(session.id, SessionActivity.WAITING_FOR_INPUT)
+                    // Neutral, not a claimed completion — see autoReconnect.
+                    statusService.updateActivity(session.id, SessionActivity.IDLE)
                     onSessionActive?.invoke(session)
                     attachSessionRuntime(session.id, session.tmuxSessionName)
                     _reconnectStatus.update { it - session.id }
@@ -1976,11 +1998,11 @@ class SessionOrchestrator(
                 tabManager.updateTabStatus(sessionId, SessionStatus.ACTIVE)
                 // Clear the DISCONNECTED activity left over from restore/disconnect —
                 // otherwise the session shows "Offline" (badge + status + empty
-                // chips) even though it's connected. autoReconnect already does
-                // this; reconnectSession (restore + manual) was missing it. The real
-                // working/idle state is then driven by the statusline parse in emit()
-                // as soon as output flows.
-                statusService.updateActivity(sessionId, SessionActivity.WAITING_FOR_INPUT)
+                // chips) even though it's connected. IDLE says exactly that much:
+                // connected, nothing heard yet. The real working/idle state is
+                // driven by the statusline parse in emit() as soon as output
+                // flows, and by the Stop hook at end of turn.
+                statusService.updateActivity(sessionId, SessionActivity.IDLE)
                 onSessionActive?.invoke(session)
                 // Restart ALL per-session loops (usage/git/latency pollers included
                 // — they may have died during the outage), not just watcher+refresh.
@@ -2134,7 +2156,7 @@ class SessionOrchestrator(
         // The respawn kills+redraws the pane; suppress the prompt detector so it
         // doesn't misfire on the transient screen. UUID is unchanged, so the
         // transcript stream keeps tailing the same file across the restart.
-        notificationService.promptDetector.suppressFor(5000)
+        notificationService.promptDetector.suppressFor(sessionId, 5000)
         try {
             execReadWithWatchdog(sshSession, cmd, totalMs = 15_000)
         } catch (e: Exception) {

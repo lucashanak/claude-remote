@@ -4,6 +4,7 @@ import com.clauderemote.model.LoginExpiryWarning
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -29,9 +30,20 @@ class InputPromptDetector(
     private val scope: CoroutineScope = CoroutineScope(Dispatchers.Default + SupervisorJob()),
 ) {
 
-    private val sessionStates = mutableMapOf<String, SessionState>()
+    // All three collections below are touched from MANY threads at once: onOutput
+    // runs on each session's own SshManager read loop, runIdleCheck/scheduleRecheck
+    // on this class's Dispatchers.Default scope, and the hook-active flags from the
+    // notify watcher's connect fan-out and from disconnectSession. A plain
+    // HashMap resized concurrently can drop unrelated entries or corrupt a bucket
+    // chain — a session that then stops deduping, or dedups forever.
+    // Read/created via computeIfAbsent, never getOrPut: Kotlin's getOrPut is
+    // get-then-put, so two threads racing a first touch each build their own
+    // SessionState and the loser's latch reset (or its pending check) is
+    // silently dropped. Concurrent maps fixed the corruption; this fixes the
+    // lost update.
+    private val sessionStates = java.util.concurrent.ConcurrentHashMap<String, SessionState>()
     /** Rolling stripped-ANSI output buffer per session — used by context/usage parsers. */
-    private val recentOutput = mutableMapOf<String, StringBuilder>()
+    private val recentOutput = java.util.concurrent.ConcurrentHashMap<String, StringBuilder>()
 
     /**
      * Sessions whose idle detection is handled by the Claude Code `Stop` hook
@@ -42,9 +54,17 @@ class InputPromptDetector(
      * an on-screen selector (APPROVAL) is acted on, because a mid-turn
      * AskUserQuestion / permission prompt never triggers the Stop hook.
      */
-    private val hookActiveSessions = mutableSetOf<String>()
+    private val hookActiveSessions = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
 
-    @Volatile private var suppressUntil = 0L
+    /**
+     * Detection suppression deadline PER SESSION. It used to be one field for
+     * the whole detector, so `connectSsh` (3 s), the reconnect path (3 s), a tab
+     * switch (2 s) and a Claude restart (5 s) each blinded detection for EVERY
+     * session — with many tabs reconnecting after a blip the detector was
+     * suppressed almost continuously and an approval prompt on an unrelated
+     * session was simply missed.
+     */
+    private val suppressUntil = java.util.concurrent.ConcurrentHashMap<String, Long>()
 
     /**
      * Platform-provided screen snapshot reader. The implementation MUST marshal
@@ -88,10 +108,15 @@ class InputPromptDetector(
     /** Fired on every quiescence check (WORKING / IDLE / UNKNOWN) so UI can update activity dots. */
     var onStateChange: ((sessionId: String, state: ClaudeState) -> Unit)? = null
 
-    /** Suppress detections for [millis] — use during tmux redraws / reconnects. */
-    fun suppressFor(millis: Long) {
-        suppressUntil = currentTimeMillis() + millis
+    /** Suppress detections for [sessionId] for [millis] — use during that
+     *  session's tmux redraws / reconnects. Never widen this back to all
+     *  sessions: a redraw on one tab says nothing about the others. */
+    fun suppressFor(sessionId: String, millis: Long) {
+        suppressUntil[sessionId] = currentTimeMillis() + millis
     }
+
+    private fun suppressed(sessionId: String): Boolean =
+        currentTimeMillis() < (suppressUntil[sessionId] ?: 0L)
 
     /** Mark a session as using the Claude Code `Stop` hook for idle detection. */
     fun markHookActive(sessionId: String) { hookActiveSessions.add(sessionId) }
@@ -115,15 +140,19 @@ class InputPromptDetector(
         // the old unconditional skip here meant APPROVAL_NEEDED was never
         // emitted for hook-active sessions: the chat stayed "Claude is
         // working…" while Claude sat waiting for an answer.
-        if (currentTimeMillis() < suppressUntil) return
+        if (suppressed(sessionId)) return
 
-        val state = sessionStates.getOrPut(sessionId) { SessionState() }
+        val state = sessionStates.computeIfAbsent(sessionId) { SessionState() }
         state.recheckCount = 0 // fresh output → fresh retry budget
-        state.pendingCheck?.cancel()
-        state.pendingCheck = scope.launch {
+        // Atomic swap-and-cancel: onOutput (SSH reader thread) and
+        // scheduleRecheck (detector scope) both install here, and a plain
+        // read-cancel-write between them leaks a scheduled recheck that then
+        // fires against a session the caller thought it had re-armed.
+        val next = scope.launch {
             delay(QUIESCENCE_MS)
             runIdleCheck(sessionId)
         }
+        state.pendingCheck.getAndSet(next)?.cancel()
     }
 
     private suspend fun runIdleCheck(sessionId: String) {
@@ -137,7 +166,7 @@ class InputPromptDetector(
         // self-heals; an APPROVAL result also re-checks (unbounded, 3s cadence)
         // so the activity stays asserted against statusline WORKING clobbers
         // for as long as the dialog is actually on screen.
-        if (currentTimeMillis() < suppressUntil) {
+        if (suppressed(sessionId)) {
             scheduleRecheck(state, sessionId)
             return
         }
@@ -219,7 +248,10 @@ class InputPromptDetector(
 
         state.waitingForInput = true
         state.lastDetectionTime = now
-        onDetection?.invoke(PromptDetection(sessionId, promptType))
+        // seq names THIS prompt. Two tool permissions inside one turn produce no
+        // new assistant text between them, so a key built from the last message
+        // id was identical for both and the second never notified.
+        onDetection?.invoke(PromptDetection(sessionId, promptType, state.detectionSeq.incrementAndGet()))
     }
 
     /**
@@ -227,18 +259,26 @@ class InputPromptDetector(
      * tries (reset whenever fresh output arrives or APPROVAL is confirmed) so a
      * disconnected/scrolled session doesn't poll the snapshot forever.
      */
-    private fun scheduleRecheck(state: SessionState, sessionId: String) {
+    private suspend fun scheduleRecheck(state: SessionState, sessionId: String) {
         if (state.recheckCount >= MAX_RECHECKS) return
         state.recheckCount++
-        state.pendingCheck = scope.launch {
+        val next = scope.launch {
             delay(RECHECK_MS)
             runIdleCheck(sessionId)
         }
+        // Swap-and-cancel, but never cancel OUR OWN job: scheduleRecheck runs
+        // inside the check that pendingCheck usually still points at, so an
+        // unconditional cancel would cancel this very coroutine mid-check.
+        // Anything else sitting there is a check that fresh output installed
+        // while we were sampling the screen, and leaving it running would fire
+        // a second check the caller never asked for.
+        val displaced = state.pendingCheck.getAndSet(next)
+        if (displaced !== currentCoroutineContext()[Job]) displaced?.cancel()
     }
 
     /** Reset the latch so the next idle transition will fire a detection. */
     fun onUserInput(sessionId: String) {
-        val state = sessionStates.getOrPut(sessionId) { SessionState() }
+        val state = sessionStates.computeIfAbsent(sessionId) { SessionState() }
         state.waitingForInput = false
         state.userHasInteracted = true
     }
@@ -261,25 +301,35 @@ class InputPromptDetector(
      * and only — notification until the user happened to type something.
      */
     fun markInteracted(sessionId: String) {
-        sessionStates.getOrPut(sessionId) { SessionState() }.userHasInteracted = true
+        sessionStates.computeIfAbsent(sessionId) { SessionState() }.userHasInteracted = true
     }
 
     fun removeSession(sessionId: String) {
-        sessionStates.remove(sessionId)?.pendingCheck?.cancel()
+        sessionStates.remove(sessionId)?.pendingCheck?.getAndSet(null)?.cancel()
         recentOutput.remove(sessionId)
+        suppressUntil.remove(sessionId)
     }
 
     /** Feed a chunk to the rolling buffer used by context/usage parsers. */
     fun feedRecentOutput(sessionId: String, text: String) {
-        val buf = recentOutput.getOrPut(sessionId) { StringBuilder() }
-        buf.append(stripAnsi(text))
-        if (buf.length > 2048) buf.delete(0, buf.length - 2048)
+        val buf = recentOutput.computeIfAbsent(sessionId) { StringBuilder() }
+        // The buffer is appended from the session's SSH reader thread and read
+        // by the context/usage parsers on another — a StringBuilder mutated
+        // while it is being copied out can throw or hand back a torn string.
+        synchronized(buf) {
+            buf.append(stripAnsi(text))
+            if (buf.length > 2048) buf.delete(0, buf.length - 2048)
+        }
     }
+
+    /** Snapshot of the rolling buffer, taken under the buffer's own monitor. */
+    private fun recentOutputText(sessionId: String): String? =
+        recentOutput[sessionId]?.let { synchronized(it) { it.toString() } }
 
     // ---- Context / usage parsing (independent of prompt detection) ----
 
     fun parseContextPercent(sessionId: String, text: String): Int? {
-        val stripped = recentOutput[sessionId]?.toString() ?: stripAnsi(text)
+        val stripped = recentOutputText(sessionId) ?: stripAnsi(text)
 
         CONTEXT_RATIO_REGEX.find(stripped)?.let { match ->
             val used = parseTokenCount(match.groupValues[1])
@@ -310,7 +360,7 @@ class InputPromptDetector(
     }
 
     fun parseUsage(sessionId: String, text: String): Map<String, Int>? {
-        val stripped = recentOutput[sessionId]?.toString() ?: stripAnsi(text)
+        val stripped = recentOutputText(sessionId) ?: stripAnsi(text)
         val result = mutableMapOf<String, Int>()
         // LAST match, not first: recentOutput is a rolling buffer holding many
         // concatenated statusline renders (and possibly stale old-format
@@ -364,7 +414,7 @@ class InputPromptDetector(
      * statusline is in the recent buffer (can't tell — leave activity as is).
      */
     fun parseClaudeWorking(sessionId: String): Boolean? {
-        val s = recentOutput[sessionId]?.toString() ?: return null
+        val s = recentOutputText(sessionId) ?: return null
         // recentOutput is a rolling buffer holding MANY concatenated statusline
         // renders. Take the LAST (current/bottom) one, not the first — otherwise
         // on a working→idle transition an older "thinking" render still in the
@@ -382,13 +432,18 @@ class InputPromptDetector(
         }
     }
 
+    // Every field is written on one thread and read on another (the notify latch
+    // from the statusline path on the SSH reader thread, the check itself on the
+    // detector scope), so each needs to be visible across them.
     private class SessionState {
-        var waitingForInput = false
-        var lastDetectionTime = 0L
-        var userHasInteracted = false
-        var pendingCheck: Job? = null
+        @Volatile var waitingForInput = false
+        @Volatile var lastDetectionTime = 0L
+        @Volatile var userHasInteracted = false
+        val pendingCheck = java.util.concurrent.atomic.AtomicReference<Job?>(null)
         /** Consecutive scheduled re-checks since the last fresh output/APPROVAL. */
-        var recheckCount = 0
+        @Volatile var recheckCount = 0
+        /** Monotonic per-session detection counter — names one prompt occasion. */
+        val detectionSeq = java.util.concurrent.atomic.AtomicLong(0L)
     }
 
     companion object {
@@ -484,10 +539,14 @@ class InputPromptDetector(
     }
 }
 
+// The hints are the notification body the user reads when no assistant text
+// could be resolved, and the Play action reads them aloud through a Czech TTS
+// voice — so they are Czech, like the rest of the phone UI.
 enum class PromptType(val displayHint: String) {
-    INPUT_PROMPT("Claude is ready for input"),
-    APPROVAL_NEEDED("Approval needed"),
-    PERMISSION_PROMPT("Permission requested"),
+    INPUT_PROMPT("Claude \u010dek\u00e1 na vstup"),
+    APPROVAL_NEEDED("Pot\u0159ebuje schv\u00e1len\u00ed"),
+    PERMISSION_PROMPT("\u017d\u00e1dost o opr\u00e1vn\u011bn\u00ed"),
 }
 
-data class PromptDetection(val sessionId: String, val type: PromptType)
+/** [seq] is a per-session monotonic counter naming this prompt occasion. */
+data class PromptDetection(val sessionId: String, val type: PromptType, val seq: Long)

@@ -151,6 +151,18 @@ internal class TranscriptService(
         return if (last != null) listOf("assistant" to last) else emptyList()
     }
 
+    /**
+     * Snapshot of the parsed transcript for [sessionId], oldest→newest, or empty
+     * when no stream is running. The Stop-hook notification path needs the whole
+     * list (not just the last assistant message) to tell an answer to the turn
+     * that just finished from one that was already in the backlog — see
+     * StopBodySelector.
+     */
+    fun entries(sessionId: String): List<TranscriptEntry> {
+        val stream = synchronized(transcriptLock) { transcriptStreams[sessionId] } ?: return emptyList()
+        return stream.entries.value
+    }
+
     fun lastAssistantEntry(sessionId: String): TranscriptEntry.AssistantText? {
         val stream = synchronized(transcriptLock) { transcriptStreams[sessionId] } ?: return null
         return stream.entries.value.lastOrNull { it is TranscriptEntry.AssistantText }
