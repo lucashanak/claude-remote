@@ -16,6 +16,12 @@ import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.KeyboardArrowDown
+import androidx.compose.material.icons.filled.KeyboardArrowRight
+import androidx.compose.material.icons.filled.Search
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
@@ -76,6 +82,7 @@ import kotlinx.coroutines.launch
 
 
 @Composable
+@OptIn(ExperimentalFoundationApi::class)
 internal fun SessionSidePanel(
     allSessions: Map<String, List<SessionItem>>,
     activeTabId: String?,
@@ -87,6 +94,7 @@ internal fun SessionSidePanel(
     onAttachRemote: ((com.clauderemote.model.RemoteSession) -> Unit)?,
     onRenameSession: ((sessionId: String, newAlias: String) -> Unit)? = null,
     onSessionLongPress: ((String) -> Unit)? = null,
+    appSettings: com.clauderemote.storage.AppSettings? = null,
     modifier: Modifier = Modifier
 ) {
     val c = CRTheme.colors
@@ -168,74 +176,105 @@ internal fun SessionSidePanel(
         }
         HorizontalDivider(color = c.border, thickness = 1.dp)
 
-        // ── Session list grouped by server ──────────────────────────────────
+        // ── Filter ──────────────────────────────────────────────────────────
+        // A fleet this size is faster to type at than to scroll: "cita" beats
+        // hunting through fifty rows. Kept above the list so it is the first
+        // thing under the title.
+        var query by rememberSaveable { mutableStateOf("") }
+        SidePanelFilter(query = query, onQueryChange = { query = it })
+
+        // Collapse state lives in settings, NOT in composition: this panel is
+        // rebuilt whenever it opens and Android kills the process while
+        // backgrounded, so anything held here would mean re-collapsing every
+        // folder after each long pause.
+        var collapsed by remember { mutableStateOf(appSettings?.collapsedSessionGroups ?: emptySet()) }
+
+        // ── Session list ────────────────────────────────────────────────────
         LazyColumn(modifier = Modifier.fillMaxSize()) {
             val sortedServers = byServer.entries.sortedBy { (_, items) ->
                 (items.first().tab?.server?.name ?: items.first().remote?.server?.name ?: "").lowercase()
             }
-            sortedServers.forEach { (_, items) ->
-                val server = items.first().tab?.server ?: items.first().remote?.server
-                // Sort strictly by (folder leaf, alias) — NOT by
-                // item.label, because label collapses to the alias when
-                // one exists, which clusters every session named e.g.
-                // "second" together regardless of which folder they
-                // belong to. The user wants folder first, alias as
-                // tiebreaker, connectedness ignored.
-                val sortedItems = items.sortedWith(
-                    compareBy(
-                        { item ->
-                            val tab = item.tab
-                            val folder = if (tab != null) {
-                                tab.folder
-                            } else {
-                                val r = item.remote
-                                if (r != null) com.clauderemote.model.TmuxNameParser
-                                    .parse(r.tmuxSession.name, r.server.name).folder
-                                else item.folder
-                            }
-                            folder.trimEnd('/').substringAfterLast('/').lowercase()
-                        },
-                        { item ->
-                            val tab = item.tab
-                            if (tab != null) {
-                                tab.alias.lowercase()
-                            } else {
-                                val r = item.remote
-                                if (r != null) com.clauderemote.model.TmuxNameParser
-                                    .parse(r.tmuxSession.name, r.server.name).alias.lowercase()
-                                else ""
-                            }
-                        },
+            sortedServers.forEach { (_, serverItems) ->
+                val server = serverItems.first().tab?.server ?: serverItems.first().remote?.server
+                val byId = serverItems.associateBy { it.id }
+                val entries = serverItems.map { item ->
+                    val tab = item.tab
+                    val remote = item.remote
+                    val parsed = if (tab == null && remote != null) {
+                        com.clauderemote.model.TmuxNameParser.parse(remote.tmuxSession.name, remote.server.name)
+                    } else null
+                    val folder = tab?.folder ?: parsed?.folder ?: item.folder
+                    val leaf = folder.trimEnd('/').substringAfterLast('/').ifBlank { folder }
+                    SessionGrouping.Entry(
+                        id = item.id,
+                        serverId = server?.id ?: "unknown",
+                        folderKey = leaf.lowercase(),
+                        folderLabel = leaf,
+                        alias = tab?.alias ?: parsed?.alias.orEmpty(),
+                        // Same definition the launcher uses: only an approval
+                        // prompt is genuinely waiting on the user. Hoisting every
+                        // "Ready" session would hoist most of the fleet.
+                        needsAttention = tab != null &&
+                            sessionActivities[tab.id] == com.clauderemote.model.SessionActivity.APPROVAL_NEEDED,
+                        isActive = tab?.id == activeTabId,
                     )
-                )
-                if (server != null) {
+                }
+                val rows = SessionGrouping.build(entries, collapsed, query)
+
+                if (server != null && query.isBlank()) {
                     item(key = "server_${server.id}") {
-                        SidePanelGroupLabel(
-                            serverName = server.name,
-                            count = items.size,
-                        )
+                        SidePanelGroupLabel(serverName = server.name, count = serverItems.size)
                     }
                 }
-                items(sortedItems, key = { it.id }) { item ->
-                    SidePanelSessionRow(
-                        item = item,
-                        isActive = item.tab?.id == activeTabId,
-                        activity = sessionActivities[item.id],
-                        dense = dense,
-                        onTabSwitch = onTabSwitch,
-                        onTabClose = onTabClose,
-                        onAttachRemote = onAttachRemote,
-                        onRename = if (onRenameSession != null) { label ->
-                            renameText = label
-                            renamingItem = item
-                        } else null,
-                        // Passed through unconditionally (still requires a tab):
-                        // SidePanelSessionRow itself decides mobile long-press
-                        // vs desktop right-click.
-                        onLongPress = if (item.tab != null) {
-                            onSessionLongPress?.let { lp -> { lp(item.tab.id) } }
-                        } else null,
-                    )
+                rows.forEach { row ->
+                    when (row) {
+                        is SessionGrouping.Row.AttentionHeader -> item(key = "attention_${server?.id}") {
+                            SidePanelSectionHeader("Needs attention · ${row.count}", accent = true)
+                        }
+                        is SessionGrouping.Row.FolderHeader -> stickyHeader(key = "folder_${row.key}") {
+                            SidePanelFolderHeader(
+                                row = row,
+                                onToggle = {
+                                    val next = if (row.key in collapsed) collapsed - row.key else collapsed + row.key
+                                    collapsed = next
+                                    // Written on every toggle, never on exit:
+                                    // Android may kill the process in the
+                                    // background without another chance to save.
+                                    appSettings?.collapsedSessionGroups = SessionGrouping.prune(next, entries)
+                                },
+                            )
+                        }
+                        is SessionGrouping.Row.Item -> item(key = row.entry.id) {
+                            val item = byId[row.entry.id]
+                            if (item != null) {
+                                SidePanelSessionRow(
+                                    item = item,
+                                    isActive = item.tab?.id == activeTabId,
+                                    activity = sessionActivities[item.id],
+                                    dense = dense,
+                                    // Under a folder header the folder is
+                                    // already on screen, so the row shows the
+                                    // alias alone and finally has the width for
+                                    // it — "backendV2 · analyza_b…" was the
+                                    // folder eating the name.
+                                    aliasOnly = row.inGroup,
+                                    onTabSwitch = onTabSwitch,
+                                    onTabClose = onTabClose,
+                                    onAttachRemote = onAttachRemote,
+                                    onRename = if (onRenameSession != null) { label ->
+                                        renameText = label
+                                        renamingItem = item
+                                    } else null,
+                                    // Passed through unconditionally (still requires a tab):
+                                    // SidePanelSessionRow itself decides mobile long-press
+                                    // vs desktop right-click.
+                                    onLongPress = if (item.tab != null) {
+                                        onSessionLongPress?.let { lp -> { lp(item.tab.id) } }
+                                    } else null,
+                                )
+                            }
+                        }
+                    }
                 }
             }
 
@@ -259,6 +298,104 @@ internal fun SessionSidePanel(
                 }
             }
         }
+    }
+}
+
+// ── Filter, section + folder headers ─────────────────────────────────────────
+
+@Composable
+private fun SidePanelFilter(query: String, onQueryChange: (String) -> Unit) {
+    val c = CRTheme.colors
+    val shape = RoundedCornerShape(8.dp)
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 10.dp, vertical = 6.dp)
+            .clip(shape)
+            .border(1.dp, c.border, shape)
+            .padding(horizontal = 8.dp, vertical = 4.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+        Icon(Icons.Default.Search, null, tint = c.textDim, modifier = Modifier.size(14.dp))
+        BasicTextField(
+            value = query,
+            onValueChange = onQueryChange,
+            singleLine = true,
+            textStyle = CRType.bodyDim.copy(color = c.text),
+            cursorBrush = androidx.compose.ui.graphics.SolidColor(c.accent),
+            modifier = Modifier.weight(1f),
+            decorationBox = { inner ->
+                if (query.isEmpty()) Text("Filter", style = CRType.bodyDim, color = c.textDim)
+                inner()
+            },
+        )
+        if (query.isNotEmpty()) {
+            Icon(
+                Icons.Default.Close,
+                "Clear filter",
+                tint = c.textDim,
+                modifier = Modifier.size(14.dp).clickable { onQueryChange("") },
+            )
+        }
+    }
+}
+
+@Composable
+private fun SidePanelSectionHeader(title: String, accent: Boolean = false) {
+    val c = CRTheme.colors
+    Text(
+        title,
+        style = if (isMobile) CRType.sectionH else CRType.sectionH.copy(fontSize = 13.sp),
+        color = if (accent) c.accent else c.textDim,
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(c.bg)
+            .padding(start = 10.dp, end = 10.dp, top = 10.dp, bottom = 4.dp),
+    )
+}
+
+/**
+ * Sticky so you always know which folder you are inside while scrolling a long
+ * fleet. Opaque background on purpose — a sticky header that lets rows show
+ * through underneath is unreadable.
+ */
+@Composable
+private fun SidePanelFolderHeader(
+    row: SessionGrouping.Row.FolderHeader,
+    onToggle: () -> Unit,
+) {
+    val c = CRTheme.colors
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(c.bg)
+            .clickable(onClick = onToggle)
+            .padding(start = 10.dp, end = 10.dp, top = 6.dp, bottom = 4.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(4.dp),
+    ) {
+        Icon(
+            if (row.collapsed) Icons.Default.KeyboardArrowRight else Icons.Default.KeyboardArrowDown,
+            if (row.collapsed) "Expand ${row.label}" else "Collapse ${row.label}",
+            tint = c.textDim,
+            modifier = Modifier.size(14.dp),
+        )
+        Text(
+            row.label,
+            style = if (isMobile) CRType.sectionH else CRType.sectionH.copy(fontSize = 13.sp),
+            color = c.textDim,
+            modifier = Modifier.weight(1f),
+            maxLines = 1,
+            overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+        )
+        // The count includes any session hoisted into "Needs attention", so a
+        // collapsed folder never under-reports what is inside it.
+        Pill(
+            text = if (row.hoisted > 0) "${row.total} · ${row.hoisted}!" else "${row.total}",
+            background = c.surface2,
+            foreground = c.textDim,
+        )
     }
 }
 
@@ -300,6 +437,8 @@ private fun SidePanelSessionRow(
     isActive: Boolean,
     activity: com.clauderemote.model.SessionActivity?,
     dense: Boolean,
+    /** Under a folder header the folder is redundant — show the alias alone. */
+    aliasOnly: Boolean = false,
     onTabSwitch: (String) -> Unit,
     onTabClose: (String) -> Unit,
     onAttachRemote: ((com.clauderemote.model.RemoteSession) -> Unit)?,
@@ -310,12 +449,19 @@ private fun SidePanelSessionRow(
     val crStatus = activity.sidePanelToCRStatus(item.isConnected)
     val mode = item.tab?.mode
 
-    // Folder basename · alias label
+    // Folder basename · alias label — or just the alias when a folder header
+    // is already showing the folder. Repeating it was what pushed the alias
+    // out of the row ("backendV2 · analyza_b…"); the alias is the half the
+    // user actually reads.
     val folderBase = item.folder.trimEnd('/').substringAfterLast('/').ifBlank { item.folder }
-    val rowLabel = buildString {
-        append(folderBase)
-        val alias = item.tab?.alias?.ifBlank { null }
-        if (alias != null) append(" · $alias")
+    val alias = item.tab?.alias?.ifBlank { null }
+    val rowLabel = when {
+        aliasOnly && alias != null -> alias
+        // A session with no alias IS the folder, so it keeps the folder name
+        // rather than rendering an empty row.
+        aliasOnly -> folderBase
+        alias != null -> "$folderBase · $alias"
+        else -> folderBase
     }
 
     Row(

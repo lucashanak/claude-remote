@@ -183,6 +183,27 @@ class AppSettings(private val prefs: KeyValueStore) {
         get() = prefs.getInt("side_panel_width_dp", 220).coerceIn(160, 480)
         set(value) = prefs.putInt("side_panel_width_dp", value.coerceIn(160, 480))
 
+    /**
+     * Folder groups the user collapsed in the session lists, as
+     * "serverId|folder" keys (see SessionGrouping.groupKey).
+     *
+     * Persisted rather than held in composition on purpose: the drawer is
+     * rebuilt every time it opens, and on Android the process is killed while
+     * backgrounded — so remembering this in Compose state would mean
+     * re-collapsing a dozen folders after every long pause, which is exactly
+     * the complaint the grouping was added to fix.
+     *
+     * Stored as one newline-joined string. Newline, not comma: a folder name is
+     * user-supplied and can contain a comma, but not a newline (tmux session
+     * names cannot).
+     */
+    var collapsedSessionGroups: Set<String>
+        get() = prefs.getString("collapsed_session_groups", "")
+            .split('\n')
+            .filter { it.isNotBlank() }
+            .toSet()
+        set(value) = prefs.putString("collapsed_session_groups", value.filter { it.isNotBlank() }.joinToString("\n"))
+
     // Speech-to-text backend for dictation + voice mode.
     var sttEngine: com.clauderemote.model.SttEngine
         get() = runCatching {

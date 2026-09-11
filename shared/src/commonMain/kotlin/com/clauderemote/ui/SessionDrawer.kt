@@ -16,6 +16,8 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.material.icons.filled.KeyboardArrowDown
+import androidx.compose.material.icons.filled.KeyboardArrowRight
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.AccountCircle
 import androidx.compose.material.icons.filled.Add
@@ -54,6 +56,11 @@ import com.clauderemote.ui.theme.CRType
  *
  * Not wired into navigation yet; callers control [open]/[onClose].
  */
+/** Stable list key for a remote pane — its tmux name is unique per server. */
+private fun rowId(serverId: String, r: RemoteSession): String =
+    "remote_${serverId}_" + r.tmuxSession.name
+
+@OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
 @Composable
 fun SessionDrawer(
     open: Boolean,
@@ -67,11 +74,16 @@ fun SessionDrawer(
     onClose: () -> Unit = {},
     onLongPressSession: ((id: String) -> Unit)? = null,
     onLogin: (() -> Unit)? = null,
+    // Collapsed folders persist here, not in composition: the drawer is rebuilt
+    // every time it opens. See AppSettings.collapsedSessionGroups.
+    appSettings: com.clauderemote.storage.AppSettings? = null,
 ) {
     if (!open && sessions.isEmpty() && remoteSessions.isEmpty()) return  // skip composition when not needed
 
     val c = CRTheme.colors
     var query by remember { mutableStateOf("") }
+    // Persisted, not composition-scoped: the drawer is rebuilt on every open.
+    var collapsed by remember { mutableStateOf(appSettings?.collapsedSessionGroups ?: emptySet()) }
 
     // Reset filter when drawer closes
     LaunchedEffect(open) { if (!open) query = "" }
@@ -166,77 +178,109 @@ fun SessionDrawer(
                         LazyColumn(Modifier.weight(1f)) {
                             sortedServerIds.forEach { sid ->
                                 val server = serverById[sid] ?: return@forEach
-                                // Merge active + remote into ONE list and
-                                // sort the combined list by (folder, alias)
-                                // — the previous code rendered actives
-                                // first (sorted) then remotes (sorted),
-                                // which split a tab and its server-side
-                                // tmux peer across the two halves. User
-                                // expectation: order is folder + alias,
-                                // period; connectedness is incidental and
-                                // shown by the per-row indicator only.
+                                // Grouping, ordering and the "needs attention"
+                                // hoist all live in SessionGrouping — the same
+                                // rules the side panel uses, so the two lists
+                                // cannot drift apart again.
                                 val activeList = activeByServer[sid] ?: emptyList()
                                 val remoteList = remoteByServer[sid] ?: emptyList()
-                                data class Entry(
-                                    val folder: String,
-                                    val alias: String,
-                                    val active: ClaudeSession?,
-                                    val remote: RemoteSession?,
-                                )
+                                val activeById = activeList.associateBy { it.id }
+                                val remoteById = remoteList.associateBy { rowId(server.id, it) }
                                 val entries = buildList {
                                     activeList.forEach { s ->
-                                        add(Entry(
-                                            folder = s.folder.trimEnd('/').substringAfterLast('/').lowercase(),
-                                            alias = s.alias.lowercase(),
-                                            active = s,
-                                            remote = null,
+                                        val leaf = s.folder.trimEnd('/').substringAfterLast('/').ifBlank { s.folder }
+                                        add(SessionGrouping.Entry(
+                                            id = s.id,
+                                            serverId = server.id,
+                                            folderKey = leaf.lowercase(),
+                                            folderLabel = leaf,
+                                            alias = s.alias,
+                                            // Same definition the launcher uses:
+                                            // only an approval prompt is really
+                                            // waiting on the user.
+                                            needsAttention = activities[s.id] == SessionActivity.APPROVAL_NEEDED,
+                                            isActive = s.id == activeId,
                                         ))
                                     }
                                     remoteList.forEach { r ->
                                         val parsed = TmuxNameParser.parse(r.tmuxSession.name, server.name)
-                                        add(Entry(
-                                            folder = parsed.folder.trimEnd('/').substringAfterLast('/').lowercase(),
-                                            alias = parsed.alias.lowercase(),
-                                            active = null,
-                                            remote = r,
+                                        val leaf = parsed.folder.trimEnd('/').substringAfterLast('/')
+                                            .ifBlank { parsed.folder }
+                                        add(SessionGrouping.Entry(
+                                            id = rowId(server.id, r),
+                                            serverId = server.id,
+                                            folderKey = leaf.lowercase(),
+                                            folderLabel = leaf,
+                                            alias = parsed.alias,
+                                            needsAttention = false,
+                                            isActive = false,
                                         ))
                                     }
-                                }.sortedWith(compareBy({ it.folder }, { it.alias }))
-
-                                item(key = "group_${server.id}") {
-                                    DrawerGroupLabel(server = server, count = entries.size)
                                 }
-                                items(
-                                    items = entries,
-                                    key = { e ->
-                                        e.active?.id
-                                            ?: ("remote_${server.id}_" + (e.remote?.tmuxSession?.name ?: ""))
-                                    },
-                                ) { e ->
-                                    val s = e.active
-                                    val r = e.remote
-                                    if (s != null) {
-                                        DrawerItem(
-                                            session = s,
-                                            activity = activities[s.id] ?: SessionActivity.IDLE,
-                                            selected = s.id == activeId,
-                                            onClick = {
-                                                onPick(s.id)
-                                                onClose()
-                                            },
-                                            // Passed through unconditionally: DrawerItem
-                                            // itself decides mobile long-press vs desktop
-                                            // right-click.
-                                            onLongPress = onLongPressSession?.let { lp -> { lp(s.id) } },
-                                        )
-                                    } else if (r != null) {
-                                        DrawerRemoteItem(
-                                            remote = r,
-                                            onClick = {
-                                                onAttachRemote?.invoke(r)
-                                                onClose()
-                                            },
-                                        )
+                                val rows = SessionGrouping.build(entries, collapsed, query)
+
+                                if (query.isBlank()) {
+                                    item(key = "group_${server.id}") {
+                                        DrawerGroupLabel(server = server, count = entries.size)
+                                    }
+                                }
+                                rows.forEach { row ->
+                                    when (row) {
+                                        is SessionGrouping.Row.AttentionHeader ->
+                                            item(key = "attention_${server.id}") {
+                                                DrawerSectionHeader("Needs attention · ${row.count}", accent = true)
+                                            }
+                                        is SessionGrouping.Row.FolderHeader ->
+                                            stickyHeader(key = "folder_${row.key}") {
+                                                DrawerFolderHeader(
+                                                    row = row,
+                                                    onToggle = {
+                                                        val next = if (row.key in collapsed) collapsed - row.key
+                                                                   else collapsed + row.key
+                                                        collapsed = next
+                                                        // Saved on every toggle:
+                                                        // Android can kill the
+                                                        // process in the
+                                                        // background without
+                                                        // another chance to.
+                                                        appSettings?.collapsedSessionGroups =
+                                                            SessionGrouping.prune(next, entries)
+                                                    },
+                                                )
+                                            }
+                                        is SessionGrouping.Row.Item -> item(key = row.entry.id) {
+                                            val s = activeById[row.entry.id]
+                                            val r = remoteById[row.entry.id]
+                                            if (s != null) {
+                                                DrawerItem(
+                                                    session = s,
+                                                    activity = activities[s.id] ?: SessionActivity.IDLE,
+                                                    selected = s.id == activeId,
+                                                    // Under a folder header the
+                                                    // folder is already on
+                                                    // screen; showing it again
+                                                    // is what truncated the
+                                                    // alias.
+                                                    aliasOnly = row.inGroup,
+                                                    onClick = {
+                                                        onPick(s.id)
+                                                        onClose()
+                                                    },
+                                                    // Passed through unconditionally: DrawerItem
+                                                    // itself decides mobile long-press vs desktop
+                                                    // right-click.
+                                                    onLongPress = onLongPressSession?.let { lp -> { lp(s.id) } },
+                                                )
+                                            } else if (r != null) {
+                                                DrawerRemoteItem(
+                                                    remote = r,
+                                                    onClick = {
+                                                        onAttachRemote?.invoke(r)
+                                                        onClose()
+                                                    },
+                                                )
+                                            }
+                                        }
                                     }
                                 }
                             }
@@ -321,6 +365,64 @@ private fun DrawerSearch(query: String, onQuery: (String) -> Unit) {
 // ── Group label ───────────────────────────────────────────────────────────────
 
 @Composable
+private fun DrawerSectionHeader(title: String, accent: Boolean = false) {
+    val c = CRTheme.colors
+    Text(
+        title,
+        style = CRType.sectionH,
+        color = if (accent) c.accent else c.textDim,
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(c.bg)
+            .padding(start = 14.dp, end = 14.dp, top = 10.dp, bottom = 4.dp),
+    )
+}
+
+/**
+ * Sticky so the folder you are scrolling through stays named. The opaque
+ * background is required, not decorative: rows sliding under a transparent
+ * sticky header are unreadable.
+ */
+@Composable
+private fun DrawerFolderHeader(
+    row: SessionGrouping.Row.FolderHeader,
+    onToggle: () -> Unit,
+) {
+    val c = CRTheme.colors
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(c.bg)
+            .clickable(onClick = onToggle)
+            .padding(start = 14.dp, end = 14.dp, top = 6.dp, bottom = 4.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(4.dp),
+    ) {
+        Icon(
+            if (row.collapsed) Icons.Default.KeyboardArrowRight else Icons.Default.KeyboardArrowDown,
+            if (row.collapsed) "Expand ${row.label}" else "Collapse ${row.label}",
+            tint = c.textDim,
+            modifier = Modifier.size(14.dp),
+        )
+        Text(
+            row.label,
+            style = CRType.sectionH,
+            color = c.textDim,
+            modifier = Modifier.weight(1f),
+            maxLines = 1,
+            overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+        )
+        // Counts sessions hoisted into "Needs attention" too, so a collapsed
+        // folder never under-reports.
+        Text(
+            if (row.hoisted > 0) "${row.total} · ${row.hoisted}!" else "${row.total}",
+            style = CRType.monoTiny,
+            color = c.textDim,
+        )
+    }
+}
+
+@Composable
 private fun DrawerGroupLabel(server: SshServer, count: Int) {
     val c = CRTheme.colors
     Row(
@@ -353,6 +455,11 @@ private fun DrawerItem(
     session: ClaudeSession,
     activity: SessionActivity,
     selected: Boolean,
+    /**
+     * Under a folder header the folder path is already on screen, so the row
+     * drops its second line and the title (which is the alias) gets the room.
+     */
+    aliasOnly: Boolean = false,
     onClick: () -> Unit,
     onLongPress: (() -> Unit)? = null,
 ) {
@@ -398,7 +505,7 @@ private fun DrawerItem(
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                 )
-                Text(
+                if (!aliasOnly) Text(
                     session.folder,
                     style = CRType.monoTiny,
                     color = c.textDim,

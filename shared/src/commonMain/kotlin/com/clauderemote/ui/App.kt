@@ -1078,6 +1078,7 @@ fun App(
                     TerminalScreen(
                         tabs = tabs,
                         activeTabId = activeTabId,
+                        appSettings = appSettings,
                         invertColors = invertColors,
                         onToggleInvertColors = {
                             val next = !invertColors

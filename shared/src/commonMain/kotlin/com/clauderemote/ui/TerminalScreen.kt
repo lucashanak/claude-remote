@@ -107,6 +107,9 @@ internal data class SessionItem(
 fun TerminalScreen(
     tabs: List<ClaudeSession>,
     activeTabId: String?,
+    // Threaded down to the session list, which persists its collapsed folders
+    // here rather than in composition — see AppSettings.collapsedSessionGroups.
+    appSettings: com.clauderemote.storage.AppSettings? = null,
     onTabSwitch: (String) -> Unit,
     onTabClose: (String) -> Unit,
     onSessionLongPress: ((String) -> Unit)? = null,
@@ -420,6 +423,7 @@ fun TerminalScreen(
                     onAttachRemote = onAttachRemote,
                     onRenameSession = onRenameSession,
                     onSessionLongPress = onSessionLongPress,
+                    appSettings = appSettings,
                     modifier = Modifier.width(sidePanelWidth).fillMaxHeight()
                 )
                 if (!isMobile) {
@@ -1459,6 +1463,7 @@ fun TerminalScreen(
             // over the session list instead of dismissing it.
             onLongPressSession = onSessionLongPress,
             onLogin = onLogin,
+            appSettings = appSettings,
         )
 
         // ── ExpandedInput overlay ──────────────────────────────────────────
