@@ -169,12 +169,16 @@ internal object SessionGrouping {
             }
         }
         if (singles.isNotEmpty()) {
-            // The header only earns its row when there are groups to be
-            // distinguished FROM. With no folder groups, nothing can pin above
-            // a loose row and mislabel it, so a server holding only loose
-            // sessions would just be paying two header rows for one session —
-            // the very header spam MIN_GROUP_SIZE exists to avoid.
-            if (rows.any { it is Row.FolderHeader }) rows += Row.OtherHeader(singles.size)
+            // The header earns its row exactly when something above could
+            // otherwise claim these rows. `rows` only ever holds a header
+            // followed by its items, so "not empty" IS that question — asking
+            // instead whether any FOLDER header exists missed the attention
+            // section: on a server whose folders all hold one session, with one
+            // of them waiting for approval, the loose ones rendered inside
+            // "Needs attention" with nothing between, since the section simply
+            // never ended. Empty means all-loose-and-nothing-waiting, which is
+            // the case this guard was added for.
+            if (rows.isNotEmpty()) rows += Row.OtherHeader(singles.size)
             singles.forEach { rows += Row.Item(it, inGroup = false) }
         }
         return rows

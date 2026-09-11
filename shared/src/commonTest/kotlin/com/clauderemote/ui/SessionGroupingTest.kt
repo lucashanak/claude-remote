@@ -113,7 +113,30 @@ class SessionGroupingTest {
         assertEquals(2, rows.items().size)
     }
 
-    // ---- collapsing: what must survive it -----------------------------------
+/**
+     * The case the first version of the guard missed: no folder groups at all,
+     * but an approval prompt. Without a header the loose sessions render inside
+     * "Needs attention" with nothing between them and it, so the section never
+     * ends and claims sessions that are not waiting for anything.
+     */
+    @Test
+    fun looseSessionsGetTheirHeaderWhenAnAttentionSectionIsAboveThem() {
+        val rows = SessionGrouping.build(
+            listOf(entry("a", "calm"), entry("b", "waiting", attention = true)),
+            collapsed = emptySet(),
+        )
+        val shape = rows.map {
+            when (it) {
+                is SessionGrouping.Row.AttentionHeader -> "ATTN"
+                is SessionGrouping.Row.OtherHeader -> "OTHER"
+                is SessionGrouping.Row.FolderHeader -> "H"
+                is SessionGrouping.Row.Item -> "  " + it.entry.alias
+            }
+        }
+        assertEquals(listOf("ATTN", "  waiting", "OTHER", "  calm"), shape)
+    }
+
+        // ---- collapsing: what must survive it -----------------------------------
 
     @Test
     fun collapsingAFolderHidesItsRowsButKeepsTheHeaderAndTheCount() {
