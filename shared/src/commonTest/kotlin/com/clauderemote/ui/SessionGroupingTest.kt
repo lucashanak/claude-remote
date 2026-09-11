@@ -98,6 +98,21 @@ class SessionGroupingTest {
         assertEquals(listOf("citace63", "deploy", "migrace"), kontexta)
     }
 
+    /**
+     * With no groups there is nothing for an "Other" header to distinguish the
+     * loose sessions FROM, and no folder header can pin above them and
+     * mislabel them — so it would just be two header rows for one session.
+     */
+    @Test
+    fun looseSessionsGetNoHeaderWhenThereAreNoGroupsAtAll() {
+        val rows = SessionGrouping.build(
+            listOf(entry("actions", ""), entry("iam-notbroke", "")),
+            collapsed = emptySet(),
+        )
+        assertTrue(rows.filterIsInstance<SessionGrouping.Row.OtherHeader>().isEmpty())
+        assertEquals(2, rows.items().size)
+    }
+
     // ---- collapsing: what must survive it -----------------------------------
 
     @Test

@@ -20,8 +20,6 @@ import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.Search
-import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
@@ -185,51 +183,63 @@ internal fun SessionSidePanel(
 
 
         // ── Session list ────────────────────────────────────────────────────
-        LazyColumn(modifier = Modifier.fillMaxSize()) {
-            val sortedServers = byServer.entries.sortedBy { (_, items) ->
-                (items.first().tab?.server?.name ?: items.first().remote?.server?.name ?: "").lowercase()
+        fun buildRows(serverItems: List<SessionItem>): List<SessionGrouping.Row> {
+            val server = serverItems.first().tab?.server ?: serverItems.first().remote?.server
+            val entries = serverItems.map { item ->
+                val tab = item.tab
+                val remote = item.remote
+                val parsed = if (tab == null && remote != null) {
+                    com.clauderemote.model.TmuxNameParser.parse(remote.tmuxSession.name, remote.server.name)
+                } else null
+                // item.folder, not tab.folder: SessionItem has already stripped
+                // the -yolo suffix and mapped a blank cwd to "~", and it is what
+                // the row itself displays — deriving the group from a different
+                // string put a yolo worktree in a group whose rows named a
+                // folder it never shows.
+                val leaf = item.folder.trimEnd('/').substringAfterLast('/').ifBlank { item.folder }
+                SessionGrouping.Entry(
+                    id = item.id,
+                    serverId = server?.id ?: "unknown",
+                    folderKey = leaf.lowercase(),
+                    folderLabel = leaf,
+                    alias = tab?.alias ?: parsed?.alias.orEmpty(),
+                    // The one haystack, used for both the filter and the empty
+                    // state. Matches what the drawer's filter always matched.
+                    searchText = listOfNotNull(
+                        tab?.alias ?: parsed?.alias,
+                        tab?.folder ?: item.folder,
+                        server?.name,
+                        tab?.mode?.name,
+                        remote?.tmuxSession?.name,
+                    ).joinToString(" ").lowercase(),
+                    // Same definition the launcher uses: only an approval prompt
+                    // is genuinely waiting on the user. Hoisting every "Ready"
+                    // session would hoist most of the fleet.
+                    needsAttention = tab != null &&
+                        sessionActivities[tab.id] == com.clauderemote.model.SessionActivity.APPROVAL_NEEDED,
+                    isActive = tab?.id == activeTabId,
+                )
             }
-            sortedServers.forEach { (_, serverItems) ->
+            return SessionGrouping.build(entries, collapsedGroups, query)
+        }
+
+        val sortedServers = byServer.entries.sortedBy { (_, items) ->
+            (items.first().tab?.server?.name ?: items.first().remote?.server?.name ?: "").lowercase()
+        }
+        // Rows are built BEFORE the list so the empty state can be derived from
+        // the very rows that will render. Re-deriving "did anything match" from
+        // a second, hand-written haystack is how a matching row and a "no
+        // matches" message ended up on screen together: that copy omitted a
+        // remote pane's parsed alias, so a query for a multi-word alias like
+        // "db prod" matched the row and missed the gate.
+        val rowsByServer = sortedServers.map { (_, serverItems) -> serverItems to buildRows(serverItems) }
+        val nothingMatched = rowsByServer.all { (_, rows) -> rows.isEmpty() }
+
+        LazyColumn(modifier = Modifier.fillMaxSize()) {
+            rowsByServer.forEach { (serverItems, rows) ->
                 val server = serverItems.first().tab?.server ?: serverItems.first().remote?.server
                 val byId = serverItems.associateBy { it.id }
                 val serverId = server?.id ?: "unknown"
-                val entries = serverItems.map { item ->
-                    val tab = item.tab
-                    val remote = item.remote
-                    val parsed = if (tab == null && remote != null) {
-                        com.clauderemote.model.TmuxNameParser.parse(remote.tmuxSession.name, remote.server.name)
-                    } else null
-                    // item.folder, not tab.folder: SessionItem has already
-                    // stripped the -yolo suffix and mapped a blank cwd to "~",
-                    // and it is what the row itself displays — deriving the
-                    // group from a different string put a yolo worktree in a
-                    // group whose rows named a folder it never shows.
-                    val leaf = item.folder.trimEnd('/').substringAfterLast('/').ifBlank { item.folder }
-                    SessionGrouping.Entry(
-                        id = item.id,
-                        serverId = serverId,
-                        folderKey = leaf.lowercase(),
-                        folderLabel = leaf,
-                        alias = tab?.alias ?: parsed?.alias.orEmpty(),
-                        // Matches what the drawer's filter always matched:
-                        // alias, the full path, the server and the mode.
-                        searchText = listOfNotNull(
-                            tab?.alias ?: parsed?.alias,
-                            tab?.folder ?: item.folder,
-                            server?.name,
-                            tab?.mode?.name,
-                            remote?.tmuxSession?.name,
-                        ).joinToString(" ").lowercase(),
-                        // Same definition the launcher uses: only an approval
-                        // prompt is genuinely waiting on the user. Hoisting every
-                        // "Ready" session would hoist most of the fleet.
-                        needsAttention = tab != null &&
-                            sessionActivities[tab.id] == com.clauderemote.model.SessionActivity.APPROVAL_NEEDED,
-                        isActive = tab?.id == activeTabId,
-                    )
-                }
-                val rows = SessionGrouping.build(entries, collapsedGroups, query)
-
                 if (server != null && query.isBlank()) {
                     stickyHeader(key = "server_${server.id}") {
                         SidePanelGroupLabel(serverName = server.name, count = serverItems.size)
@@ -293,15 +303,7 @@ internal fun SessionSidePanel(
             // A filter that matches nothing must say so. Without this the
             // panel renders its header, the filter box and the footer with a
             // void between them, which reads as "my sessions are gone".
-            if (query.isNotBlank() && byServer.values.flatten().none { item ->
-                    val tab = item.tab
-                    listOfNotNull(
-                        tab?.alias, tab?.folder ?: item.folder,
-                        item.tab?.server?.name ?: item.remote?.server?.name,
-                        tab?.mode?.name, item.remote?.tmuxSession?.name,
-                    ).joinToString(" ").lowercase().contains(query.trim().lowercase())
-                }
-            ) {
+            if (query.isNotBlank() && nothingMatched) {
                 item(key = "empty") {
                     Text(
                         "No sessions match \"$query\"",
@@ -440,7 +442,10 @@ private fun SidePanelGroupLabel(serverName: String, count: Int) {
     val c = CRTheme.colors
     Row(
         modifier = Modifier
+            // Opaque: this is a stickyHeader, and rows sliding under a
+            // transparent one are unreadable.
             .fillMaxWidth()
+            .background(c.bg)
             .padding(start = 10.dp, end = 10.dp, top = 10.dp, bottom = 4.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(6.dp),

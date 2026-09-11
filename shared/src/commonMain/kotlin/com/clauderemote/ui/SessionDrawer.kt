@@ -439,6 +439,9 @@ private fun DrawerGroupLabel(server: SshServer, count: Int) {
     Row(
         Modifier
             .fillMaxWidth()
+            // Opaque: this is a stickyHeader, and rows sliding under a
+            // transparent one are unreadable.
+            .background(c.bg)
             .padding(start = 12.dp, end = 12.dp, top = 12.dp, bottom = 4.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(6.dp),

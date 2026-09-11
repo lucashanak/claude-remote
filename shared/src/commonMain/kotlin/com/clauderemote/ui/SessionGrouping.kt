@@ -70,7 +70,16 @@ internal object SessionGrouping {
         data class Item(val entry: Entry, val inGroup: Boolean) : Row
     }
 
-    /** Stable across restarts: the folder is derived from the tmux name. */
+    /**
+     * Stable across restarts: the folder is derived from the tmux name.
+     *
+     * Nothing prunes these keys. An earlier version did, from inside each
+     * caller's per-server loop, so collapsing a folder on one server deleted
+     * every other server's collapse state — and any server that was merely
+     * offline lost its state to a toggle anywhere else. The set only grows when
+     * the user deliberately collapses something, so a stale key costs a few
+     * bytes, while deleting the wrong one reads as "it randomly forgets".
+     */
     fun groupKey(serverId: String, folderKey: String): String = "$serverId|$folderKey"
 
     /**
@@ -160,19 +169,15 @@ internal object SessionGrouping {
             }
         }
         if (singles.isNotEmpty()) {
-            rows += Row.OtherHeader(singles.size)
+            // The header only earns its row when there are groups to be
+            // distinguished FROM. With no folder groups, nothing can pin above
+            // a loose row and mislabel it, so a server holding only loose
+            // sessions would just be paying two header rows for one session —
+            // the very header spam MIN_GROUP_SIZE exists to avoid.
+            if (rows.any { it is Row.FolderHeader }) rows += Row.OtherHeader(singles.size)
             singles.forEach { rows += Row.Item(it, inGroup = false) }
         }
         return rows
     }
 
-    /**
-     * NO PRUNING. An earlier version dropped keys for folders it could not see,
-     * which both callers invoked from inside their per-server loop — so
-     * collapsing a folder on one server deleted every other server's collapse
-     * state, and any server that happened to be offline lost its state to a
-     * toggle anywhere else. The set only grows when the user explicitly
-     * collapses a folder, so leaving stale keys costs a few bytes and cannot
-     * surprise anyone; deleting the wrong ones reads as "it randomly forgets".
-     */
 }
