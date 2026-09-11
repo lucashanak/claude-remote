@@ -30,6 +30,15 @@ internal object SessionGrouping {
         /** Folder leaf as the user wrote it, for the header. */
         val folderLabel: String,
         val alias: String,
+        /**
+         * Everything the filter should match, lowercased by the caller: alias,
+         * the full folder path, the server name, the mode, the tmux name. It
+         * lives here because the drawer used to pre-filter on all of those and
+         * then this model filtered again on folder+alias alone — a query for a
+         * server name passed the first filter, matched nothing in the second,
+         * and produced an empty list with no "no matches" message.
+         */
+        val searchText: String,
         /** Claude is waiting for input, or the session broke. */
         val needsAttention: Boolean,
         /** The session currently on screen. */
@@ -39,6 +48,9 @@ internal object SessionGrouping {
     sealed interface Row {
         /** "Needs you" — only emitted when something is actually waiting. */
         data class AttentionHeader(val count: Int) : Row
+
+        /** Heads the loose sessions whose folder has only one of them. */
+        data class OtherHeader(val count: Int) : Row
 
         data class FolderHeader(
             val key: String,
@@ -82,15 +94,22 @@ internal object SessionGrouping {
         entries: List<Entry>,
         collapsed: Set<String>,
         query: String = "",
+        /**
+         * Force the flat view without filtering here — for a caller that has
+         * ALREADY filtered [entries] itself. The drawer does: it filters on
+         * server name, mode and tmux name as well, and having this model filter
+         * a second time on a narrower field set meant a query for a server name
+         * passed the first filter, matched nothing here, and rendered an empty
+         * panel with no "no matches" message.
+         */
+        flat: Boolean = false,
     ): List<Row> {
         val q = query.trim().lowercase()
-        val matching = if (q.isEmpty()) entries else entries.filter {
-            it.folderKey.contains(q) || it.alias.lowercase().contains(q)
-        }
+        val matching = if (q.isEmpty()) entries else entries.filter { it.searchText.contains(q) }
         if (matching.isEmpty()) return emptyList()
 
         val ordered = matching.sortedWith(compareBy({ it.folderKey }, { it.alias.lowercase() }))
-        if (q.isNotEmpty()) return ordered.map { Row.Item(it, inGroup = false) }
+        if (q.isNotEmpty() || flat) return ordered.map { Row.Item(it, inGroup = false) }
 
         val attention = ordered.filter { it.needsAttention }
         val rest = ordered.filterNot { it.needsAttention }
@@ -110,18 +129,22 @@ internal object SessionGrouping {
         // across them are normal. Keying on the name would merge two servers'
         // sessions into one group and let one collapse hide the other's.
         val totalByGroup = ordered.groupingBy { groupKey(it.serverId, it.folderKey) }.eachCount()
-        // Emitted in folder order with singletons inline, which keeps the
-        // alphabetical reading order the list has always had.
+        // Groups first, then the loose ones under their own header.
+        //
+        // Singletons used to sit inline in one alphabetical sequence, which
+        // read better but broke the sticky header: a pinned "backendV2" stayed
+        // on screen above an unrelated single "iam-notbroke" row, saying the
+        // row belonged to a folder it does not. A sticky header that lies is
+        // worse than a lost sort order, and every section here now has a
+        // header of its own so whatever is pinned is always true.
+        val singles = rest.filter { (totalByGroup[groupKey(it.serverId, it.folderKey)] ?: 0) < MIN_GROUP_SIZE }
+        val grouped = rest - singles.toSet()
         val seen = mutableSetOf<String>()
-        for (entry in rest) {
+        for (entry in grouped) {
             val key = groupKey(entry.serverId, entry.folderKey)
             if (!seen.add(key)) continue
             val total = totalByGroup[key] ?: 0
-            val members = rest.filter { groupKey(it.serverId, it.folderKey) == key }
-            if (total < MIN_GROUP_SIZE) {
-                members.forEach { rows += Row.Item(it, inGroup = false) }
-                continue
-            }
+            val members = grouped.filter { groupKey(it.serverId, it.folderKey) == key }
             val isCollapsed = key in collapsed
             rows += Row.FolderHeader(
                 key = key,
@@ -136,18 +159,20 @@ internal object SessionGrouping {
                 members.forEach { rows += Row.Item(it, inGroup = true) }
             }
         }
+        if (singles.isNotEmpty()) {
+            rows += Row.OtherHeader(singles.size)
+            singles.forEach { rows += Row.Item(it, inGroup = false) }
+        }
         return rows
     }
 
     /**
-     * Drops keys for folders that no longer exist, so the stored set cannot
-     * grow forever as folders come and go. Called on write, where the live
-     * folder list is known — never on read, where a momentarily empty session
-     * list would wipe the user's collapse state.
+     * NO PRUNING. An earlier version dropped keys for folders it could not see,
+     * which both callers invoked from inside their per-server loop — so
+     * collapsing a folder on one server deleted every other server's collapse
+     * state, and any server that happened to be offline lost its state to a
+     * toggle anywhere else. The set only grows when the user explicitly
+     * collapses a folder, so leaving stale keys costs a few bytes and cannot
+     * surprise anyone; deleting the wrong ones reads as "it randomly forgets".
      */
-    fun prune(collapsed: Set<String>, live: List<Entry>): Set<String> {
-        if (collapsed.isEmpty()) return collapsed
-        val liveKeys = live.map { groupKey(it.serverId, it.folderKey) }.toSet()
-        return collapsed.intersect(liveKeys)
-    }
 }

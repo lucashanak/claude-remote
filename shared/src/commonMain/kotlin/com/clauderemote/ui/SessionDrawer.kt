@@ -74,16 +74,15 @@ fun SessionDrawer(
     onClose: () -> Unit = {},
     onLongPressSession: ((id: String) -> Unit)? = null,
     onLogin: (() -> Unit)? = null,
-    // Collapsed folders persist here, not in composition: the drawer is rebuilt
-    // every time it opens. See AppSettings.collapsedSessionGroups.
-    appSettings: com.clauderemote.storage.AppSettings? = null,
+    // Owned by TerminalScreen so the drawer and the side panel cannot hold two
+    // private copies that overwrite each other. Persisted there.
+    collapsedGroups: Set<String> = emptySet(),
+    onToggleGroup: ((String) -> Unit)? = null,
 ) {
     if (!open && sessions.isEmpty() && remoteSessions.isEmpty()) return  // skip composition when not needed
 
     val c = CRTheme.colors
     var query by remember { mutableStateOf("") }
-    // Persisted, not composition-scoped: the drawer is rebuilt on every open.
-    var collapsed by remember { mutableStateOf(appSettings?.collapsedSessionGroups ?: emptySet()) }
 
     // Reset filter when drawer closes
     LaunchedEffect(open) { if (!open) query = "" }
@@ -195,6 +194,10 @@ fun SessionDrawer(
                                             folderKey = leaf.lowercase(),
                                             folderLabel = leaf,
                                             alias = s.alias,
+                                            searchText = listOf(
+                                                s.alias, s.folder, server.name,
+                                                s.mode.name, s.tmuxSessionName,
+                                            ).joinToString(" ").lowercase(),
                                             // Same definition the launcher uses:
                                             // only an approval prompt is really
                                             // waiting on the user.
@@ -212,39 +215,47 @@ fun SessionDrawer(
                                             folderKey = leaf.lowercase(),
                                             folderLabel = leaf,
                                             alias = parsed.alias,
+                                            searchText = listOf(
+                                                parsed.alias, parsed.folder,
+                                                server.name, r.tmuxSession.name,
+                                            ).joinToString(" ").lowercase(),
                                             needsAttention = false,
                                             isActive = false,
                                         ))
                                     }
                                 }
-                                val rows = SessionGrouping.build(entries, collapsed, query)
+                                // The entries are already filtered by
+                                // filterSessions/filterRemote above, which match
+                                // more fields than this model would — so it only
+                                // gets told to go flat, never to filter again.
+                                val rows = SessionGrouping.build(
+                                    entries, collapsedGroups, flat = query.isNotBlank(),
+                                )
 
                                 if (query.isBlank()) {
-                                    item(key = "group_${server.id}") {
+                                    stickyHeader(key = "group_${server.id}") {
                                         DrawerGroupLabel(server = server, count = entries.size)
                                     }
                                 }
                                 rows.forEach { row ->
                                     when (row) {
+                                        // Every section header sticks, so the
+                                        // pinned one always names the section
+                                        // you are actually inside.
                                         is SessionGrouping.Row.AttentionHeader ->
-                                            item(key = "attention_${server.id}") {
+                                            stickyHeader(key = "attention_${server.id}") {
                                                 DrawerSectionHeader("Needs attention · ${row.count}", accent = true)
+                                            }
+                                        is SessionGrouping.Row.OtherHeader ->
+                                            stickyHeader(key = "other_${server.id}") {
+                                                DrawerSectionHeader("Other · ${row.count}")
                                             }
                                         is SessionGrouping.Row.FolderHeader ->
                                             stickyHeader(key = "folder_${row.key}") {
                                                 DrawerFolderHeader(
                                                     row = row,
                                                     onToggle = {
-                                                        val next = if (row.key in collapsed) collapsed - row.key
-                                                                   else collapsed + row.key
-                                                        collapsed = next
-                                                        // Saved on every toggle:
-                                                        // Android can kill the
-                                                        // process in the
-                                                        // background without
-                                                        // another chance to.
-                                                        appSettings?.collapsedSessionGroups =
-                                                            SessionGrouping.prune(next, entries)
+                                                        onToggleGroup?.invoke(row.key)
                                                     },
                                                 )
                                             }
@@ -505,7 +516,10 @@ private fun DrawerItem(
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                 )
-                if (!aliasOnly) Text(
+                // Hidden only when the alias carries the row. Without an alias
+                // the title falls back to the folder leaf, so dropping the path
+                // too would render two identical rows in the same group.
+                if (!aliasOnly || session.alias.isBlank()) Text(
                     session.folder,
                     style = CRType.monoTiny,
                     color = c.textDim,

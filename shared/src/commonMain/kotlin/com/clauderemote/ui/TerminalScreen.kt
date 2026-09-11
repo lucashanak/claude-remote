@@ -107,8 +107,8 @@ internal data class SessionItem(
 fun TerminalScreen(
     tabs: List<ClaudeSession>,
     activeTabId: String?,
-    // Threaded down to the session list, which persists its collapsed folders
-    // here rather than in composition — see AppSettings.collapsedSessionGroups.
+    // Persists the session list's collapsed folders — see
+    // AppSettings.collapsedSessionGroups.
     appSettings: com.clauderemote.storage.AppSettings? = null,
     onTabSwitch: (String) -> Unit,
     onTabClose: (String) -> Unit,
@@ -272,6 +272,18 @@ fun TerminalScreen(
     val scope = rememberCoroutineScope()
     var showPalette by remember { mutableStateOf(false) }
     var showSessionDrawer by remember { mutableStateOf(false) }
+    // ONE owner for the collapsed folders. The drawer and the side panel are
+    // composed at the same time on desktop; when each kept its own `remember`
+    // copy they disagreed on screen and the later write erased the earlier
+    // one's folders.
+    var collapsedGroups by remember { mutableStateOf(appSettings?.collapsedSessionGroups ?: emptySet()) }
+    val toggleGroup: (String) -> Unit = { key ->
+        val next = if (key in collapsedGroups) collapsedGroups - key else collapsedGroups + key
+        collapsedGroups = next
+        // Written on every toggle rather than on exit: Android kills the
+        // process in the background without another chance to save.
+        appSettings?.collapsedSessionGroups = next
+    }
     var showExpanded by remember { mutableStateOf(false) }
 
     // Tapping a path in a Claude answer opens the confirm dialog. Null when the
@@ -423,7 +435,8 @@ fun TerminalScreen(
                     onAttachRemote = onAttachRemote,
                     onRenameSession = onRenameSession,
                     onSessionLongPress = onSessionLongPress,
-                    appSettings = appSettings,
+                    collapsedGroups = collapsedGroups,
+                    onToggleGroup = toggleGroup,
                     modifier = Modifier.width(sidePanelWidth).fillMaxHeight()
                 )
                 if (!isMobile) {
@@ -1463,7 +1476,8 @@ fun TerminalScreen(
             // over the session list instead of dismissing it.
             onLongPressSession = onSessionLongPress,
             onLogin = onLogin,
-            appSettings = appSettings,
+            collapsedGroups = collapsedGroups,
+            onToggleGroup = toggleGroup,
         )
 
         // ── ExpandedInput overlay ──────────────────────────────────────────

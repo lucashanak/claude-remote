@@ -23,6 +23,7 @@ class SessionGroupingTest {
         folderKey = folder.lowercase(),
         folderLabel = folder,
         alias = alias,
+        searchText = "$folder $alias".lowercase(),
         needsAttention = attention,
         isActive = active,
     )
@@ -57,18 +58,28 @@ class SessionGroupingTest {
         assertTrue(rows.items().any { it.entry.folderKey == "iam-notbroke" })
     }
 
-    /** Alphabetical reading order is what the list has always had; keep it. */
+    /**
+     * Groups first, then the loose ones under their own header. They used to be
+     * interleaved alphabetically, which reads better but makes the sticky
+     * header lie: a pinned "backendV2" would sit above an unrelated
+     * "iam-notbroke" row, claiming it. Every section owns a header now.
+     */
     @Test
-    fun foldersAndSingletonsStayInOneAlphabeticalSequence() {
+    fun groupsComeFirstAndLooseSessionsGetTheirOwnSection() {
         val rows = SessionGrouping.build(fleet(), collapsed = emptySet())
-        val labels = rows.mapNotNull {
+        val shape = rows.map {
             when (it) {
-                is SessionGrouping.Row.FolderHeader -> it.label.lowercase()
-                is SessionGrouping.Row.Item -> if (it.inGroup) null else it.entry.folderKey
-                else -> null
+                is SessionGrouping.Row.FolderHeader -> "H:" + it.label.lowercase()
+                is SessionGrouping.Row.OtherHeader -> "OTHER"
+                is SessionGrouping.Row.Item -> if (it.inGroup) "  in" else "  loose"
+                is SessionGrouping.Row.AttentionHeader -> "ATTN"
             }
         }
-        assertEquals(listOf("actions", "backendv2", "iam-notbroke", "kontexta"), labels)
+        assertEquals(
+            listOf("H:backendv2", "  in", "  in", "H:kontexta", "  in", "  in", "  in",
+                   "OTHER", "  loose", "  loose"),
+            shape,
+        )
     }
 
     /** Rows under a header show the alias alone — that is the width win. */
@@ -163,7 +174,7 @@ class SessionGroupingTest {
     // ---- filtering ----------------------------------------------------------
 
     @Test
-    fun aQueryMatchesFolderOrAlias() {
+    fun aQueryMatchesAnythingInTheSearchText() {
         assertEquals(listOf("citace63"), SessionGrouping.build(fleet(), emptySet(), "cita").aliases())
         assertEquals(
             listOf("citace63", "deploy", "migrace"),
@@ -185,6 +196,27 @@ class SessionGroupingTest {
         assertTrue(rows.filterIsInstance<SessionGrouping.Row.AttentionHeader>().isEmpty())
     }
 
+    /**
+     * A caller that filtered the entries itself asks for the flat view without
+     * this model filtering a second time on a narrower field set — that
+     * mismatch produced an empty panel with no "no matches" message.
+     */
+    @Test
+    fun flatShowsEveryEntryUngroupedWithoutFilteringAgain() {
+        val rows = SessionGrouping.build(fleet(), collapsed = emptySet(), flat = true)
+        assertEquals(fleet().size, rows.items().size)
+        assertTrue(rows.headers().isEmpty())
+        assertTrue(rows.items().none { it.inGroup })
+    }
+
+    /** A collapsed folder must not hide anything in the flat view either. */
+    @Test
+    fun flatIgnoresCollapsedFolders() {
+        val key = SessionGrouping.groupKey("srv", "kontexta")
+        val rows = SessionGrouping.build(fleet(), collapsed = setOf(key), flat = true)
+        assertEquals(3, rows.items().count { it.entry.folderKey == "kontexta" })
+    }
+
     @Test
     fun aQueryThatMatchesNothingProducesNoRows() {
         assertTrue(SessionGrouping.build(fleet(), emptySet(), "zzz").isEmpty())
@@ -196,28 +228,6 @@ class SessionGroupingTest {
     }
 
     // ---- persistence hygiene ------------------------------------------------
-
-    @Test
-    fun pruneDropsKeysForFoldersThatNoLongerExist() {
-        val live = fleet()
-        val stored = setOf(
-            SessionGrouping.groupKey("srv", "kontexta"),
-            SessionGrouping.groupKey("srv", "deleted-project"),
-        )
-        assertEquals(setOf(SessionGrouping.groupKey("srv", "kontexta")), SessionGrouping.prune(stored, live))
-    }
-
-    /**
-     * Pruning against an empty list would wipe every collapse the user made —
-     * and an empty list is exactly what a reconnect shows for a moment.
-     */
-    @Test
-    fun pruneAgainstNoSessionsIsNotDestructive() {
-        val stored = setOf(SessionGrouping.groupKey("srv", "kontexta"))
-        assertEquals(emptySet(), SessionGrouping.prune(stored, emptyList()))
-        // ...which is why the caller must not prune on read; documented on the
-        // function. This test pins the behaviour so the contract stays visible.
-    }
 
     @Test
     fun groupKeysAreScopedPerServerSoTwoServersDoNotShareCollapseState() {

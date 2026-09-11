@@ -15,7 +15,6 @@ import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.KeyboardArrowDown
@@ -94,7 +93,8 @@ internal fun SessionSidePanel(
     onAttachRemote: ((com.clauderemote.model.RemoteSession) -> Unit)?,
     onRenameSession: ((sessionId: String, newAlias: String) -> Unit)? = null,
     onSessionLongPress: ((String) -> Unit)? = null,
-    appSettings: com.clauderemote.storage.AppSettings? = null,
+    collapsedGroups: Set<String> = emptySet(),
+    onToggleGroup: ((String) -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
     val c = CRTheme.colors
@@ -183,11 +183,6 @@ internal fun SessionSidePanel(
         var query by rememberSaveable { mutableStateOf("") }
         SidePanelFilter(query = query, onQueryChange = { query = it })
 
-        // Collapse state lives in settings, NOT in composition: this panel is
-        // rebuilt whenever it opens and Android kills the process while
-        // backgrounded, so anything held here would mean re-collapsing every
-        // folder after each long pause.
-        var collapsed by remember { mutableStateOf(appSettings?.collapsedSessionGroups ?: emptySet()) }
 
         // ── Session list ────────────────────────────────────────────────────
         LazyColumn(modifier = Modifier.fillMaxSize()) {
@@ -197,20 +192,34 @@ internal fun SessionSidePanel(
             sortedServers.forEach { (_, serverItems) ->
                 val server = serverItems.first().tab?.server ?: serverItems.first().remote?.server
                 val byId = serverItems.associateBy { it.id }
+                val serverId = server?.id ?: "unknown"
                 val entries = serverItems.map { item ->
                     val tab = item.tab
                     val remote = item.remote
                     val parsed = if (tab == null && remote != null) {
                         com.clauderemote.model.TmuxNameParser.parse(remote.tmuxSession.name, remote.server.name)
                     } else null
-                    val folder = tab?.folder ?: parsed?.folder ?: item.folder
-                    val leaf = folder.trimEnd('/').substringAfterLast('/').ifBlank { folder }
+                    // item.folder, not tab.folder: SessionItem has already
+                    // stripped the -yolo suffix and mapped a blank cwd to "~",
+                    // and it is what the row itself displays — deriving the
+                    // group from a different string put a yolo worktree in a
+                    // group whose rows named a folder it never shows.
+                    val leaf = item.folder.trimEnd('/').substringAfterLast('/').ifBlank { item.folder }
                     SessionGrouping.Entry(
                         id = item.id,
-                        serverId = server?.id ?: "unknown",
+                        serverId = serverId,
                         folderKey = leaf.lowercase(),
                         folderLabel = leaf,
                         alias = tab?.alias ?: parsed?.alias.orEmpty(),
+                        // Matches what the drawer's filter always matched:
+                        // alias, the full path, the server and the mode.
+                        searchText = listOfNotNull(
+                            tab?.alias ?: parsed?.alias,
+                            tab?.folder ?: item.folder,
+                            server?.name,
+                            tab?.mode?.name,
+                            remote?.tmuxSession?.name,
+                        ).joinToString(" ").lowercase(),
                         // Same definition the launcher uses: only an approval
                         // prompt is genuinely waiting on the user. Hoisting every
                         // "Ready" session would hoist most of the fleet.
@@ -219,32 +228,35 @@ internal fun SessionSidePanel(
                         isActive = tab?.id == activeTabId,
                     )
                 }
-                val rows = SessionGrouping.build(entries, collapsed, query)
+                val rows = SessionGrouping.build(entries, collapsedGroups, query)
 
                 if (server != null && query.isBlank()) {
-                    item(key = "server_${server.id}") {
+                    stickyHeader(key = "server_${server.id}") {
                         SidePanelGroupLabel(serverName = server.name, count = serverItems.size)
                     }
                 }
                 rows.forEach { row ->
                     when (row) {
-                        is SessionGrouping.Row.AttentionHeader -> item(key = "attention_${server?.id}") {
+                        // Every section header sticks, so whatever is pinned at
+                        // the top always names the section you are actually in.
+                        is SessionGrouping.Row.AttentionHeader -> stickyHeader(key = "attention_$serverId") {
                             SidePanelSectionHeader("Needs attention · ${row.count}", accent = true)
+                        }
+                        is SessionGrouping.Row.OtherHeader -> stickyHeader(key = "other_$serverId") {
+                            SidePanelSectionHeader("Other · ${row.count}")
                         }
                         is SessionGrouping.Row.FolderHeader -> stickyHeader(key = "folder_${row.key}") {
                             SidePanelFolderHeader(
                                 row = row,
-                                onToggle = {
-                                    val next = if (row.key in collapsed) collapsed - row.key else collapsed + row.key
-                                    collapsed = next
-                                    // Written on every toggle, never on exit:
-                                    // Android may kill the process in the
-                                    // background without another chance to save.
-                                    appSettings?.collapsedSessionGroups = SessionGrouping.prune(next, entries)
-                                },
+                                onToggle = { onToggleGroup?.invoke(row.key) },
                             )
                         }
-                        is SessionGrouping.Row.Item -> item(key = row.entry.id) {
+                        // Server-scoped key. A remote pane's SessionItem id is
+                        // the bare tmux name, so two servers holding a session
+                        // with the same name produced a duplicate LazyColumn
+                        // key — which is a hard crash, not a glitch. (The
+                        // drawer already prefixes; this side was missed.)
+                        is SessionGrouping.Row.Item -> item(key = "${serverId}_${row.entry.id}") {
                             val item = byId[row.entry.id]
                             if (item != null) {
                                 SidePanelSessionRow(
@@ -275,6 +287,28 @@ internal fun SessionSidePanel(
                             }
                         }
                     }
+                }
+            }
+
+            // A filter that matches nothing must say so. Without this the
+            // panel renders its header, the filter box and the footer with a
+            // void between them, which reads as "my sessions are gone".
+            if (query.isNotBlank() && byServer.values.flatten().none { item ->
+                    val tab = item.tab
+                    listOfNotNull(
+                        tab?.alias, tab?.folder ?: item.folder,
+                        item.tab?.server?.name ?: item.remote?.server?.name,
+                        tab?.mode?.name, item.remote?.tmuxSession?.name,
+                    ).joinToString(" ").lowercase().contains(query.trim().lowercase())
+                }
+            ) {
+                item(key = "empty") {
+                    Text(
+                        "No sessions match \"$query\"",
+                        style = CRType.bodyDim,
+                        color = c.textDim,
+                        modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 16.dp),
+                    )
                 }
             }
 
@@ -456,6 +490,8 @@ private fun SidePanelSessionRow(
     val folderBase = item.folder.trimEnd('/').substringAfterLast('/').ifBlank { item.folder }
     val alias = item.tab?.alias?.ifBlank { null }
     val rowLabel = when {
+        // Only when there IS an alias: a session without one has nothing else
+        // to show, and dropping the folder would leave the row blank.
         aliasOnly && alias != null -> alias
         // A session with no alias IS the folder, so it keeps the folder name
         // rather than rendering an empty row.
