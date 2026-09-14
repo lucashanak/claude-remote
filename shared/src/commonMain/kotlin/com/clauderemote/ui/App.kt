@@ -113,6 +113,11 @@ fun App(
     var tabCloseConfirmId by remember { mutableStateOf<String?>(null) }
     // Long-press session context menu (mobile): which session it's open for.
     var sessionMenuId by remember { mutableStateOf<String?>(null) }
+    // Usage is reachable from the launcher AND from the chat's "..." menu, so
+    // Back has to return where it was opened from rather than to a fixed
+    // screen — landing in the launcher after opening it mid-session loses the
+    // terminal you were reading.
+    var usageReturnScreen by remember { mutableStateOf(Screen.LAUNCHER) }
     // Long-press server context menu (mobile): which server it's open for.
     var serverMenuServer by remember { mutableStateOf<SshServer?>(null) }
     // Delete-server confirmation: which server is pending deletion. Both the
@@ -853,7 +858,15 @@ fun App(
                         onSettings = { currentScreen = Screen.SETTINGS },
                         onViewLog = { currentScreen = Screen.LOG_VIEWER },
                         onHistory = { currentScreen = Screen.HISTORY },
-                        onUsageDashboard = { currentScreen = Screen.USAGE_DASHBOARD },
+                        // Per-account usage IS the usage screen now: with
+                        // several seats provisioned, "which account still has
+                        // room" is the question being asked, and the
+                        // per-session dashboard can only answer it for the
+                        // active login.
+                        onUsageDashboard = {
+                            usageReturnScreen = Screen.LAUNCHER
+                            currentScreen = Screen.ACCOUNT_USAGE
+                        },
                         onCheckUpdate = { checkForUpdate() },
                     )
                 }
@@ -1079,6 +1092,10 @@ fun App(
                         tabs = tabs,
                         activeTabId = activeTabId,
                         appSettings = appSettings,
+                        onUsage = {
+                            usageReturnScreen = Screen.TERMINAL
+                            currentScreen = Screen.ACCOUNT_USAGE
+                        },
                         invertColors = invertColors,
                         onToggleInvertColors = {
                             val next = !invertColors
@@ -1329,6 +1346,15 @@ fun App(
                             { sessionOrchestrator.clearPendingInputs(id) }
                         },
                         onNavigate = { target ->
+                            // This navigation starts FROM the terminal, so Usage
+                            // opened through it must come back here — otherwise
+                            // Back drops you in the launcher and you lose the
+                            // session you were reading. (The usage screens are
+                            // the only ones that track a return point; the rest
+                            // go home by design.)
+                            if (target == "dashboard" || target == "account-usage") {
+                                usageReturnScreen = Screen.TERMINAL
+                            }
                             currentScreen = when (target) {
                                 "settings" -> Screen.SETTINGS
                                 "dashboard" -> Screen.USAGE_DASHBOARD
@@ -1489,8 +1515,11 @@ fun App(
                         sessionUsagePercent = activeServerId?.let { sessionUsagePercents[it] },
                         weekUsagePercent = activeServerId?.let { weekUsagePercents[it] },
                         usageTokens = usageTokensState,
-                        onBack = { currentScreen = Screen.LAUNCHER },
-                        onPerAccountUsage = { currentScreen = Screen.ACCOUNT_USAGE },
+                        // Second page now — Back goes to the accounts page, and
+                        // the link that used to lead there would point at its
+                        // own caller.
+                        onBack = { currentScreen = Screen.ACCOUNT_USAGE },
+                        onPerAccountUsage = null,
                     )
                 }
 
@@ -1499,8 +1528,9 @@ fun App(
                         servers = serverList,
                         sessionOrchestrator = sessionOrchestrator,
                         accountColorStorage = accountColorStorage,
-                        onBack = { currentScreen = Screen.USAGE_DASHBOARD },
+                        onBack = { currentScreen = usageReturnScreen },
                         onManageAccounts = { currentScreen = Screen.ACCOUNTS },
+                        onSessionUsage = { currentScreen = Screen.USAGE_DASHBOARD },
                     )
                 }
 

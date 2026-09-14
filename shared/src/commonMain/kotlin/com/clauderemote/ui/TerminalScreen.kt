@@ -113,6 +113,8 @@ fun TerminalScreen(
     onTabSwitch: (String) -> Unit,
     onTabClose: (String) -> Unit,
     onSessionLongPress: ((String) -> Unit)? = null,
+    /** Opens per-account usage — the same screen the launcher's Usage icon does. */
+    onUsage: (() -> Unit)? = null,
     onNewTab: () -> Unit,
     onMenuOpen: () -> Unit,
     onSendCommand: (String) -> Unit,
@@ -571,6 +573,19 @@ fun TerminalScreen(
                                         moreMenu = false
                                         scope.launch { claudeMdContent = onFetchClaudeMd.invoke(); showClaudeMd = true }
                                     }, modifier = Modifier.fillMaxWidth()) { Text("View CLAUDE.md", color = c.text) }
+                                }
+                                if (onUsage != null) {
+                                    // Here as well as in the launcher: "which
+                                    // account still has room" gets asked
+                                    // mid-session, exactly when walking back out
+                                    // to the launcher costs you the terminal you
+                                    // were reading.
+                                    TextButton(onClick = {
+                                        moreMenu = false
+                                        onUsage()
+                                    }, modifier = Modifier.fillMaxWidth()) {
+                                        Text("Usage podle účtů", color = c.text)
+                                    }
                                 }
                                 TextButton(onClick = { moreMenu = false; onSendCommand("c") },
                                     modifier = Modifier.fillMaxWidth()) { Text("Reset terminal", color = c.text) }

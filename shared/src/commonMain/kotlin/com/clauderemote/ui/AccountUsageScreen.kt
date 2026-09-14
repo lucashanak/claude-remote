@@ -50,6 +50,12 @@ fun AccountUsageScreen(
     onBack: () -> Unit,
     /** Opens the accounts screen, where a lapsed login can be renewed. */
     onManageAccounts: (() -> Unit)? = null,
+    /**
+     * Opens the per-SESSION dashboard, which is now the second page: its bars
+     * only ever describe the active session's login, so with several seats
+     * provisioned this screen is the one that answers "how much is left".
+     */
+    onSessionUsage: (() -> Unit)? = null,
 ) {
     val c = CRTheme.colors
     val m = CRTheme.metrics
@@ -185,6 +191,16 @@ fun AccountUsageScreen(
                     style = CRType.bodyDim,
                     color = if (partial) c.working else c.textDim,
                 )
+            }
+
+            // The old first page, now reachable from here: it charts the ACTIVE
+            // session's own usage, which is a different question from "which of
+            // my seats still has room" and worth keeping one tap away.
+            if (onSessionUsage != null) {
+                TextButton(
+                    onClick = onSessionUsage,
+                    contentPadding = PaddingValues(horizontal = 0.dp),
+                ) { Text("Usage aktivní session (kontext, tokeny, graf) →", color = c.accent) }
             }
 
             Spacer(Modifier.height(24.dp))
