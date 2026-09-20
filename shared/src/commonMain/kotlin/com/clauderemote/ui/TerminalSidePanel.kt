@@ -94,6 +94,13 @@ internal fun SessionSidePanel(
     collapsedGroups: Set<String> = emptySet(),
     onToggleGroup: ((String) -> Unit)? = null,
     /**
+     * tmux `#{session_activity}` per tmux session name, for ordering rows by
+     * what was last used. Supplied by the caller because an ATTACHED session's
+     * stamp lives in the remote listing, which this panel doesn't see once the
+     * two lists have been merged into [allSessions].
+     */
+    tmuxActivityByName: Map<String, Long> = emptyMap(),
+    /**
      * Mode new sessions get; rows in it show no pill. Same reasoning as the
      * drawer's parameter — with YOLO as the default the pill was on every row,
      * so it marked nothing and only crowded the one row that differs.
@@ -224,9 +231,16 @@ internal fun SessionSidePanel(
                     needsAttention = tab != null &&
                         sessionActivities[tab.id] == com.clauderemote.model.SessionActivity.APPROVAL_NEEDED,
                     isActive = tab?.id == activeTabId,
+                    // tmux's own last-activity stamp. For an attached tab it
+                    // comes from the remote listing keyed by tmux name, since
+                    // the tab itself only knows when the APP connected — the
+                    // same instant for everything after a restore-on-boot.
+                    activityAt = remote?.tmuxSession?.lastActivity
+                        ?: tab?.let { tmuxActivityByName[it.tmuxSessionName] }
+                        ?: 0L,
                 )
             }
-            return SessionGrouping.build(entries, collapsedGroups, query)
+            return SessionGrouping.build(entries, collapsedGroups, query, sortByRecency = true)
         }
 
         val sortedServers = byServer.entries.sortedBy { (_, items) ->

@@ -28,17 +28,22 @@ object TmuxManager {
             // `-u`: exec channels carry no locale, and a non-UTF-8 tmux client gets
             // every non-ASCII character in a session name replaced with '_'. See the
             // long note in SessionOrchestrator.serverHasOtherLiveSession.
-            val output = execCommand(session, "tmux -u list-sessions -F '#{session_name}|#{session_windows}|#{session_attached}|#{session_created}' 2>/dev/null")
+            val output = execCommand(session, "tmux -u list-sessions -F '#{session_name}|#{session_windows}|#{session_attached}|#{session_created}|#{session_activity}' 2>/dev/null")
             if (output.isBlank()) return@withContext emptyList()
 
             output.lines().filter { it.isNotBlank() }.mapNotNull { line ->
                 val parts = line.split("|")
+                // Still `>= 4`: the activity field is additive, so a server
+                // whose tmux doesn't emit it (or a line from an older format)
+                // yields a session with lastActivity = 0 instead of vanishing
+                // from the list entirely.
                 if (parts.size >= 4) {
                     TmuxSession(
                         name = parts[0],
                         windows = parts[1].toIntOrNull() ?: 0,
                         attached = parts[2] == "1",
-                        created = parts[3]
+                        created = parts[3],
+                        lastActivity = parts.getOrNull(4)?.trim()?.toLongOrNull() ?: 0L,
                     )
                 } else null
             }

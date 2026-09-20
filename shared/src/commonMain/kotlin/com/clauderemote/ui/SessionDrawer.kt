@@ -61,6 +61,31 @@ import com.clauderemote.ui.theme.CRType
 private fun rowId(serverId: String, r: RemoteSession): String =
     "remote_${serverId}_" + r.tmuxSession.name
 
+/**
+ * Status filter above the list. Deliberately three states, not a chip per
+ * activity: with 44 sessions the question is almost always "what is waiting on
+ * me" or "what is still running", and every extra chip costs a row of the list
+ * it is meant to make findable.
+ */
+private enum class DrawerStatusFilter(val label: String) {
+    All("Vše"),
+    NeedsYou("Čeká"),
+    Running("Běží");
+
+    fun accepts(activity: SessionActivity?): Boolean = when (this) {
+        All -> true
+        NeedsYou -> activity == SessionActivity.APPROVAL_NEEDED
+        Running -> activity == SessionActivity.WORKING
+    }
+
+    /**
+     * Un-attached tmux sessions have no activity of their own — the app isn't
+     * reading their screen — so they can only ever answer "unknown". Showing
+     * them under a status filter would be a guess presented as a fact.
+     */
+    val acceptsRemote: Boolean get() = this == All
+}
+
 /** One server's worth of prepared rows, built before the list so the key order is known. */
 private data class DrawerSection(
     val server: SshServer,
@@ -100,6 +125,8 @@ fun SessionDrawer(
     // private copies that overwrite each other. Persisted there.
     collapsedGroups: Set<String> = emptySet(),
     onToggleGroup: ((String) -> Unit)? = null,
+    /** Replaces the whole collapsed set at once — the collapse/expand-all button. */
+    onSetCollapsedGroups: ((Set<String>) -> Unit)? = null,
     /**
      * Hoisted so the scroll position survives closing the drawer. Held inside,
      * it died with the composition every time the drawer slid shut and every
@@ -125,6 +152,10 @@ fun SessionDrawer(
 
     val c = CRTheme.colors
     var query by remember { mutableStateOf("") }
+    // Status filter. Kept across opens on purpose (unlike the text query): it
+    // is a working mode — "show me only what's waiting on me" — not a one-off
+    // lookup, and re-picking it on every open would defeat the point.
+    var statusFilter by remember { mutableStateOf(DrawerStatusFilter.All) }
 
     // Reset filter when drawer closes
     LaunchedEffect(open) { if (!open) query = "" }
@@ -174,21 +205,66 @@ fun SessionDrawer(
                         .background(drawerBrush)
                         .border(1.dp, c.border, RoundedCornerShape(0.dp)),
                 ) {
-                    DrawerHeader(count = sessions.size, onClose = onClose)
+                    // Every folder that could be collapsed, from the UNFILTERED
+                    // lists: "collapse all" means all of them, not just the ones
+                    // the current query happens to show.
+                    val allGroupKeys = remember(sessions, remoteSessions) {
+                        buildSet {
+                            sessions.forEach { s ->
+                                val leaf = s.folder.trimEnd('/').substringAfterLast('/').ifBlank { s.folder }
+                                add(SessionGrouping.groupKey(s.server.id, leaf.lowercase()))
+                            }
+                            remoteSessions.forEach { r ->
+                                val parsed = TmuxNameParser.parse(r.tmuxSession.name, r.server.name)
+                                val leaf = parsed.folder.trimEnd('/').substringAfterLast('/')
+                                    .ifBlank { parsed.folder }
+                                add(SessionGrouping.groupKey(r.server.id, leaf.lowercase()))
+                            }
+                        }
+                    }
+                    val allCollapsed = allGroupKeys.isNotEmpty() && collapsedGroups.containsAll(allGroupKeys)
+                    val statusCounts = remember(sessions, activities) {
+                        DrawerStatusFilter.entries.associateWith { f ->
+                            if (f == DrawerStatusFilter.All) sessions.size
+                            else sessions.count { f.accepts(activities[it.id]) }
+                        }
+                    }
+
+                    DrawerHeader(
+                        count = sessions.size,
+                        onClose = onClose,
+                        allCollapsed = allCollapsed,
+                        onToggleAll = onSetCollapsedGroups?.let { set ->
+                            { set(if (allCollapsed) emptySet() else allGroupKeys) }
+                        },
+                    )
                     HorizontalDivider(color = c.border, thickness = 1.dp)
                     DrawerSearch(query = query, onQuery = { query = it })
+                    DrawerStatusChips(
+                        selected = statusFilter,
+                        counts = statusCounts,
+                        onSelect = { statusFilter = it },
+                    )
                     HorizontalDivider(color = c.border, thickness = 1.dp)
 
                     val filteredActive = filterSessions(sessions, query)
+                        .filter { statusFilter.accepts(activities[it.id]) }
                     val attachedTmuxByServer: Map<String, Set<String>> =
                         sessions.groupBy { it.server.id }
                             .mapValues { (_, list) -> list.map { it.tmuxSessionName }.toSet() }
-                    val filteredRemote = filterRemote(
+                    val filteredRemote = if (!statusFilter.acceptsRemote) emptyList() else filterRemote(
                         remoteSessions.filter { rs ->
                             rs.tmuxSession.name !in (attachedTmuxByServer[rs.server.id] ?: emptySet())
                         },
                         query
                     )
+                    // Last activity for the ATTACHED sessions too: the app only
+                    // knows when it connected to them (identical for every
+                    // session after a restore-on-boot), while the tmux listing
+                    // carries the real thing for all of them, attached or not.
+                    val activityByTmuxName = remember(remoteSessions) {
+                        remoteSessions.associate { it.tmuxSession.name to it.tmuxSession.lastActivity }
+                    }
 
                     val activeByServer = filteredActive.groupBy { it.server.id }
                     val remoteByServer = filteredRemote.groupBy { it.server.id }
@@ -229,6 +305,7 @@ fun SessionDrawer(
                                     // approval prompt is really waiting on the user.
                                     needsAttention = activities[s.id] == SessionActivity.APPROVAL_NEEDED,
                                     isActive = s.id == activeId,
+                                    activityAt = activityByTmuxName[s.tmuxSessionName] ?: 0L,
                                 ))
                             }
                             remoteList.forEach { r ->
@@ -247,6 +324,7 @@ fun SessionDrawer(
                                     ).joinToString(" ").lowercase(),
                                     needsAttention = false,
                                     isActive = false,
+                                    activityAt = r.tmuxSession.lastActivity,
                                 ))
                             }
                         }
@@ -257,7 +335,11 @@ fun SessionDrawer(
                         DrawerSection(
                             server = server,
                             entryCount = entries.size,
-                            rows = SessionGrouping.build(entries, collapsedGroups, flat = query.isNotBlank()),
+                            rows = SessionGrouping.build(
+                                entries, collapsedGroups,
+                                flat = query.isNotBlank(),
+                                sortByRecency = true,
+                            ),
                             activeById = activeList.associateBy { it.id },
                             remoteById = remoteList.associateBy { rowId(server.id, it) },
                         )
@@ -399,7 +481,13 @@ fun SessionDrawer(
 // ── Header ────────────────────────────────────────────────────────────────────
 
 @Composable
-private fun DrawerHeader(count: Int, onClose: () -> Unit) {
+private fun DrawerHeader(
+    count: Int,
+    onClose: () -> Unit,
+    allCollapsed: Boolean = false,
+    /** Null hides the button — a caller that can't own the whole collapsed set. */
+    onToggleAll: (() -> Unit)? = null,
+) {
     val c = CRTheme.colors
     Row(
         Modifier
@@ -425,8 +513,58 @@ private fun DrawerHeader(count: Int, onClose: () -> Unit) {
             style = CRType.pill,
             color = c.textDim,
         )
+        if (onToggleAll != null) {
+            // One tap turns ten folders into a ten-row index and back. The icon
+            // is the same chevron the folder headers use, so it reads as "do
+            // that to all of them".
+            IconButton(onClick = onToggleAll, modifier = Modifier.size(32.dp)) {
+                Icon(
+                    if (allCollapsed) Icons.Default.KeyboardArrowDown else Icons.Default.KeyboardArrowRight,
+                    contentDescription = if (allCollapsed) "Rozbalit vše" else "Sbalit vše",
+                    tint = c.textDim,
+                    modifier = Modifier.size(18.dp),
+                )
+            }
+        }
         IconButton(onClick = onClose, modifier = Modifier.size(32.dp)) {
             Icon(Icons.Default.Close, contentDescription = "Close", tint = c.textDim, modifier = Modifier.size(16.dp))
+        }
+    }
+}
+
+// ── Search field ──────────────────────────────────────────────────────────────
+
+@Composable
+private fun DrawerStatusChips(
+    selected: DrawerStatusFilter,
+    counts: Map<DrawerStatusFilter, Int>,
+    onSelect: (DrawerStatusFilter) -> Unit,
+) {
+    val c = CRTheme.colors
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 10.dp, vertical = 6.dp),
+        horizontalArrangement = Arrangement.spacedBy(6.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        DrawerStatusFilter.entries.forEach { filter ->
+            val count = counts[filter] ?: 0
+            val isSelected = filter == selected
+            // A filter that would empty the list is disabled rather than hidden:
+            // a chip that appears and vanishes as sessions change state is a
+            // moving target, and "Čeká 0" is itself the answer to the question.
+            val enabled = count > 0 || filter == DrawerStatusFilter.All
+            Pill(
+                text = if (filter == DrawerStatusFilter.All) filter.label else "${filter.label} $count",
+                background = if (isSelected) c.tintAccent else c.surface2,
+                foreground = when {
+                    isSelected -> c.accent
+                    enabled -> c.textDim
+                    else -> c.textDim.copy(alpha = 0.4f)
+                },
+                modifier = Modifier.clickable(enabled = enabled) { onSelect(filter) },
+            )
         }
     }
 }
@@ -566,6 +704,7 @@ private fun DrawerItem(
     onLongPress: (() -> Unit)? = null,
 ) {
     val c = CRTheme.colors
+    val m = CRTheme.metrics
     val bg = if (selected) c.tintAccent else Color.Transparent
     // The second line earns its place only when it says something the title
     // doesn't. Without an alias the title IS the folder leaf, so the old
@@ -590,14 +729,19 @@ private fun DrawerItem(
         Box(
             Modifier
                 .width(3.dp)
-                .height(48.dp)
+                // Row height and padding come from the Appearance → Density
+                // setting (Dense 38dp / Compact 48dp / Regular 56dp) instead of
+                // a constant, so the existing control finally reaches the list
+                // that most needs it — at 44 sessions Dense shows ~25% more
+                // rows per screen.
+                .height(m.rowHeight)
                 .background(if (selected) c.accent else Color.Transparent),
         )
 
         Row(
             Modifier
                 .weight(1f)
-                .padding(horizontal = 10.dp, vertical = 10.dp),
+                .padding(horizontal = 10.dp, vertical = m.cardPadV),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(8.dp),
         ) {
@@ -652,6 +796,7 @@ private fun DrawerRemoteItem(
     onClick: () -> Unit,
 ) {
     val c = CRTheme.colors
+    val m = CRTheme.metrics
     val parsed = TmuxNameParser.parse(remote.tmuxSession.name, remote.server.name)
     val leaf = parsed.folder.trimEnd('/').substringAfterLast('/').ifBlank { parsed.folder }
     val label = parsed.alias.ifBlank { leaf }
@@ -664,12 +809,12 @@ private fun DrawerRemoteItem(
             .clickable(onClick = onClick),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Box(Modifier.width(3.dp).height(48.dp))
+        Box(Modifier.width(3.dp).height(m.rowHeight))
 
         Row(
             Modifier
                 .weight(1f)
-                .padding(horizontal = 10.dp, vertical = 10.dp),
+                .padding(horizontal = 10.dp, vertical = m.cardPadV),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(8.dp),
         ) {

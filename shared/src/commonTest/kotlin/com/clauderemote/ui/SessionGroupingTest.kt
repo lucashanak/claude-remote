@@ -47,6 +47,66 @@ class SessionGroupingTest {
 
     private fun List<SessionGrouping.Row>.aliases() = items().map { it.entry.alias }
 
+    // ---- recency ordering --------------------------------------------------
+
+    private fun activeEntry(folder: String, alias: String, activityAt: Long) =
+        entry(folder, alias).copy(activityAt = activityAt)
+
+    @Test
+    fun recencyPutsTheSessionYouUsedLastAtTheTopOfItsFolder() {
+        // The point of the whole option: nine sessions in one folder, and the
+        // one touched an hour ago should not be alphabetically last.
+        val entries = listOf(
+            activeEntry("kontexta", "aaa-oldest", 1_000),
+            activeEntry("kontexta", "zzz-newest", 9_000),
+            activeEntry("kontexta", "mmm-middle", 5_000),
+        )
+        val rows = SessionGrouping.build(entries, collapsed = emptySet(), sortByRecency = true)
+        assertEquals(listOf("zzz-newest", "mmm-middle", "aaa-oldest"), rows.aliases())
+        // …and the opt-out still reads alphabetically.
+        assertEquals(
+            listOf("aaa-oldest", "mmm-middle", "zzz-newest"),
+            SessionGrouping.build(entries, collapsed = emptySet()).aliases(),
+        )
+    }
+
+    @Test
+    fun foldersThemselvesStayAlphabeticalUnderRecency() {
+        // Only the order INSIDE a folder changes. Reordering the folders too
+        // would reshuffle the list every time a background agent printed a line.
+        val entries = listOf(
+            activeEntry("zeta", "z1", 9_000), activeEntry("zeta", "z2", 8_000),
+            activeEntry("alpha", "a1", 1_000), activeEntry("alpha", "a2", 2_000),
+        )
+        val rows = SessionGrouping.build(entries, collapsed = emptySet(), sortByRecency = true)
+        assertEquals(listOf("alpha", "zeta"), rows.headers().map { it.label })
+        assertEquals(listOf("a2", "a1", "z1", "z2"), rows.aliases())
+    }
+
+    @Test
+    fun sessionsWithNoActivityStampKeepTheAlphabeticalOrder() {
+        // A server whose tmux didn't report activity (all zeros) must not end up
+        // in an arbitrary order — it falls back to the old, predictable one.
+        val entries = listOf(entry("kontexta", "ccc"), entry("kontexta", "aaa"), entry("kontexta", "bbb"))
+        assertEquals(
+            listOf("aaa", "bbb", "ccc"),
+            SessionGrouping.build(entries, collapsed = emptySet(), sortByRecency = true).aliases(),
+        )
+    }
+
+    @Test
+    fun recencyAlsoOrdersTheAttentionSection() {
+        // "Needs you" is the section read under time pressure, so the newest
+        // prompt belongs at its top too.
+        val entries = listOf(
+            activeEntry("kontexta", "old-prompt", 1_000).copy(needsAttention = true),
+            activeEntry("kontexta", "new-prompt", 9_000).copy(needsAttention = true),
+            activeEntry("kontexta", "quiet", 5_000),
+        )
+        val rows = SessionGrouping.build(entries, collapsed = emptySet(), sortByRecency = true)
+        assertEquals(listOf("new-prompt", "old-prompt"), rows.aliases().take(2))
+    }
+
     // ---- grouping shape ----------------------------------------------------
 
     @Test

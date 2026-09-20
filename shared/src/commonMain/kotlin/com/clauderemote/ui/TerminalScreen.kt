@@ -296,6 +296,11 @@ fun TerminalScreen(
     // the top, close, reopen, and it would yank you back down to where you were
     // an hour ago.
     var drawerAnchor by remember { mutableStateOf(appSettings?.sessionDrawerAnchor.orEmpty()) }
+    // tmux's last-activity stamp per session name, from the remote listing —
+    // the only "when did I last use this" the app has (see TmuxSession).
+    val tmuxActivityByName = remember(remoteSessions) {
+        remoteSessions.associate { it.tmuxSession.name to it.tmuxSession.lastActivity }
+    }
     var showExpanded by remember { mutableStateOf(false) }
 
     // Tapping a path in a Claude answer opens the confirm dialog. Null when the
@@ -447,6 +452,7 @@ fun TerminalScreen(
                     onAttachRemote = onAttachRemote,
                     onRenameSession = onRenameSession,
                     onSessionLongPress = onSessionLongPress,
+                    tmuxActivityByName = tmuxActivityByName,
                     defaultMode = appSettings?.defaultClaudeMode ?: com.clauderemote.model.ClaudeMode.YOLO,
                     collapsedGroups = collapsedGroups,
                     onToggleGroup = toggleGroup,
@@ -1504,6 +1510,10 @@ fun TerminalScreen(
             onLogin = onLogin,
             collapsedGroups = collapsedGroups,
             onToggleGroup = toggleGroup,
+            onSetCollapsedGroups = { next ->
+                collapsedGroups = next
+                appSettings?.collapsedSessionGroups = next
+            },
             listState = drawerListState,
             restoreAnchor = drawerAnchor,
             // Written on close rather than on every scroll tick: one prefs write

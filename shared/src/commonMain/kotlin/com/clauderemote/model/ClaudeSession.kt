@@ -74,7 +74,17 @@ data class TmuxSession(
     val name: String,
     val windows: Int,
     val attached: Boolean,
-    val created: String
+    val created: String,
+    /**
+     * tmux's `#{session_activity}` in epoch SECONDS — when the pane last
+     * produced or received anything. 0 when the server didn't report it (an
+     * older client build, or a listing that predates the field).
+     *
+     * This is the only "last used" signal available: the app tracks when it
+     * CONNECTED to a session, which after a restore-on-boot is the same instant
+     * for all of them and says nothing about which one you were working in.
+     */
+    val lastActivity: Long = 0L,
 )
 
 /**

@@ -43,6 +43,13 @@ internal object SessionGrouping {
         val needsAttention: Boolean,
         /** The session currently on screen. */
         val isActive: Boolean,
+        /**
+         * tmux's last-activity time in epoch seconds, or 0 when unknown.
+         * Only read when the caller asks for [build]'s `sortByRecency`, and
+         * equal values (including all-zero) fall back to the alias order — so a
+         * server that doesn't report activity keeps the old alphabetical list.
+         */
+        val activityAt: Long = 0L,
     )
 
     sealed interface Row {
@@ -112,12 +119,31 @@ internal object SessionGrouping {
          * panel with no "no matches" message.
          */
         flat: Boolean = false,
+        /**
+         * Order the sessions INSIDE each section by tmux's last activity
+         * (newest first) instead of by alias.
+         *
+         * Folders themselves stay alphabetical: ordering those by recency too
+         * would reshuffle the whole list every time a background agent printed
+         * a line, and the folder is the part the user navigates by. This only
+         * decides which of a folder's sessions is at the top — the question
+         * "which of these nine did I work in today".
+         */
+        sortByRecency: Boolean = false,
     ): List<Row> {
         val q = query.trim().lowercase()
         val matching = if (q.isEmpty()) entries else entries.filter { it.searchText.contains(q) }
         if (matching.isEmpty()) return emptyList()
 
-        val ordered = matching.sortedWith(compareBy({ it.folderKey }, { it.alias.lowercase() }))
+        val ordered = matching.sortedWith(
+            if (sortByRecency) {
+                compareBy<Entry> { it.folderKey }
+                    .thenByDescending { it.activityAt }
+                    .thenBy { it.alias.lowercase() }
+            } else {
+                compareBy({ it.folderKey }, { it.alias.lowercase() })
+            }
+        )
         if (q.isNotEmpty() || flat) return ordered.map { Row.Item(it, inGroup = false) }
 
         val attention = ordered.filter { it.needsAttention }
