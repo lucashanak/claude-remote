@@ -64,6 +64,14 @@ jobs:
       - name: Setup Android NDK
         if: steps.mosh-cache.outputs.cache-hit != 'true'
         uses: android-actions/setup-android@v3
+        with:
+          # The v3 tag still defaults to `packages: tools platform-tools`, and
+          # Google removed the legacy `tools` package from the SDK repository —
+          # sdkmanager then exits 1 and every Android job dies at setup. Naming
+          # the packages explicitly (what the action's own main branch now
+          # defaults to) is what unbreaks it; nothing here needs `tools`, the
+          # NDK steps use sdkmanager out of cmdline-tools.
+          packages: platform-tools
 
       - name: Install NDK
         if: steps.mosh-cache.outputs.cache-hit != 'true'
@@ -105,6 +113,14 @@ jobs:
       - name: Setup Android NDK
         if: steps.et-cache.outputs.cache-hit != 'true'
         uses: android-actions/setup-android@v3
+        with:
+          # The v3 tag still defaults to `packages: tools platform-tools`, and
+          # Google removed the legacy `tools` package from the SDK repository —
+          # sdkmanager then exits 1 and every Android job dies at setup. Naming
+          # the packages explicitly (what the action's own main branch now
+          # defaults to) is what unbreaks it; nothing here needs `tools`, the
+          # NDK steps use sdkmanager out of cmdline-tools.
+          packages: platform-tools
 
       - name: Install NDK
         if: steps.et-cache.outputs.cache-hit != 'true'
@@ -255,6 +271,14 @@ jobs:
 
       - name: Setup Android SDK
         uses: android-actions/setup-android@v3
+        with:
+          # The v3 tag still defaults to `packages: tools platform-tools`, and
+          # Google removed the legacy `tools` package from the SDK repository —
+          # sdkmanager then exits 1 and every Android job dies at setup. Naming
+          # the packages explicitly (what the action's own main branch now
+          # defaults to) is what unbreaks it; nothing here needs `tools`, the
+          # NDK steps use sdkmanager out of cmdline-tools.
+          packages: platform-tools
 
       - name: Update version in build.gradle.kts
         run: |
