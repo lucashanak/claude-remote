@@ -93,6 +93,12 @@ internal fun SessionSidePanel(
     onSessionLongPress: ((String) -> Unit)? = null,
     collapsedGroups: Set<String> = emptySet(),
     onToggleGroup: ((String) -> Unit)? = null,
+    /**
+     * Mode new sessions get; rows in it show no pill. Same reasoning as the
+     * drawer's parameter — with YOLO as the default the pill was on every row,
+     * so it marked nothing and only crowded the one row that differs.
+     */
+    defaultMode: ClaudeMode = ClaudeMode.YOLO,
     modifier: Modifier = Modifier
 ) {
     val c = CRTheme.colors
@@ -280,6 +286,7 @@ internal fun SessionSidePanel(
                                     // it — "backendV2 · analyza_b…" was the
                                     // folder eating the name.
                                     aliasOnly = row.inGroup,
+                                    defaultMode = defaultMode,
                                     onTabSwitch = onTabSwitch,
                                     onTabClose = onTabClose,
                                     onAttachRemote = onAttachRemote,
@@ -478,6 +485,7 @@ private fun SidePanelSessionRow(
     dense: Boolean,
     /** Under a folder header the folder is redundant — show the alias alone. */
     aliasOnly: Boolean = false,
+    defaultMode: ClaudeMode = ClaudeMode.YOLO,
     onTabSwitch: (String) -> Unit,
     onTabClose: (String) -> Unit,
     onAttachRemote: ((com.clauderemote.model.RemoteSession) -> Unit)?,
@@ -589,7 +597,7 @@ private fun SidePanelSessionRow(
                             modifier = Modifier.size(8.dp),
                             viz = com.clauderemote.ui.theme.CRStatusViz.Dot,
                         )
-                        if (mode != null) {
+                        if (mode != null && mode != defaultMode) {
                             SidePanelModePill(mode = mode)
                         }
                     }

@@ -286,6 +286,16 @@ fun TerminalScreen(
         // process in the background without another chance to save.
         appSettings?.collapsedSessionGroups = next
     }
+    // Owned here for the same reason as collapsedGroups: the drawer's own
+    // composition is thrown away every time it slides shut, so a state held
+    // inside it could never survive a close. Held here it does, and the anchor
+    // below extends that across an app restart.
+    val drawerListState = androidx.compose.foundation.lazy.rememberLazyListState()
+    // Kept in state and updated on every close, not read once: a stale anchor
+    // from app start would otherwise fight the live scroll position — scroll to
+    // the top, close, reopen, and it would yank you back down to where you were
+    // an hour ago.
+    var drawerAnchor by remember { mutableStateOf(appSettings?.sessionDrawerAnchor.orEmpty()) }
     var showExpanded by remember { mutableStateOf(false) }
 
     // Tapping a path in a Claude answer opens the confirm dialog. Null when the
@@ -437,6 +447,7 @@ fun TerminalScreen(
                     onAttachRemote = onAttachRemote,
                     onRenameSession = onRenameSession,
                     onSessionLongPress = onSessionLongPress,
+                    defaultMode = appSettings?.defaultClaudeMode ?: com.clauderemote.model.ClaudeMode.YOLO,
                     collapsedGroups = collapsedGroups,
                     onToggleGroup = toggleGroup,
                     modifier = Modifier.width(sidePanelWidth).fillMaxHeight()
@@ -1493,6 +1504,15 @@ fun TerminalScreen(
             onLogin = onLogin,
             collapsedGroups = collapsedGroups,
             onToggleGroup = toggleGroup,
+            listState = drawerListState,
+            restoreAnchor = drawerAnchor,
+            // Written on close rather than on every scroll tick: one prefs write
+            // per drawer visit, and the value is only ever read on a cold start.
+            onAnchorChange = { key ->
+                drawerAnchor = key
+                appSettings?.sessionDrawerAnchor = key
+            },
+            defaultMode = appSettings?.defaultClaudeMode ?: com.clauderemote.model.ClaudeMode.YOLO,
         )
 
         // ── ExpandedInput overlay ──────────────────────────────────────────

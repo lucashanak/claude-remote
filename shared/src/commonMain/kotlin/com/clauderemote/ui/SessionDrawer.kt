@@ -13,7 +13,8 @@ import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.LazyListState
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material.icons.filled.KeyboardArrowDown
@@ -60,6 +61,27 @@ import com.clauderemote.ui.theme.CRType
 private fun rowId(serverId: String, r: RemoteSession): String =
     "remote_${serverId}_" + r.tmuxSession.name
 
+/** One server's worth of prepared rows, built before the list so the key order is known. */
+private data class DrawerSection(
+    val server: SshServer,
+    val entryCount: Int,
+    val rows: List<SessionGrouping.Row>,
+    val activeById: Map<String, ClaudeSession>,
+    val remoteById: Map<String, RemoteSession>,
+)
+
+/**
+ * The LazyColumn key for a row. Single source of truth: the restore looks an
+ * anchor up in a list built from this, and the list DSL keys items with it — if
+ * the two ever disagreed, restoring would land on the wrong row.
+ */
+private fun rowKeyOf(serverId: String, row: SessionGrouping.Row): String = when (row) {
+    is SessionGrouping.Row.AttentionHeader -> "attention_$serverId"
+    is SessionGrouping.Row.OtherHeader -> "other_$serverId"
+    is SessionGrouping.Row.FolderHeader -> "folder_${row.key}"
+    is SessionGrouping.Row.Item -> row.entry.id
+}
+
 @OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
 @Composable
 fun SessionDrawer(
@@ -78,6 +100,26 @@ fun SessionDrawer(
     // private copies that overwrite each other. Persisted there.
     collapsedGroups: Set<String> = emptySet(),
     onToggleGroup: ((String) -> Unit)? = null,
+    /**
+     * Hoisted so the scroll position survives closing the drawer. Held inside,
+     * it died with the composition every time the drawer slid shut and every
+     * reopen started at the top of 44 sessions.
+     */
+    listState: LazyListState = rememberLazyListState(),
+    /**
+     * Row key to scroll to on the FIRST open of an app run — [listState] covers
+     * every later open on its own. Ignored once the user has scrolled, and
+     * silently dropped when the row no longer exists.
+     */
+    restoreAnchor: String? = null,
+    /** Reports the top visible row key when the drawer closes, for [restoreAnchor]. */
+    onAnchorChange: ((String) -> Unit)? = null,
+    /**
+     * The mode new sessions get. Rows matching it show NO mode pill: with YOLO
+     * as the default every row carried an identical red "YOLO" tag, which is
+     * 44 pills of pure noise hiding the handful that differ.
+     */
+    defaultMode: ClaudeMode = ClaudeMode.YOLO,
 ) {
     if (!open && sessions.isEmpty() && remoteSessions.isEmpty()) return  // skip composition when not needed
 
@@ -159,6 +201,103 @@ fun SessionDrawer(
                     }
                     val totalItems = filteredActive.size + filteredRemote.size
 
+                    // Sections are built OUTSIDE the LazyColumn so the ordered
+                    // key list is known up front — the anchor restore needs to
+                    // turn a key back into an index, and the list DSL can't be
+                    // asked after the fact.
+                    val sections = sortedServerIds.mapNotNull { sid ->
+                        val server = serverById[sid] ?: return@mapNotNull null
+                        // Grouping, ordering and the "needs attention" hoist all
+                        // live in SessionGrouping — the same rules the side panel
+                        // uses, so the two lists cannot drift apart again.
+                        val activeList = activeByServer[sid] ?: emptyList()
+                        val remoteList = remoteByServer[sid] ?: emptyList()
+                        val entries = buildList {
+                            activeList.forEach { s ->
+                                val leaf = s.folder.trimEnd('/').substringAfterLast('/').ifBlank { s.folder }
+                                add(SessionGrouping.Entry(
+                                    id = s.id,
+                                    serverId = server.id,
+                                    folderKey = leaf.lowercase(),
+                                    folderLabel = leaf,
+                                    alias = s.alias,
+                                    searchText = listOf(
+                                        s.alias, s.folder, server.name,
+                                        s.mode.name, s.tmuxSessionName,
+                                    ).joinToString(" ").lowercase(),
+                                    // Same definition the launcher uses: only an
+                                    // approval prompt is really waiting on the user.
+                                    needsAttention = activities[s.id] == SessionActivity.APPROVAL_NEEDED,
+                                    isActive = s.id == activeId,
+                                ))
+                            }
+                            remoteList.forEach { r ->
+                                val parsed = TmuxNameParser.parse(r.tmuxSession.name, server.name)
+                                val leaf = parsed.folder.trimEnd('/').substringAfterLast('/')
+                                    .ifBlank { parsed.folder }
+                                add(SessionGrouping.Entry(
+                                    id = rowId(server.id, r),
+                                    serverId = server.id,
+                                    folderKey = leaf.lowercase(),
+                                    folderLabel = leaf,
+                                    alias = parsed.alias,
+                                    searchText = listOf(
+                                        parsed.alias, parsed.folder,
+                                        server.name, r.tmuxSession.name,
+                                    ).joinToString(" ").lowercase(),
+                                    needsAttention = false,
+                                    isActive = false,
+                                ))
+                            }
+                        }
+                        // The entries are already filtered by
+                        // filterSessions/filterRemote above, which match more
+                        // fields than this model would — so it only gets told to
+                        // go flat, never to filter again.
+                        DrawerSection(
+                            server = server,
+                            entryCount = entries.size,
+                            rows = SessionGrouping.build(entries, collapsedGroups, flat = query.isNotBlank()),
+                            activeById = activeList.associateBy { it.id },
+                            remoteById = remoteList.associateBy { rowId(server.id, it) },
+                        )
+                    }
+
+                    val showServerHeaders = query.isBlank()
+                    val rowKeys = remember(sections, showServerHeaders) {
+                        buildList {
+                            sections.forEach { section ->
+                                if (showServerHeaders) add("group_${section.server.id}")
+                                section.rows.forEach { row -> add(rowKeyOf(section.server.id, row)) }
+                            }
+                        }
+                    }
+
+                    // Restore once per app run: [listState] already carries the
+                    // position across open/close, so this only has to cover the
+                    // cold start. Guarded on being at the very top so it can
+                    // never yank a list the user has already scrolled.
+                    var anchorRestored by remember { mutableStateOf(false) }
+                    LaunchedEffect(open, rowKeys) {
+                        if (!open || anchorRestored || rowKeys.isEmpty()) return@LaunchedEffect
+                        anchorRestored = true
+                        val key = restoreAnchor?.takeIf { it.isNotBlank() } ?: return@LaunchedEffect
+                        if (listState.firstVisibleItemIndex != 0 || listState.firstVisibleItemScrollOffset != 0) {
+                            return@LaunchedEffect
+                        }
+                        val index = rowKeys.indexOf(key)
+                        if (index > 0) listState.scrollToItem(index)
+                    }
+
+                    // Remember where we were when the drawer closes. Reading the
+                    // FIRST VISIBLE row (not the index) is what makes the restore
+                    // survive sessions appearing and dying in between.
+                    LaunchedEffect(open) {
+                        if (open) return@LaunchedEffect
+                        val topKey = listState.layoutInfo.visibleItemsInfo.firstOrNull()?.key as? String
+                        if (topKey != null) onAnchorChange?.invoke(topKey)
+                    }
+
                     if (totalItems == 0) {
                         Box(
                             Modifier
@@ -174,94 +313,38 @@ fun SessionDrawer(
                             )
                         }
                     } else {
-                        LazyColumn(Modifier.weight(1f)) {
-                            sortedServerIds.forEach { sid ->
-                                val server = serverById[sid] ?: return@forEach
-                                // Grouping, ordering and the "needs attention"
-                                // hoist all live in SessionGrouping — the same
-                                // rules the side panel uses, so the two lists
-                                // cannot drift apart again.
-                                val activeList = activeByServer[sid] ?: emptyList()
-                                val remoteList = remoteByServer[sid] ?: emptyList()
-                                val activeById = activeList.associateBy { it.id }
-                                val remoteById = remoteList.associateBy { rowId(server.id, it) }
-                                val entries = buildList {
-                                    activeList.forEach { s ->
-                                        val leaf = s.folder.trimEnd('/').substringAfterLast('/').ifBlank { s.folder }
-                                        add(SessionGrouping.Entry(
-                                            id = s.id,
-                                            serverId = server.id,
-                                            folderKey = leaf.lowercase(),
-                                            folderLabel = leaf,
-                                            alias = s.alias,
-                                            searchText = listOf(
-                                                s.alias, s.folder, server.name,
-                                                s.mode.name, s.tmuxSessionName,
-                                            ).joinToString(" ").lowercase(),
-                                            // Same definition the launcher uses:
-                                            // only an approval prompt is really
-                                            // waiting on the user.
-                                            needsAttention = activities[s.id] == SessionActivity.APPROVAL_NEEDED,
-                                            isActive = s.id == activeId,
-                                        ))
-                                    }
-                                    remoteList.forEach { r ->
-                                        val parsed = TmuxNameParser.parse(r.tmuxSession.name, server.name)
-                                        val leaf = parsed.folder.trimEnd('/').substringAfterLast('/')
-                                            .ifBlank { parsed.folder }
-                                        add(SessionGrouping.Entry(
-                                            id = rowId(server.id, r),
-                                            serverId = server.id,
-                                            folderKey = leaf.lowercase(),
-                                            folderLabel = leaf,
-                                            alias = parsed.alias,
-                                            searchText = listOf(
-                                                parsed.alias, parsed.folder,
-                                                server.name, r.tmuxSession.name,
-                                            ).joinToString(" ").lowercase(),
-                                            needsAttention = false,
-                                            isActive = false,
-                                        ))
-                                    }
-                                }
-                                // The entries are already filtered by
-                                // filterSessions/filterRemote above, which match
-                                // more fields than this model would — so it only
-                                // gets told to go flat, never to filter again.
-                                val rows = SessionGrouping.build(
-                                    entries, collapsedGroups, flat = query.isNotBlank(),
-                                )
-
-                                if (query.isBlank()) {
+                        LazyColumn(Modifier.weight(1f), state = listState) {
+                            sections.forEach { section ->
+                                val server = section.server
+                                if (showServerHeaders) {
                                     stickyHeader(key = "group_${server.id}") {
-                                        DrawerGroupLabel(server = server, count = entries.size)
+                                        DrawerGroupLabel(server = server, count = section.entryCount)
                                     }
                                 }
-                                rows.forEach { row ->
+                                section.rows.forEach { row ->
+                                    val key = rowKeyOf(server.id, row)
                                     when (row) {
                                         // Every section header sticks, so the
                                         // pinned one always names the section
                                         // you are actually inside.
                                         is SessionGrouping.Row.AttentionHeader ->
-                                            stickyHeader(key = "attention_${server.id}") {
-                                                DrawerSectionHeader("Needs attention · ${row.count}", accent = true)
+                                            stickyHeader(key = key) {
+                                                DrawerSectionHeader("Needs attention \u00b7 ${row.count}", accent = true)
                                             }
                                         is SessionGrouping.Row.OtherHeader ->
-                                            stickyHeader(key = "other_${server.id}") {
-                                                DrawerSectionHeader("Other · ${row.count}")
+                                            stickyHeader(key = key) {
+                                                DrawerSectionHeader("Other \u00b7 ${row.count}")
                                             }
                                         is SessionGrouping.Row.FolderHeader ->
-                                            stickyHeader(key = "folder_${row.key}") {
+                                            stickyHeader(key = key) {
                                                 DrawerFolderHeader(
                                                     row = row,
-                                                    onToggle = {
-                                                        onToggleGroup?.invoke(row.key)
-                                                    },
+                                                    onToggle = { onToggleGroup?.invoke(row.key) },
                                                 )
                                             }
-                                        is SessionGrouping.Row.Item -> item(key = row.entry.id) {
-                                            val s = activeById[row.entry.id]
-                                            val r = remoteById[row.entry.id]
+                                        is SessionGrouping.Row.Item -> item(key = key) {
+                                            val s = section.activeById[row.entry.id]
+                                            val r = section.remoteById[row.entry.id]
                                             if (s != null) {
                                                 DrawerItem(
                                                     session = s,
@@ -273,6 +356,7 @@ fun SessionDrawer(
                                                     // is what truncated the
                                                     // alias.
                                                     aliasOnly = row.inGroup,
+                                                    defaultMode = defaultMode,
                                                     onClick = {
                                                         onPick(s.id)
                                                         onClose()
@@ -285,6 +369,8 @@ fun SessionDrawer(
                                             } else if (r != null) {
                                                 DrawerRemoteItem(
                                                     remote = r,
+                                                    aliasOnly = row.inGroup,
+                                                    defaultMode = defaultMode,
                                                     onClick = {
                                                         onAttachRemote?.invoke(r)
                                                         onClose()
@@ -474,11 +560,20 @@ private fun DrawerItem(
      * drops its second line and the title (which is the alias) gets the room.
      */
     aliasOnly: Boolean = false,
+    /** Sessions in this mode show no pill — see [SessionDrawer]'s parameter. */
+    defaultMode: ClaudeMode = ClaudeMode.YOLO,
     onClick: () -> Unit,
     onLongPress: (() -> Unit)? = null,
 ) {
     val c = CRTheme.colors
     val bg = if (selected) c.tintAccent else Color.Transparent
+    // The second line earns its place only when it says something the title
+    // doesn't. Without an alias the title IS the folder leaf, so the old
+    // condition drew the same word twice on every unaliased row.
+    val leaf = session.folder.trimEnd('/').substringAfterLast('/').ifBlank { session.folder }
+    val subtitle = session.folder.takeIf {
+        !aliasOnly && it.isNotBlank() && it != session.displayLabel && leaf != session.displayLabel
+    }
 
     Row(
         modifier = Modifier
@@ -519,11 +614,8 @@ private fun DrawerItem(
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                 )
-                // Hidden only when the alias carries the row. Without an alias
-                // the title falls back to the folder leaf, so dropping the path
-                // too would render two identical rows in the same group.
-                if (!aliasOnly || session.alias.isBlank()) Text(
-                    session.folder,
+                if (subtitle != null) Text(
+                    subtitle,
                     style = CRType.monoTiny,
                     color = c.textDim,
                     maxLines = 1,
@@ -531,9 +623,14 @@ private fun DrawerItem(
                 )
             }
 
-            Column(horizontalAlignment = Alignment.End) {
-                DrawerModePill(mode = session.mode)
-                Spacer(Modifier.height(2.dp))
+            // One line, not a stacked pair: the age is what distinguishes rows,
+            // and the pill only appears when the mode is NOT the default — so
+            // the column is usually just "4w" instead of a red tag plus a date.
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                if (session.mode != defaultMode) DrawerModePill(mode = session.mode)
                 Text(
                     session.durationText,
                     style = CRType.monoTiny,
@@ -549,11 +646,17 @@ private fun DrawerItem(
 @Composable
 private fun DrawerRemoteItem(
     remote: RemoteSession,
+    /** Under a folder header the folder is already on screen — see [DrawerItem]. */
+    aliasOnly: Boolean = false,
+    defaultMode: ClaudeMode = ClaudeMode.YOLO,
     onClick: () -> Unit,
 ) {
     val c = CRTheme.colors
     val parsed = TmuxNameParser.parse(remote.tmuxSession.name, remote.server.name)
-    val label = parsed.alias.ifBlank { parsed.folder.trimEnd('/').substringAfterLast('/').ifBlank { parsed.folder } }
+    val leaf = parsed.folder.trimEnd('/').substringAfterLast('/').ifBlank { parsed.folder }
+    val label = parsed.alias.ifBlank { leaf }
+    val subtitle = parsed.folder.takeIf { !aliasOnly && it.isNotBlank() && it != label && leaf != label }
+    val mode = if (parsed.isYolo) ClaudeMode.YOLO else ClaudeMode.NORMAL
 
     Row(
         modifier = Modifier
@@ -580,8 +683,8 @@ private fun DrawerRemoteItem(
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                 )
-                Text(
-                    parsed.folder,
+                if (subtitle != null) Text(
+                    subtitle,
                     style = CRType.monoTiny,
                     color = c.textDim,
                     maxLines = 1,
@@ -589,14 +692,18 @@ private fun DrawerRemoteItem(
                 )
             }
 
-            Column(horizontalAlignment = Alignment.End) {
-                DrawerModePill(mode = if (parsed.isYolo) ClaudeMode.YOLO else ClaudeMode.NORMAL)
-                Spacer(Modifier.height(2.dp))
-                Text(
-                    if (remote.tmuxSession.attached) "attached" else "detached",
-                    style = CRType.monoTiny,
-                    color = c.textDim,
-                )
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                if (mode != defaultMode) DrawerModePill(mode = mode)
+                // Only the noteworthy half of the pair: "detached" is the normal
+                // state of a session this device hasn't opened, so labelling it
+                // added a word to every remote row and said nothing. "attached"
+                // means another client holds it — that's worth a glance.
+                if (remote.tmuxSession.attached) {
+                    Text("attached", style = CRType.monoTiny, color = c.textDim)
+                }
             }
         }
     }

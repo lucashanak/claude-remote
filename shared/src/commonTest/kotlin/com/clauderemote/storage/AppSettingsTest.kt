@@ -344,6 +344,19 @@ class AppSettingsTest {
     }
 
     @Test
+    fun sessionDrawerAnchor_roundTripsAndDefaultsToEmpty() {
+        // Empty means "no anchor yet" — the drawer must open at the top rather
+        // than hunting for a row keyed by "".
+        val (s, _) = settings()
+        assertEquals("", s.sessionDrawerAnchor)
+        // Keys are session ids and header keys like "folder_srv|kontexta", so
+        // the value must survive verbatim: any mangling here silently degrades
+        // into "restore did nothing".
+        s.sessionDrawerAnchor = "folder_srv-1|kontexta"
+        assertEquals("folder_srv-1|kontexta", s.sessionDrawerAnchor)
+    }
+
+    @Test
     fun sidePanelWidthDp_isClampedOnBothReadAndWrite() {
         val (s, store) = settings()
         s.sidePanelWidthDp = 9999

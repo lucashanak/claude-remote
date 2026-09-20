@@ -204,6 +204,20 @@ class AppSettings(private val prefs: KeyValueStore) {
             .toSet()
         set(value) = prefs.putString("collapsed_session_groups", value.filter { it.isNotBlank() }.joinToString("\n"))
 
+    /**
+     * List key of the row that was at the top of the session drawer when it was
+     * last closed, so reopening lands where the user left off.
+     *
+     * Stored as the row's KEY (session id / header key), not its index: the list
+     * is rebuilt from live sessions, so an index means a different row after any
+     * session appears, dies or gets renamed — which is exactly the case the
+     * restore is supposed to help with. An anchor that no longer exists simply
+     * restores nothing.
+     */
+    var sessionDrawerAnchor: String
+        get() = prefs.getString("session_drawer_anchor", "")
+        set(value) = prefs.putString("session_drawer_anchor", value)
+
     // Speech-to-text backend for dictation + voice mode.
     var sttEngine: com.clauderemote.model.SttEngine
         get() = runCatching {
