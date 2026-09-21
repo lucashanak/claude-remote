@@ -17,6 +17,25 @@ import kotlin.math.roundToInt
 
 private const val TAG = "SessionOrchestrator"
 
+/**
+ * How long a fetched usage payload stays good in the SERVER-SIDE cache
+ * (see rateLimitCmd).
+ *
+ * The endpoint's quota is per ACCOUNT, and every client polled every
+ * account independently — phone plus two desktops is 3 requests per
+ * account per minute against a quota that answers roughly one. Measured
+ * on the live box: the default seat's poll succeeded 2827 times on one
+ * desktop and NOT ONCE on the phone (0 successes, 17× HTTP 429), which
+ * is why the all-accounts page showed it as "no data". The desktop that
+ * polls constantly simply wins every race.
+ *
+ * With the cache the endpoint sees ~one request per account per TTL no
+ * matter how many devices are open, and every client reads the same
+ * numbers. 90s rather than 60: the 5h window moves slowly, and it leaves
+ * room for pollers whose phases nearly align.
+ */
+private const val USAGE_CACHE_TTL_SEC = 90
+
 // Reads the OAuth access token from the credentials file ON THE SERVER and
 // queries Anthropic's usage endpoint directly (free — usage metadata only, no
 // model tokens, no subscription credit pool). OMC-independent: only needs the
@@ -33,12 +52,42 @@ private const val TAG = "SessionOrchestrator"
 // `~/.claude-remote/accounts/<slug>` otherwise; it is shell-quoted by the caller.
 private fun rateLimitCmd(accountConfigDir: String): String =
     "CRED=\"$accountConfigDir/.credentials.json\"; " +
+        "CD=\"\$HOME/.claude-remote/usage\"; mkdir -p \"\$CD\" 2>/dev/null; " +
+        // One cache file per ACCOUNT, named after its config dir's basename
+        // (`.claude` for the default login, the slug otherwise) reduced to the
+        // filename charset so a slug can never escape the directory.
+        // `tr -dc`, not `tr -c … '_'`: the translating form rewrites the trailing
+        // NEWLINE too, so the file came out as `.claude_.json`. Deleting the
+        // out-of-set bytes leaves `.claude` and a slug (already restricted to
+        // this charset by accountSlugFromEmail) untouched.
+        "CN=\$(basename \"$accountConfigDir\" | tr -dc 'A-Za-z0-9._@-'); " +
+        "[ -n \"\$CN\" ] || CN=default; " +
+        "CF=\"\$CD/\$CN.json\"; NOW=\$(date +%s); " +
+        // Line 1 is the fetch time, the rest is the payload — `stat` differs
+        // between GNU and BSD, this needs nothing but head/tail.
+        "CT=\$(head -1 \"\$CF\" 2>/dev/null); " +
+        "case \"\$CT\" in ''|*[!0-9]*) CT=0;; esac; " +
+        "[ \$((NOW - CT)) -lt $USAGE_CACHE_TTL_SEC ] && { tail -n +2 \"\$CF\"; exit 0; }; " +
         "T=\$(grep -oE '\"accessToken\":\"[^\"]+\"' \"\$CRED\" 2>/dev/null | head -1 | sed 's/.*:\"//; s/\"\$//'); " +
         "[ -z \"\$T\" ] && { echo '{}'; exit 0; }; " +
-        "printf 'header = \"Authorization: Bearer %s\"\\nheader = \"anthropic-beta: oauth-2025-04-20\"\\nurl = \"https://api.anthropic.com/api/oauth/usage\"\\n' \"\$T\" | " +
+        // Serialise the miss: without the lock every client that finds the cache
+        // stale fetches at once, which is the stampede this whole cache exists
+        // to stop. The second check inside the lock catches the ones that were
+        // queued behind the winner.
+        "( flock -x 9 2>/dev/null; " +
+        "CT=\$(head -1 \"\$CF\" 2>/dev/null); case \"\$CT\" in ''|*[!0-9]*) CT=0;; esac; " +
+        "[ \$((\$(date +%s) - CT)) -lt $USAGE_CACHE_TTL_SEC ] && { tail -n +2 \"\$CF\"; exit 0; }; " +
+        "OUT=\$(printf 'header = \"Authorization: Bearer %s\"\\nheader = \"anthropic-beta: oauth-2025-04-20\"\\nurl = \"https://api.anthropic.com/api/oauth/usage\"\\n' \"\$T\" | " +
         // -w exposes the status: without it a 429 body is indistinguishable from
         // an empty reply, so the poller kept hammering a tripped rate limit.
-        "curl -sK - --max-time 8 -w '\\nHTTP:%{http_code}' 2>/dev/null || echo '{}'"
+        "curl -sK - --max-time 8 -w '\\nHTTP:%{http_code}' 2>/dev/null || echo '{}'); " +
+        // Cache SUCCESSES only. Caching a 429 would hand the same failure to
+        // every client for the whole TTL, and the retry is what recovers it.
+        "case \"\$OUT\" in *'\"five_hour\"'*) " +
+        "{ date +%s; printf '%s' \"\$OUT\"; } > \"\$CF.tmp.\$\$\" && mv \"\$CF.tmp.\$\$\" \"\$CF\";; " +
+        "esac; " +
+        "printf '%s' \"\$OUT\" " +
+        ") 9>\"\$CF.lock\""
 
 /**
  * 5h/week usage percents + reset minutes + usage tokens + per-server ccusage
