@@ -172,7 +172,23 @@ class WearDataListenerService : WearableListenerService() {
             // APPROVAL_NEEDED, mění se jen zpráva. Je to plnohodnotná nová
             // žádost o akci, ne oprava textu předchozí — musí vyvěsit a
             // zabzučet i tehdy, když na zápěstí nic nevisí.
-            val isNewRequest = session.activity == "APPROVAL_NEEDED" && messageAdvanced
+            // Totéž pro ČEKÁNÍ NA VSTUP: session, kterou hodinky mezi dvěma
+            // dokončeními nikdy neviděly WORKING (push s WORKING se sloučil
+            // nebo telefon aktivitu nepřepnul), přijde jako
+            // WAITING -> WAITING s novou zprávou. Dřív se to bralo jako tichá
+            // oprava textu: bez bzučení, a když uživatel předchozí notifikaci
+            // smetl, vůbec se nevyvěsila („skip repair: no longer active“) —
+            // nové dokončení se tak na zápěstí ztratilo. Nová zpráva = obě
+            // podmínky zároveň: `lastMessageAt` se pohnulo A zobrazené tělo
+            // se změnilo. Samotné `messageAdvanced` nestačí, protože telefon
+            // razítko posune i když jen dohnal transcript a text zůstal
+            // stejný (to je tichá oprava, ne nová zpráva).
+            // `bodyChanged` porovnává USEKNUTÉ tělo (100 znaků), takže dvě
+            // odpovědi se stejným začátkem by splynuly — proto navíc plný
+            // text (`spokenText`), jehož hash se posouvá s každým vyvěšením.
+            val isNewRequest = messageAdvanced &&
+                (session.activity == "APPROVAL_NEEDED" || bodyChanged ||
+                    (spokenText != null && spokenText.hashCode() != previous.spokenHash))
 
             if (!wasNotifyWorthy) {
                 if (!enteringApproval && !messageAdvanced) {
@@ -218,8 +234,12 @@ class WearDataListenerService : WearableListenerService() {
             // pod už odbytou notifikací. Opačný směr (APPROVAL -> WAITING,
             // telefon degraduje aktivitu při přepnutí tabu) i čistá oprava
             // těla se propíšou tiše přes setOnlyAlertOnce.
-            val alerts = !wasNotifyWorthy ||
-                (session.activity == "APPROVAL_NEEDED" && (activityChanged || messageAdvanced))
+            // A stejně tak každé NOVÉ dokončení (`isNewRequest` výš) — i když
+            // aktivita zůstala WAITING_FOR_INPUT. Tiše se propíše jen oprava
+            // těla téže zprávy (příchod LLM shrnutí, dohnaný transcript) a
+            // sestup APPROVAL -> WAITING.
+            val alerts = !wasNotifyWorthy || isNewRequest ||
+                (session.activity == "APPROVAL_NEEDED" && activityChanged)
 
             // Logs the PREVIOUS activity too — a session reported as acting
             // on a message that "hadn't moved in days" needs this to tell

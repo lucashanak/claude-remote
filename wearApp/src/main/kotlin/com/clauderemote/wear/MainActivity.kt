@@ -378,12 +378,24 @@ private fun SessionDetailScreen(session: WearSessionInfo) {
     // Fallback flag: když do ~5 s nic nedorazí (telefon offline / starý build),
     // spadneme na dosavadní jednorázový session.lastMessage.
     var historyTimedOut by remember(session.id) { mutableStateOf(false) }
-    LaunchedEffect(session.id) {
-        HistoryStore.clear(session.id)
+    // Klíčováno i na `lastMessageAt`: historie se stahovala jen jednou při
+    // otevření detailu, takže když Claude mezitím odpověděl, seznam ukazoval
+    // dál starou odpověď, zatímco „Přehrát“ (čte `session.lastMessage`, který
+    // /sessions push průběžně obnovuje) už mluvilo tou novou. Každý posun
+    // razítka si historii vyžádá znovu; starý seznam zůstane vidět, dokud
+    // nedorazí nový (clear se dělá jen při změně session).
+    LaunchedEffect(session.id) { HistoryStore.clear(session.id) }
+    var historyRequests by remember(session.id) { mutableStateOf(0) }
+    LaunchedEffect(session.id, session.lastMessageAt) {
+        historyRequests++
         historyTimedOut = false
         sendHistoryRequest(context, session.id)
         kotlinx.coroutines.delay(5_000)
         historyTimedOut = true
+        // Opakovaný dotaz (po posunu razítka) bez odpovědi: starý seznam by
+        // dál vyhrával nad fallbackem a ukazoval předchozí odpověď, zatímco
+        // `session.lastMessage` je už nová — zahoď ho, ať se ukáže fallback.
+        if (historyRequests > 1) HistoryStore.clear(session.id)
     }
 
     // Watch jinak žádné příchozí MessageClient zprávy neposlouchá — registrace
