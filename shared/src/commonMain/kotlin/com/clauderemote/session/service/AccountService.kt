@@ -519,7 +519,11 @@ internal class AccountService(
             // grep -o of the single field: the surrounding file holds the
             // access and refresh TOKENS, which must never leave the server.
             "CRED=\"\${2:-\$HOME/.claude}/.credentials.json\"; " +
-            "grep -o '\"refreshTokenExpiresAt\"[[:space:]]*:[[:space:]]*[0-9]*' \"\$CRED\" 2>/dev/null | head -1; " +
+            // Scoped to the claudeAiOauth object for the same reason the usage
+            // probe is: `mcpOAuth` entries carry their own token fields, and a
+            // file-wide grep reads whichever plugin happens to be listed first.
+            "tr -d '\\n' < \"\$CRED\" 2>/dev/null | sed 's/.*\"claudeAiOauth\"[^{]*{//' | " +
+            "grep -o '\"refreshTokenExpiresAt\"[[:space:]]*:[[:space:]]*[0-9]*' | head -1; " +
             "printf '\\n'; }; " +
             "probe ${ClaudeAccount.DEFAULT_SLUG} \"\"; " +
             "if [ -d \"\$ROOT\" ]; then for d in \"\$ROOT\"/*; do " +

@@ -68,8 +68,29 @@ private fun rateLimitCmd(accountConfigDir: String): String =
         "CT=\$(head -1 \"\$CF\" 2>/dev/null); " +
         "case \"\$CT\" in ''|*[!0-9]*) CT=0;; esac; " +
         "[ \$((NOW - CT)) -lt $USAGE_CACHE_TTL_SEC ] && { tail -n +2 \"\$CF\"; exit 0; }; " +
-        "T=\$(grep -oE '\"accessToken\":\"[^\"]+\"' \"\$CRED\" 2>/dev/null | head -1 | sed 's/.*:\"//; s/\"\$//'); " +
-        "[ -z \"\$T\" ] && { echo '{}'; exit 0; }; " +
+        // Scope the read to the claudeAiOauth OBJECT. `.credentials.json` also
+        // holds an `mcpOAuth` section — one entry per MCP plugin the user has
+        // authorised — and those entries carry their own `accessToken`, listed
+        // BEFORE claudeAiOauth. A plain "first accessToken in the file" grep
+        // therefore started sending a PLUGIN's token (a Vercel `vca_…`) to
+        // api.anthropic.com the moment such a plugin was authorised: the
+        // endpoint answered 429, the poller read that as a rate limit and
+        // backed off politely, and the account showed "no data" forever while
+        // looking exactly like quota contention.
+        //
+        // `tr -d` flattens the file first so this holds whether the JSON is
+        // compact or pretty-printed; the greedy `.*` then drops everything up
+        // to the claudeAiOauth object's opening brace.
+        "T=\$(tr -d '\\n' < \"\$CRED\" 2>/dev/null | sed 's/.*\"claudeAiOauth\"[^{]*{//' | " +
+        // Whitespace-tolerant: Claude Code writes this file compact today, but a
+        // pretty-printed `"accessToken": "sk-…"` would slip through a pattern
+        // that hardcodes `":"` and hand curl an empty Bearer.
+        "grep -oE '\"accessToken\"[[:space:]]*:[[:space:]]*\"[^\"]+\"' | head -1 | " +
+        "sed 's/.*:[[:space:]]*\"//; s/\"\$//'); " +
+        // Never send a credential we cannot identify as the Claude one. If the
+        // token format ever changes the chips go blank — visible and harmless —
+        // instead of quietly shipping somebody else's secret to a third party.
+        "case \"\$T\" in sk-ant-*) ;; *) echo '{}'; exit 0;; esac; " +
         // Serialise the miss: without the lock every client that finds the cache
         // stale fetches at once, which is the stampede this whole cache exists
         // to stop. The second check inside the lock catches the ones that were
