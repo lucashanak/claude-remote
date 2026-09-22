@@ -33,6 +33,19 @@ object MessageSummarizer {
 
     private val thinkBlock = Regex("(?s)<think>.*?</think>")
 
+    /**
+     * Longest message that is NOT worth summarising for a given target
+     * length — roughly the size of the summary itself (one Czech sentence of
+     * ~12 words ≈ 100 chars; 2–3 sentences ≈ 220; a 4-sentence paragraph ≈ 380).
+     * Keep the largest value ≤ WearNotifier.BODY_MAX_CHARS on the watch, so a
+     * skipped message is never truncated there.
+     */
+    fun passthroughMaxChars(length: String): Int = when (length) {
+        "SHORT" -> 220
+        "PARAGRAPH" -> 380
+        else -> 100
+    }
+
     suspend fun summarize(
         baseUrl: String,
         apiKey: String,
@@ -43,6 +56,17 @@ object MessageSummarizer {
         length: String = "SENTENCE",
     ): String? = withContext(Dispatchers.IO) {
         if (baseUrl.isBlank() || message.isBlank()) return@withContext null
+        // A message already shorter than the summary it would get is not
+        // summarised at all: the LLM otherwise pads it (78 chars became 250
+        // in PARAGRAPH mode in the device log) and burns a call for nothing.
+        // Null here means "show the raw text" on both surfaces — the watch
+        // renders bodies up to WearNotifier's cap (≥ the PARAGRAPH threshold)
+        // whole, so nothing is lost, and the caller caches the null so the
+        // decision isn't re-evaluated on every push.
+        if (message.length <= passthroughMaxChars(length)) {
+            FileLogger.log("MessageSummarizer", "skip ($length, ${message.length} zn ≤ ${passthroughMaxChars(length)}): raw text shown as is")
+            return@withContext null
+        }
         // Prompt differs by activity: an approval prompt is an action to
         // confirm, otherwise it's a question the agent is asking.
         val subject = if (activity == "APPROVAL_NEEDED") {

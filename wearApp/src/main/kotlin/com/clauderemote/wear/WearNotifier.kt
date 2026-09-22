@@ -75,7 +75,16 @@ object WearNotifier {
     }
 
     private fun truncate(text: String): String =
-        if (text.length > 100) text.take(100) + "…" else text
+        if (text.length > BODY_MAX_CHARS) text.take(BODY_MAX_CHARS) + "…" else text
+
+    /**
+     * Cap for a raw (unsummarised) body. Raw assistant messages run to
+     * thousands of characters, which is useless on a watch; up to this length
+     * BigTextStyle shows the message whole. Matches the phone's
+     * MessageSummarizer.passthroughMaxChars("PARAGRAPH") — messages that short
+     * are deliberately NOT summarised, so this is what the wrist shows for them.
+     */
+    private const val BODY_MAX_CHARS = 380
 
     /**
      * Stabilní id notifikace pro session. Vlastní bázový offset, disjunktní

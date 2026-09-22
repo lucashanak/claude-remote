@@ -13,6 +13,7 @@ import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.debounce
 import kotlinx.coroutines.async
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
@@ -112,6 +113,9 @@ object WearSync {
     // across a completion without letting the map grow with the transcript.
     private const val SUMMARY_CACHE_PER_SESSION = 4
     private val summaryCache = mutableMapOf<String, LinkedHashMap<Int, String?>>()
+    // "$sessionId#$textHash" -> the LLM call currently running for it. See
+    // maybeSummarize. Entries live only for the duration of one call.
+    private val inFlight = mutableMapOf<String, CompletableDeferred<String?>>()
 
     private fun summarySlots(sessionId: String): LinkedHashMap<Int, String?> =
         summaryCache.getOrPut(sessionId) {
@@ -494,9 +498,27 @@ object WearSync {
             summaryCache[sessionId]?.let { slots -> if (slots.containsKey(key)) slots[key] to true else null }
         }
         if (hit != null) return hit.first
-        val summary = com.clauderemote.voice.MessageSummarizer
-            .summarize(url, apiKey, model, activity, msg, length)
+        // In-flight dedup: the phase-2 watch push and the phone alert's
+        // summaryFor (or two overlapping pushes) miss the cache at the same
+        // instant and each called the LLM — every message was summarised
+        // twice, with two different results on the two surfaces. The first
+        // caller owns the call; everyone else awaits the same Deferred.
+        val flightKey = "$sessionId#$key"
+        val (deferred, owner) = synchronized(inFlight) {
+            inFlight[flightKey]?.let { it to false } ?: (CompletableDeferred<String?>().also { inFlight[flightKey] = it } to true)
+        }
+        if (!owner) return deferred.await()
+        val summary = try {
+            com.clauderemote.voice.MessageSummarizer
+                .summarize(url, apiKey, model, activity, msg, length)
+        } catch (t: Throwable) {
+            deferred.complete(null)
+            synchronized(inFlight) { inFlight.remove(flightKey) }
+            throw t
+        }
         synchronized(summaryCache) { summarySlots(sessionId)[key] = summary }
+        deferred.complete(summary)
+        synchronized(inFlight) { inFlight.remove(flightKey) }
         return summary
     }
 
