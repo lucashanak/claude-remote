@@ -743,10 +743,25 @@ fun TerminalScreen(
                                         TextButton(onClick = { moreMenu = false; onReconnect?.invoke(activeSession.id) },
                                             modifier = Modifier.fillMaxWidth()) { Text("Reconnect", color = c.text) }
                                     }
-                                    if (onRestartClaude != null && activeSession.status == SessionStatus.ACTIVE) {
-                                        TextButton(onClick = { moreMenu = false; showRestartConfirm = true },
-                                            modifier = Modifier.fillMaxWidth()) {
-                                            Text("Restart Claude Code", color = c.text)
+                                    if (onRestartClaude != null) {
+                                        // Shown for every session, disabled rather
+                                        // than hidden when it can't run. A menu
+                                        // entry that silently isn't there reads as
+                                        // "this build can't do it" — which is
+                                        // exactly how it was reported from macOS,
+                                        // where the same code hid it because the
+                                        // session simply wasn't ACTIVE at the time.
+                                        val canRestart = activeSession.status == SessionStatus.ACTIVE
+                                        TextButton(
+                                            onClick = { moreMenu = false; showRestartConfirm = true },
+                                            enabled = canRestart,
+                                            modifier = Modifier.fillMaxWidth(),
+                                        ) {
+                                            Text(
+                                                if (canRestart) "Restart Claude Code"
+                                                else "Restart Claude Code (session not connected)",
+                                                color = if (canRestart) c.text else c.textDim,
+                                            )
                                         }
                                     }
                                     TextButton(onClick = { moreMenu = false; onTabClose(activeSession.id) },

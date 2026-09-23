@@ -2164,6 +2164,36 @@ class SessionOrchestrator(
         }
     }
 
+    /**
+     * Restart Claude in EVERY eligible session, one at a time.
+     *
+     * The case this exists for is a Claude Code upgrade: the new binary only
+     * takes effect on a fresh process, and respawning forty panes by hand is
+     * how it doesn't get done.
+     *
+     * SEQUENTIAL on purpose. Each restart is an SSH exec with a transcript
+     * probe and a pane respawn; firing forty at once means forty concurrent
+     * execs against one sshd and one tmux server, which is the shape of the
+     * redraw bursts that have killed transports here before. A restart also
+     * takes a moment to settle, and staggering keeps the terminal readable
+     * instead of every pane blanking at once.
+     *
+     * Returns how many sessions were actually restarted, so the caller can say
+     * so rather than claim all of them.
+     */
+    suspend fun restartClaudeForAllSessions(): Int {
+        val targets = RestartTargets.eligible(tabManager.tabs.value)
+        FileLogger.log(TAG, "restartAll: ${targets.size} of ${tabManager.tabs.value.size} sessions eligible")
+        var done = 0
+        for (id in targets) {
+            restartClaude(id)
+            done++
+            kotlinx.coroutines.delay(RESTART_ALL_GAP_MS)
+        }
+        FileLogger.log(TAG, "restartAll: restarted $done session(s)")
+        return done
+    }
+
     // ======================== CLAUDE ACCOUNTS ========================
 
     /**
@@ -2368,5 +2398,13 @@ class SessionOrchestrator(
         /** Sentinel returned by [downloadFile] when the remote file exceeds [DOWNLOAD_SIZE_LIMIT]. */
         val DOWNLOAD_TOO_LARGE: ByteArray = ByteArray(0)
         private const val DOWNLOAD_SIZE_LIMIT = 200L * 1024 * 1024 // 200 MB
+
+        /**
+         * Pause between panes in [restartClaudeForAllSessions]. Long enough that
+         * a fleet-wide restart reads as a rolling wave rather than every pane
+         * going blank at once, short enough that forty sessions finish in about
+         * a minute.
+         */
+        private const val RESTART_ALL_GAP_MS = 1_500L
     }
 }

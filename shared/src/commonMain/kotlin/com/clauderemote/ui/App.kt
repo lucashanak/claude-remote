@@ -762,6 +762,9 @@ fun App(
                         onSwitchEffortAll = { effort ->
                             sessionOrchestrator.switchEffortForAllSessions(effort)
                         },
+                        onRestartAllSessions = {
+                            scope.launch { sessionOrchestrator.restartClaudeForAllSessions() }
+                        },
                         onAttachRemote = { remote ->
                             scope.launch {
                                 try {

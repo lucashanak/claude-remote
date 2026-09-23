@@ -62,6 +62,12 @@ fun LauncherScreen(
     onConnectAll: (() -> Unit)? = null,
     onSwitchModelAll: ((ClaudeModel) -> Unit)? = null,
     onSwitchEffortAll: ((ClaudeEffort) -> Unit)? = null,
+    /**
+     * Restart Claude in every eligible session — the Claude Code upgrade case.
+     * Receives nothing and reports nothing back; the confirm below is what
+     * makes it deliberate.
+     */
+    onRestartAllSessions: (() -> Unit)? = null,
     onAttachRemote: ((RemoteSession) -> Unit)? = null,
     onConnectServer: (SshServer) -> Unit,
     onQuickConnect: ((SshServer) -> Unit)? = null,
@@ -152,6 +158,53 @@ fun LauncherScreen(
                                     )
                                 }
                             }
+                        }
+                    }
+                    if (onRestartAllSessions != null) {
+                        var confirmRestartAll by remember { mutableStateOf(false) }
+                        IconButton(onClick = { confirmRestartAll = true }) {
+                            Icon(
+                                Icons.Default.Refresh,
+                                contentDescription = "Restart Claude in all sessions",
+                                tint = c.textDim,
+                            )
+                        }
+                        if (confirmRestartAll) {
+                            // Confirmed, unlike the model/effort switches next to
+                            // it: those type a slash command into a running
+                            // Claude, this one kills and respawns every pane. The
+                            // count is in the question because "all sessions" does
+                            // not convey that it is forty of them.
+                            val eligible = com.clauderemote.session.RestartTargets
+                                .eligible(activeSessions).size
+                            AlertDialog(
+                                onDismissRequest = { confirmRestartAll = false },
+                                title = { Text("Restart Claude everywhere?", color = c.text) },
+                                text = {
+                                    Text(
+                                        if (eligible == 0)
+                                            "No session can be restarted right now — it needs to be " +
+                                                "connected and have a conversation to resume."
+                                        else
+                                            "Restarts Claude in $eligible session(s), one after another. " +
+                                                "Each conversation is resumed, so nothing is lost — but " +
+                                                "anything Claude is working on right now is interrupted.",
+                                        color = c.textDim,
+                                    )
+                                },
+                                confirmButton = {
+                                    TextButton(
+                                        onClick = { confirmRestartAll = false; onRestartAllSessions() },
+                                        enabled = eligible > 0,
+                                    ) { Text("Restart", color = if (eligible > 0) c.accent else c.textDim) }
+                                },
+                                dismissButton = {
+                                    TextButton(onClick = { confirmRestartAll = false }) {
+                                        Text("Cancel", color = c.textDim)
+                                    }
+                                },
+                                containerColor = c.surface,
+                            )
                         }
                     }
                     if (onUsageDashboard != null) {
