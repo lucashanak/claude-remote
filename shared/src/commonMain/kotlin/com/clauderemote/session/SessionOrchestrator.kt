@@ -2140,19 +2140,26 @@ class SessionOrchestrator(
         // A session nobody has spoken to yet has NO transcript, and `--resume` on
         // one exits with "No conversation found with session ID" — which is how
         // switching the account of a freshly created session used to kill it.
-        val hasConversation = try {
+        //
+        // A FAILED probe is "don't know", not "no": null hands the decision to
+        // the server, which checks for the transcript itself at launch time. The
+        // old `assuming none` turned a momentary `channel is not opened` into a
+        // `--session-id` launch against an existing conversation — Claude
+        // refuses that ("already in use") and the pane is left as a bare prompt.
+        val hasConversation: Boolean? = try {
             connectionRegistry.ssh(sessionId)?.let { mgr ->
                 tmuxProbes.probeTranscriptExists(mgr, tab.folder, uuid)
-            } ?: false
+            }
         } catch (e: Exception) {
-            FileLogger.error(TAG, "transcript probe failed for $sessionId; assuming none", e)
-            false
+            FileLogger.error(TAG, "transcript probe failed for $sessionId; letting the server decide", e)
+            null
         }
         val cmd = ClaudeConfig.buildRestartCommand(
             tab.tmuxSessionName, tab.folder, tab.mode, tab.model, uuid, tab.accountSlug,
             resume = hasConversation,
         )
-        FileLogger.log(TAG, "Restarting Claude Code for $sessionId (${if (hasConversation) "resume" else "fresh"} $uuid, account=${tab.accountSlug ?: "default"}) in tmux ${tab.tmuxSessionName}")
+        val how = when (hasConversation) { true -> "resume"; false -> "fresh"; null -> "server-decided" }
+        FileLogger.log(TAG, "Restarting Claude Code for $sessionId ($how $uuid, account=${tab.accountSlug ?: "default"}) in tmux ${tab.tmuxSessionName}")
         // The respawn kills+redraws the pane; suppress the prompt detector so it
         // doesn't misfire on the transient screen. UUID is unchanged, so the
         // transcript stream keeps tailing the same file across the restart.

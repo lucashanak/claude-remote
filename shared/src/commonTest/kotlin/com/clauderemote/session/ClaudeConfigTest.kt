@@ -238,6 +238,57 @@ class ClaudeConfigTest {
     }
 
     @Test
+    fun buildRestartCommand_unknownTranscript_letsTheServerDecide() {
+        // A failed probe must not be read as "no conversation": that launched
+        // `--session-id` against an existing transcript, Claude refused it as
+        // "already in use", and a live session came back as a bare prompt.
+        // resume = null emits both branches behind a server-side existence check.
+        val cmd = ClaudeConfig.buildRestartCommand(
+            "sess", "kontexta", ClaudeMode.NORMAL, ClaudeModel.DEFAULT,
+            "03b6128c-011e-45b6-899b-7ec5aabacf33", resume = null,
+        )
+        assertTrue("/.claude/projects/*/03b6128c-011e-45b6-899b-7ec5aabacf33.jsonl" in cmd)
+        assertTrue("--resume 03b6128c-011e-45b6-899b-7ec5aabacf33" in cmd)
+        assertTrue("--session-id 03b6128c-011e-45b6-899b-7ec5aabacf33" in cmd)
+        // resume is the THEN branch: with a transcript present it must win.
+        assertTrue(cmd.indexOf("--resume") < cmd.indexOf("--session-id"))
+    }
+
+    @Test
+    fun buildRestartCommand_unknownTranscript_alsoChecksAnAccountsOwnProjectsDir() {
+        // An account provisioned out of order has a REAL projects/ dir instead of
+        // the symlink to ~/.claude/projects, so its transcript lives only there.
+        val cmd = ClaudeConfig.buildRestartCommand(
+            "sess", "kontexta", ClaudeMode.NORMAL, ClaudeModel.DEFAULT,
+            "uuid-1", accountSlug = "hanakl@nekrachni.cz", resume = null,
+        )
+        assertTrue(".claude-remote/accounts/hanakl@nekrachni.cz" in cmd)
+        assertTrue("/projects/*/uuid-1.jsonl" in cmd)
+    }
+
+    @Test
+    fun buildRestartCommand_unknownTranscript_uuidCannotInjectIntoTheGlob() {
+        // The id is interpolated into a shell glob; anything outside a uuid's
+        // charset is dropped rather than quoted, since it couldn't name a file.
+        val cmd = ClaudeConfig.buildRestartCommand(
+            "sess", "kontexta", ClaudeMode.NORMAL, ClaudeModel.DEFAULT,
+            "abc;rm -rf ~", resume = null,
+        )
+        assertTrue("projects/*/abcrm-rf.jsonl" in cmd)
+        assertTrue(";rm" !in cmd.substringBefore("then"))
+    }
+
+    @Test
+    fun buildRestartCommand_knownAnswerStillEmitsASingleBranch() {
+        // Callers that DO know keep the old, unconditional command.
+        val resume = ClaudeConfig.buildRestartCommand("s", "/p", ClaudeMode.NORMAL, ClaudeModel.DEFAULT, "u", resume = true)
+        val fresh = ClaudeConfig.buildRestartCommand("s", "/p", ClaudeMode.NORMAL, ClaudeModel.DEFAULT, "u", resume = false)
+        assertTrue("if ls" !in resume && "if ls" !in fresh)
+        assertTrue("--resume u" in resume && "--session-id" !in resume)
+        assertTrue("--session-id u" in fresh && "--resume" !in fresh)
+    }
+
+    @Test
     fun buildRestartCommand_alwaysUsesResumeFlagNeverSessionId() {
         // buildRestartCommand hardcodes resume = true when calling
         // buildLaunchCommand internally — restarting must always reuse the

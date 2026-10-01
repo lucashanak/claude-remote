@@ -240,8 +240,18 @@ object ClaudeConfig {
          * claude exit with "No conversation found with session ID", killing the
          * restart; `--session-id` starts that same uuid instead, so nothing is
          * lost and later restarts resume normally.
+         *
+         * NULL means the caller does not know, and the SERVER decides at launch
+         * time by looking for the transcript itself. That is the only safe answer
+         * to a failed probe: both guesses kill the pane when wrong — `--resume`
+         * on a missing transcript exits "No conversation found", `--session-id`
+         * on an existing one exits "Session ID … is already in use". The second
+         * is what happened to a live session whose account switch hit a
+         * momentary `channel is not opened`: the probe threw, the old code
+         * assumed "no conversation", and a 310-entry conversation came back as a
+         * dead bash prompt.
          */
-        resume: Boolean = true,
+        resume: Boolean? = true,
     ): String {
         // Restart claude in place, KEEPING both the conversation AND the folder.
         //
@@ -267,8 +277,25 @@ object ClaudeConfig {
         // pane restarts under the new account's CLAUDE_CONFIG_DIR while
         // `--resume <uuid>` reloads the same conversation, which survives the
         // switch because `projects/` is symlinked to the shared `~/.claude/`.
-        val inner = "cd \"\$HOME\"; " +
+        val launch = if (resume != null) {
             buildLaunchCommand(folder, mode, model, claudeSessionId, resume = resume, accountSlug = accountSlug)
+        } else {
+            // The uuid is interpolated into a glob, so reduce it to the charset a
+            // uuid actually has; anything else could not name a transcript anyway.
+            val id = claudeSessionId.filter { it.isLetterOrDigit() || it == '-' }
+            // Same check the drift daemon uses: the uuid is globally unique, so
+            // globbing every project dir is enough and needs no cwd encoding.
+            // An account whose `projects/` is a REAL directory rather than the
+            // usual symlink (provisioned out of order) is looked at as well.
+            val accountProjects = claudeConfigDirFor(accountSlug)
+                ?.let { " || ls ${shellEscape(it)}/projects/*/$id.jsonl >/dev/null 2>&1" }
+                .orEmpty()
+            val resumeCmd = buildLaunchCommand(folder, mode, model, claudeSessionId, resume = true, accountSlug = accountSlug)
+            val freshCmd = buildLaunchCommand(folder, mode, model, claudeSessionId, resume = false, accountSlug = accountSlug)
+            "if ls \"\$HOME\"/.claude/projects/*/$id.jsonl >/dev/null 2>&1$accountProjects; " +
+                "then $resumeCmd; else $freshCmd; fi"
+        }
+        val inner = "cd \"\$HOME\"; " + launch
         fun sq(s: String) = "'" + s.replace("'", "'\\''") + "'"
         val loginRun = "bash -lc ${sq(inner)}"
         // `respawn-pane`/`send-keys` take a target-PANE, not target-session:
