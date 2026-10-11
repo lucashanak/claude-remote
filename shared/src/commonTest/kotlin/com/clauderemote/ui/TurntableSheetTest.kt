@@ -1,0 +1,65 @@
+package com.clauderemote.ui
+
+import kotlin.test.Test
+import kotlin.test.assertEquals
+import kotlin.test.assertFalse
+import kotlin.test.assertNull
+import kotlin.test.assertTrue
+
+/**
+ * [TurntableSheet] slices the sprite sheet turntable.py writes. A wrong slice
+ * shows the wrong angle or half of two frames, so the arithmetic is pinned
+ * against the generator's documented layout.
+ */
+class TurntableSheetTest {
+
+    private val default = TurntableSheet(frames = 36, elevations = 3, columns = 12)
+
+    @Test
+    fun theShapeIsReadFromTheFileName() {
+        assertEquals(default, TurntableSheet.parse("/home/lucas/3D/benchy.turntable-36x3c12.png"))
+        assertEquals(TurntableSheet(24, 1, 8), TurntableSheet.parse("x.TURNTABLE-24x1c8.PNG"))
+    }
+
+    @Test
+    fun anOrdinaryImageIsNotATurntable() {
+        assertNull(TurntableSheet.parse("/tmp/shot.png"))
+        assertNull(TurntableSheet.parse("/tmp/benchy_preview.png"))
+        assertNull(TurntableSheet.parse("/tmp/x.turntable-36x3c12.jpg"))
+    }
+
+    @Test
+    fun nonsenseShapesFallBackToAPlainImage() {
+        assertNull(TurntableSheet.parse("a.turntable-1x3c12.png"))
+        assertNull(TurntableSheet.parse("a.turntable-36x0c12.png"))
+        assertNull(TurntableSheet.parse("a.turntable-36x3c0.png"))
+    }
+
+    /** The real sheet: 108 frames of 256 px in 12 columns = 3072 x 2304. */
+    @Test
+    fun theDefaultSheetFitsItsRenderedSize() {
+        assertEquals(9, default.rows)
+        assertEquals(256, default.frameSize(3072))
+        assertTrue(default.fits(3072, 2304))
+        assertFalse(default.fits(3072, 2000), "a truncated sheet must not be sliced")
+    }
+
+    @Test
+    fun framesAreRowMajorWithElevationsStackedLowToHigh() {
+        assertEquals(0 to 0, default.frameOrigin(0, 0, 3072))
+        assertEquals(11 * 256 to 0, default.frameOrigin(11, 0, 3072))
+        assertEquals(0 to 256, default.frameOrigin(12, 0, 3072))
+        // Elevation 1 starts at index 36 = row 3, column 0.
+        assertEquals(0 to 3 * 256, default.frameOrigin(0, 1, 3072))
+        assertEquals(11 * 256 to 8 * 256, default.frameOrigin(35, 2, 3072))
+    }
+
+    /** Spinning past the last frame comes round to the first; tilt clamps. */
+    @Test
+    fun azimuthWrapsBothWaysAndElevationClamps() {
+        assertEquals(default.frameOrigin(0, 1, 3072), default.frameOrigin(36, 1, 3072))
+        assertEquals(default.frameOrigin(35, 1, 3072), default.frameOrigin(-1, 1, 3072))
+        assertEquals(default.frameOrigin(5, 2, 3072), default.frameOrigin(5, 9, 3072))
+        assertEquals(default.frameOrigin(5, 0, 3072), default.frameOrigin(5, -3, 3072))
+    }
+}

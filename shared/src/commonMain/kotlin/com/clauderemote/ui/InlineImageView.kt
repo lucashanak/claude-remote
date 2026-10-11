@@ -58,6 +58,9 @@ internal const val INLINE_TIMEOUT_MS = 30_000L
  */
 private const val INLINE_MAX_DIMENSION = 2048
 
+/** Must match MAX_SHEET_SIDE in turntable.py, which renders sheets within it. */
+private const val TURNTABLE_MAX_DIMENSION = 3072
+
 /**
  * At most this many inline fetches at once. Each one opens an SFTP channel on
  * the session's SSH connection, which OpenSSH caps (MaxSessions, 10 by default)
@@ -147,6 +150,7 @@ internal fun InlineImage(
     onFileLink: ((String) -> Unit)?,
 ) {
     val c = CRTheme.colors
+    val turntable = remember(path) { TurntableSheet.parse(path) }
     var attempt by remember { mutableIntStateOf(0) }
     var state by remember(cacheKey) {
         mutableStateOf<LoadState>(
@@ -167,8 +171,12 @@ internal fun InlineImage(
                     LoadState.Failed(Failure("is too large to show here", offerDownload = true))
                 bytes == null -> LoadState.Failed(Failure("could not be loaded", offerDownload = false))
                 else -> {
+                    // A turntable sheet is many frames in one picture: downscaling
+                    // it to the ordinary inline size would blur every frame, so it
+                    // gets the sheet budget turntable.py renders within instead.
+                    val maxDim = if (turntable != null) TURNTABLE_MAX_DIMENSION else INLINE_MAX_DIMENSION
                     val bitmap = withContext(Dispatchers.Default) {
-                        com.clauderemote.util.decodeImageBitmapScaled(bytes, INLINE_MAX_DIMENSION)
+                        com.clauderemote.util.decodeImageBitmapScaled(bytes, maxDim)
                     }
                     if (bitmap == null) LoadState.Failed(Failure("is not a readable image", offerDownload = true))
                     else LoadState.Ready(InlineImageCache.Entry(bytes, bitmap))
@@ -191,7 +199,9 @@ internal fun InlineImage(
     val shape = RoundedCornerShape(8.dp)
     Column(modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
         when (val s = state) {
-            is LoadState.Ready -> Image(
+            is LoadState.Ready -> if (turntable != null && turntable.fits(s.entry.bitmap.width, s.entry.bitmap.height)) {
+                TurntableView(s.entry.bitmap, turntable, alt.ifBlank { name })
+            } else Image(
                 bitmap = s.entry.bitmap,
                 contentDescription = alt.ifBlank { name },
                 contentScale = ContentScale.Fit,
