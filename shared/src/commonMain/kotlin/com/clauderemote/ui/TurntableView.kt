@@ -20,6 +20,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.text.selection.DisableSelection
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Close
@@ -38,7 +39,9 @@ import androidx.compose.runtime.Stable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.listSaver
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -46,6 +49,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.FilterQuality
 import androidx.compose.ui.graphics.ImageBitmap
@@ -226,6 +230,32 @@ internal fun TurntableView(
 
 private const val MAX_ZOOM = 6f
 
+/** What [TurntableHost] shows full screen. */
+internal class TurntableRequest(
+    val bitmap: ImageBitmap,
+    val state: TurntableState,
+    val title: String,
+    val loadDetail: suspend (elevation: Int) -> ImageBitmap?,
+)
+
+/**
+ * Owns the full-screen turntable ABOVE the chat list. Opened from inside a list
+ * item, the dialog would die with that item — and while Claude is still
+ * answering, the list follows the bottom and disposes items scrolled past.
+ */
+@Stable
+internal class TurntableHost {
+    var open by mutableStateOf<TurntableRequest?>(null)
+
+    @Composable
+    fun Content() {
+        val request = open ?: return
+        TurntableFullScreen(request.bitmap, request.state, request.title, request.loadDetail, onClose = { open = null })
+    }
+}
+
+internal val LocalTurntableHost = staticCompositionLocalOf<TurntableHost?> { null }
+
 /**
  * Full-screen turntable: one-finger (or mouse) drag rotates sideways and tilts
  * up/down, pinch or the mouse wheel zooms around the fingers / pointer, two
@@ -249,15 +279,20 @@ internal fun TurntableFullScreen(
     val sheet = state.sheet
     val detailLayout = remember(sheet) { sheet.detail() }
     var detail by remember { mutableStateOf<Pair<Int, ImageBitmap>?>(null) }
-    val missing = remember { mutableSetOf<Int>() }
+    // Failed fetches per elevation: one retry covers a dropped connection, a
+    // second failure means the render simply has no detail sheet there.
+    val failures = remember { mutableStateMapOf<Int, Int>() }
     LaunchedEffect(state.elevation) {
         val e = state.elevation
-        if (detail?.first == e || e in missing) return@LaunchedEffect
+        if (detail?.first == e || (failures[e] ?: 0) >= 2) return@LaunchedEffect
+        // Drop the previous level's sheet first (~37 MB): the main sheet shows
+        // meanwhile, and holding both through the next decode is ~100 MB.
+        detail = null
         // Let a quick run of tilts settle before fetching ~2-3 MB per level.
         kotlinx.coroutines.delay(200)
         val loaded = loadDetail(e)
         if (loaded != null && detailLayout.fits(loaded.width, loaded.height)) detail = e to loaded
-        else missing += e
+        else failures[e] = (failures[e] ?: 0) + 1
     }
 
     var zoom by remember { mutableFloatStateOf(1f) }
@@ -265,6 +300,10 @@ internal fun TurntableFullScreen(
 
     Dialog(onDismissRequest = onClose, properties = DialogProperties(usePlatformDefaultWidth = false)) {
         Surface(modifier = Modifier.fillMaxSize(), color = c.bg) {
+            // A Dialog inherits composition locals from its call site — without
+            // this its Texts would join the transcript's SelectionContainer
+            // across two windows (see the table dialog in TranscriptCards).
+            DisableSelection {
             Column(modifier = Modifier.fillMaxSize()) {
                 Row(
                     modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 4.dp),
@@ -276,9 +315,14 @@ internal fun TurntableFullScreen(
                 }
                 BoxWithConstraints(modifier = Modifier.weight(1f).fillMaxWidth()) {
                     val sidePx = with(androidx.compose.ui.platform.LocalDensity.current) { min(maxWidth, maxHeight).toPx() }
+                    // A rotation or window resize shrinks how far the model may pan.
+                    LaunchedEffect(sidePx) { pan = clampPan(pan, zoom, sidePx) }
                     Canvas(
                         modifier = Modifier
                             .fillMaxSize()
+                            // A zoomed frame is bigger than the canvas; unclipped it
+                            // would paint over the title bar and its Close button.
+                            .clipToBounds()
                             .semantics {
                                 contentDescription = "$title, 3D model you can rotate and zoom"
                                 customActions = state.accessibilityActions() + listOf(
@@ -303,6 +347,11 @@ internal fun TurntableFullScreen(
                                     // Once two fingers zoomed, the finger left behind must
                                     // not spin the model as the other one lifts.
                                     var pinched = false
+                                    // Nothing turns until the finger really moves: a
+                                    // jittery tap would otherwise nudge the angle and,
+                                    // by consuming the move, cancel a double tap.
+                                    var slop = 0f
+                                    val touchSlop = viewConfiguration.touchSlop
                                     do {
                                         val event = awaitPointerEvent()
                                         val pressed = event.changes.count { it.pressed }
@@ -311,13 +360,14 @@ internal fun TurntableFullScreen(
                                             val z = event.calculateZoom()
                                             val p = event.calculatePan()
                                             val centroid = event.calculateCentroid(useCurrent = true)
-                                            if (centroid != Offset.Unspecified) zoomAt(centroid, z)
                                             pan = clampPan(pan + p, zoom, side())
+                                            if (centroid != Offset.Unspecified) zoomAt(centroid, z)
                                             event.changes.forEach { it.consume() }
                                         } else if (pressed == 1 && !pinched) {
                                             val change = event.changes.first { it.pressed }
                                             val d = change.positionChange()
-                                            if (d != Offset.Zero) {
+                                            if (slop < touchSlop) slop += d.getDistance()
+                                            if (d != Offset.Zero && slop >= touchSlop) {
                                                 // Same feel as inline: a revolution per ~1.5 widths.
                                                 val pxPerFrame = side() * 1.5f / sheet.frames
                                                 if (pxPerFrame > 0f) state.turn(-d.x / pxPerFrame)
@@ -352,7 +402,9 @@ internal fun TurntableFullScreen(
                                         val event = awaitPointerEvent()
                                         if (event.type != PointerEventType.Scroll) continue
                                         val change = event.changes.firstOrNull() ?: continue
-                                        val dy = change.scrollDelta.y
+                                        // A precise trackpad sends deltas of 10+; one event
+                                    // must not jump straight to the zoom limit.
+                                    val dy = change.scrollDelta.y.coerceIn(-3f, 3f)
                                         if (dy == 0f) continue
                                         val side = minOf(size.width, size.height).toFloat()
                                         val next = (zoom * 1.15f.pow(-dy)).coerceIn(1f, MAX_ZOOM)
@@ -405,6 +457,7 @@ internal fun TurntableFullScreen(
                         modifier = Modifier.align(Alignment.BottomCenter).padding(8.dp),
                     )
                 }
+            }
             }
         }
     }

@@ -561,7 +561,12 @@ fun TranscriptView(
             ),
             LocalClipboardManager provides richClipboard,
         ) {
+            // Full-screen turntables live here, above the list, so one opened
+            // from an answer survives that item scrolling out (see TurntableHost).
+            val turntableHost = remember { TurntableHost() }
             Box(Modifier.fillMaxSize()) {
+                turntableHost.Content()
+                CompositionLocalProvider(LocalTurntableHost provides turntableHost) {
                 SelectionContainer {
                     LazyColumn(
                         state = listState,
@@ -632,6 +637,7 @@ fun TranscriptView(
                             item(key = "__awaiting_answer__") { AwaitingAnswerCard() }
                         }
                     }
+                }
                 }
                 // Prev/next user-prompt jumps — only useful with 2+ prompts.
                 if (promptIndices.size > 1) {

@@ -152,7 +152,9 @@ internal fun InlineImage(
     val c = CRTheme.colors
     val turntable = remember(path) { TurntableSheet.parse(path) }
     val turntableState = turntable?.let { rememberTurntableState(it) }
+    // Fallback when no transcript hosts the full-screen view above the list.
     var fullScreen by remember { mutableStateOf(false) }
+    val turntableHost = LocalTurntableHost.current
     var attempt by remember { mutableIntStateOf(0) }
     var state by remember(cacheKey) {
         mutableStateOf<LoadState>(
@@ -202,15 +204,14 @@ internal fun InlineImage(
     Column(modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
         when (val s = state) {
             is LoadState.Ready -> if (turntableState != null && turntableState.sheet.fits(s.entry.bitmap.width, s.entry.bitmap.height)) {
-                TurntableView(s.entry.bitmap, turntableState, alt.ifBlank { name }, onExpand = { fullScreen = true })
+                val request = TurntableRequest(s.entry.bitmap, turntableState, alt.ifBlank { name }) { e ->
+                    loadDetailSheet(load, TurntableSheet.detailPath(path, e))
+                }
+                TurntableView(s.entry.bitmap, turntableState, alt.ifBlank { name }, onExpand = {
+                    if (turntableHost != null) turntableHost.open = request else fullScreen = true
+                })
                 if (fullScreen) {
-                    TurntableFullScreen(
-                        bitmap = s.entry.bitmap,
-                        state = turntableState,
-                        title = alt.ifBlank { name },
-                        loadDetail = { e -> loadDetailSheet(load, TurntableSheet.detailPath(path, e)) },
-                        onClose = { fullScreen = false },
-                    )
+                    TurntableFullScreen(request.bitmap, request.state, request.title, request.loadDetail, onClose = { fullScreen = false })
                 }
             } else Image(
                 bitmap = s.entry.bitmap,
