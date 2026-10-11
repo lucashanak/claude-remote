@@ -42,6 +42,9 @@ class TurntableSheetTest {
         assertEquals(256, default.frameSize(3072))
         assertTrue(default.fits(3072, 2304))
         assertFalse(default.fits(3072, 2000), "a truncated sheet must not be sliced")
+        // Android halves it with inSampleSize: still whole 128 px frames.
+        assertTrue(default.fits(1536, 1152))
+        assertFalse(default.fits(2048, 1536 + 500), "2048 / 12 is not a whole frame side")
     }
 
     @Test

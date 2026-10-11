@@ -23,10 +23,16 @@ internal data class TurntableSheet(val frames: Int, val elevations: Int, val col
     /** Side of one square frame in a sheet [sheetWidth] pixels wide. */
     fun frameSize(sheetWidth: Int): Int = sheetWidth / columns
 
-    /** True when a decoded sheet of this size really holds every frame. */
+    /**
+     * True when a decoded sheet of this size really holds every frame on whole
+     * pixels. A width that does not divide by the columns (a hand-made sheet,
+     * or one decoded down by a factor its frame side does not divide) would
+     * slice with a creeping offset and show slivers of the neighbours — such a
+     * sheet is shown as a plain image instead.
+     */
     fun fits(sheetWidth: Int, sheetHeight: Int): Boolean {
         val s = frameSize(sheetWidth)
-        return s > 0 && sheetHeight >= rows * s
+        return s > 0 && sheetWidth % columns == 0 && sheetHeight >= rows * s
     }
 
     /** Top-left pixel of frame ([azimuth], [elevation]); both wrap / clamp. */
