@@ -163,7 +163,19 @@ internal class RemoteOpsService(
      * Download a file from the remote server via SFTP.
      * Returns the file bytes, or null on failure.
      */
-    suspend fun downloadFile(sessionId: String, remotePath: String): ByteArray? = withContext(Dispatchers.IO) {
+    suspend fun downloadFile(
+        sessionId: String,
+        remotePath: String,
+        /**
+         * Refuse anything bigger BEFORE transferring it. Inline images pass a
+         * small cap: checking the size after the download meant a 150 MB file
+         * crossed the link in full only to be rejected — and again on every
+         * scroll back to it.
+         */
+        maxBytes: Long = DOWNLOAD_SIZE_LIMIT,
+        /** Abort a transfer that runs longer than this (a FIFO, a dead link). */
+        timeoutMs: Long = 0,
+    ): ByteArray? = withContext(Dispatchers.IO) {
         try {
             val conn = registry.ssh(sessionId) ?: return@withContext null
             val sshSession = conn.getSession() ?: return@withContext null
@@ -181,13 +193,46 @@ internal class RemoteOpsService(
                 // bytes) while get() follows it, which let a link to a huge file
                 // slip past this guard and then blow up the heap.
                 val attrs = sftp.stat(resolved)
-                if (attrs.size > DOWNLOAD_SIZE_LIMIT) {
-                    FileLogger.log(TAG, "Download refused: $resolved is ${attrs.size} bytes (limit $DOWNLOAD_SIZE_LIMIT)")
+                // Regular files only. A FIFO or a link into /dev or /proc stats
+                // at size 0, passes any size guard, and then get() blocks
+                // forever or streams without end — and with inline images a
+                // path in Claude's text starts a fetch without anyone tapping.
+                if (!attrs.isReg) {
+                    FileLogger.log(TAG, "Download refused: $resolved is not a regular file")
+                    return@withContext null
+                }
+                if (attrs.size > maxBytes) {
+                    FileLogger.log(TAG, "Download refused: $resolved is ${attrs.size} bytes (limit $maxBytes)")
                     return@withContext SessionOrchestrator.DOWNLOAD_TOO_LARGE
                 }
-                val out = java.io.ByteArrayOutputStream()
-                sftp.get(resolved, out)
-                out.toByteArray()
+                val out = java.io.ByteArrayOutputStream(attrs.size.coerceIn(0, maxBytes).toInt())
+                // The stat is a promise, not a guarantee: the file can grow
+                // while it is read. The monitor enforces the cap (and the time
+                // limit) on the bytes actually arriving, by aborting the get.
+                val started = System.currentTimeMillis()
+                var received = 0L
+                var aborted: Any? = null
+                val monitor = object : com.jcraft.jsch.SftpProgressMonitor {
+                    override fun init(op: Int, src: String?, dest: String?, max: Long) {}
+                    override fun count(bytes: Long): Boolean {
+                        received += bytes
+                        if (received > maxBytes) { aborted = SessionOrchestrator.DOWNLOAD_TOO_LARGE; return false }
+                        if (timeoutMs > 0 && System.currentTimeMillis() - started > timeoutMs) {
+                            aborted = "timeout"; return false
+                        }
+                        return true
+                    }
+                    override fun end() {}
+                }
+                sftp.get(resolved, out, monitor)
+                when (aborted) {
+                    null -> out.toByteArray()
+                    SessionOrchestrator.DOWNLOAD_TOO_LARGE -> SessionOrchestrator.DOWNLOAD_TOO_LARGE
+                    else -> {
+                        FileLogger.log(TAG, "Download aborted after ${timeoutMs}ms: $resolved")
+                        null
+                    }
+                }
             } finally {
                 sftp.disconnect()
             }

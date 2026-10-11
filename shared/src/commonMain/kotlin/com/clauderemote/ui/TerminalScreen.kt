@@ -261,10 +261,12 @@ fun TerminalScreen(
     var previewBytes by remember { mutableStateOf<ByteArray?>(null) }
     // Inline images reuse the same full-screen preview (and its Save) that a
     // tapped file link opens; they already hold the decoded bitmap.
-    val openImagePreview: OpenImagePreview = { name, bytes, bitmap ->
-        previewFileName = name
-        previewBytes = bytes
-        previewBitmap = bitmap
+    val openImagePreview: OpenImagePreview = remember {
+        { name, bytes, bitmap ->
+            previewFileName = name
+            previewBytes = bytes
+            previewBitmap = bitmap
+        }
     }
     var downloadJob by remember { mutableStateOf<kotlinx.coroutines.Job?>(null) }
     val inputFocusRequester = remember { FocusRequester() }

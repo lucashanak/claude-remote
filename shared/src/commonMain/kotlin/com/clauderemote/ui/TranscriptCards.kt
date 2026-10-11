@@ -330,7 +330,10 @@ internal fun AssistantTextCard(
         // no image in the message) this is exactly the old single RichBody.
         val segments = remember(entry.text, loadImage != null) {
             if (loadImage == null) null
-            else InlineImages.split(entry.text).takeIf { parts -> parts.any { it is InlineImages.Segment.Image } }
+            // Unchanged ⇒ the old single RichBody, byte for byte. Changed
+            // without any image segment still counts: an embedded image was
+            // rewritten as text so its table/list/quote stays one block.
+            else InlineImages.split(entry.text).takeIf { it != listOf(InlineImages.Segment.Text(entry.text)) }
         }
         if (segments == null || loadImage == null) {
             RichBody(entry.text, onFileLink = onFileLink, verifiedPaths = verifiedPaths)
@@ -346,6 +349,7 @@ internal fun AssistantTextCard(
                         cacheKey = InlineImageCache.key(imageScope, entry.id, segment.path),
                         load = loadImage,
                         onOpen = onOpenImage,
+                        onFileLink = onFileLink,
                     )
                 }
             }

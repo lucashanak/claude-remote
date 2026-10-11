@@ -2376,6 +2376,10 @@ class SessionOrchestrator(
     suspend fun downloadFile(sessionId: String, remotePath: String): ByteArray? =
         remoteOps.downloadFile(sessionId, remotePath)
 
+    /** [downloadFile] with a size cap applied BEFORE the transfer, and a time limit. */
+    suspend fun downloadFileCapped(sessionId: String, remotePath: String, maxBytes: Long, timeoutMs: Long): ByteArray? =
+        remoteOps.downloadFile(sessionId, remotePath, maxBytes, timeoutMs)
+
     /**
      * Which of [remotePaths] are regular files. Used to confirm the paths Claude
      * mentions in chat before rendering them as download links.

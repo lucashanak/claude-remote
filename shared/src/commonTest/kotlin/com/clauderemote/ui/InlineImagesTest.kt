@@ -7,47 +7,62 @@ import kotlin.test.assertTrue
 
 /**
  * [InlineImages] decides which images Claude's answer shows inline. The rules
- * that matter are the ones that keep things OUT: examples in code, remote URLs,
- * non-image files, and bare paths that were only mentioned.
+ * that matter are the ones that keep things OUT, and the ones that keep the
+ * surrounding markdown in one piece.
  */
 class InlineImagesTest {
 
     private fun images(md: String) = InlineImages.split(md).filterIsInstance<Segment.Image>()
+    private fun texts(md: String) = InlineImages.split(md).filterIsInstance<Segment.Text>().map { it.markdown }
 
     @Test
-    fun aMarkdownImageWithAServerPathIsShown() {
-        val segments = InlineImages.split("Here it is:\n\n![the bug](/tmp/shot.png)\n\nSee the red box.")
+    fun anImageOnItsOwnLineIsShown() {
         assertEquals(
             listOf(
                 Segment.Text("Here it is:\n\n"),
                 Segment.Image("the bug", "/tmp/shot.png"),
-                Segment.Text("\n\nSee the red box."),
+                Segment.Text("\nSee the red box."),
             ),
-            segments,
+            InlineImages.split("Here it is:\n\n![the bug](/tmp/shot.png)\n\nSee the red box."),
         )
+    }
+
+    @Test
+    fun severalImagesOnOneOtherwiseEmptyLineAreAllShown() {
+        assertEquals(listOf("/a.png", "/b.png"), images("  ![a](/a.png) ![b](/b.png)  ").map { it.path })
     }
 
     @Test
     fun relativeAndHomePathsAreAccepted() {
         assertEquals(
             listOf("shots/a.png", "~/b.jpg", "./c.webp"),
-            images("![](shots/a.png) ![](~/b.jpg) ![](./c.webp)").map { it.path },
+            images("![](shots/a.png)\n![](~/b.jpg)\n![](./c.webp)").map { it.path },
         )
     }
 
+    // ---- structure must survive: embedded images become text ------------
+
+    /** A table split in two rendered as two broken half-tables. */
     @Test
-    fun severalImagesOnOneLineKeepTheTextBetweenThem() {
-        val segments = InlineImages.split("before ![a](/x.png) middle ![b](/y.png) after")
-        assertEquals(
-            listOf(
-                Segment.Text("before "),
-                Segment.Image("a", "/x.png"),
-                Segment.Text(" middle "),
-                Segment.Image("b", "/y.png"),
-                Segment.Text(" after"),
-            ),
-            segments,
-        )
+    fun anImageInATableRowIsRewrittenAsTextAndTheTableStaysWhole() {
+        val md = "| a | b |\n|---|---|\n| x | ![shot](/x.png) |"
+        assertTrue(images(md).isEmpty())
+        assertEquals(listOf("| a | b |\n|---|---|\n| x | shot (/x.png) |"), texts(md))
+    }
+
+    @Test
+    fun anImageInAListItemKeepsTheItemTogether() {
+        assertEquals(listOf("- see /x.png here"), texts("- see ![](/x.png) here"))
+    }
+
+    @Test
+    fun anImageInAQuoteStaysInsideTheQuote() {
+        assertEquals(listOf("> look: a (/x.png)"), texts("> look: ![a](/x.png)"))
+    }
+
+    @Test
+    fun anImageInsideALinkBecomesTheLinkText() {
+        assertEquals(listOf("[thumb (/t.png)](/big.png)"), texts("[![thumb](/t.png)](/big.png)"))
     }
 
     /** A bare path is something Claude mentioned, not something it showed. */
@@ -56,11 +71,11 @@ class InlineImagesTest {
         assertTrue(images("I edited /home/lucas/app/res/icon.png and resized it.").isEmpty())
     }
 
-    /** Inside a code block the syntax is an example. */
+    // ---- code is an example ---------------------------------------------
+
     @Test
     fun imagesInsideFencedCodeAreLeftAlone() {
         val md = "Use this syntax:\n\n```markdown\n![alt](/tmp/x.png)\n```\n\nThat's all."
-        assertTrue(images(md).isEmpty())
         assertEquals(listOf(Segment.Text(md)), InlineImages.split(md))
     }
 
@@ -69,40 +84,73 @@ class InlineImagesTest {
         assertTrue(images("~~~\n![a](/x.png)\n~~~").isEmpty())
     }
 
+    /**
+     * Claude shows markdown that contains a fence by wrapping it in a longer
+     * one. The inner three-backtick line must not close the outer block.
+     */
+    @Test
+    fun anInnerShorterFenceDoesNotCloseALongerOne() {
+        val md = "````\n```\n![ex](/a.png)\n```\n![still an example](/b.png)\n````\n![real](/c.png)"
+        assertEquals(listOf("/c.png"), images(md).map { it.path })
+    }
+
+    @Test
+    fun aLineWithAnInfoStringDoesNotCloseAFence() {
+        assertTrue(images("```\n```kotlin\n![x](/a.png)\n```").isEmpty())
+    }
+
+    @Test
+    fun indentedCodeIsLeftAlone() {
+        assertTrue(images("    ![a](/x.png)").isEmpty())
+        assertTrue(images("\t![a](/x.png)").isEmpty())
+    }
+
     @Test
     fun imagesInsideInlineCodeAreLeftAlone() {
-        assertTrue(images("Write `![alt](/tmp/x.png)` to show one.").isEmpty())
+        val md = "Write `![alt](/tmp/x.png)` to show one."
+        assertEquals(listOf(md), texts(md))
     }
 
-    /** After the fence closes, a real image renders again. */
+    @Test
+    fun anEscapedImageIsLeftAlone() {
+        val md = """Literally \![a](/x.png) — not an image."""
+        assertEquals(listOf(md), texts(md))
+    }
+
     @Test
     fun anImageAfterAClosedFenceIsShown() {
-        val md = "```\n![ex](/a.png)\n```\n![real](/b.png)"
-        assertEquals(listOf("/b.png"), images(md).map { it.path })
+        assertEquals(listOf("/b.png"), images("```\n![ex](/a.png)\n```\n![real](/b.png)").map { it.path })
     }
 
-    /** The app must not fetch arbitrary internet content on Claude's say-so. */
+    // ---- what is never fetched ------------------------------------------
+
     @Test
     fun remoteUrlsAreNotFetched() {
-        assertTrue(images("![](https://example.com/a.png) ![](http://x/b.jpg) ![](data:image/png;base64,AAAA)").isEmpty())
+        assertTrue(images("![](https://example.com/a.png)\n![](data:image/png;base64,AAAA)\n![](file:/etc/a.png)").isEmpty())
     }
 
     @Test
     fun nonImageTargetsStayText() {
-        assertTrue(images("![report](/tmp/report.pdf) ![log](/var/log/x.txt)").isEmpty())
+        assertTrue(images("![report](/tmp/report.pdf)").isEmpty())
+    }
+
+    /** SFTP globs these, so they would fetch the wrong file or none. */
+    @Test
+    fun globCharactersAreRefused() {
+        assertTrue(images("![](/tmp/b.jpg?v=2)\n![](/home/u/*.png)\n![](/tmp/[ab].png)").isEmpty())
     }
 
     @Test
     fun angleBracketsAndTitlesAreUnwrapped() {
         assertEquals(
             listOf("/tmp/with space.png", "/tmp/t.png"),
-            images("""![a](</tmp/with space.png>) ![b](/tmp/t.png "a title")""").map { it.path },
+            images("![a](</tmp/with space.png>)\n![b](/tmp/t.png \"a title\")").map { it.path },
         )
     }
 
     @Test
-    fun theExtensionCheckIgnoresCaseAndQuery() {
-        assertEquals(listOf("/tmp/A.PNG", "/tmp/b.jpg?v=2"), images("![](/tmp/A.PNG) ![](/tmp/b.jpg?v=2)").map { it.path })
+    fun theExtensionCheckIgnoresCase() {
+        assertEquals(listOf("/tmp/A.PNG"), images("![](/tmp/A.PNG)").map { it.path })
     }
 
     @Test

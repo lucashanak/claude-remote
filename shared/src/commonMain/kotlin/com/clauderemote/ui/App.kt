@@ -1198,7 +1198,12 @@ fun App(
                         } else null,
                         onLoadSessionFile = { id, path ->
                             val folder = tabManager.getTab(id)?.folder ?: "~"
-                            sessionOrchestrator.downloadFile(id, resolveSessionPath(path, folder))
+                            // Capped on the SERVER side, before any transfer:
+                            // inline images start fetching on render, with no
+                            // tap, so an oversized file must never cross the link.
+                            sessionOrchestrator.downloadFileCapped(
+                                id, resolveSessionPath(path, folder), INLINE_MAX_BYTES, INLINE_TIMEOUT_MS,
+                            )
                         },
                         onDownloadFile = { path ->
                             val id = activeTabId
