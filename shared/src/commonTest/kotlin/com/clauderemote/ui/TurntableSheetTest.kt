@@ -65,4 +65,16 @@ class TurntableSheetTest {
         assertEquals(default.frameOrigin(5, 2, 3072), default.frameOrigin(5, 9, 3072))
         assertEquals(default.frameOrigin(5, 0, 3072), default.frameOrigin(5, -3, 3072))
     }
+
+    /** Detail sheets: 36 frames of 512 px in 6 columns = 3072 x 3072, one per elevation. */
+    @Test
+    fun detailSheetsSitNextToTheMainSheet() {
+        assertEquals("/r/deck.turntable-36x3c12.hd2.png", TurntableSheet.detailPath("/r/deck.turntable-36x3c12.png", 2))
+        assertNull(TurntableSheet.parse(TurntableSheet.detailPath("/r/deck.turntable-36x3c12.png", 0)), "a detail sheet is not shown inline")
+        val d = default.detail()
+        assertEquals(TurntableSheet(36, 1, 6), d)
+        assertTrue(d.fits(3072, 3072))
+        assertEquals(5 * 512 to 5 * 512, d.frameOrigin(35, 0, 3072))
+        assertEquals(TurntableSheet(24, 1, 5), TurntableSheet(24, 3, 12).detail())
+    }
 }

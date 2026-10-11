@@ -151,6 +151,8 @@ internal fun InlineImage(
 ) {
     val c = CRTheme.colors
     val turntable = remember(path) { TurntableSheet.parse(path) }
+    val turntableState = turntable?.let { rememberTurntableState(it) }
+    var fullScreen by remember { mutableStateOf(false) }
     var attempt by remember { mutableIntStateOf(0) }
     var state by remember(cacheKey) {
         mutableStateOf<LoadState>(
@@ -199,8 +201,17 @@ internal fun InlineImage(
     val shape = RoundedCornerShape(8.dp)
     Column(modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
         when (val s = state) {
-            is LoadState.Ready -> if (turntable != null && turntable.fits(s.entry.bitmap.width, s.entry.bitmap.height)) {
-                TurntableView(s.entry.bitmap, turntable, alt.ifBlank { name })
+            is LoadState.Ready -> if (turntableState != null && turntableState.sheet.fits(s.entry.bitmap.width, s.entry.bitmap.height)) {
+                TurntableView(s.entry.bitmap, turntableState, alt.ifBlank { name }, onExpand = { fullScreen = true })
+                if (fullScreen) {
+                    TurntableFullScreen(
+                        bitmap = s.entry.bitmap,
+                        state = turntableState,
+                        title = alt.ifBlank { name },
+                        loadDetail = { e -> loadDetailSheet(load, TurntableSheet.detailPath(path, e)) },
+                        onClose = { fullScreen = false },
+                    )
+                }
             } else Image(
                 bitmap = s.entry.bitmap,
                 contentDescription = alt.ifBlank { name },
@@ -261,4 +272,21 @@ internal fun InlineImage(
             )
         }
     }
+}
+
+/**
+ * One elevation's detail sheet for the full-screen turntable, or null when
+ * there is none (an older render) or it cannot be used. Not cached: each is
+ * ~37 MB decoded, and the full-screen view holds the one it is showing.
+ */
+private suspend fun loadDetailSheet(load: ServerImageLoader, path: String): ImageBitmap? = try {
+    val bytes = fetchPermits.withPermit { load(path) }
+    if (bytes == null || bytes === SessionOrchestrator.DOWNLOAD_TOO_LARGE) null
+    else withContext(Dispatchers.Default) {
+        com.clauderemote.util.decodeImageBitmapScaled(bytes, TURNTABLE_MAX_DIMENSION)
+    }
+} catch (e: kotlinx.coroutines.CancellationException) {
+    throw e
+} catch (_: Exception) {
+    null
 }

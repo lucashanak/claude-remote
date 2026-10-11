@@ -44,7 +44,17 @@ internal data class TurntableSheet(val frames: Int, val elevations: Int, val col
         return (index % columns) * s to (index / columns) * s
     }
 
+    /**
+     * Layout of one elevation's DETAIL sheet (turntable.py's `hd<e>` files):
+     * the same frames at a larger side, row-major in ceil(sqrt(A)) columns.
+     */
+    fun detail(): TurntableSheet =
+        TurntableSheet(frames, 1, kotlin.math.ceil(kotlin.math.sqrt(frames.toDouble())).toInt())
+
     companion object {
+        /** Where turntable.py writes elevation [elevation]'s detail sheet for [path]. */
+        fun detailPath(path: String, elevation: Int): String = path.dropLast(".png".length) + ".hd$elevation.png"
+
         private val NAME = Regex("""\.turntable-(\d{1,3})x(\d{1,2})c(\d{1,3})\.png$""", RegexOption.IGNORE_CASE)
 
         /** The sheet shape encoded in [path], or null if it is an ordinary image. */
