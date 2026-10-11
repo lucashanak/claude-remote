@@ -128,6 +128,13 @@ fun TerminalScreen(
     onRenameSession: ((sessionId: String, newAlias: String) -> Unit)? = null,
     onAttachFile: (suspend () -> String?)? = null,
     onDownloadFile: (suspend (path: String) -> ByteArray?)? = null,
+    /**
+     * Like [onDownloadFile] but for a NAMED session. Inline images need it:
+     * onDownloadFile always reads from the active tab, so in the pane grid an
+     * image in another session's answer would be looked up in the wrong folder,
+     * or on the wrong server.
+     */
+    onLoadSessionFile: (suspend (sessionId: String, path: String) -> ByteArray?)? = null,
     /** Narrows chat file-path candidates to the ones that are really files on the server. */
     onVerifyPaths: (suspend (List<String>) -> Set<String>)? = null,
     onSaveFile: ((bytes: ByteArray, suggestedName: String) -> Unit)? = null,
@@ -252,6 +259,13 @@ fun TerminalScreen(
     var previewFileName by remember { mutableStateOf<String?>(null) }
     var previewBitmap by remember { mutableStateOf<androidx.compose.ui.graphics.ImageBitmap?>(null) }
     var previewBytes by remember { mutableStateOf<ByteArray?>(null) }
+    // Inline images reuse the same full-screen preview (and its Save) that a
+    // tapped file link opens; they already hold the decoded bitmap.
+    val openImagePreview: OpenImagePreview = { name, bytes, bitmap ->
+        previewFileName = name
+        previewBytes = bytes
+        previewBitmap = bitmap
+    }
     var downloadJob by remember { mutableStateOf<kotlinx.coroutines.Job?>(null) }
     val inputFocusRequester = remember { FocusRequester() }
     LaunchedEffect(activeTabId) {
@@ -1245,6 +1259,12 @@ fun TerminalScreen(
                                                 claudeSessionId = tab?.claudeSessionId,
                                                 onFileLink = openFileLink,
                                                 onVerifyPaths = onVerifyPaths,
+                                                loadImage = onLoadSessionFile?.let { load ->
+                                                    val bound: ServerImageLoader = { path -> load(sid, path) }
+                                                    bound
+                                                },
+                                                onOpenImage = openImagePreview,
+                                                imageScope = sid,
                                                 accountLabel = accounts.firstOrNull { a ->
                                                     a.slug == (tab?.accountSlug ?: com.clauderemote.model.ClaudeAccount.DEFAULT_SLUG)
                                                 }?.initials,
@@ -1325,6 +1345,14 @@ fun TerminalScreen(
                                     connectionLabel = connectionLabel,
                                     onFileLink = openFileLink,
                                     onVerifyPaths = onVerifyPaths,
+                                    loadImage = activeTabId?.let { id ->
+                                        onLoadSessionFile?.let { load ->
+                                            val bound: ServerImageLoader = { path -> load(id, path) }
+                                            bound
+                                        }
+                                    },
+                                    onOpenImage = openImagePreview,
+                                    imageScope = activeTabId ?: "",
                                     accountLabel = activeAccountLabel,
                                     fontScale = transcriptFontScale,
                                     onFontScaleChange = onTranscriptFontScaleChange,

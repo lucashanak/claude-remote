@@ -297,6 +297,11 @@ internal fun AssistantTextCard(
     framed: Boolean = false,
     onFileLink: ((String) -> Unit)? = null,
     onVerifyPaths: (suspend (List<String>) -> Set<String>)? = null,
+    /** Fetches an image Claude chose to show; null disables inline images. */
+    loadImage: ServerImageLoader? = null,
+    onOpenImage: OpenImagePreview? = null,
+    /** Separates sessions in the image cache (see InlineImageCache). */
+    imageScope: String = "",
 ) {
     val c = CRTheme.colors
     val m = CRTheme.metrics
@@ -320,7 +325,31 @@ internal fun AssistantTextCard(
                 verifiedPaths = try { onVerifyPaths(candidates) } catch (_: Exception) { emptySet() }
             }
         }
-        RichBody(entry.text, onFileLink = onFileLink, verifiedPaths = verifiedPaths)
+        // Images Claude wrote as `![alt](/path.png)` render in place; the text
+        // around them keeps the normal markdown body. Without a loader (or with
+        // no image in the message) this is exactly the old single RichBody.
+        val segments = remember(entry.text, loadImage != null) {
+            if (loadImage == null) null
+            else InlineImages.split(entry.text).takeIf { parts -> parts.any { it is InlineImages.Segment.Image } }
+        }
+        if (segments == null || loadImage == null) {
+            RichBody(entry.text, onFileLink = onFileLink, verifiedPaths = verifiedPaths)
+        } else {
+            segments.forEach { segment ->
+                when (segment) {
+                    is InlineImages.Segment.Text -> if (segment.markdown.isNotBlank()) {
+                        RichBody(segment.markdown, onFileLink = onFileLink, verifiedPaths = verifiedPaths)
+                    }
+                    is InlineImages.Segment.Image -> InlineImage(
+                        alt = segment.alt,
+                        path = segment.path,
+                        cacheKey = InlineImageCache.key(imageScope, entry.id, segment.path),
+                        load = loadImage,
+                        onOpen = onOpenImage,
+                    )
+                }
+            }
+        }
         Row(
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(6.dp),

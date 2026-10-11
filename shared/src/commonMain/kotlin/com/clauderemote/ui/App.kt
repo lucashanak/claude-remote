@@ -1196,6 +1196,10 @@ fun App(
                                 if (paths.isEmpty()) null else paths.joinToString("\n")
                             }
                         } else null,
+                        onLoadSessionFile = { id, path ->
+                            val folder = tabManager.getTab(id)?.folder ?: "~"
+                            sessionOrchestrator.downloadFile(id, resolveSessionPath(path, folder))
+                        },
                         onDownloadFile = { path ->
                             val id = activeTabId
                             if (id == null) {

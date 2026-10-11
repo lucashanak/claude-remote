@@ -87,6 +87,10 @@ fun TranscriptView(
     accountLabel: String? = null,
     /** Narrows file-path candidates to the ones that really exist on the server. */
     onVerifyPaths: (suspend (List<String>) -> Set<String>)? = null,
+    /** Inline images in Claude's answers — see AssistantTextCard. */
+    loadImage: ServerImageLoader? = null,
+    onOpenImage: OpenImagePreview? = null,
+    imageScope: String = "",
     /** Chat text scale (1f = 100%). Ignored unless [onFontScaleChange] is wired. */
     fontScale: Float = 1f,
     /** Wire to persist the A−/A+ choice; when null the scale stays view-local. */
@@ -591,6 +595,9 @@ fun TranscriptView(
                                                 framed = item.isFinalAnswer,
                                                 onFileLink = onFileLink,
                                                 onVerifyPaths = onVerifyPaths,
+                                                loadImage = loadImage,
+                                                onOpenImage = onOpenImage,
+                                                imageScope = imageScope,
                                             )
                                         is TranscriptEntry.AssistantThinking -> ThinkingCard(e)
                                         is TranscriptEntry.ToolCall -> when (e.name) {
