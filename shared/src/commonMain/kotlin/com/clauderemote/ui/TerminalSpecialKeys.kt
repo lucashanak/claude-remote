@@ -79,13 +79,19 @@ import kotlinx.coroutines.launch
 internal fun SpecialKeysRow(
     onKey: (SpecialKey) -> Unit,
     onMore: () -> Unit,
+    /**
+     * 0 when the control bar follows directly: its own top padding is the gap
+     * then, and adding this one too left twice the space between the two rows
+     * that there is between the input field and the keys.
+     */
+    bottomPadding: androidx.compose.ui.unit.Dp = 6.dp,
 ) {
     val c = CRTheme.colors
     Row(
         modifier = Modifier
             .fillMaxWidth()
             .background(c.surface)
-            .padding(horizontal = 12.dp, vertical = 6.dp),
+            .padding(start = 12.dp, end = 12.dp, top = 6.dp, bottom = bottomPadding),
         horizontalArrangement = Arrangement.spacedBy(4.dp),
     ) {
         SpecialKeyBtn("Esc",  Modifier.weight(1f)) { onKey(SpecialKey.Esc)   }

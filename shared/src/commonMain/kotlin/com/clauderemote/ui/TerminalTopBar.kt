@@ -66,6 +66,7 @@ import com.clauderemote.ui.components.Pill
 import com.clauderemote.ui.components.ServerGlyph
 import com.clauderemote.ui.components.StatusIndicator
 import com.clauderemote.ui.components.color
+import com.clauderemote.ui.components.label
 import com.clauderemote.ui.theme.CRTerminalView
 import com.clauderemote.ui.theme.CRTheme
 import com.clauderemote.ui.theme.CRType
@@ -344,6 +345,8 @@ internal fun CrumbBar(
     onOpenDrawer: () -> Unit,
     onPrev: () -> Unit,
     onNext: () -> Unit,
+    /** Shown as a mini badge — this row is where the old status row's pill went. */
+    activity: SessionActivity? = null,
 ) {
     val c = CRTheme.colors
     Row(
@@ -387,6 +390,12 @@ internal fun CrumbBar(
             }
         }
 
+        // Status, in the space this row already had free. It used to cost a whole
+        // row of its own (StatusRow) to show one pill. Idle shows nothing — it is
+        // the resting state, and a badge that never changes reads as noise.
+        val status = activity.toCRStatus()
+        if (status != CRStatus.Idle) MiniStatusBadge(status)
+
         // Prev / counter / next
         IconButton(
             onClick = onPrev,
@@ -409,26 +418,21 @@ internal fun CrumbBar(
 }
 
 // ---------------------------------------------------------------------------
-// StatusRow — activity + last line + cost
+// MiniStatusBadge — the session's activity, small enough to share a row
 // ---------------------------------------------------------------------------
 
 @Composable
-internal fun StatusRow(
-    session: ClaudeSession,
-    activity: SessionActivity?,
-) {
-    val c = CRTheme.colors
-    val crStatus = activity.toCRStatus()
+private fun MiniStatusBadge(status: CRStatus) {
+    val tint = status.color()
     Row(
         modifier = Modifier
-            .fillMaxWidth()
-            .background(c.surface)
-            .padding(horizontal = 10.dp, vertical = 4.dp),
+            .background(tint.copy(alpha = 0.18f), RoundedCornerShape(999.dp))
+            .padding(horizontal = 6.dp, vertical = 1.dp),
         verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(8.dp),
+        horizontalArrangement = Arrangement.spacedBy(4.dp),
     ) {
-        StatusIndicator(status = crStatus)
-        Spacer(Modifier.weight(1f))
+        Box(Modifier.size(6.dp).background(tint, CircleShape))
+        Text(status.label(), style = CRType.monoTiny, color = tint)
     }
 }
 

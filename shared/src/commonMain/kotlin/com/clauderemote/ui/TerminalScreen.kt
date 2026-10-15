@@ -646,6 +646,7 @@ fun TerminalScreen(
                     val total = allFlat.size.coerceAtLeast(1)
                     CrumbBar(
                         session = activeSession,
+                        activity = sessionActivities[activeSession.id],
                         allSessions = allFlat,
                         index = idx,
                         total = total,
@@ -1544,14 +1545,6 @@ fun TerminalScreen(
                         }
                     }
 
-                    // ── Status row ─────────────────────────────────────────
-                    // Keyboard mode: the top bar's dot already says working/idle.
-                    if (activeSession != null && !keyboardMode) {
-                        StatusRow(
-                            session = activeSession,
-                            activity = sessionActivities[activeSession.id],
-                        )
-                    }
 
                     // ── Prompt input ────────────────────────────────────────
                     // Keyboard mode in Raw view types straight into the terminal,
@@ -1617,6 +1610,7 @@ fun TerminalScreen(
                                 onSendCommand(String(key.bytes.map { it.toInt().toChar() }.toCharArray()))
                             },
                             onMore = { openPalette("") },
+                            bottomPadding = if (showControlBar) 0.dp else 6.dp,
                         )
                     }
 
