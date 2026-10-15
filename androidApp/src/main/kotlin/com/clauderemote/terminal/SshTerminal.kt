@@ -123,6 +123,8 @@ fun SshTerminal(
     onUserInput: (ByteArray) -> Unit,
     onResize: (cols: Int, rows: Int) -> Unit,
     onSingleTap: () -> Unit,
+    /** See ClauDeTerminalViewClient.onAppShortcutKey. */
+    onAppShortcutKey: ((KeyEvent) -> Boolean)? = null,
     onReady: (SshTerminalHandle) -> Unit,
     modifier: Modifier = Modifier,
 ) {
@@ -146,7 +148,7 @@ fun SshTerminal(
                 isFocusableInTouchMode = true
             }
             sessionClient.terminalView = view
-            val viewClient = ClauDeTerminalViewClient(onSingleTap)
+            val viewClient = ClauDeTerminalViewClient(onSingleTap, onAppShortcutKey)
             view.setTerminalViewClient(viewClient)
             val density = ctx.resources.displayMetrics.density
             view.setTextSize((fontSizeDp.coerceIn(6, 48) * density).toInt())
@@ -232,6 +234,14 @@ private fun applyColorSchemeTo(session: SshTerminalSession, scheme: String) {
  */
 private class ClauDeTerminalViewClient(
     private val onSingleTap: () -> Unit,
+    /**
+     * Offered every hardware key BEFORE the terminal handles it; returning true
+     * consumes it. This is where app shortcuts are caught on Android: with the
+     * terminal view focused, Compose's preview handlers are not guaranteed to
+     * see the key at all. Anything not claimed (incl. plain Ctrl+W/K/N, which
+     * the terminal needs) falls through untouched.
+     */
+    private val onAppShortcutKey: ((KeyEvent) -> Boolean)? = null,
 ) : TerminalViewClient {
 
     override fun onScale(scale: Float): Float = 1.0f
@@ -246,7 +256,8 @@ private class ClauDeTerminalViewClient(
     override fun isTerminalViewSelected(): Boolean = true
     override fun copyModeChanged(copyMode: Boolean) {}
 
-    override fun onKeyDown(keyCode: Int, e: KeyEvent, session: TerminalSession): Boolean = false
+    override fun onKeyDown(keyCode: Int, e: KeyEvent, session: TerminalSession): Boolean =
+        onAppShortcutKey?.invoke(e) ?: false
     override fun onKeyUp(keyCode: Int, e: KeyEvent): Boolean = false
     override fun onLongPress(event: MotionEvent): Boolean = false
 

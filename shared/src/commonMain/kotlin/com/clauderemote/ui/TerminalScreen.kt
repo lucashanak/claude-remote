@@ -217,6 +217,25 @@ fun TerminalScreen(
     /** Chip fill for the active session's account. */
     activeAccountColor: androidx.compose.ui.graphics.Color? = null,
     onSwitchAccount: ((sessionId: String, accountSlug: String?) -> Unit)? = null,
+    /**
+     * A physical keyboard is attached. Together with a landscape window this
+     * switches on keyboard mode — see [keyboardMode] below. Only Android sets
+     * it; the desktop layout is already built for a keyboard.
+     */
+    hardwareKeyboard: Boolean = false,
+    /**
+     * Shortcuts caught by the PLATFORM before they reach Compose — on Android,
+     * the terminal view's own key hook, because a focused terminal view may
+     * not route keys through Compose's preview handlers at all. Dispatched
+     * exactly like the ones [handleShortcut] catches.
+     */
+    externalShortcuts: kotlinx.coroutines.flow.Flow<AppShortcut>? = null,
+    /**
+     * Give the terminal keyboard focus (keyboard mode hides the input field).
+     * Returns false while the terminal view does not exist yet, so the caller
+     * can retry rather than leave keys with nowhere to land.
+     */
+    onFocusTerminal: (() -> Boolean)? = null,
 ) {
     val c = CRTheme.colors
     val m = CRTheme.metrics
@@ -289,6 +308,16 @@ fun TerminalScreen(
     }
     val scope = rememberCoroutineScope()
     var showPalette by remember { mutableStateOf(false) }
+    // Pre-typed palette query, set by the shortcuts that open it narrowed.
+    var paletteFilter by remember { mutableStateOf("") }
+    var showShortcutHelp by remember { mutableStateOf(false) }
+    // The side panel's visibility. Shown by default — collapsing it is a
+    // deliberate Ctrl+Shift+B, never something the layout decides on its own.
+    var sidebarHidden by remember { mutableStateOf(false) }
+    // Escape hatch for a misdetected keyboard (a barcode scanner or YubiKey also
+    // reports a QWERTY keyboard) — without it the on-screen keys would be gone
+    // with no way back.
+    var keyboardModeOff by remember { mutableStateOf(false) }
     var showSessionDrawer by remember { mutableStateOf(false) }
     // ONE owner for the collapsed folders. The drawer and the side panel are
     // composed at the same time on desktop; when each kept its own `remember`
@@ -414,30 +443,62 @@ fun TerminalScreen(
         (activeSessions + remoteItems).groupBy { it.folder }.toSortedMap()
     }
 
-    // Keyboard shortcuts
-    fun handleShortcut(event: KeyEvent): Boolean {
-        if (event.type != KeyEventType.KeyDown) return false
-        if (event.isCtrlPressed || event.isMetaPressed) {
-            when (event.key) {
-                Key.K -> { showPalette = true; return true }
-                Key.Tab -> {
-                    if (tabs.size > 1) {
-                        val currentIdx = tabs.indexOfFirst { it.id == activeTabId }
-                        val nextIdx = if (event.isShiftPressed) {
-                            if (currentIdx <= 0) tabs.size - 1 else currentIdx - 1
-                        } else {
-                            if (currentIdx >= tabs.size - 1) 0 else currentIdx + 1
-                        }
-                        onTabSwitch(tabs[nextIdx].id)
-                    }
-                    return true
-                }
-                Key.W -> { activeTabId?.let { onTabClose(it) }; return true }
-                Key.N -> { onNewTab(); return true }
-                else -> {}
-            }
+    // Keyboard shortcuts — the table, the key rules and the reasons for them
+    // live in AppShortcuts; this only says what each one does here.
+    fun openPalette(filter: String) {
+        paletteFilter = filter
+        showPalette = true
+        if (onFetchCommands != null) {
+            scope.launch { commands = onFetchCommands.invoke() }
         }
-        return false
+    }
+
+    fun stepSession(delta: Int) {
+        if (tabs.size < 2) return
+        val current = tabs.indexOfFirst { it.id == activeTabId }.coerceAtLeast(0)
+        onTabSwitch(tabs[(current + delta + tabs.size) % tabs.size].id)
+    }
+
+    fun dispatchShortcut(shortcut: AppShortcut) {
+        // Desktop Raw view: the palette is an in-window overlay and would open
+        // BEHIND the SwingPanel terminal, invisible but holding focus. The menu
+        // entry is disabled for the same reason; the shortcuts must not route
+        // around that.
+        val paletteHidden = !composeTerminalUnderTranscript && terminalView == CRTerminalView.Raw
+        // Exhaustive on purpose: adding an AppShortcut does not compile until
+        // it does something here, and the help dialog lists it automatically.
+        when (shortcut) {
+            AppShortcut.PALETTE -> if (!paletteHidden) openPalette("")
+            AppShortcut.NEW_SESSION -> onNewTab()
+            AppShortcut.CLOSE_SESSION -> activeTabId?.let { onTabClose(it) }
+            AppShortcut.NEXT_SESSION -> stepSession(+1)
+            AppShortcut.PREV_SESSION -> stepSession(-1)
+            AppShortcut.TOGGLE_SIDEBAR -> sidebarHidden = !sidebarHidden
+            AppShortcut.TOGGLE_VIEW -> onTerminalViewChange?.invoke(
+                if (terminalView == CRTerminalView.Raw) CRTerminalView.Transcript else CRTerminalView.Raw
+            )
+            AppShortcut.MODEL -> if (!paletteHidden) openPalette("model")
+            AppShortcut.EFFORT -> if (!paletteHidden) openPalette("effort")
+            AppShortcut.HELP -> showShortcutHelp = !showShortcutHelp
+        }
+    }
+
+    fun handleShortcut(event: KeyEvent): Boolean {
+        val shortcut = AppShortcuts.match(event) ?: return false
+        dispatchShortcut(shortcut)
+        return true
+    }
+
+    // Shortcuts the platform caught first (Android's terminal view hook).
+    // Whichever path sees a key first consumes it, so each press fires once.
+    //
+    // rememberUpdatedState, not a direct call: the effect is launched once, and
+    // a lambda captured then would act on the tabs/active session of THAT
+    // composition — Ctrl+Shift+W in the terminal would close the session that
+    // was active when the screen opened, not the one on screen.
+    val latestDispatch by rememberUpdatedState<(AppShortcut) -> Unit>({ dispatchShortcut(it) })
+    LaunchedEffect(externalShortcuts) {
+        externalShortcuts?.collect { latestDispatch(it) }
     }
 
     BoxWithConstraints(modifier = Modifier.fillMaxSize().onPreviewKeyEvent { handleShortcut(it) }) {
@@ -450,13 +511,40 @@ fun TerminalScreen(
         // Captured once: the more-menu picker runs inside a FloatingDialog lambda
         // that no longer has the BoxWithConstraintsScope receiver in scope.
         val allowQuadLayout = !isMobile || maxWidth > 1000.dp
+        // Keyboard mode: a physical keyboard on a landscape screen. Everything
+        // the on-screen rows offer is then a key the user already has, so they
+        // go and the terminal gets the height (~20 → ~39 rows on a phone).
+        val keyboardMode = hardwareKeyboard && !keyboardModeOff && maxWidth > maxHeight
+        val sidebarShown = wideMode && !sidebarHidden
+        // With the input field gone, keys have to land in the terminal without
+        // a tap first — on entering keyboard mode, on switching to Raw, and on
+        // switching sessions (the terminal view is shared and re-seeded).
+        //
+        // Chat view gets the INPUT field instead: the emulator stays composed
+        // under Chat on Android, so leaving focus in it would send everything
+        // typed straight into Claude's prompt behind the visible chat. Re-run
+        // when the palette or help closes, since they took focus and nothing
+        // else here changes when they go.
+        LaunchedEffect(keyboardMode, effectiveTerminalView, activeTabId, showPalette, showShortcutHelp) {
+            if (!keyboardMode || showPalette || showShortcutHelp) return@LaunchedEffect
+            if (effectiveTerminalView == CRTerminalView.Raw) {
+                // The terminal view may not exist yet on a cold open; retry briefly
+                // instead of giving up and leaving keys with nowhere to go.
+                repeat(15) {
+                    if (onFocusTerminal?.invoke() == true) return@LaunchedEffect
+                    kotlinx.coroutines.delay(200)
+                }
+            } else {
+                try { inputFocusRequester.requestFocus() } catch (_: Exception) {}
+            }
+        }
 
         var sidePanelWidth by remember { mutableStateOf(sidePanelWidthDp.dp) }
         val density = LocalDensity.current
 
         Row(modifier = Modifier.fillMaxSize()) {
             // Wide-screen side panel
-            if (wideMode) {
+            if (sidebarShown) {
                 SessionSidePanel(
                     allSessions = allSessions,
                     activeTabId = activeTabId,
@@ -538,7 +626,10 @@ fun TerminalScreen(
                 )
 
                 // ── Crumb bar (36 dp) ──────────────────────────────────────
-                if (activeSession != null) {
+                // In keyboard mode it only says what the visible side panel
+                // already shows; it comes back the moment the panel is hidden,
+                // which is exactly when "where am I, 3/45" is worth a row.
+                if (activeSession != null && !(keyboardMode && sidebarShown)) {
                     val allFlat = remember(allSessions) { allSessions.values.flatten() }
                     val idx = allFlat.indexOfFirst { it.tab?.id == activeTabId }.coerceAtLeast(0)
                     val total = allFlat.size.coerceAtLeast(1)
@@ -588,10 +679,7 @@ fun TerminalScreen(
                                 TextButton(
                                     onClick = {
                                         moreMenu = false
-                                        showPalette = true
-                                        if (onFetchCommands != null) {
-                                            scope.launch { commands = onFetchCommands.invoke() }
-                                        }
+                                        openPalette("")
                                     },
                                     enabled = !paletteBlockedByRawView,
                                     modifier = Modifier.fillMaxWidth(),
@@ -600,6 +688,23 @@ fun TerminalScreen(
                                         if (paletteBlockedByRawView) "Command Palette (switch to Chat first)" else "Command Palette",
                                         color = if (paletteBlockedByRawView) c.textDim else c.text,
                                     )
+                                }
+                                // Discoverable without knowing the shortcut that opens it.
+                                TextButton(
+                                    onClick = { moreMenu = false; showShortcutHelp = true },
+                                    modifier = Modifier.fillMaxWidth(),
+                                ) { Text("Klávesové zkratky (Ctrl+Shift+H)", color = c.text) }
+                                if (hardwareKeyboard) {
+                                    TextButton(
+                                        onClick = { moreMenu = false; keyboardModeOff = !keyboardModeOff },
+                                        modifier = Modifier.fillMaxWidth(),
+                                    ) {
+                                        Text(
+                                            if (keyboardModeOff) "Zapnout klávesnicový režim"
+                                            else "Vypnout klávesnicový režim (ukázat klávesy na obrazovce)",
+                                            color = c.text,
+                                        )
+                                    }
                                 }
                                 if (onFetchClaudeMd != null) {
                                     TextButton(onClick = {
@@ -1035,14 +1140,22 @@ fun TerminalScreen(
                             onReconnect = onReconnect,
                             onSwitchModel = onSwitchModel,
                             onSendEscape = onSendEscape,
-                            onNavigate = { target -> onNavigate?.invoke(target) }
+                            onNavigate = { target -> onNavigate?.invoke(target) },
+                            onSwitchEffort = onSwitchEffort,
                         )
                     }
                     CommandPaletteDialog(
                         actions = paletteActions,
-                        onDismiss = { showPalette = false }
+                        onDismiss = { showPalette = false },
+                        initialFilter = paletteFilter,
                     )
                 }
+
+                ShortcutHelpDialog(
+                    visible = showShortcutHelp,
+                    theme = crThemeSnapshot,
+                    onDismiss = { showShortcutHelp = false },
+                )
 
                 // CLAUDE.md editor dialog
                 if (showClaudeMd) {
@@ -1421,7 +1534,8 @@ fun TerminalScreen(
                     }
 
                     // ── Status row ─────────────────────────────────────────
-                    if (activeSession != null) {
+                    // Keyboard mode: the top bar's dot already says working/idle.
+                    if (activeSession != null && !keyboardMode) {
                         StatusRow(
                             session = activeSession,
                             activity = sessionActivities[activeSession.id],
@@ -1429,7 +1543,10 @@ fun TerminalScreen(
                     }
 
                     // ── Prompt input ────────────────────────────────────────
-                    if (activeSession != null) {
+                    // Keyboard mode in Raw view types straight into the terminal,
+                    // so the field would only duplicate it. Chat view keeps it —
+                    // there it is the only way to write.
+                    if (activeSession != null && !(keyboardMode && effectiveTerminalView == CRTerminalView.Raw)) {
                         PromptInputBar(
                             commands = commands,
                             onSend = { text ->
@@ -1483,17 +1600,12 @@ fun TerminalScreen(
                     }
 
                     // ── Special keys row (spec §6.3 CRITICAL) ──────────────
-                    if (isMobile && activeSession != null) {
+                    if (isMobile && activeSession != null && !keyboardMode) {
                         SpecialKeysRow(
                             onKey = { key ->
                                 onSendCommand(String(key.bytes.map { it.toInt().toChar() }.toCharArray()))
                             },
-                            onMore = {
-                                showPalette = true
-                                if (onFetchCommands != null) {
-                                    scope.launch { commands = onFetchCommands.invoke() }
-                                }
-                            },
+                            onMore = { openPalette("") },
                         )
                     }
 
@@ -1514,12 +1626,8 @@ fun TerminalScreen(
                             // already opens (slash commands PLUS tab/model/
                             // navigation actions). Route both to the one
                             // command surface instead of maintaining two.
-                            onOpenCommands = {
-                                showPalette = true
-                                if (onFetchCommands != null) {
-                                    scope.launch { commands = onFetchCommands.invoke() }
-                                }
-                            }
+                            onOpenCommands = { openPalette("") },
+                            chipsOnly = keyboardMode,
                         )
                     }
                 }

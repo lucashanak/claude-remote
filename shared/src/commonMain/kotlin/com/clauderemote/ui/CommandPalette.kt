@@ -54,7 +54,9 @@ fun buildPaletteActions(
     onReconnect: ((String) -> Unit)?,
     onSwitchModel: (ClaudeModel) -> Unit,
     onSendEscape: () -> Unit,
-    onNavigate: (String) -> Unit // "settings", "dashboard", "logs", "launcher"
+    onNavigate: (String) -> Unit, // "settings", "dashboard", "logs", "launcher"
+    /** Effort entries, so Ctrl+Shift+E has something to land on. Null hides them. */
+    onSwitchEffort: ((com.clauderemote.model.ClaudeEffort) -> Unit)? = null,
 ): List<PaletteAction> {
     val actions = mutableListOf<PaletteAction>()
 
@@ -79,6 +81,15 @@ fun buildPaletteActions(
         actions.add(PaletteAction("model_${model.name}", "Switch to ${model.displayName}", "Model") {
             onSwitchModel(model)
         })
+    }
+
+    // Effort — category "Effort" is what the Ctrl+Shift+E pre-filter matches.
+    if (onSwitchEffort != null) {
+        com.clauderemote.model.ClaudeEffort.entries.forEach { effort ->
+            actions.add(PaletteAction("effort_${effort.name}", "Effort: ${effort.displayName}", "Effort") {
+                onSwitchEffort(effort)
+            })
+        }
     }
 
     // Session actions
@@ -130,12 +141,20 @@ fun buildPaletteActions(
 @Composable
 fun CommandPaletteDialog(
     actions: List<PaletteAction>,
-    onDismiss: () -> Unit
+    onDismiss: () -> Unit,
+    /**
+     * Pre-typed query, so a shortcut can open the palette already narrowed
+     * (Ctrl+Shift+M → "model"). It is ordinary text in the field: the user can
+     * edit or clear it like anything they typed.
+     */
+    initialFilter: String = "",
 ) {
     val c = CRTheme.colors
     val m = CRTheme.metrics
 
-    var filter by remember { mutableStateOf("") }
+    // Keyed on the filter: Ctrl+Shift+E pressed while the palette is already
+    // open (narrowed to "model") must re-narrow it, not be silently ignored.
+    var filter by remember(initialFilter) { mutableStateOf(initialFilter) }
     var selectedIndex by remember { mutableStateOf(0) }
 
     val filtered = if (filter.isBlank()) actions

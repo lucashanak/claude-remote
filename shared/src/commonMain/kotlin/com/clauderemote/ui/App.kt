@@ -94,7 +94,13 @@ fun App(
     // #75: keep emulator composed under the Chat overlay so screenReader works in
     // Chat. Android single-pane passes true; desktop stays false (SwingPanel bleeds
     // through a Compose overlay).
-    composeTerminalUnderTranscript: Boolean = false
+    composeTerminalUnderTranscript: Boolean = false,
+    /** Physical keyboard attached — enables keyboard mode in landscape. Android only. */
+    hardwareKeyboard: Boolean = false,
+    /** Shortcuts the platform caught before Compose did (Android terminal view hook). */
+    externalShortcuts: kotlinx.coroutines.flow.Flow<AppShortcut>? = null,
+    /** Move keyboard focus into the terminal view; false while it doesn't exist yet. */
+    onFocusTerminal: (() -> Boolean)? = null,
 ) {
     val scope = rememberCoroutineScope()
     // Which chat-mentioned paths the server confirmed are real files.
@@ -1335,6 +1341,9 @@ fun App(
                         reconnectStatus = reconnectStatus,
                         loginFlow = loginFlow,
                         loginExpiry = activeTabId?.let { loginExpiryWarnings[it] },
+                        hardwareKeyboard = hardwareKeyboard,
+                        externalShortcuts = externalShortcuts,
+                        onFocusTerminal = onFocusTerminal,
                         onOpenLoginUrl = { url -> onOpenUrl?.invoke(url) },
                         onSubmitLoginCode = { code ->
                             val clean = code.filterNot { it.isWhitespace() }

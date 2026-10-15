@@ -71,6 +71,12 @@ class MainActivity : FragmentActivity() {
     private lateinit var tabManager: TabManager
     private lateinit var sessionOrchestrator: SessionOrchestrator
     @Volatile private var terminalHandle: SshTerminalHandle? = null
+
+    // App shortcuts caught by the terminal view's own key hook, handed to the
+    // Compose UI to dispatch. Activity-level so the lambda the AndroidView
+    // factory captures once never goes stale.
+    private val appShortcutEvents =
+        kotlinx.coroutines.flow.MutableSharedFlow<com.clauderemote.ui.AppShortcut>(extraBufferCapacity = 8)
     private var keyFileCallback: ((String) -> Unit)? = null
     private var attachFileCallback: ((List<Pair<ByteArray, String>>) -> Unit)? = null
     // In-flight "enter this session" request from a notification tap, waiting
@@ -438,7 +444,17 @@ class MainActivity : FragmentActivity() {
             val liveHandle = androidx.compose.runtime.remember {
                 androidx.compose.runtime.mutableStateOf<SshTerminalHandle?>(null)
             }
+            // Recomposes on attach/detach: the manifest handles keyboard and
+            // keyboardHidden config changes, so the activity is NOT recreated
+            // and LocalConfiguration simply updates.
+            val cfg = androidx.compose.ui.platform.LocalConfiguration.current
+            val hardwareKeyboard =
+                cfg.hardKeyboardHidden == android.content.res.Configuration.HARDKEYBOARDHIDDEN_NO &&
+                    cfg.keyboard != android.content.res.Configuration.KEYBOARD_NOKEYS
             App(
+                hardwareKeyboard = hardwareKeyboard,
+                externalShortcuts = appShortcutEvents,
+                onFocusTerminal = { terminalHandle?.view?.requestFocus() ?: false },
                 serverStorage = serverStorage,
                 appSettings = appSettings,
                 folderPolicyStorage = folderPolicyStorage,
@@ -534,6 +550,19 @@ class MainActivity : FragmentActivity() {
                         onResize = { cols, rows ->
                             tabManager.activeTabId.value?.let { id ->
                                 sessionOrchestrator.resize(id, cols, rows)
+                            }
+                        },
+                        onAppShortcutKey = { e ->
+                            // The same matcher Compose uses, so a key is an app
+                            // shortcut on exactly one rule; null = the terminal's.
+                            val sc = com.clauderemote.ui.AppShortcuts.match(androidx.compose.ui.input.key.KeyEvent(e))
+                            when {
+                                sc == null -> false
+                                // A held chord auto-repeats; consume the repeats so
+                                // they neither re-fire (sidebar flicker, repeated
+                                // close dialogs) nor leak into the terminal.
+                                e.repeatCount > 0 -> true
+                                else -> { appShortcutEvents.tryEmit(sc); true }
                             }
                         },
                         onSingleTap = {
