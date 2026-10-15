@@ -319,10 +319,17 @@ fun TerminalScreen(
     // The side panel's visibility. Shown by default — collapsing it is a
     // deliberate Ctrl+Shift+B, never something the layout decides on its own.
     var sidebarHidden by remember { mutableStateOf(false) }
-    // Escape hatch for a misdetected keyboard (a barcode scanner or YubiKey also
-    // reports a QWERTY keyboard) — without it the on-screen keys would be gone
-    // with no way back.
-    var keyboardModeOff by remember { mutableStateOf(false) }
+    // The user's explicit choice, overriding "keyboard + landscape": false turns
+    // keyboard mode off (also the escape hatch for a misdetected keyboard — a
+    // barcode scanner or YubiKey reports QWERTY too), true turns it on in
+    // portrait as well. Null = automatic.
+    var keyboardModeOverride by remember { mutableStateOf<Boolean?>(null) }
+    // Mirror of the effective mode, so the toggle can flip what is on screen
+    // from outside BoxWithConstraints, where the orientation is known.
+    var keyboardModeShown by remember { mutableStateOf(false) }
+    // Unplugging the keyboard drops the override: a "forced on" left behind
+    // would hide the on-screen keys with no keyboard to bring them back.
+    LaunchedEffect(hardwareKeyboard) { if (!hardwareKeyboard) keyboardModeOverride = null }
     var showSessionDrawer by remember { mutableStateOf(false) }
     // ONE owner for the collapsed folders. The drawer and the side panel are
     // composed at the same time on desktop; when each kept its own `remember`
@@ -479,6 +486,8 @@ fun TerminalScreen(
             AppShortcut.NEXT_SESSION -> stepSession(+1)
             AppShortcut.PREV_SESSION -> stepSession(-1)
             AppShortcut.TOGGLE_SIDEBAR -> sidebarHidden = !sidebarHidden
+            AppShortcut.TOGGLE_KEYBOARD_MODE ->
+                if (hardwareKeyboard) keyboardModeOverride = !keyboardModeShown
             AppShortcut.TOGGLE_VIEW -> onTerminalViewChange?.invoke(
                 if (terminalView == CRTerminalView.Raw) CRTerminalView.Transcript else CRTerminalView.Raw
             )
@@ -519,7 +528,8 @@ fun TerminalScreen(
         // Keyboard mode: a physical keyboard on a landscape screen. Everything
         // the on-screen rows offer is then a key the user already has, so they
         // go and the terminal gets the height (~20 → ~39 rows on a phone).
-        val keyboardMode = hardwareKeyboard && !keyboardModeOff && maxWidth > maxHeight
+        val keyboardMode = hardwareKeyboard && (keyboardModeOverride ?: (maxWidth > maxHeight))
+        SideEffect { keyboardModeShown = keyboardMode }
         val sidebarShown = wideMode && !sidebarHidden
         // onDispose matters: leaving the terminal for Settings must bring the
         // status bar back even though the keyboard is still attached.
@@ -708,12 +718,12 @@ fun TerminalScreen(
                                 ) { Text("Klávesové zkratky (Ctrl+Shift+H)", color = c.text) }
                                 if (hardwareKeyboard) {
                                     TextButton(
-                                        onClick = { moreMenu = false; keyboardModeOff = !keyboardModeOff },
+                                        onClick = { moreMenu = false; keyboardModeOverride = !keyboardMode },
                                         modifier = Modifier.fillMaxWidth(),
                                     ) {
                                         Text(
-                                            if (keyboardModeOff) "Zapnout klávesnicový režim"
-                                            else "Vypnout klávesnicový režim (ukázat klávesy na obrazovce)",
+                                            if (keyboardMode) "Vypnout klávesnicový režim (Ctrl+Shift+L)"
+                                            else "Zapnout klávesnicový režim (Ctrl+Shift+L)",
                                             color = c.text,
                                         )
                                     }

@@ -34,6 +34,7 @@ enum class AppShortcut(val keys: String, val label: String) {
     PREV_SESSION("Ctrl+Shift+Tab", "Předchozí session"),
     TOGGLE_SIDEBAR("Ctrl+Shift+B", "Skrýt / ukázat seznam sessions"),
     TOGGLE_VIEW("Ctrl+Shift+R", "Přepnout Raw / Chat"),
+    TOGGLE_KEYBOARD_MODE("Ctrl+Shift+L", "Klávesnicový režim zap / vyp (i na výšku)"),
     MODEL("Ctrl+Shift+M", "Vybrat model"),
     EFFORT("Ctrl+Shift+E", "Vybrat effort"),
     HELP("Ctrl+Shift+H", "Tahle nápověda"),
@@ -85,6 +86,7 @@ object AppShortcuts {
             Key.W -> AppShortcut.CLOSE_SESSION
             Key.B -> AppShortcut.TOGGLE_SIDEBAR
             Key.R -> AppShortcut.TOGGLE_VIEW
+            Key.L -> AppShortcut.TOGGLE_KEYBOARD_MODE
             Key.M -> AppShortcut.MODEL
             Key.E -> AppShortcut.EFFORT
             Key.H -> AppShortcut.HELP

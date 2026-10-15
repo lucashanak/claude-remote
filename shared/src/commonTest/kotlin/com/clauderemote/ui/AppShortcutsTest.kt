@@ -28,6 +28,7 @@ class AppShortcutsTest {
         assertNull(hit(Key.C, ctrl = true))
         assertNull(hit(Key.D, ctrl = true))
         assertNull(hit(Key.R, ctrl = true))
+        assertNull(hit(Key.L, ctrl = true)) // Ctrl+L = clear screen
     }
 
     @Test
@@ -37,6 +38,7 @@ class AppShortcutsTest {
         assertEquals(AppShortcut.CLOSE_SESSION, hit(Key.W, ctrl = true, shift = true))
         assertEquals(AppShortcut.TOGGLE_SIDEBAR, hit(Key.B, ctrl = true, shift = true))
         assertEquals(AppShortcut.TOGGLE_VIEW, hit(Key.R, ctrl = true, shift = true))
+        assertEquals(AppShortcut.TOGGLE_KEYBOARD_MODE, hit(Key.L, ctrl = true, shift = true))
         assertEquals(AppShortcut.MODEL, hit(Key.M, ctrl = true, shift = true))
         assertEquals(AppShortcut.EFFORT, hit(Key.E, ctrl = true, shift = true))
         assertEquals(AppShortcut.HELP, hit(Key.H, ctrl = true, shift = true))
