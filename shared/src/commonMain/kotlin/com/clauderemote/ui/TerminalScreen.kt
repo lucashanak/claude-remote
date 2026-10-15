@@ -231,6 +231,11 @@ fun TerminalScreen(
      */
     externalShortcuts: kotlinx.coroutines.flow.Flow<AppShortcut>? = null,
     /**
+     * Told when keyboard mode starts and stops, and false again when this screen
+     * leaves — Android uses it to hide the system bars only while it is on.
+     */
+    onKeyboardModeChange: ((Boolean) -> Unit)? = null,
+    /**
      * Give the terminal keyboard focus (keyboard mode hides the input field).
      * Returns false while the terminal view does not exist yet, so the caller
      * can retry rather than leave keys with nowhere to land.
@@ -516,6 +521,12 @@ fun TerminalScreen(
         // go and the terminal gets the height (~20 → ~39 rows on a phone).
         val keyboardMode = hardwareKeyboard && !keyboardModeOff && maxWidth > maxHeight
         val sidebarShown = wideMode && !sidebarHidden
+        // onDispose matters: leaving the terminal for Settings must bring the
+        // status bar back even though the keyboard is still attached.
+        DisposableEffect(keyboardMode) {
+            onKeyboardModeChange?.invoke(keyboardMode)
+            onDispose { onKeyboardModeChange?.invoke(false) }
+        }
         // With the input field gone, keys have to land in the terminal without
         // a tap first — on entering keyboard mode, on switching to Raw, and on
         // switching sessions (the terminal view is shared and re-seeded).
@@ -623,13 +634,13 @@ fun TerminalScreen(
                     // SwingPanel-embedded terminal.
                     onMoreMenu = { moreMenu = true },
                     onOpenDrawer = { showSessionDrawer = true },
+                    slim = keyboardMode,
                 )
 
                 // ── Crumb bar (36 dp) ──────────────────────────────────────
-                // In keyboard mode it only says what the visible side panel
-                // already shows; it comes back the moment the panel is hidden,
-                // which is exactly when "where am I, 3/45" is worth a row.
-                if (activeSession != null && !(keyboardMode && sidebarShown)) {
+                // Not in keyboard mode: it repeats the top bar's title, and the
+                // one thing it adds (‹ 3/45 ›) is what Ctrl+Tab does.
+                if (activeSession != null && !keyboardMode) {
                     val allFlat = remember(allSessions) { allSessions.values.flatten() }
                     val idx = allFlat.indexOfFirst { it.tab?.id == activeTabId }.coerceAtLeast(0)
                     val total = allFlat.size.coerceAtLeast(1)
@@ -1610,7 +1621,10 @@ fun TerminalScreen(
                     }
 
                     // ── Control bar ─────────────────────────────────────────
-                    if (showControlBar && activeSession != null) {
+                    // Not in keyboard mode: the model is already in the top bar,
+                    // the mode in Claude's own statusline, and both are changed
+                    // from the keyboard (Ctrl+Shift+M / E, Shift+Tab).
+                    if (showControlBar && activeSession != null && !keyboardMode) {
                         CRControlBar(
                             session = activeSession,
                             activity = sessionActivities[activeSession.id],
@@ -1627,7 +1641,6 @@ fun TerminalScreen(
                             // navigation actions). Route both to the one
                             // command surface instead of maintaining two.
                             onOpenCommands = { openPalette("") },
-                            chipsOnly = keyboardMode,
                         )
                     }
                 }

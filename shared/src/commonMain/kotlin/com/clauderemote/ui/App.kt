@@ -99,6 +99,8 @@ fun App(
     hardwareKeyboard: Boolean = false,
     /** Shortcuts the platform caught before Compose did (Android terminal view hook). */
     externalShortcuts: kotlinx.coroutines.flow.Flow<AppShortcut>? = null,
+    /** Keyboard mode started/stopped on the terminal screen (Android: system bars). */
+    onKeyboardModeChange: ((Boolean) -> Unit)? = null,
     /** Move keyboard focus into the terminal view; false while it doesn't exist yet. */
     onFocusTerminal: (() -> Boolean)? = null,
 ) {
@@ -1344,6 +1346,7 @@ fun App(
                         hardwareKeyboard = hardwareKeyboard,
                         externalShortcuts = externalShortcuts,
                         onFocusTerminal = onFocusTerminal,
+                        onKeyboardModeChange = onKeyboardModeChange,
                         onOpenLoginUrl = { url -> onOpenUrl?.invoke(url) },
                         onSubmitLoginCode = { code ->
                             val clean = code.filterNot { it.isWhitespace() }

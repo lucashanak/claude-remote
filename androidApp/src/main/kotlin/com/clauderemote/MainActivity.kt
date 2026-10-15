@@ -455,6 +455,18 @@ class MainActivity : FragmentActivity() {
                 hardwareKeyboard = hardwareKeyboard,
                 externalShortcuts = appShortcutEvents,
                 onFocusTerminal = { terminalHandle?.view?.requestFocus() ?: false },
+                onKeyboardModeChange = { on ->
+                    // Status bar and gesture strip only while keyboard mode is on;
+                    // a swipe from the edge brings them back temporarily.
+                    val ctl = androidx.core.view.WindowCompat.getInsetsController(window, window.decorView)
+                    if (on) {
+                        ctl.systemBarsBehavior =
+                            androidx.core.view.WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+                        ctl.hide(androidx.core.view.WindowInsetsCompat.Type.systemBars())
+                    } else {
+                        ctl.show(androidx.core.view.WindowInsetsCompat.Type.systemBars())
+                    }
+                },
                 serverStorage = serverStorage,
                 appSettings = appSettings,
                 folderPolicyStorage = folderPolicyStorage,

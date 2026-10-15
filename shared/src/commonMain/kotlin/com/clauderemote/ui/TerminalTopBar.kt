@@ -143,21 +143,29 @@ internal fun CRTopBar(
     onToggleControlBar: () -> Unit,
     onMoreMenu: () -> Unit,
     onOpenDrawer: () -> Unit,
+    /**
+     * Keyboard mode: about two thirds of the height, smaller buttons, and the
+     * usage figures side by side instead of stacked — the same content in the
+     * one row of chrome that mode keeps.
+     */
+    slim: Boolean = false,
 ) {
     val c = CRTheme.colors
     val m = CRTheme.metrics
+    val barHeight = if (slim) (m.rowHeight * 0.66f).coerceAtLeast(30.dp) else m.rowHeight
+    val btn = if (slim) 28.dp else 36.dp
 
     Surface(
         color = c.surface,
         tonalElevation = 0.dp,
-        modifier = Modifier.fillMaxWidth().height(m.rowHeight)
+        modifier = Modifier.fillMaxWidth().height(barHeight)
     ) {
         Row(
             modifier = Modifier.fillMaxSize().padding(horizontal = 4.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
             if (!wideMode) {
-                IconButton(onClick = onMenuOpen, modifier = Modifier.size(36.dp)) {
+                IconButton(onClick = onMenuOpen, modifier = Modifier.size(btn)) {
                     Icon(Icons.Default.Menu, "Sessions", tint = c.textDim, modifier = Modifier.size(20.dp))
                 }
             }
@@ -223,10 +231,20 @@ internal fun CRTopBar(
                 // Order = priority: usage, then latency, model, and git branch
                 // last (widest + most variable → it's the one that scrolls away).
                 if (contextPercent != null || sessionUsagePercent != null || weekUsagePercent != null) {
-                    Column(verticalArrangement = Arrangement.spacedBy(1.dp), modifier = Modifier.padding(horizontal = 4.dp)) {
-                        if (contextPercent != null) MiniBar("Ctx", contextPercent)
-                        if (sessionUsagePercent != null) MiniBar("5h", sessionUsagePercent)
-                        if (weekUsagePercent != null) MiniBar("Wk", weekUsagePercent)
+                    // Stacked they need ~3 text lines of height, which the slim
+                    // bar doesn't have; side by side they cost width instead.
+                    if (slim) {
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.padding(horizontal = 4.dp)) {
+                            if (contextPercent != null) MiniBar("Ctx", contextPercent)
+                            if (sessionUsagePercent != null) MiniBar("5h", sessionUsagePercent)
+                            if (weekUsagePercent != null) MiniBar("Wk", weekUsagePercent)
+                        }
+                    } else {
+                        Column(verticalArrangement = Arrangement.spacedBy(1.dp), modifier = Modifier.padding(horizontal = 4.dp)) {
+                            if (contextPercent != null) MiniBar("Ctx", contextPercent)
+                            if (sessionUsagePercent != null) MiniBar("5h", sessionUsagePercent)
+                            if (weekUsagePercent != null) MiniBar("Wk", weekUsagePercent)
+                        }
                     }
                 }
 
@@ -296,7 +314,7 @@ internal fun CRTopBar(
 
             // Invert colors (sunlight-readable)
             if (onToggleInvertColors != null) {
-                IconButton(onClick = onToggleInvertColors, modifier = Modifier.size(36.dp)) {
+                IconButton(onClick = onToggleInvertColors, modifier = Modifier.size(btn)) {
                     Text(
                         if (invertColors) "☾" else "☀",
                         style = MaterialTheme.typography.titleMedium,
@@ -306,7 +324,7 @@ internal fun CRTopBar(
             }
 
             // More menu
-            IconButton(onClick = onMoreMenu, modifier = Modifier.size(36.dp)) {
+            IconButton(onClick = onMoreMenu, modifier = Modifier.size(btn)) {
                 Text("⋮", style = MaterialTheme.typography.titleMedium, color = c.textDim)
             }
         }

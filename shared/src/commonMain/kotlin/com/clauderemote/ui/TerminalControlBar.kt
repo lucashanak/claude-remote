@@ -86,12 +86,6 @@ internal fun CRControlBar(
     onSwitchModel: (ClaudeModel) -> Unit,
     onSwitchEffort: ((com.clauderemote.model.ClaudeEffort) -> Unit)? = null,
     onOpenCommands: () -> Unit,
-    /**
-     * Keyboard mode: keep the mode/model/effort chips, drop the key buttons
-     * (/cmd, PgUp, PgDn, Esc, C-c, y, n) — with a physical keyboard every one
-     * of them is a key the user already has under their fingers.
-     */
-    chipsOnly: Boolean = false,
 ) {
     val c = CRTheme.colors
 
@@ -300,7 +294,7 @@ internal fun CRControlBar(
             Spacer(Modifier.weight(1f))
 
             // Right-hand button cluster — scrollable so it never clips on narrow phones
-            if (!chipsOnly) Row(
+            Row(
                 modifier = Modifier.horizontalScroll(rememberScrollState()),
                 horizontalArrangement = Arrangement.spacedBy(6.dp),
                 verticalAlignment = Alignment.CenterVertically,
