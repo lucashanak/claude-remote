@@ -3,6 +3,7 @@ package com.clauderemote.session.transcript
 import com.clauderemote.connection.SshSessionHelper
 import com.clauderemote.model.SshServer
 import com.clauderemote.util.FileLogger
+import com.clauderemote.util.isoToEpochMillis
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -80,9 +81,22 @@ class TranscriptStream(
     val contextTokens: StateFlow<Long?> = _contextTokens.asStateFlow()
 
     // Human-readable diagnostic for the "Waiting for transcript…" state: what
-    // the tail is doing / why it hasn't produced data yet. Null once data flows.
+    // the tail is doing / why it hasn't produced data yet. Also carries a
+    // TRANSIENT failure note once entries exist — a poll/stream that starts
+    // failing mid-conversation used to be completely invisible (the flag was
+    // only ever written while the entry list was empty), so a session could sit
+    // minutes behind with the UI looking perfectly healthy. Cleared by the next
+    // successful poll.
     private val _status = MutableStateFlow<String?>(null)
     val status: StateFlow<String?> = _status.asStateFlow()
+
+    // True once we know the conversation shown is NOT the whole conversation:
+    // either the first poll came back with a full `tail -n INITIAL_LINES`
+    // backlog (so older lines exist in the file we never read), or
+    // appendEntries trimmed the head at MAX_ENTRIES. The UI renders a marker
+    // from this — silently starting mid-conversation is the thing to avoid.
+    private val _historyTruncated = MutableStateFlow(false)
+    val historyTruncated: StateFlow<Boolean> = _historyTruncated.asStateFlow()
 
     private val supervisor = SupervisorJob(parentScope.coroutineContext[Job])
     private val scope = CoroutineScope(parentScope.coroutineContext + supervisor)
@@ -106,6 +120,16 @@ class TranscriptStream(
     // stream daemon made it skip the new file's head (permanent gap on
     // /resume into a larger conversation). Seeded together with the reset.
     @Volatile private var offsetUuid: String? = null
+    // When the stream daemon last delivered a batch for THIS session (epoch ms,
+    // 0 = never). daemonActive() is per-SERVER but gates a per-SESSION poll
+    // cadence, so a single watch that never took (lost control line, daemon
+    // restarted mid-registration) degraded just that session to the 60 s
+    // backstop with nothing to show for it. Paired with [daemonMisses] below.
+    @Volatile private var lastPushAt = 0L
+    // Consecutive safety polls that found new bytes the daemon should already
+    // have pushed. Two in a row ⇒ stop trusting the daemon for this session and
+    // go back to the normal cadence until a poll comes up clean again.
+    @Volatile private var daemonMisses = 0
     // Serializes pollOnce() + byteOffset updates between the steady loop and
     // pollNow(). Without it a Stop-hook-triggered pollNow() could run a second
     // pollOnce concurrently with the loop, both advancing byteOffset and losing
@@ -145,6 +169,9 @@ class TranscriptStream(
                     seenIds.clear()
                     _contextTokens.value = null
                     _status.value = null
+                    _historyTruncated.value = false
+                    lastPushAt = 0L
+                    daemonMisses = 0
                 }
             }
             runTail(claudeSessionUuid)
@@ -168,32 +195,40 @@ class TranscriptStream(
         pollMutex.withLock {
             byteOffset = 0L
             offsetUuid = uuid
+            daemonMisses = 0
+            lastPushAt = 0L
         }
         var attempt = 0
         while (scope.isActive) {
             attempt++
             try {
-                _status.value = if (_entries.value.isEmpty()) "connecting…" else null
+                if (_entries.value.isEmpty()) _status.value = "connecting…"
                 doPoll(safeFolder, safeUuid)
                 attempt = 0
-                if (_entries.value.isEmpty()) {
+                // A poll that succeeded clears any transient failure note; with
+                // no entries yet, keep explaining why the view is still empty.
+                _status.value = if (_entries.value.isEmpty()) {
                     // Connected & polled fine, but nothing parseable yet (no
                     // transcript written, or wrong folder/uuid).
-                    _status.value = "connected, no transcript data yet"
-                }
+                    "connected, no transcript data yet"
+                } else null
             } catch (t: Throwable) {
                 val msg = t.message?.take(80) ?: t::class.simpleName ?: "unknown error"
                 FileLogger.log(TAG, "transcript poll error (attempt $attempt): ${t.message}")
-                if (_entries.value.isEmpty()) _status.value = "retry $attempt — $msg"
+                // Surface the failure even mid-conversation: the user was
+                // otherwise shown a healthy-looking, silently frozen chat.
+                _status.value = if (_entries.value.isEmpty()) "retry $attempt — $msg"
+                else "reconnecting — $msg"
             }
             if (!scope.isActive) break
             // Steady poll cadence; back off only after errors. With a live
             // stream daemon the poll is only an offset-integrity backstop —
-            // deltas arrive pushed, in background too.
+            // deltas arrive pushed, in background too. But only while THIS
+            // session's watch is demonstrably delivering (see daemonMisses).
             val wait = when {
                 attempt > 1 -> (1_000L * attempt).coerceAtMost(10_000L)
                 _entries.value.isEmpty() -> 1_500L
-                daemonActive() -> DAEMON_SAFETY_POLL_MS
+                daemonActive() && StreamOffsetPolicy.daemonTrusted(daemonMisses) -> DAEMON_SAFETY_POLL_MS
                 isBackground() -> BG_POLL_MS
                 !isActiveTab() -> INACTIVE_POLL_MS
                 else -> POLL_MS
@@ -212,6 +247,10 @@ class TranscriptStream(
         // poll); fall back to a short-lived dedicated session only when the tab
         // has no live main connection.
         val shared = liveSession()?.takeIf { it.isConnected }
+        // A poll from offset 0 asks for `tail -n INITIAL_LINES`, so a full
+        // batch means the file had at least that many lines and we are NOT
+        // looking at the start of the conversation.
+        val initialRead = byteOffset <= 0L
         val (lines, newOffset) = if (shared != null) {
             pollOnce(shared, safeFolder, safeUuid, byteOffset)
         } else {
@@ -219,14 +258,34 @@ class TranscriptStream(
                 pollOnce(sess, safeFolder, safeUuid, byteOffset)
             }
         }
+        // The poll asks for INITIAL_LINES + 1: getting more than we keep is
+        // proof that older history exists, where `>= INITIAL_LINES` would also
+        // have fired on a complete file of exactly that length and told the
+        // user a whole conversation was cut.
+        val truncated = initialRead && lines.size > INITIAL_LINES
+        if (truncated) _historyTruncated.value = true
+        // Drop the surplus oldest line so the view holds exactly what it claims.
+        val kept = if (truncated) lines.subList(lines.size - INITIAL_LINES, lines.size) else lines
+        // Daemon health for THIS session: finding bytes here that the daemon
+        // should long since have pushed (and no recent push to explain the lag)
+        // means its watch isn't delivering, whatever the per-server flag says.
+        daemonMisses = StreamOffsetPolicy.nextDaemonMisses(
+            prev = daemonMisses,
+            daemonLive = daemonActive(),
+            pollFoundNewLines = lines.isNotEmpty() && !initialRead,
+            msSinceLastPush = System.currentTimeMillis() - lastPushAt,
+        )
+        if (daemonMisses == StreamOffsetPolicy.DAEMON_MISS_LIMIT) {
+            FileLogger.log(TAG, "streamd watch looks dead for $safeUuid — back to the fast poll")
+        }
         if (newOffset >= 0) byteOffset = newOffset
-        if (lines.isNotEmpty()) {
-            val newEntries = TranscriptParser.parseLines(lines.asSequence())
+        if (kept.isNotEmpty()) {
+            val newEntries = TranscriptParser.parseLines(kept.asSequence())
             if (newEntries.isNotEmpty()) {
                 _status.value = null
                 appendEntries(newEntries)
             }
-            TranscriptParser.latestContextTokens(lines.asSequence())?.let {
+            TranscriptParser.latestContextTokens(kept.asSequence())?.let {
                 _contextTokens.value = it
             }
         }
@@ -270,29 +329,64 @@ class TranscriptStream(
     fun currentUuid(): String? = currentUuid
 
     /**
+     * Visible for tests ONLY. [pushLines]' offset arithmetic is the one place
+     * in this class that can lose transcript bytes for good, and it is
+     * unreachable without a live SSH tail to seed the (uuid, offset)
+     * bookkeeping [runTail] normally establishes. This seeds exactly that.
+     */
+    internal fun primeForTest(uuid: String, offset: Long) {
+        currentUuid = uuid
+        offsetUuid = uuid
+        byteOffset = offset
+    }
+
+    /**
      * Push a batch of transcript lines delivered by the per-server stream
      * daemon (single shared channel) instead of this stream's own poll.
      * Serialized with the poll path under [pollMutex]; a batch for a stale
      * UUID (the tab /clear'd or /resume'd since the daemon read it) is
      * dropped. [newOffset] moves the poll offset forward so the safety poll
-     * doesn't re-fetch what the daemon already delivered.
+     * doesn't re-fetch what the daemon already delivered. [fromOffset] is the
+     * chunk's START offset (streamd's `f`); null means a pre-v4 daemon that
+     * doesn't report one — see [StreamOffsetPolicy.dropsGapBatch].
      */
-    suspend fun pushLines(uuid: String, lines: List<String>, newOffset: Long) {
+    suspend fun pushLines(uuid: String, lines: List<String>, newOffset: Long, fromOffset: Long? = null) {
         if (closed || uuid != currentUuid) return
         pollMutex.withLock {
-            if (closed || uuid != currentUuid) return
+            if (closed || uuid != currentUuid) {
+                FileLogger.log(TAG, "push dropped: closed=$closed, uuid $uuid vs current $currentUuid")
+                return
+            }
             // Poll pipeline hasn't re-seeded for this uuid yet (rotation wipe
             // pending) — applying a push would append into the old convo's
             // entries and poison the old offset. The re-seeded tail + backlog
             // poll will cover these bytes.
-            if (uuid != offsetUuid) return
+            if (uuid != offsetUuid) {
+                FileLogger.log(TAG, "push dropped: offset still on $offsetUuid, push for $uuid")
+                return
+            }
             // Backlog not loaded yet (offset 0): applying a push here would
             // jump byteOffset past the initial tail read and leave a GAP the
             // poll can never backfill. Drop the push — the ≤1.5 s startup poll
             // fetches those bytes itself because our offset stays behind them.
-            if (byteOffset == 0L) return
+            if (byteOffset == 0L) {
+                FileLogger.log(TAG, "push dropped: backlog not loaded yet for $uuid")
+                return
+            }
+            // The batch starts beyond what we've consumed, so the bytes between
+            // are only in the file. Leave byteOffset where it is and let the
+            // safety poll re-read from there; fast-forwarding past the hole (the
+            // old behaviour) lost those lines permanently.
+            if (StreamOffsetPolicy.dropsGapBatch(byteOffset, fromOffset)) {
+                FileLogger.log(TAG, "push dropped: gap for $uuid — batch starts at $fromOffset, have $byteOffset")
+                return
+            }
+            lastPushAt = System.currentTimeMillis()
             if (newOffset > byteOffset) byteOffset = newOffset
-            if (lines.isEmpty()) return
+            if (lines.isEmpty()) {
+                FileLogger.log(TAG, "push dropped: empty batch for $uuid at $newOffset")
+                return
+            }
             val newEntries = TranscriptParser.parseLines(lines.asSequence())
             if (newEntries.isNotEmpty()) {
                 _status.value = null
@@ -339,7 +433,12 @@ class TranscriptStream(
             // on line boundaries (jsonl ends every line with \n), so appended
             // bytes are always whole lines.
             append("if [ ").append(offset).append(" -le 0 ] || [ \"\$SZ\" -lt ").append(offset).append(" ]; then ")
-            append("tail -n ").append(INITIAL_LINES).append(" \"\$FILE\" 2>/dev/null; ")
+            // One line MORE than we keep: seeing the extra line is the only way
+            // to tell "the file is exactly INITIAL_LINES long" (complete) from
+            // "there is older history we are not showing" (truncated). The
+            // surplus line is dropped before parsing; offsets are byte-based,
+            // so dropping it cannot disturb them.
+            append("tail -n ").append(INITIAL_LINES + 1).append(" \"\$FILE\" 2>/dev/null; ")
             append("elif [ \"\$SZ\" -gt ").append(offset).append(" ]; then ")
             append("tail -c +\$(("); append(offset.toString()); append("+1)) \"\$FILE\" 2>/dev/null; fi; ")
             append("printf '\\n__OFFSET__%s\\n' \"\$SZ\"")
@@ -373,15 +472,58 @@ class TranscriptStream(
      * the StateFlow.update lambda, which can be retried), and seenIds is
      * bounded so a long-lived stream doesn't grow it without limit.
      */
+    /**
+     * When a queued prompt was last seen, by trimmed text. The parser dedups a
+     * queued record against its `user` twin within one parse, but the two are
+     * written a turn apart and streamd pushes every second, so in the live path
+     * they arrive in different batches with different ids — nothing downstream
+     * would catch them. Measured: all 7 queued/user pairs in the corpus split
+     * that way. Only a prompt that did NOT come from the queue is ever dropped
+     * against this, so two prompts the user really typed twice both survive.
+     */
+    private val queuedPromptTimes = HashMap<String, Long>()
+
+    private fun isSplitDuplicatePrompt(entry: TranscriptEntry.UserPrompt): Boolean {
+        if (entry.fromQueue) return false
+        val at = entry.timestamp?.let { isoToEpochMillis(it) } ?: return false
+        val queuedAt = queuedPromptTimes[entry.text.trim()] ?: return false
+        return kotlin.math.abs(at - queuedAt) <= PROMPT_DEDUP_WINDOW_MS
+    }
+
     private fun appendEntries(newEntries: List<TranscriptEntry>) {
-        val unique = newEntries.filter { seenIds.add(it.id) }
+        val unique = newEntries.filter { e ->
+            if (e is TranscriptEntry.UserPrompt && isSplitDuplicatePrompt(e)) {
+                FileLogger.log(TAG, "dropping a queued prompt's duplicate user record")
+                return@filter false
+            }
+            seenIds.add(e.id)
+        }
+        for (e in unique) {
+            if (e is TranscriptEntry.UserPrompt && e.fromQueue) {
+                e.timestamp?.let { isoToEpochMillis(it) }?.let { queuedPromptTimes[e.text.trim()] = it }
+            }
+        }
+        if (queuedPromptTimes.size > QUEUED_PROMPT_MEMORY) {
+            // Keep the newest half; an older queued prompt can no longer be
+            // inside any future record's dedup window anyway.
+            val keep = queuedPromptTimes.entries.sortedByDescending { it.value }
+                .take(QUEUED_PROMPT_MEMORY / 2)
+                .associate { it.key to it.value }
+            queuedPromptTimes.clear()
+            queuedPromptTimes.putAll(keep)
+        }
         if (unique.isEmpty()) return
+        val sizeBefore = _entries.value.size
         _entries.update { prev ->
             val combined = prev + unique
             if (combined.size > MAX_ENTRIES) {
                 combined.subList(combined.size - MAX_ENTRIES, combined.size).toList()
             } else combined
         }
+        // Fewer entries than we appended ⇒ the head was dropped, so the view no
+        // longer starts where the conversation does and the UI has to say so.
+        // Checked here, not inside the update lambda, which can be retried.
+        if (_entries.value.size < sizeBefore + unique.size) _historyTruncated.value = true
         // Keep seenIds from growing unbounded across a very long session by
         // pruning back to the currently-visible ids. This is safe against the
         // offset-reset re-read: a reset poll re-reads only the NEWEST
@@ -399,6 +541,10 @@ class TranscriptStream(
         private const val TAG = "TranscriptStream"
         // Cap initial backlog from tail to bound startup time + RAM.
         private const val INITIAL_LINES = 2000
+        /** Same rule the parser uses for a queued prompt and its `user` twin. */
+        private const val PROMPT_DEDUP_WINDOW_MS = 15L * 60L * 1000L
+        /** Bound on [queuedPromptTimes]; a long session must not grow it forever. */
+        private const val QUEUED_PROMPT_MEMORY = 256
         // Hard cap on entries held in memory; oldest get dropped when exceeded.
         private const val MAX_ENTRIES = 5000
         // Steady-state poll interval once the backlog has loaded. New content
@@ -412,4 +558,51 @@ class TranscriptStream(
         // Background poll cadence — much slower; the user isn't looking.
         private const val BG_POLL_MS = 30_000L
     }
+}
+
+/**
+ * The two [TranscriptStream] decisions that can silently lose transcript data,
+ * factored out as pure functions so they can be tested without an SSH session
+ * behind them.
+ */
+internal object StreamOffsetPolicy {
+    /** Consecutive daemon misses after which this session stops trusting its watch. */
+    const val DAEMON_MISS_LIMIT = 2
+
+    /**
+     * A push older than this (ms) can't explain a safety poll finding new
+     * bytes: streamd ticks once a second, so anything beyond a few ticks means
+     * the watch, not the lag, is the reason nothing arrived.
+     */
+    const val PUSH_STALE_MS = 5_000L
+
+    /**
+     * Should a daemon-pushed batch be dropped because it begins beyond the
+     * bytes the client has consumed? [from] is the chunk's START offset as
+     * reported by streamd (`f`); null means a pre-v4 daemon that doesn't report
+     * one, where the lenient pre-v4 behaviour is all that's available.
+     *
+     * Dropping rather than fast-forwarding the client's byte offset to the
+     * batch's end is what lets the safety poll heal the hole: the client's
+     * offset stays BEHIND the missing bytes, so the next `tail -c +offset`
+     * re-reads them. Fast-forwarding stepped over them for good.
+     */
+    fun dropsGapBatch(byteOffset: Long, from: Long?): Boolean = from != null && from > byteOffset
+
+    /** True while the per-server daemon flag may still be believed for this session. */
+    fun daemonTrusted(misses: Int): Boolean = misses < DAEMON_MISS_LIMIT
+
+    /**
+     * Fold one safety-poll result into the consecutive-miss count. A miss is
+     * "the daemon claims to be live, the poll found bytes it should already
+     * have pushed, and no recent push explains the lag". Anything else resets
+     * the count, so a session heals as soon as its watch starts delivering —
+     * and an IDLE session (no new bytes at all) is never counted against.
+     */
+    fun nextDaemonMisses(
+        prev: Int,
+        daemonLive: Boolean,
+        pollFoundNewLines: Boolean,
+        msSinceLastPush: Long,
+    ): Int = if (daemonLive && pollFoundNewLines && msSinceLastPush > PUSH_STALE_MS) prev + 1 else 0
 }

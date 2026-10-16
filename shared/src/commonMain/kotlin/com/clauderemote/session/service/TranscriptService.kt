@@ -264,6 +264,23 @@ internal class TranscriptService(
     }
 
     /**
+     * True once [sessionId]'s transcript is known to be missing its beginning —
+     * the backlog poll hit the `tail -n 2000` cap, or the in-memory list was
+     * trimmed. The Chat view renders a marker from this so a conversation that
+     * starts mid-stream doesn't silently look complete.
+     */
+    fun transcriptTruncatedFlow(sessionId: String): kotlinx.coroutines.flow.StateFlow<Boolean> {
+        val tab = tabManager.getTab(sessionId)
+            ?: return kotlinx.coroutines.flow.MutableStateFlow(false)
+        val stream = synchronized(transcriptLock) {
+            transcriptStreams.getOrPut(sessionId) {
+                TranscriptStream(tab.server, tab.folder, scope, liveSession = { registry.ssh(sessionId)?.getSession() }, isBackground = { isBackground() }, isActiveTab = { tabManager.activeTabId.value == sessionId }, daemonActive = { serverStreamDaemons[tab.server.id]?.live == true })
+            }
+        }
+        return stream.historyTruncated
+    }
+
+    /**
      * Called when the Claude Code session UUID rotates (e.g. user invoked
      * `/resume` or `/clear`). Restarts the transcript stream against the new
      * file so the UI keeps showing the active conversation.
@@ -289,123 +306,143 @@ internal class TranscriptService(
     // its own poll loop as a 60 s safety backstop and as the full fallback when
     // python3 is missing or the channel dies.
 
-    /** Marker doubles as the version gate — bump vN to force reinstall. */
-    private val STREAMD_MARKER = "claude-remote-streamd v3"
+    // In a companion so the python can be syntax-checked by a test without
+    // standing up a whole TranscriptService (a syntax error here is invisible
+    // to the Kotlin compiler and breaks every session on the server).
+    internal companion object {
 
-    private val STREAMD_SCRIPT = """
-        #!/usr/bin/env python3
-        # claude-remote-streamd v3 — single-channel transcript delta streamer.
-        # stdin : {"op":"watch","id":..,"cwd":..,"uuid":..,"off":N}  (off<0 = from EOF)
-        #         {"op":"unwatch","id":..}
-        # stdout: {"t":"hello","v":1} | {"t":"hb"} | {"t":"d","id":..,"u":..,"o":N,"b":b64,"z":0|1}
-        #   z=1 ⇒ b is gzip-then-base64 (client sends "z":1 in its watch to opt in;
-        #   omitted/0 keeps the old raw-base64 format for back-compat).
-        import sys, os, json, time, base64, gzip, threading, glob, re
+        /** Marker doubles as the version gate — bump vN to force reinstall. */
+        internal val STREAMD_MARKER = "claude-remote-streamd v4"
 
-        watches = {}
-        lock = threading.Lock()
-        TAIL = 200000  # initial backlog bytes when off==0 (~2000 lines)
+        internal val STREAMD_SCRIPT = """
+            #!/usr/bin/env python3
+            # marker-compat (do NOT remove, keep inside `head -c 200`): claude-remote-streamd v3 claude-remote-streamd v4
+            # single-channel transcript delta streamer.
+            # Every vN listed above is a client whose own marker grep must match this
+            # file, so an app still running an older build takes ENSURE_STREAMD's
+            # no-op path instead of overwriting v4 with its own vN — two clients on
+            # one server would otherwise rewrite the script past each other forever.
+            # Only ever list versions this script is still compatible WITH.
+            # stdin : {"op":"watch","id":..,"cwd":..,"uuid":..,"off":N}  (off<0 = from EOF)
+            #         {"op":"unwatch","id":..}
+            # stdout: {"t":"hello","v":1} | {"t":"hb"}
+            #         {"t":"d","id":..,"u":..,"f":N,"o":N,"b":b64,"z":0|1}
+            #   z=1 ⇒ b is gzip-then-base64 (client sends "z":1 in its watch to opt in;
+            #   omitted/0 keeps the old raw-base64 format for back-compat).
+            #   f = the chunk's START offset, o = the offset just past its end. The
+            #   client needs f to tell a contiguous delta from one that begins past
+            #   what it has read: without it (v3 and older) it fast-forwarded to o
+            #   and the bytes in between were lost for good. A v3 CLIENT simply
+            #   ignores the extra key, so emitting it is safe both ways.
+            import sys, os, json, time, base64, gzip, threading, glob, re
 
-        def resolve(cwd, uuid):
-            # UUID is globally unique — find the existing transcript directly, immune to
-            # the lossy cwd->dir encoding (tmux mangles '.'/'_' in session names, so a
-            # restored session's cwd can't be reconstructed exactly).
-            hits = glob.glob(os.path.join(os.path.expanduser('~/.claude/projects'), '*', uuid + '.jsonl'))
-            if hits:
-                return max(hits, key=os.path.getmtime)
-            # Not written yet — compute the expected path (Claude replaces every
-            # non-alphanumeric char with '-') so we can watch for its creation.
-            p = os.path.expanduser(cwd)
-            if not os.path.isabs(p):
-                p = os.path.join(os.path.expanduser('~'), p)
-            enc = re.sub(r'[^a-zA-Z0-9]', '-', os.path.realpath(p))
-            return os.path.join(os.path.expanduser('~/.claude/projects'), enc, uuid + '.jsonl')
+            watches = {}
+            lock = threading.Lock()
+            TAIL = 200000  # initial backlog bytes when off==0 (~2000 lines)
 
-        def emit(o):
-            sys.stdout.write(json.dumps(o, separators=(',', ':')) + '\n')
-            sys.stdout.flush()
+            def resolve(cwd, uuid):
+                # UUID is globally unique — find the existing transcript directly, immune to
+                # the lossy cwd->dir encoding (tmux mangles '.'/'_' in session names, so a
+                # restored session's cwd can't be reconstructed exactly).
+                hits = glob.glob(os.path.join(os.path.expanduser('~/.claude/projects'), '*', uuid + '.jsonl'))
+                if hits:
+                    return max(hits, key=os.path.getmtime)
+                # Not written yet — compute the expected path (Claude replaces every
+                # non-alphanumeric char with '-') so we can watch for its creation.
+                p = os.path.expanduser(cwd)
+                if not os.path.isabs(p):
+                    p = os.path.join(os.path.expanduser('~'), p)
+                enc = re.sub(r'[^a-zA-Z0-9]', '-', os.path.realpath(p))
+                return os.path.join(os.path.expanduser('~/.claude/projects'), enc, uuid + '.jsonl')
 
-        def reader():
-            for line in sys.stdin:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    c = json.loads(line)
-                except Exception:
-                    continue
-                op = c.get('op')
-                if op == 'watch' and c.get('id') and c.get('uuid'):
-                    with lock:
-                        watches[c['id']] = {
-                            'path': resolve(c.get('cwd') or '~', c['uuid']),
-                            'uuid': c['uuid'],
-                            'off': int(c.get('off') or 0),
-                            'z': int(c.get('z') or 0),
-                        }
-                elif op == 'unwatch':
-                    with lock:
-                        watches.pop(c.get('id'), None)
-            os._exit(0)  # stdin closed -> client gone
+            def emit(o):
+                sys.stdout.write(json.dumps(o, separators=(',', ':')) + '\n')
+                sys.stdout.flush()
 
-        threading.Thread(target=reader, daemon=True).start()
-        emit({'t': 'hello', 'v': 1})
-        last_hb = time.time()
-        while True:
-            now = time.time()
-            if now - last_hb >= 20:
-                emit({'t': 'hb'})
-                last_hb = now
-            with lock:
-                items = list(watches.items())
-            for wid, w in items:
-                try:
-                    sz = os.path.getsize(w['path'])
-                except OSError:
-                    continue
-                off = w['off']
-                if off < 0:          # "from EOF": client loads its own backlog
-                    w['off'] = sz
-                    continue
-                adjusted = False
-                if sz < off or (off == 0 and sz > TAIL):
-                    off = max(0, sz - TAIL)   # rotation / first sight of a big file
-                    adjusted = True
-                if sz <= off:
-                    continue
-                try:
-                    with open(w['path'], 'rb') as f:
-                        f.seek(off)
-                        data = f.read(sz - off)
-                except OSError:
-                    continue
-                nl = data.rfind(b'\n')
-                if nl < 0:
-                    continue          # no complete line yet
-                chunk = data[:nl + 1]
-                new_off = off + nl + 1
-                if adjusted and off > 0:
-                    first = chunk.find(b'\n')
-                    chunk = chunk[first + 1:]   # drop the partial first line
-                w['off'] = new_off
-                if chunk:
-                    if w['z']:
-                        emit({'t': 'd', 'id': wid, 'u': w['uuid'], 'o': new_off, 'z': 1,
-                              'b': base64.b64encode(gzip.compress(chunk)).decode()})
-                    else:
-                        emit({'t': 'd', 'id': wid, 'u': w['uuid'], 'o': new_off,
-                              'b': base64.b64encode(chunk).decode()})
-            time.sleep(1.0)
-    """.trimIndent()
+            def reader():
+                for line in sys.stdin:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        c = json.loads(line)
+                    except Exception:
+                        continue
+                    op = c.get('op')
+                    if op == 'watch' and c.get('id') and c.get('uuid'):
+                        with lock:
+                            watches[c['id']] = {
+                                'path': resolve(c.get('cwd') or '~', c['uuid']),
+                                'uuid': c['uuid'],
+                                'off': int(c.get('off') or 0),
+                                'z': int(c.get('z') or 0),
+                            }
+                    elif op == 'unwatch':
+                        with lock:
+                            watches.pop(c.get('id'), None)
+                os._exit(0)  # stdin closed -> client gone
 
-    private val ENSURE_STREAMD_COMMAND = buildString {
-        append("F=\"${'$'}HOME/.claude-remote/streamd.py\"; ")
-        append("if head -c 200 \"${'$'}F\" 2>/dev/null | grep -q '").append(STREAMD_MARKER).append("'; ")
-        append("then echo STREAMD_OK; else mkdir -p \"${'$'}HOME/.claude-remote\" && ")
-        append("cat > \"${'$'}F\" <<'CRSD_EOF'\n")
-        append(STREAMD_SCRIPT)
-        append("\nCRSD_EOF\n")
-        append("echo STREAMD_INSTALLED; fi")
+            threading.Thread(target=reader, daemon=True).start()
+            emit({'t': 'hello', 'v': 1})
+            last_hb = time.time()
+            while True:
+                now = time.time()
+                if now - last_hb >= 20:
+                    emit({'t': 'hb'})
+                    last_hb = now
+                with lock:
+                    items = list(watches.items())
+                for wid, w in items:
+                    try:
+                        sz = os.path.getsize(w['path'])
+                    except OSError:
+                        continue
+                    off = w['off']
+                    if off < 0:          # "from EOF": client loads its own backlog
+                        w['off'] = sz
+                        continue
+                    adjusted = False
+                    if sz < off or (off == 0 and sz > TAIL):
+                        off = max(0, sz - TAIL)   # rotation / first sight of a big file
+                        adjusted = True
+                    if sz <= off:
+                        continue
+                    try:
+                        with open(w['path'], 'rb') as f:
+                            f.seek(off)
+                            data = f.read(sz - off)
+                    except OSError:
+                        continue
+                    nl = data.rfind(b'\n')
+                    if nl < 0:
+                        continue          # no complete line yet
+                    chunk = data[:nl + 1]
+                    new_off = off + nl + 1
+                    start = off
+                    if adjusted and off > 0:
+                        first = chunk.find(b'\n')
+                        chunk = chunk[first + 1:]   # drop the partial first line
+                        start = off + first + 1     # ...so the chunk starts after it
+                    w['off'] = new_off
+                    if chunk:
+                        if w['z']:
+                            emit({'t': 'd', 'id': wid, 'u': w['uuid'], 'f': start, 'o': new_off, 'z': 1,
+                                  'b': base64.b64encode(gzip.compress(chunk)).decode()})
+                        else:
+                            emit({'t': 'd', 'id': wid, 'u': w['uuid'], 'f': start, 'o': new_off,
+                                  'b': base64.b64encode(chunk).decode()})
+                time.sleep(1.0)
+        """.trimIndent()
+
+        internal val ENSURE_STREAMD_COMMAND = buildString {
+            append("F=\"${'$'}HOME/.claude-remote/streamd.py\"; ")
+            append("if head -c 200 \"${'$'}F\" 2>/dev/null | grep -q '").append(STREAMD_MARKER).append("'; ")
+            append("then echo STREAMD_OK; else mkdir -p \"${'$'}HOME/.claude-remote\" && ")
+            append("cat > \"${'$'}F\" <<'CRSD_EOF'\n")
+            append(STREAMD_SCRIPT)
+            append("\nCRSD_EOF\n")
+            append("echo STREAMD_INSTALLED; fi")
+        }
     }
 
     /** Install/refresh streamd.py on the server. Idempotent, non-fatal. */
@@ -516,6 +553,14 @@ internal class TranscriptService(
                         kotlinx.coroutines.delay(20_000)
                         if (System.currentTimeMillis() - d.lastEventAt > 60_000) {
                             FileLogger.log(TAG, "streamd watchdog fired for server ${d.serverId}")
+                            // Clear `live` HERE, not only in the finally below:
+                            // that one can't run until readLine() unblocks, and
+                            // the user's own logs measured 262–429 s between
+                            // the watchdog firing and that happening. For all
+                            // that time every session on this server believed
+                            // deltas were still being pushed and sat on the
+                            // 60 s backstop poll instead of its normal cadence.
+                            d.live = false
                             try { chRef.disconnect() } catch (_: Exception) {}
                             break
                         }
@@ -541,6 +586,12 @@ internal class TranscriptService(
                             val sid = obj["id"]?.jsonPrimitive?.contentOrNull ?: continue
                             val uuid = obj["u"]?.jsonPrimitive?.contentOrNull ?: continue
                             val off = obj["o"]?.jsonPrimitive?.longOrNull ?: continue
+                            // Chunk START offset (streamd v4+). Absent from a
+                            // v3 daemon still running from a pre-upgrade
+                            // install — the script is only re-read when the
+                            // process restarts — so null must keep working and
+                            // means "can't tell whether this is contiguous".
+                            val from = obj["f"]?.jsonPrimitive?.longOrNull
                             val b64 = obj["b"]?.jsonPrimitive?.contentOrNull ?: continue
                             val gz = obj["z"]?.jsonPrimitive?.longOrNull == 1L
                             // Meter the on-wire payload (base64, gzipped when z=1).
@@ -563,7 +614,7 @@ internal class TranscriptService(
                             // heartbeat into a false watchdog kill. A dropped
                             // push is backfilled by that same safety poll.
                             kotlinx.coroutines.withTimeoutOrNull(5_000) {
-                                stream.pushLines(uuid, text.lineSequence().filter { it.isNotBlank() }.toList(), off)
+                                stream.pushLines(uuid, text.lineSequence().filter { it.isNotBlank() }.toList(), off, from)
                             } ?: FileLogger.log(TAG, "streamd push timed out for $sid (safety poll will backfill)")
                         }
                         else -> {}
