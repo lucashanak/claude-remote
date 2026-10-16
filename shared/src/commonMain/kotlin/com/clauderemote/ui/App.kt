@@ -308,6 +308,24 @@ fun App(
     val pane3Tx = rememberPaneTranscript(paneSessions[3])
     val paneTranscripts = listOf(pane0Tx, pane1Tx, pane2Tx, pane3Tx)
 
+    // Same four unconditional call sites for "this pane's history is cut", keyed
+    // the same way, so a rotation re-subscribes the flag with the transcript.
+    @Composable
+    fun rememberPaneTruncated(sid: String?): Boolean {
+        val claudeUuid = sid?.let { id -> tabs.firstOrNull { it.id == id }?.claudeSessionId }
+        val flow = remember(sid, claudeUuid) {
+            if (sid != null) sessionOrchestrator.transcriptTruncatedFlow(sid)
+            else kotlinx.coroutines.flow.MutableStateFlow(false)
+        }
+        return flow.collectAsState().value
+    }
+    val paneHistoryTruncated = listOf(
+        rememberPaneTruncated(paneSessions[0]),
+        rememberPaneTruncated(paneSessions[1]),
+        rememberPaneTruncated(paneSessions[2]),
+        rememberPaneTruncated(paneSessions[3]),
+    )
+
     // Remote tmux sessions discovered on servers
     var remoteSessions by remember { mutableStateOf<List<RemoteSession>>(emptyList()) }
     var remoteSessionsLoading by remember { mutableStateOf(false) }
@@ -1068,6 +1086,13 @@ fun App(
                         val flow = remember(id, claudeUuid) { sessionOrchestrator.transcriptFlow(id) }
                         flow.collectAsState().value
                     } ?: emptyList()
+                    val activeHistoryTruncated: Boolean = activeTabId?.let { id ->
+                        val claudeUuid = tabs.firstOrNull { it.id == id }?.claudeSessionId
+                        val flow = remember(id, claudeUuid) {
+                            sessionOrchestrator.transcriptTruncatedFlow(id)
+                        }
+                        flow.collectAsState().value
+                    } ?: false
                     // #70: Claude awaiting a choice on the ACTIVE session.
                     //  • AskUserQuestion (transcript tool) is the reliable trigger for
                     //    assistant-initiated questions.
@@ -1394,6 +1419,7 @@ fun App(
                         terminalPendingOutput = terminalPendingOutput,
                         onJumpToLatest = onJumpToLatest,
                         transcriptEntries = activeTranscript,
+                        transcriptHistoryTruncated = activeHistoryTruncated,
                         awaitingChoice = awaitingChoice,
                         autoOpenTerminalOnPrompt = appSettings.autoOpenTerminalOnPrompt,
                         remoteStatus = activeTabId?.let { id ->
@@ -1413,6 +1439,7 @@ fun App(
                         gridLayout = gridLayout,
                         paneSessions = paneSessions,
                         paneTranscripts = paneTranscripts,
+                        paneHistoryTruncated = paneHistoryTruncated,
                         panePendingAsk = panePendingAsk,
                         focusedPaneIndex = focusedPaneIndex,
                         onSetLayout = { layout ->

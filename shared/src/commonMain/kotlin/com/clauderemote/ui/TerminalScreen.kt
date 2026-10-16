@@ -177,6 +177,8 @@ fun TerminalScreen(
     terminalPendingOutput: Boolean = false,
     onJumpToLatest: (() -> Unit)? = null,
     transcriptEntries: List<TranscriptEntry> = emptyList(),
+    /** Active session's chat is missing older history (see TranscriptStream). */
+    transcriptHistoryTruncated: Boolean = false,
     remoteStatus: RemoteSessionStatus? = null,
     onTerminalContentVisible: (() -> Unit)? = null,
     activeClaudeSessionId: String? = null,
@@ -188,6 +190,8 @@ fun TerminalScreen(
     gridLayout: com.clauderemote.model.GridLayout = com.clauderemote.model.GridLayout.ONE,
     paneSessions: List<String?> = listOf(null, null, null, null),
     paneTranscripts: List<List<TranscriptEntry>> = listOf(emptyList(), emptyList(), emptyList(), emptyList()),
+    /** Per-pane counterpart of [transcriptHistoryTruncated]; mirrors paneTranscripts. */
+    paneHistoryTruncated: List<Boolean> = listOf(false, false, false, false),
     focusedPaneIndex: Int = 0,
     onSetLayout: ((com.clauderemote.model.GridLayout) -> Unit)? = null,
     // FIX 1: (paneIndex, sessionId?) — index-based focus guarantees exactly
@@ -1390,6 +1394,7 @@ fun TerminalScreen(
                                         } else {
                                             TranscriptView(
                                                 entries = paneTranscripts.getOrNull(i) ?: emptyList(),
+                                                historyTruncated = paneHistoryTruncated.getOrNull(i) == true,
                                                 modifier = Modifier.fillMaxSize(),
                                                 activity = sessionActivities[sid],
                                                 hookActive = sid in hookActiveSessions,
@@ -1467,6 +1472,7 @@ fun TerminalScreen(
                             ) {
                                 TranscriptView(
                                     entries = transcriptEntries,
+                                    historyTruncated = transcriptHistoryTruncated,
                                     modifier = Modifier.fillMaxSize(),
                                     contextPercent = contextPercent,
                                     sessionUsagePercent = sessionUsagePercent,

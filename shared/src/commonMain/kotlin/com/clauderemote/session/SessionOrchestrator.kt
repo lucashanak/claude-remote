@@ -776,6 +776,15 @@ class SessionOrchestrator(
         transcriptService.transcriptStatusFlow(sessionId)
 
     /**
+     * True once the chat for [sessionId] is known to be missing older history —
+     * the first tail hit the line cap, or the in-memory cap trimmed the head.
+     * The view draws a marker so a conversation that starts mid-stream doesn't
+     * silently look complete.
+     */
+    fun transcriptTruncatedFlow(sessionId: String): kotlinx.coroutines.flow.StateFlow<Boolean> =
+        transcriptService.transcriptTruncatedFlow(sessionId)
+
+    /**
      * Lazy poller for OMC remote state (active skill, in-flight subagents).
      * Polls two small state files via SSH stat+cat every ~5 s; idle traffic
      * stays under ~50 B/s. Cached per session and cleaned up on disconnect.
