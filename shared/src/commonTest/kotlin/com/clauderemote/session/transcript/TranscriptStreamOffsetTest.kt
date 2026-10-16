@@ -249,4 +249,31 @@ class TranscriptStreamOffsetTest {
             newOffset = 200L, fromOffset = 100L)
         assertEquals(2, s.entries.value.count { it is TranscriptEntry.UserPrompt })
     }
+
+    /**
+     * The one ordering the first version of this guard missed, found on real
+     * data: the `user` record arrives in the EARLIER batch and the queued twin
+     * 193 s later, so there was nothing recorded to match it against and both
+     * rendered. Mirrors the parser, which drops the queued one in this order.
+     */
+    @Test
+    fun aQueuedPromptArrivingAfterItsUserTwinIsNotAppendedTwice() = withStream { s ->
+        s.primeForTest("u-1", offset = 10L)
+        s.pushLines("u-1", listOf(userLineAt("u-2", "nasadit sentry", "2026-06-07T10:00:00.000Z")),
+            newOffset = 100L, fromOffset = 10L)
+        s.pushLines("u-1", listOf(queuedLine("a-1", "nasadit sentry", "2026-06-07T10:03:13.000Z")),
+            newOffset = 200L, fromOffset = 100L)
+        assertEquals(1, s.entries.value.count { it is TranscriptEntry.UserPrompt })
+    }
+
+    /** Far enough apart, the queued record is a second prompt and stays. */
+    @Test
+    fun aQueuedPromptLongAfterItsUserTwinIsKept() = withStream { s ->
+        s.primeForTest("u-1", offset = 10L)
+        s.pushLines("u-1", listOf(userLineAt("u-2", "pokracuj", "2026-06-07T10:00:00.000Z")),
+            newOffset = 100L, fromOffset = 10L)
+        s.pushLines("u-1", listOf(queuedLine("a-1", "pokracuj", "2026-06-07T12:00:00.000Z")),
+            newOffset = 200L, fromOffset = 100L)
+        assertEquals(2, s.entries.value.count { it is TranscriptEntry.UserPrompt })
+    }
 }

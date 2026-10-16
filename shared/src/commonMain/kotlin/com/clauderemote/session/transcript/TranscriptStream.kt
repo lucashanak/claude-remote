@@ -482,12 +482,39 @@ class TranscriptStream(
      * against this, so two prompts the user really typed twice both survive.
      */
     private val queuedPromptTimes = HashMap<String, Long>()
+    /** The same, for prompts that came from a `user` record. */
+    private val userPromptTimes = HashMap<String, Long>()
 
+    /**
+     * Mirrors the parser's asymmetric rule, which the per-batch [ParseState]
+     * cannot apply once the pair is split across batches: a queued record is
+     * compared against both sides (it can arrive after its twin — measured once
+     * in the corpus, 193 s later, and it did render twice), a plain `user`
+     * record only against queued ones. Two plain user prompts with the same
+     * text are never deduped: those are two prompts the user really typed.
+     */
     private fun isSplitDuplicatePrompt(entry: TranscriptEntry.UserPrompt): Boolean {
-        if (entry.fromQueue) return false
         val at = entry.timestamp?.let { isoToEpochMillis(it) } ?: return false
-        val queuedAt = queuedPromptTimes[entry.text.trim()] ?: return false
-        return kotlin.math.abs(at - queuedAt) <= PROMPT_DEDUP_WINDOW_MS
+        val key = entry.text.trim()
+        val maps = if (entry.fromQueue) listOf(queuedPromptTimes, userPromptTimes)
+            else listOf(queuedPromptTimes)
+        return maps.any { seen ->
+            val before = seen[key] ?: return@any false
+            kotlin.math.abs(at - before) <= PROMPT_DEDUP_WINDOW_MS
+        }
+    }
+
+    /**
+     * Keep the newest half once the map outgrows its bound: an older prompt can
+     * no longer fall inside any future record's dedup window anyway.
+     */
+    private fun prunePromptMemory(seen: HashMap<String, Long>) {
+        if (seen.size <= QUEUED_PROMPT_MEMORY) return
+        val keep = seen.entries.sortedByDescending { it.value }
+            .take(QUEUED_PROMPT_MEMORY / 2)
+            .associate { it.key to it.value }
+        seen.clear()
+        seen.putAll(keep)
     }
 
     private fun appendEntries(newEntries: List<TranscriptEntry>) {
@@ -499,19 +526,12 @@ class TranscriptStream(
             seenIds.add(e.id)
         }
         for (e in unique) {
-            if (e is TranscriptEntry.UserPrompt && e.fromQueue) {
-                e.timestamp?.let { isoToEpochMillis(it) }?.let { queuedPromptTimes[e.text.trim()] = it }
-            }
+            if (e !is TranscriptEntry.UserPrompt) continue
+            val at = e.timestamp?.let { isoToEpochMillis(it) } ?: continue
+            (if (e.fromQueue) queuedPromptTimes else userPromptTimes)[e.text.trim()] = at
         }
-        if (queuedPromptTimes.size > QUEUED_PROMPT_MEMORY) {
-            // Keep the newest half; an older queued prompt can no longer be
-            // inside any future record's dedup window anyway.
-            val keep = queuedPromptTimes.entries.sortedByDescending { it.value }
-                .take(QUEUED_PROMPT_MEMORY / 2)
-                .associate { it.key to it.value }
-            queuedPromptTimes.clear()
-            queuedPromptTimes.putAll(keep)
-        }
+        prunePromptMemory(queuedPromptTimes)
+        prunePromptMemory(userPromptTimes)
         if (unique.isEmpty()) return
         val sizeBefore = _entries.value.size
         _entries.update { prev ->
