@@ -96,8 +96,11 @@ internal object MarkdownTables {
         }
     }
 
-    /** Split on unescaped `|`, dropping the outer pipes. */
-    private fun splitCells(line: String): List<String> {
+    /** Split on unescaped `|`, dropping the outer pipes.
+     *  Internal rather than private: the chat table card renders cells with
+     *  the same rules the clipboard does, and two copies of this had already
+     *  drifted apart (the card's own split mis-handled `\|` and links). */
+    internal fun splitCells(line: String): List<String> {
         val t = line.trim()
         val cells = mutableListOf<String>()
         val cur = StringBuilder()
@@ -122,7 +125,7 @@ internal object MarkdownTables {
      * show up as literal `**` noise. Links keep their text, dropping the URL —
      * a URL inside an aligned column destroys the layout for no gain.
      */
-    private fun stripInlineMarkdown(s: String): String {
+    internal fun stripInlineMarkdown(s: String): String {
         var r = s
         r = Regex("""\[([^\]]*)]\([^)]*\)""").replace(r) { it.groupValues[1] }
         r = Regex("""\*\*([^*]+)\*\*""").replace(r) { it.groupValues[1] }

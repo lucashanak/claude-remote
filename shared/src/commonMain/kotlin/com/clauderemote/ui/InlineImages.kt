@@ -130,7 +130,12 @@ internal object InlineImages {
     /**
      * An image embedded in a sentence, list, table, quote or link: rewritten as
      * text so the surrounding markdown stays one block. Untouched inside inline
-     * code, when escaped, or when it is not a showable server image at all.
+     * code and when escaped.
+     *
+     * An image we cannot SHOW is rewritten too, not left for the markdown
+     * library: no `imageTransformer` is wired into `Markdown()`, so a
+     * `![alt](https://…)` it is handed renders as absolutely nothing — no alt
+     * text, no link, a silent hole in the answer. Text at least reads.
      */
     private fun rewriteEmbedded(line: String): String {
         val codeSpans = inlineCodeRanges(line)
@@ -140,8 +145,7 @@ internal object InlineImages {
             val start = m.range.first
             if (codeSpans.any { start in it }) continue
             if (start > 0 && line[start - 1] == '\\') continue
-            val target = targetOf(m)
-            if (!isShowableServerImage(target)) continue
+            val target = displayTarget(targetOf(m))
             sb.append(line, cursor, start)
             val alt = m.groupValues[1].trim()
             sb.append(if (alt.isBlank()) target else "$alt ($target)")
@@ -150,6 +154,14 @@ internal object InlineImages {
         sb.append(line, cursor, line.length)
         return sb.toString()
     }
+
+    /**
+     * What goes in the parentheses. A `data:` URI is kilobytes of base64 —
+     * printing it whole would bury the answer under its own payload, so a long
+     * target is cut to something that still identifies the image.
+     */
+    private fun displayTarget(target: String): String =
+        if (target.length <= 80) target else target.take(79) + "…"
 
     private fun targetOf(m: MatchResult): String = m.groupValues[2].removeSurrounding("<", ">").trim()
 

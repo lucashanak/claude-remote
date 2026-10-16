@@ -65,6 +65,31 @@ import kotlinx.coroutines.launch
 // Generous so a slow tool (build, test run) doesn't flip the indicator off.
 private const val STALE_WORKING_MS = 45_000L
 
+/**
+ * System notes that are CONTENT, not plumbing, and so ignore the "show system"
+ * toggle. Both carry a conversation summary — `summary` the one Claude Code
+ * writes for a session, `compact_summary` the one it injects after compaction,
+ * which is the only record of everything that was compacted away. Hiding those
+ * two behind a toggle that is off by default hid the earlier half of the
+ * conversation; the rest of the subtypes (turn_duration, stop_hook_summary, …)
+ * really are plumbing and stay hidden.
+ */
+private val alwaysShownSystemNotes = setOf("summary", "compact_summary")
+
+/** The display filter behind the Chat view's system/thinking toggles. */
+internal fun shouldShowEntry(
+    entry: TranscriptEntry,
+    showSystem: Boolean,
+    showThinking: Boolean,
+    pairedResultIds: Set<String>,
+): Boolean = when (entry) {
+    is TranscriptEntry.SystemNote -> showSystem || entry.subtype in alwaysShownSystemNotes
+    is TranscriptEntry.AssistantThinking -> showThinking
+    // Paired results are rendered inside their tool-call card.
+    is TranscriptEntry.ToolResult -> entry.id !in pairedResultIds
+    else -> true
+}
+
 @Composable
 fun TranscriptView(
     entries: List<TranscriptEntry>,
@@ -91,6 +116,12 @@ fun TranscriptView(
     loadImage: ServerImageLoader? = null,
     onOpenImage: OpenImagePreview? = null,
     imageScope: String = "",
+    /**
+     * The loaded backlog is not the whole conversation — the first poll hit the
+     * `tail -n` cap, or the entry cap trimmed the head. Draws a marker at the
+     * top; see TranscriptStream.historyTruncated.
+     */
+    historyTruncated: Boolean = false,
     /** Chat text scale (1f = 100%). Ignored unless [onFontScaleChange] is wired. */
     fontScale: Float = 1f,
     /** Wire to persist the A−/A+ choice; when null the scale stays view-local. */
@@ -160,15 +191,7 @@ fun TranscriptView(
     }
 
     val filtered = remember(entries, showSystem, showThinking, pairedResultIds) {
-        entries.filter { entry ->
-            when (entry) {
-                is TranscriptEntry.SystemNote -> showSystem
-                is TranscriptEntry.AssistantThinking -> showThinking
-                // Paired results are rendered inside their tool-call card.
-                is TranscriptEntry.ToolResult -> entry.id !in pairedResultIds
-                else -> true
-            }
-        }
+        entries.filter { shouldShowEntry(it, showSystem, showThinking, pairedResultIds) }
     }
     // Find the most recent TodoWrite tool_use to derive an open-todo count.
     val todoPending = remember(entries) { countOpenTodos(entries) }
@@ -264,6 +287,24 @@ fun TranscriptView(
             }
         )
 
+        // Mid-conversation trouble (a failing poll, a dropped stream) used to be
+        // reported only in the empty state below, i.e. never once a single
+        // entry had arrived — the chat just silently stopped updating. A thin
+        // dim line says it without taking the conversation's room; the next
+        // successful poll clears it.
+        if (filtered.isNotEmpty() && !streamStatus.isNullOrBlank()) {
+            Text(
+                streamStatus,
+                style = CRType.monoTiny,
+                color = CRTheme.colors.textDim,
+                maxLines = 1,
+                overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 10.dp, vertical = 2.dp),
+            )
+        }
+
         if (filtered.isEmpty()) {
             Box(
                 modifier = Modifier.fillMaxSize(),
@@ -315,8 +356,10 @@ fun TranscriptView(
         // turn is over (transcriptWorking == false); while working — or with
         // no marker info at all — leave it flat to avoid frame flicker.
         val liveTurnDone = transcriptWorking == false
-        val rendered = remember(filtered, turnMeta, expandedSnapshot, liveTurnDone) {
-            buildRenderList(filtered, turnMeta, liveTurnDone) { key -> expandedSnapshot[key] == true }
+        val rendered = remember(filtered, turnMeta, expandedSnapshot, liveTurnDone, historyTruncated) {
+            buildRenderList(filtered, turnMeta, liveTurnDone, historyTruncated) { key ->
+                expandedSnapshot[key] == true
+            }
         }
         val itemsCount = rendered.size + if (skeletonShowing || awaitingShowing) 1 else 0
 

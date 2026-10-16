@@ -290,6 +290,11 @@ internal fun SlashCommandRow(entry: TranscriptEntry.SlashCommand) {
  * a card frame: together with the user bubble it forms the pair of turn
  * anchors the eye scans for. Metadata (model · time, copy, speaker) sits in
  * a quiet hairline row under the body either way.
+ *
+ * An `isError` record (rate limit, overloaded, transport failure) is written
+ * in the assistant's own voice but is not an answer, so it takes the error
+ * chrome instead — red border and an API ERROR pill — and never the
+ * authoritative frame, whatever [framed] says.
  */
 @Composable
 internal fun AssistantTextCard(
@@ -305,15 +310,26 @@ internal fun AssistantTextCard(
 ) {
     val c = CRTheme.colors
     val m = CRTheme.metrics
-    val frameModifier = if (framed) {
-        Modifier
+    val frameModifier = when {
+        entry.isError -> Modifier
+            .background(c.disconnected.copy(alpha = 0.12f), RoundedCornerShape(m.cardRadius))
+            .border(1.dp, c.disconnected.copy(alpha = 0.4f), RoundedCornerShape(m.cardRadius))
+            .padding(horizontal = m.cardPadH, vertical = m.cardPadV)
+        framed -> Modifier
             .background(c.surface2, RoundedCornerShape(m.cardRadius))
             .border(1.dp, c.border, RoundedCornerShape(m.cardRadius))
             .padding(horizontal = m.cardPadH, vertical = m.cardPadV)
-    } else {
-        Modifier.padding(vertical = 2.dp)
+        else -> Modifier.padding(vertical = 2.dp)
     }
     Column(modifier = Modifier.fillMaxWidth().then(frameModifier)) {
+        if (entry.isError) {
+            Pill(
+                text = "API ERROR",
+                background = c.disconnected.copy(alpha = 0.18f),
+                foreground = c.disconnected,
+            )
+            Spacer(Modifier.height(4.dp))
+        }
         // Ask the server which of the mentioned paths are real files before
         // offering any of them as a link; until it answers, nothing is linkified.
         val candidates = remember(entry.text) {
@@ -414,6 +430,20 @@ internal fun ThinkingCard(entry: TranscriptEntry.AssistantThinking) {
 }
 
 /**
+ * The tool's name as drawn. Never blank: a tool row whose name slot is empty
+ * is an unreadable row, and the name is the one thing we always know.
+ */
+internal fun toolDisplayName(name: String): String = name.trim().ifBlank { "tool" }
+
+/**
+ * The summary as drawn, or null when there is nothing to say. Null rather
+ * than a placeholder: the row then gives the whole line to the name instead of
+ * claiming arguments we did not see.
+ */
+internal fun toolSummaryOrNull(summary: String): String? =
+    summary.trim().takeIf { it.isNotEmpty() }
+
+/**
  * Compact one-line tool row: category glyph · name · summary · status.
  * Borderless — tool calls are secondary detail, only an error result gets
  * card emphasis. Expanded reveals input + result indented under the row.
@@ -428,6 +458,8 @@ internal fun ToolRow(
     var expanded by rememberSaveable(entry.id) { mutableStateOf(false) }
     val errorTint = result?.isError == true
     val categoryTint = toolCategoryTint(entry.name, c)
+    val displayName = toolDisplayName(entry.name)
+    val summary = toolSummaryOrNull(entry.inputSummary)
 
     val rowContent: @Composable () -> Unit = {
         Column {
@@ -445,18 +477,25 @@ internal fun ToolRow(
                     modifier = Modifier.padding(end = 6.dp)
                 )
                 Text(
-                    entry.name,
-                    style = CRType.mono,
-                    color = if (errorTint) c.disconnected else c.text,
-                    modifier = Modifier.padding(end = 8.dp)
-                )
-                Text(
-                    entry.inputSummary,
+                    displayName,
                     style = CRType.mono,
                     maxLines = 1,
-                    color = c.textDim,
-                    modifier = Modifier.weight(1f).horizontalScroll(rememberScrollState())
+                    color = if (errorTint) c.disconnected else c.text,
+                    // With no summary the name takes the line, so a long name
+                    // can still be read (and scrolled) rather than clipped by
+                    // an empty neighbour that owns the width.
+                    modifier = if (summary == null) Modifier.weight(1f).horizontalScroll(rememberScrollState())
+                    else Modifier.padding(end = 8.dp)
                 )
+                if (summary != null) {
+                    Text(
+                        summary,
+                        style = CRType.mono,
+                        maxLines = 1,
+                        color = c.textDim,
+                        modifier = Modifier.weight(1f).horizontalScroll(rememberScrollState())
+                    )
+                }
                 if (result == null) {
                     PendingDot(modifier = Modifier.padding(start = 4.dp))
                 } else if (errorTint) {
@@ -773,8 +812,15 @@ internal fun AskUserQuestionCard(
                 }
             }
             if (questions.isEmpty()) {
-                // Fallback: couldn't parse the expected shape — show the summary.
-                Text(entry.inputSummary, style = CRType.bodyDim, color = c.text)
+                // Fallback: couldn't parse the expected shape — show the
+                // summary, or say so. A blank summary here used to render a
+                // card with nothing but the CLAUDE ASKS pill in it.
+                Text(
+                    toolSummaryOrNull(entry.inputSummary)
+                        ?: "The question text isn't in the transcript.",
+                    style = CRType.bodyDim,
+                    color = c.text,
+                )
             } else {
                 questions.forEach { q ->
                     Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
@@ -889,28 +935,64 @@ internal fun ToolResultCard(entry: TranscriptEntry.ToolResult) {
     }
 }
 
+/** Collapsed length of a system note's body before it needs expanding. */
+private const val SYSTEM_NOTE_PREVIEW = 500
+
+/**
+ * What a system note shows: the body when it fits, else a preview plus the
+ * number of characters hidden behind the tap. The old code silently cut at
+ * [SYSTEM_NOTE_PREVIEW] with no affordance, which matters most for the one
+ * note the user actually wants to read — the post-compaction summary, which
+ * IS the earlier half of the conversation and runs to several thousand
+ * characters.
+ */
+internal fun systemNoteBody(text: String, expanded: Boolean): Pair<String, Int> {
+    val hidden = (text.length - SYSTEM_NOTE_PREVIEW).coerceAtLeast(0)
+    return if (expanded || hidden == 0) text to hidden else text.take(SYSTEM_NOTE_PREVIEW) to hidden
+}
+
 @Composable
 internal fun SystemNoteRow(entry: TranscriptEntry.SystemNote) {
     val c = CRTheme.colors
     val m = CRTheme.metrics
+    var expanded by rememberSaveable(entry.id) { mutableStateOf(false) }
+    val (shown, hidden) = systemNoteBody(entry.text, expanded)
     Box(
         modifier = Modifier
             .fillMaxWidth()
             .background(c.surface.copy(alpha = 0.4f), RoundedCornerShape(4.dp))
             .border(1.dp, c.border.copy(alpha = 0.3f), RoundedCornerShape(4.dp))
+            .clickable(enabled = hidden > 0) { expanded = !expanded }
             .padding(horizontal = m.cardPadH, vertical = 4.dp)
     ) {
         Column {
-            Text(
-                "system · ${entry.subtype}",
-                style = CRType.monoTiny,
-                color = c.textDim
-            )
-            if (entry.text.isNotBlank()) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween,
+                modifier = Modifier.fillMaxWidth()
+            ) {
                 Text(
-                    entry.text.take(500),
+                    "system · ${entry.subtype}",
+                    style = CRType.monoTiny,
+                    color = c.textDim
+                )
+                if (entry.text.isNotBlank()) {
+                    CopyButton(entry.text, modifier = Modifier.size(22.dp))
+                }
+            }
+            if (shown.isNotBlank()) {
+                Text(
+                    shown,
                     style = CRType.mono,
                     color = c.textDim
+                )
+            }
+            if (hidden > 0) {
+                Text(
+                    if (expanded) "▲ show less" else "▼ +$hidden more characters",
+                    style = CRType.monoTiny,
+                    color = c.accent,
+                    modifier = Modifier.padding(top = 2.dp)
                 )
             }
         }
@@ -1044,6 +1126,35 @@ private fun RichBody(
     }
 }
 
+internal data class MarkdownTableCells(
+    val header: List<String>,
+    val body: List<List<String>>,
+)
+
+/**
+ * Split a pipe table's source into display cells.
+ *
+ * The cell rules are [MarkdownTables.splitCells]'s, not a second copy of them:
+ * the card had grown its own `splitRow`/`cleanCell` pair that split on every
+ * `|` — so an escaped `\|` inside a cell shifted the whole row one column to
+ * the right — and left `[text](url)` untouched, so links rendered as raw
+ * markdown in the grid. The clipboard path already handled both, and the two
+ * had no business disagreeing about the same table.
+ */
+internal fun parseMarkdownTable(raw: String): MarkdownTableCells {
+    val sepRegex = Regex("^:?-{2,}:?$")
+    val rows = raw.lines()
+        .map { it.trim() }
+        .filter { it.isNotBlank() }
+        .map { MarkdownTables.splitCells(it) }
+    val sepIndex = rows.indexOfFirst { row -> row.isNotEmpty() && row.all { sepRegex.matches(it) } }
+    return when {
+        sepIndex > 0 -> MarkdownTableCells(rows[sepIndex - 1], rows.drop(sepIndex + 1))
+        rows.isNotEmpty() -> MarkdownTableCells(rows[0], rows.drop(1))
+        else -> MarkdownTableCells(emptyList(), emptyList())
+    }
+}
+
 /**
  * Custom renderer for GitHub-style pipe tables: wraps cell text (no ellipsis) and
  * is horizontally scrollable with fixed, aligned per-column widths so full text and
@@ -1054,44 +1165,10 @@ private fun CRMarkdownTable(model: com.mikepenz.markdown.compose.components.Mark
     val c = CRTheme.colors
     val raw = model.content.substring(model.node.startOffset, model.node.endOffset)
 
-    fun cleanCell(s: String): String {
-        var t = s.trim()
-        // unwrap `code`
-        t = t.replace(Regex("`([^`]+)`"), "$1")
-        // strip **bold**
-        t = t.replace(Regex("\\*\\*(.+?)\\*\\*"), "$1")
-        // strip *italic* (single star pairs)
-        t = t.replace(Regex("(?<!\\*)\\*(?!\\*)(.+?)(?<!\\*)\\*(?!\\*)"), "$1")
-        return t.trim()
-    }
-
-    fun splitRow(line: String): List<String> {
-        val parts = line.split("|").toMutableList()
-        if (parts.isNotEmpty() && parts.first().isBlank()) parts.removeAt(0)
-        if (parts.isNotEmpty() && parts.last().isBlank()) parts.removeAt(parts.size - 1)
-        return parts.map { it.trim() }
-    }
-
-    val sepRegex = Regex("^:?-{2,}:?$")
-    val lines = raw.lines().map { it.trim() }.filter { it.isNotBlank() }
-    val allRows = lines.map { splitRow(it) }
-    val sepIndex = allRows.indexOfFirst { row -> row.isNotEmpty() && row.all { sepRegex.matches(it) } }
-
-    val headerCells: List<String>
-    val bodyRows: List<List<String>>
-    if (sepIndex > 0) {
-        headerCells = allRows[sepIndex - 1]
-        bodyRows = allRows.drop(sepIndex + 1)
-    } else if (allRows.isNotEmpty()) {
-        headerCells = allRows[0]
-        bodyRows = allRows.drop(1)
-    } else {
-        headerCells = emptyList()
-        bodyRows = emptyList()
-    }
+    val parsed = remember(raw) { parseMarkdownTable(raw) }
 
     // Defensive fallback: nothing parseable -> plain monospace text.
-    if (headerCells.isEmpty()) {
+    if (parsed.header.isEmpty()) {
         Box(
             modifier = Modifier
                 .fillMaxWidth()
@@ -1108,8 +1185,8 @@ private fun CRMarkdownTable(model: com.mikepenz.markdown.compose.components.Mark
         return
     }
 
-    val cleanedHeader = headerCells.map { cleanCell(it) }
-    val cleanedBody = bodyRows.map { row -> row.map { cleanCell(it) } }
+    val cleanedHeader = parsed.header
+    val cleanedBody = parsed.body
     val numCols = (listOf(cleanedHeader) + cleanedBody).maxOf { it.size }
 
     var expanded by remember { mutableStateOf(false) }

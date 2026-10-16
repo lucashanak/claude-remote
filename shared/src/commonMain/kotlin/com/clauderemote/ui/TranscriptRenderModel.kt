@@ -131,12 +131,13 @@ internal fun buildRenderList(
     filtered: List<TranscriptEntry>,
     meta: Map<String, TurnMeta>,
     liveTurnDone: Boolean,
+    /** Backlog hit the tail cap — see [HISTORY_TRUNCATED_KEY]. */
+    historyTruncated: Boolean = false,
     isExpanded: (String) -> Boolean,
 ): List<RenderItem> {
-    val anchors = filtered.indices.filter {
-        filtered[it] is TranscriptEntry.UserPrompt || filtered[it] is TranscriptEntry.SlashCommand
-    }
-    if (anchors.isEmpty()) return insertTimeGaps(groupConsecutiveTools(filtered))
+    val head = if (historyTruncated) listOf(historyTruncatedMarker()) else emptyList()
+    val anchors = filtered.indices.filter { isTurnAnchor(filtered[it]) }
+    if (anchors.isEmpty()) return head + insertTimeGaps(groupConsecutiveTools(filtered))
     val out = ArrayList<RenderItem>(filtered.size)
     // Pre-anchor prefix (post-compaction summary etc.) renders as-is.
     out += groupConsecutiveTools(filtered.subList(0, anchors.first()))
@@ -160,9 +161,16 @@ internal fun buildRenderList(
             continue
         }
         val finalIdx = finalAnswerIndex(body)
+        // A turn that ended in an API error has no final answer — but the error
+        // is the only explanation the user gets for a turn that produced
+        // nothing, so it must stay visible while the steps are collapsed.
+        // Without this it fell into `middle` and vanished behind "▶ N steps".
+        val errorIdx = if (finalIdx >= 0) -1 else errorTailIndex(body)
+        val cutIdx = if (finalIdx >= 0) finalIdx else errorIdx
         val final = if (finalIdx >= 0) body[finalIdx] else null
-        val middle = if (finalIdx >= 0) body.subList(0, finalIdx) else body
-        val trailing = if (finalIdx >= 0) body.subList(finalIdx + 1, body.size) else emptyList()
+        val errorTail = if (errorIdx >= 0) body[errorIdx] else null
+        val middle = if (cutIdx >= 0) body.subList(0, cutIdx) else body
+        val trailing = if (cutIdx >= 0) body.subList(cutIdx + 1, body.size) else emptyList()
         if (middle.isNotEmpty()) {
             val key = prompt.id
             val m = meta[key]
@@ -178,22 +186,73 @@ internal fun buildRenderList(
             if (expanded) out += groupConsecutiveTools(middle)
         }
         if (final != null) out += RenderItem.Single(final, isFinalAnswer = true)
+        // Not isFinalAnswer: the card gives it error chrome, not the answer frame.
+        if (errorTail != null) out += RenderItem.Single(errorTail)
         for (t in trailing) out += RenderItem.Single(t)
     }
-    return insertTimeGaps(out)
+    return head + insertTimeGaps(out)
 }
+
+/**
+ * Does this entry start a new turn? Prompts and slash commands obviously do —
+ * and so does a compaction, which ends the conversation so far and restarts it
+ * from a summary. It used to be an anchor by accident: the injected summary was
+ * parsed as a user bubble. Now that it is correctly a system note, saying so
+ * explicitly keeps the answer BEFORE a compaction framed as that turn's answer
+ * (15 real ones in this user's transcripts lost their frame otherwise) and
+ * keeps post-compaction work out of the previous turn's step count.
+ */
+private fun isTurnAnchor(entry: TranscriptEntry): Boolean = when (entry) {
+    is TranscriptEntry.UserPrompt, is TranscriptEntry.SlashCommand -> true
+    is TranscriptEntry.SystemNote -> entry.subtype == "compact_summary"
+    else -> false
+}
+
+/**
+ * Key of the "earlier messages were not loaded" marker. Stable and namespaced
+ * so it can never collide with an entry-derived item key.
+ */
+internal const val HISTORY_TRUNCATED_KEY = "hist:truncated"
+
+/**
+ * The chat starts mid-conversation whenever the backlog hit the `tail -n`
+ * cap (or the in-memory entry cap trimmed the head). Saying so is cheap and
+ * stops the user reading a half conversation as the whole one. It reuses the
+ * TimeGap row — a labelled hairline is exactly the right weight for this; it
+ * is deliberately NOT a "load more" button, since nothing loads more.
+ */
+private fun historyTruncatedMarker() =
+    RenderItem.TimeGap(key = HISTORY_TRUNCATED_KEY, label = "earlier messages not loaded")
 
 /**
  * Index of the turn's final answer: the last AssistantText followed only by
  * system notes (turn_duration / stop_hook_summary trail the answer when
  * system notes are shown). -1 when the turn ends in anything else (e.g. a
  * tool call) — then there is no final answer.
+ *
+ * An `isError` text (rate limit, transport failure) ends the turn without
+ * answering it, so it is never the final answer — framing it as one dresses a
+ * failure up as Claude's conclusion.
  */
-private fun finalAnswerIndex(body: List<TranscriptEntry>): Int {
+internal fun finalAnswerIndex(body: List<TranscriptEntry>): Int {
     for (i in body.indices.reversed()) {
         val e = body[i]
         if (e is TranscriptEntry.SystemNote) continue
-        return if (e is TranscriptEntry.AssistantText) i else -1
+        return if (e is TranscriptEntry.AssistantText && !e.isError) i else -1
+    }
+    return -1
+}
+
+/**
+ * Index of an error [TranscriptEntry.AssistantText] that ends the turn (system
+ * notes may trail it), or -1. Counterpart of [finalAnswerIndex]: that one
+ * refuses to call an error the answer, this one keeps it on screen anyway.
+ */
+internal fun errorTailIndex(body: List<TranscriptEntry>): Int {
+    for (i in body.indices.reversed()) {
+        val e = body[i]
+        if (e is TranscriptEntry.SystemNote) continue
+        return if (e is TranscriptEntry.AssistantText && e.isError) i else -1
     }
     return -1
 }
@@ -202,29 +261,63 @@ private fun finalAnswerIndex(body: List<TranscriptEntry>): Int {
 private const val TIME_GAP_MINUTES = 30L
 
 /**
- * Insert a thin `── 14:32 ──` separator wherever two adjacent items are more
- * than [TIME_GAP_MINUTES] apart — an anchor for "I came back hours later".
+ * Minimum BACKWARDS step that earns a "resumed from" separator. A resumed or
+ * compacted session re-emits old turns after new ones, so the conversation can
+ * jump a month back between two adjacent items with nothing to mark it. The
+ * threshold exists because most inversions are not that: of 304 observed
+ * backwards steps, 296 are under a second — clock jitter between two records
+ * written in the same moment, which must not draw anything.
  */
-private fun insertTimeGaps(items: List<RenderItem>): List<RenderItem> {
+private const val RESUMED_GAP_SECONDS = 60L
+
+/**
+ * Insert a thin `── 14:32 ──` separator wherever two adjacent items are more
+ * than [TIME_GAP_MINUTES] apart — an anchor for "I came back hours later" —
+ * and a `resumed from <date>` one where time runs BACKWARDS by more than
+ * [RESUMED_GAP_SECONDS].
+ */
+internal fun insertTimeGaps(items: List<RenderItem>): List<RenderItem> {
     if (items.size < 2) return items
     val out = ArrayList<RenderItem>(items.size + 4)
     var prev: Long? = null
     for (item in items) {
         val ts = itemTimestamp(item)
-        val cur = isoToEpochMinutes(ts)
-        if (prev != null && cur != null && cur - prev >= TIME_GAP_MINUTES) {
-            // Key derived from the item the gap precedes: at most one gap per
-            // item, and stable across streaming updates (a positional index
-            // would re-key every gap whenever an earlier item is inserted).
+        val cur = isoToEpochSeconds(ts)
+        val delta = if (prev != null && cur != null) cur - prev else null
+        // Key derived from the item the gap precedes: at most one gap per
+        // item, and stable across streaming updates (a positional index
+        // would re-key every gap whenever an earlier item is inserted).
+        if (delta != null && delta >= TIME_GAP_MINUTES * 60) {
             out += RenderItem.TimeGap(
                 key = "gap:" + itemKey(item),
                 label = formatTimestamp(ts!!).take(5)
+            )
+        } else if (delta != null && delta <= -RESUMED_GAP_SECONDS) {
+            out += RenderItem.TimeGap(
+                key = "gap:" + itemKey(item),
+                // UTC date straight off the record: commonMain has no date
+                // formatter, and a day-boundary skew matters less here than
+                // showing the user which conversation they are looking at.
+                label = "resumed from " + ts!!.take(10)
             )
         }
         if (cur != null) prev = cur
         out += item
     }
     return out
+}
+
+/**
+ * Seconds, not [isoToEpochMinutes]'s minutes: a sub-second backwards step that
+ * happens to straddle a minute boundary reads as a full minute back, which
+ * would draw a "resumed" divider in the middle of one live turn.
+ */
+private fun isoToEpochSeconds(iso: String?): Long? {
+    val minutes = isoToEpochMinutes(iso) ?: return null
+    val seconds = if (iso!!.length >= 19 && iso[16] == ':') {
+        iso.substring(17, 19).toLongOrNull() ?: 0L
+    } else 0L
+    return minutes * 60 + seconds
 }
 
 /**
@@ -273,7 +366,9 @@ internal fun mapEntryToTurn(filtered: List<TranscriptEntry>): Map<String, String
     val out = HashMap<String, String>()
     var turn: String? = null
     for (e in filtered) {
-        if (e is TranscriptEntry.UserPrompt || e is TranscriptEntry.SlashCommand) turn = e.id
+        // Same anchor rule as buildRenderList, so a compaction closes the turn
+        // here too instead of folding what follows into the previous one.
+        if (isTurnAnchor(e)) turn = e.id
         else turn?.let { out[e.id] = it }
     }
     return out
