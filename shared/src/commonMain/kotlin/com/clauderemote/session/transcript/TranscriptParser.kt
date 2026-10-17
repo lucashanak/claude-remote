@@ -30,7 +30,7 @@ object TranscriptParser {
      * same thing again later. Measured gap between a true pair: 1.5 s - 160 s;
      * between two genuine repeats: 14 h and up.
      */
-    private const val DEDUP_WINDOW_MS = 15L * 60L * 1000L
+    internal const val DEDUP_WINDOW_MS = 15L * 60L * 1000L
 
     private val json = Json {
         ignoreUnknownKeys = true
@@ -198,8 +198,12 @@ object TranscriptParser {
      * system reminders, bash-tool I/O, prompt-submit hook output. They start
      * with a recognizable wrapper tag. Without this they render as bogus USER
      * bubbles (e.g. a <task-notification> showing the assistant's own summary).
+     *
+     * `internal` rather than private so RealTranscriptHarnessTest can ask the
+     * real predicate why a queued prompt was dropped. Duplicating this tag list
+     * in the harness would make the harness pass on a list that had rotted.
      */
-    private fun isSyntheticUserText(text: String): Boolean {
+    internal fun isSyntheticUserText(text: String): Boolean {
         val t = text.trimStart()
         return t.startsWith("<command-") ||
             t.startsWith("<local-command-stdout>") ||
@@ -293,6 +297,7 @@ object TranscriptParser {
                         // Skip system/tool injections (local-command output,
                         // task notifications, system reminders, …) — not human input.
                     }
+                    text.isBlank() -> Unit // never a bubble with nothing in it
                     else -> state.emitUserPrompt(uuid, ts, text)
                 }
             }
@@ -448,7 +453,10 @@ object TranscriptParser {
     )
 
     private fun summarizeToolInput(name: String, input: JsonObject?): Pair<String, String> {
-        if (input == null) return "" to ""
+        // A missing `input` key is as argument-less as an empty one (see below)
+        // — and returning "" here made the card look like a rendering failure,
+        // which is exactly what the empty-object branch exists to prevent.
+        if (input == null) return "(no arguments)" to "{}"
         // Claude Code stores arguments it could not parse as
         // {"__unparsedToolInput":{"raw":"<json>","len":N}}. Summarising THAT
         // wrapper yields a card with no content at all (measured on 5 of 150

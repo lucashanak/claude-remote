@@ -316,4 +316,31 @@ class TranscriptParserChatFixesTest {
         assertEquals("file.txt", (entries[3] as TranscriptEntry.ToolResult).text)
         assertFalse((entries[4] as TranscriptEntry.AssistantText).isError)
     }
+
+    // ---- blank cards: a row with nothing in it reads as a broken app ----
+
+    @Test
+    fun aToolUseWithNoInputKeyIsSummarisedRatherThanLeftBlank() {
+        // The empty-object case was already handled; a block with no `input`
+        // key at all fell through to an empty summary AND an empty argument
+        // dump, i.e. a card showing nothing.
+        val entries = parse(
+            """{"type":"assistant","uuid":"a1","timestamp":"2026-07-03T06:38:00.000Z","message":{"model":"opus",""" +
+                """"content":[{"type":"tool_use","id":"toolu_1","name":"SomeMcpTool"}]}}"""
+        )
+        val call = assertIs<TranscriptEntry.ToolCall>(entries.single())
+        assertEquals("(no arguments)", call.inputSummary)
+        assertEquals("{}", call.fullInput)
+    }
+
+    @Test
+    fun aUserRecordWithEmptyTextDoesNotBecomeAnEmptyBubble() {
+        // The array-content branch already refused blank parts; the plain-string
+        // branch did not, so an empty message rendered as an empty user bubble.
+        val entries = parse(
+            """{"type":"user","uuid":"u1","timestamp":"2026-07-03T06:38:00.000Z","message":{"content":"   "}}""",
+            """{"type":"user","uuid":"u2","timestamp":"2026-07-03T06:38:01.000Z","message":{"content":"real prompt"}}"""
+        )
+        assertEquals(listOf("u2"), entries.map { it.id })
+    }
 }

@@ -131,6 +131,11 @@ val integrationTest by tasks.registering(Test::class) {
     dependsOn(compilation.compileTaskProvider)
 
     useJUnit()
+    // RealTranscriptHarnessTest holds one whole transcript's entries in memory
+    // at a time — ~100 MiB of JSONL today, and Gradle's default test heap is
+    // 512m. An OOM here would read as a parser defect, which is the one thing
+    // this lane must never report falsely.
+    maxHeapSize = "2g"
     // Real external processes: serial, and never skipped. These assert against
     // the ENVIRONMENT (a live sshd, a real tmux server, the installed restore.sh)
     // rather than against their declared inputs, so reusing a previous result is
