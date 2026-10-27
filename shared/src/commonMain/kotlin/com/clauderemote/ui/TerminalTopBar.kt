@@ -454,7 +454,7 @@ private fun SessionActivity?.toCRStatus(): CRStatus = when (this) {
  * hardcoded dark, so a colour set later (or a light theme accent) can't end up
  * as pale-on-pale.
  */
-private fun inkOn(background: androidx.compose.ui.graphics.Color): androidx.compose.ui.graphics.Color {
+internal fun inkOn(background: androidx.compose.ui.graphics.Color): androidx.compose.ui.graphics.Color {
     val l = 0.2126f * background.red + 0.7152f * background.green + 0.0722f * background.blue
     return if (l > 0.55f) androidx.compose.ui.graphics.Color(0xFF0B1220)
     else androidx.compose.ui.graphics.Color(0xFFF8FAFC)

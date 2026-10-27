@@ -220,6 +220,11 @@ fun TerminalScreen(
     activeFolderPolicy: com.clauderemote.model.FolderPolicy? = null,
     /** Chip fill for the active session's account. */
     activeAccountColor: androidx.compose.ui.graphics.Color? = null,
+    /**
+     * Account chip per slug for the session lists (drawer and side panel) —
+     * see [buildAccountTags]. Empty with a single account, so rows stay clean.
+     */
+    accountTags: Map<String, AccountTag> = emptyMap(),
     onSwitchAccount: ((sessionId: String, accountSlug: String?) -> Unit)? = null,
     /**
      * A physical keyboard is attached. Together with a landscape window this
@@ -583,6 +588,7 @@ fun TerminalScreen(
                     onSessionLongPress = onSessionLongPress,
                     tmuxActivityByName = tmuxActivityByName,
                     defaultMode = appSettings?.defaultClaudeMode ?: com.clauderemote.model.ClaudeMode.YOLO,
+                    accountTags = accountTags,
                     collapsedGroups = collapsedGroups,
                     onToggleGroup = toggleGroup,
                     modifier = Modifier.width(sidePanelWidth).fillMaxHeight()
@@ -1699,6 +1705,7 @@ fun TerminalScreen(
                 appSettings?.sessionDrawerAnchor = key
             },
             defaultMode = appSettings?.defaultClaudeMode ?: com.clauderemote.model.ClaudeMode.YOLO,
+            accountTags = accountTags,
         )
 
         // ── ExpandedInput overlay ──────────────────────────────────────────

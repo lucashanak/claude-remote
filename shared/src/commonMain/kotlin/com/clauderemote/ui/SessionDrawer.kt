@@ -147,6 +147,8 @@ fun SessionDrawer(
      * 44 pills of pure noise hiding the handful that differ.
      */
     defaultMode: ClaudeMode = ClaudeMode.YOLO,
+    /** Account chip per slug; empty hides it (single account). */
+    accountTags: Map<String, AccountTag> = emptyMap(),
 ) {
     if (!open && sessions.isEmpty() && remoteSessions.isEmpty()) return  // skip composition when not needed
 
@@ -439,6 +441,7 @@ fun SessionDrawer(
                                                     // alias.
                                                     aliasOnly = row.inGroup,
                                                     defaultMode = defaultMode,
+                                                    accountTag = accountTags[s.accountKey],
                                                     onClick = {
                                                         onPick(s.id)
                                                         onClose()
@@ -700,6 +703,7 @@ private fun DrawerItem(
     aliasOnly: Boolean = false,
     /** Sessions in this mode show no pill — see [SessionDrawer]'s parameter. */
     defaultMode: ClaudeMode = ClaudeMode.YOLO,
+    accountTag: AccountTag? = null,
     onClick: () -> Unit,
     onLongPress: (() -> Unit)? = null,
 ) {
@@ -775,6 +779,7 @@ private fun DrawerItem(
                 horizontalArrangement = Arrangement.spacedBy(6.dp),
             ) {
                 if (session.mode != defaultMode) DrawerModePill(mode = session.mode)
+                if (accountTag != null) AccountTagChip(accountTag)
                 Text(
                     session.durationText,
                     style = CRType.monoTiny,

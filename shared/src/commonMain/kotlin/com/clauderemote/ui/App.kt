@@ -1504,6 +1504,9 @@ fun App(
                                 folderPolicyStorage.get(t.server.id, t.folder)
                             }
                         },
+                        accountTags = buildAccountTags(terminalAccounts, tabs) { slugs ->
+                            accountColorStorage.assign(slugs).mapValues { it.value.color }
+                        },
                         onSwitchAccount = { id, slug -> sessionOrchestrator.switchSessionAccount(id, slug) },
                     )
                 }

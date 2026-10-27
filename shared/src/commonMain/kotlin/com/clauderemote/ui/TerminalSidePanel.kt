@@ -106,6 +106,8 @@ internal fun SessionSidePanel(
      * so it marked nothing and only crowded the one row that differs.
      */
     defaultMode: ClaudeMode = ClaudeMode.YOLO,
+    /** Account chip per slug; empty hides it (single account). */
+    accountTags: Map<String, AccountTag> = emptyMap(),
     modifier: Modifier = Modifier
 ) {
     val c = CRTheme.colors
@@ -301,6 +303,9 @@ internal fun SessionSidePanel(
                                     // folder eating the name.
                                     aliasOnly = row.inGroup,
                                     defaultMode = defaultMode,
+                                    // Only attached sessions know their account;
+                                    // a bare tmux listing doesn't carry it.
+                                    accountTag = item.tab?.let { accountTags[it.accountKey] },
                                     onTabSwitch = onTabSwitch,
                                     onTabClose = onTabClose,
                                     onAttachRemote = onAttachRemote,
@@ -500,6 +505,7 @@ private fun SidePanelSessionRow(
     /** Under a folder header the folder is redundant — show the alias alone. */
     aliasOnly: Boolean = false,
     defaultMode: ClaudeMode = ClaudeMode.YOLO,
+    accountTag: AccountTag? = null,
     onTabSwitch: (String) -> Unit,
     onTabClose: (String) -> Unit,
     onAttachRemote: ((com.clauderemote.model.RemoteSession) -> Unit)?,
@@ -574,6 +580,7 @@ private fun SidePanelSessionRow(
                     overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
                     modifier = Modifier.weight(1f),
                 )
+                if (accountTag != null) AccountTagChip(accountTag)
                 if (isActive && item.isConnected) {
                     IconButton(
                         onClick = { item.tab?.let { onTabClose(it.id) } },
@@ -614,6 +621,7 @@ private fun SidePanelSessionRow(
                         if (mode != null && mode != defaultMode) {
                             SidePanelModePill(mode = mode)
                         }
+                        if (accountTag != null) AccountTagChip(accountTag)
                     }
                 }
 
