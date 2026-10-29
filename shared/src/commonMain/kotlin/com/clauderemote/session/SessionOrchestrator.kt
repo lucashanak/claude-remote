@@ -1088,10 +1088,10 @@ class SessionOrchestrator(
             stillTracked = { fetchCloseState()?.tracked ?: true },
             hasLivePeers = { serverHasOtherLiveSession(sshManager, session.tmuxSessionName) },
             hasTranscript = {
-                // Unknown counts as "has one": a session with a uuid has almost
-                // always been spoken to, and `--session-id` against an existing
-                // conversation is refused outright.
-                tmuxProbes.probeTranscriptExists(sshManager, session.folder, session.claudeSessionId!!) ?: true
+                // Only a confident YES is taken. A NO can be wrong too — the probe
+                // does not see an account's own projects/ dir — and an unknown is
+                // unknown, so both let the server look for the transcript itself.
+                if (tmuxProbes.probeTranscriptExists(sshManager, session.folder, session.claudeSessionId!!) == true) true else null
             },
         )
 
@@ -1132,15 +1132,16 @@ class SessionOrchestrator(
                         accountSlug = session.accountSlug
                     )
                 }
-                decision.resume -> {
-                    FileLogger.log(TAG, "Tmux '${session.tmuxSessionName}' missing — rebuilding with claude --resume ${session.claudeSessionId}")
+                decision.resume != false -> {
+                    val how = if (decision.resume == true) "claude --resume" else "a server-side transcript check for"
+                    FileLogger.log(TAG, "Tmux '${session.tmuxSessionName}' missing — rebuilding with $how ${session.claudeSessionId}")
                     ClaudeConfig.buildTmuxLaunchCommand(
                         tmuxSessionName = session.tmuxSessionName,
                         folder = session.folder,
                         mode = session.mode,
                         model = session.model,
                         claudeSessionId = session.claudeSessionId,
-                        resume = true,
+                        resume = decision.resume,
                         accountSlug = session.accountSlug
                     )
                 }
@@ -2155,25 +2156,16 @@ class SessionOrchestrator(
         // one exits with "No conversation found with session ID" — which is how
         // switching the account of a freshly created session used to kill it.
         //
-        // A FAILED probe is "don't know", not "no": null hands the decision to
-        // the server, which checks for the transcript itself at launch time. The
-        // old `assuming none` turned a momentary `channel is not opened` into a
-        // `--session-id` launch against an existing conversation — Claude
-        // refuses that ("already in use") and the pane is left as a bare prompt.
-        val hasConversation: Boolean? = try {
-            connectionRegistry.ssh(sessionId)?.let { mgr ->
-                tmuxProbes.probeTranscriptExists(mgr, tab.folder, uuid)
-            }
-        } catch (e: Exception) {
-            FileLogger.error(TAG, "transcript probe failed for $sessionId; letting the server decide", e)
-            null
-        }
+        // So the SERVER decides, at launch time, by looking for the transcript
+        // itself — in the shared projects/ and in the account's own. An app-side
+        // probe first only added a round trip and a way to be wrong: when it
+        // failed it was taken as "no conversation", and `--session-id` against
+        // an existing one is refused ("already in use"), leaving a bare prompt.
         val cmd = ClaudeConfig.buildRestartCommand(
             tab.tmuxSessionName, tab.folder, tab.mode, tab.model, uuid, tab.accountSlug,
-            resume = hasConversation,
+            resume = null,
         )
-        val how = when (hasConversation) { true -> "resume"; false -> "fresh"; null -> "server-decided" }
-        FileLogger.log(TAG, "Restarting Claude Code for $sessionId ($how $uuid, account=${tab.accountSlug ?: "default"}) in tmux ${tab.tmuxSessionName}")
+        FileLogger.log(TAG, "Restarting Claude Code for $sessionId (server-decided $uuid, account=${tab.accountSlug ?: "default"}) in tmux ${tab.tmuxSessionName}")
         // The respawn kills+redraws the pane; suppress the prompt detector so it
         // doesn't misfire on the transient screen. UUID is unchanged, so the
         // transcript stream keeps tailing the same file across the restart.

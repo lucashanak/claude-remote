@@ -199,7 +199,10 @@ internal class TmuxProbes(
             ch.connect(1500) // fail-open probe — keep snappy on cell links
             val out = input.bufferedReader().readText().trim()
             ch.disconnect()
-            out.endsWith("YES")
+            // Only an explicit NO means gone. A channel that closed before
+            // answering reads as "" — and "gone" makes the caller kill-session and
+            // rebuild a LIVE session mid-task, so it is fail-open like an exception.
+            !out.endsWith("NO")
         } catch (e: Exception) {
             FileLogger.error(TAG, "Tmux probe failed for $sessionName: ${e.message}", e)
             true // fail-open
@@ -228,6 +231,8 @@ internal class TmuxProbes(
         return try {
             val sshSession = sshManager.getSession() ?: return null
             val escapedFolder = folder.replace("'", "'\\''")
+            // Interpolated into the shell command: keep it to a uuid's charset.
+            val uuid = uuid.filter { it.isLetterOrDigit() || it == '-' }
             val cmd = """
                 F='$escapedFolder'
                 E="${'$'}{F/#~/${'$'}HOME}"

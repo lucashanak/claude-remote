@@ -30,7 +30,8 @@ internal sealed interface TmuxLaunchDecision {
     /**
      * tmux is gone — recreate it and re-launch claude.
      *
-     * @param resume pass `--resume` (a transcript exists) instead of only `--session-id`.
+     * @param resume pass `--resume` (a transcript exists) instead of only
+     *   `--session-id`; NULL when that is unknown, and the server decides at launch.
      * @param withSessionId pass the session's `claudeSessionId` at all; false only
      *   when the session has none (then the launch command omits both arguments).
      * @param afterSuspectedServerOutage this rebuild is the fall-through from the
@@ -39,7 +40,7 @@ internal sealed interface TmuxLaunchDecision {
      *   log line it always has; it does not change the command that gets built.
      */
     data class Rebuild(
-        val resume: Boolean,
+        val resume: Boolean?,
         val withSessionId: Boolean,
         val afterSuspectedServerOutage: Boolean = false,
     ) : TmuxLaunchDecision
@@ -135,7 +136,7 @@ internal object TmuxLaunchDecider {
      *   answers both — see SessionPersistenceService.fetchCloseState).
      * @param stillTracked probe: is the tmux name still in the server's shared manifest?
      * @param hasLivePeers probe: is the tmux server provably up with ≥1 OTHER live session?
-     * @param hasTranscript probe: did claude write a jsonl transcript for the UUID?
+     * @param hasTranscript probe: did claude write a jsonl transcript for the UUID? Null = unknown.
      */
     suspend fun decide(
         isNew: Boolean,
@@ -145,7 +146,7 @@ internal object TmuxLaunchDecider {
         tombstoned: suspend () -> Boolean,
         stillTracked: suspend () -> Boolean,
         hasLivePeers: suspend () -> Boolean,
-        hasTranscript: suspend () -> Boolean,
+        hasTranscript: suspend () -> Boolean?,
     ): TmuxLaunchDecision {
         if (isNew) return TmuxLaunchDecision.FreshLaunch
 
@@ -201,7 +202,7 @@ internal object TmuxLaunchDecider {
         // session that was launched but never interacted with has no jsonl, and
         // `--resume` would print "No conversation found". In that case we
         // re-launch fresh with the same `--session-id` so future restarts can
-        // resume.
+        // resume. When the probe can't tell, null hands the choice to the server.
         return TmuxLaunchDecision.Rebuild(
             resume = hasTranscript(),
             withSessionId = true,

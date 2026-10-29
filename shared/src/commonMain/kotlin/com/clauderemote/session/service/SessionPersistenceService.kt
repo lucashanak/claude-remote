@@ -289,6 +289,11 @@ if [ "${'$'}HAVE_JQ" = "1" ]; then
             # UUIDs are globally unique: if the encoding guess still misses (it
             # has changed before), find the transcript by UUID anywhere.
             [ -f "${'$'}JSONL" ] || JSONL=${'$'}(ls "${'$'}HOME"/.claude/projects/*/"${'$'}UUID".jsonl 2>/dev/null | head -1)
+            # An account whose projects/ is a real directory, not the usual
+            # symlink to the shared one, keeps its transcripts there.
+            if [ ! -f "${'$'}JSONL" ] && [ -n "${'$'}{ACCT:-}" ] && [ "${'$'}{ACCT:-}" != "default" ]; then
+                JSONL=${'$'}(ls "${'$'}HOME/.claude-remote/accounts/${'$'}ACCT/projects/"*/"${'$'}UUID".jsonl 2>/dev/null | head -1)
+            fi
             if [ -n "${'$'}JSONL" ] && [ -f "${'$'}JSONL" ]; then
                 ARGS+=(--resume "${'$'}UUID")
             else
@@ -338,7 +343,16 @@ else
                         FOLDER_EXP="${'$'}{FOLDER/#\~/${'$'}HOME}"
                         [ -d "${'$'}FOLDER_EXP" ] && {
                             CMD="claude --allow-dangerously-skip-permissions"
-                            [ -n "${'$'}{UUID:-}" ] && CMD="${'$'}CMD --resume ${'$'}UUID"
+                            # Resume only a conversation that exists: --resume on a
+                            # session nobody spoke to exits "No conversation found".
+                            if [ -n "${'$'}{UUID:-}" ]; then
+                                if ls "${'$'}HOME"/.claude/projects/*/"${'$'}UUID".jsonl >/dev/null 2>&1 \
+                                   || { [ -n "${'$'}{ACCT:-}" ] && ls "${'$'}HOME/.claude-remote/accounts/${'$'}ACCT/projects/"*/"${'$'}UUID".jsonl >/dev/null 2>&1; }; then
+                                    CMD="${'$'}CMD --resume ${'$'}UUID"
+                                else
+                                    CMD="${'$'}CMD --session-id ${'$'}UUID"
+                                fi
+                            fi
                             # Same account rule as the jq branch above — this
                             # SECOND command builder must honour it too, or a
                             # jq-less box quietly restores every session onto the

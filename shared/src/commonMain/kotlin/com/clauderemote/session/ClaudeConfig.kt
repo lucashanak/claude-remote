@@ -35,6 +35,39 @@ object ClaudeConfig {
     ): String = "cd ${shellEscape(folder)} && ${claudeInvocation(mode, model, claudeSessionId, resume, accountSlug)}"
 
     /**
+     * [buildLaunchCommand] where [resume] may be NULL: the app does not know
+     * whether the conversation exists, so the SERVER decides at launch time by
+     * looking for the transcript itself. That is the only safe answer to an
+     * unknown: both guesses kill the pane when wrong — `--resume` on a missing
+     * transcript exits "No conversation found", `--session-id` on an existing
+     * one exits "Session ID … is already in use".
+     */
+    internal fun buildLaunchCommandOrServerDecided(
+        folder: String,
+        mode: ClaudeMode,
+        model: ClaudeModel,
+        claudeSessionId: String,
+        resume: Boolean?,
+        accountSlug: String?,
+    ): String {
+        if (resume != null) return buildLaunchCommand(folder, mode, model, claudeSessionId, resume, accountSlug)
+        // The uuid is interpolated into a glob, so reduce it to the charset a
+        // uuid actually has; anything else could not name a transcript anyway.
+        val id = claudeSessionId.filter { it.isLetterOrDigit() || it == '-' }
+        // Same check the drift daemon uses: the uuid is globally unique, so
+        // globbing every project dir is enough and needs no cwd encoding.
+        // An account whose `projects/` is a REAL directory rather than the
+        // usual symlink (provisioned out of order) is looked at as well.
+        val accountProjects = claudeConfigDirFor(accountSlug)
+            ?.let { " || ls ${shellEscape(it)}/projects/*/$id.jsonl >/dev/null 2>&1" }
+            .orEmpty()
+        val resumeCmd = buildLaunchCommand(folder, mode, model, claudeSessionId, resume = true, accountSlug = accountSlug)
+        val freshCmd = buildLaunchCommand(folder, mode, model, claudeSessionId, resume = false, accountSlug = accountSlug)
+        return "if ls \"\$HOME\"/.claude/projects/*/$id.jsonl >/dev/null 2>&1$accountProjects; " +
+            "then $resumeCmd; else $freshCmd; fi"
+    }
+
+    /**
      * `CLAUDE_CONFIG_DIR=<dir> ` prefix for a non-default account, or `""`.
      *
      * The empty string is load-bearing: `CLAUDE_CONFIG_DIR=$HOME/.claude` is NOT
@@ -113,11 +146,16 @@ object ClaudeConfig {
         mode: ClaudeMode,
         model: ClaudeModel,
         claudeSessionId: String? = null,
-        resume: Boolean = false,
+        /** Null with a [claudeSessionId]: the server decides — see [buildLaunchCommandOrServerDecided]. */
+        resume: Boolean? = false,
         accountSlug: String? = null
     ): String = buildTmuxRunCommand(
         tmuxSessionName,
-        buildLaunchCommand(folder, mode, model, claudeSessionId, resume, accountSlug),
+        if (claudeSessionId != null) {
+            buildLaunchCommandOrServerDecided(folder, mode, model, claudeSessionId, resume, accountSlug)
+        } else {
+            buildLaunchCommand(folder, mode, model, null, false, accountSlug)
+        },
     )
 
     /**
@@ -277,24 +315,7 @@ object ClaudeConfig {
         // pane restarts under the new account's CLAUDE_CONFIG_DIR while
         // `--resume <uuid>` reloads the same conversation, which survives the
         // switch because `projects/` is symlinked to the shared `~/.claude/`.
-        val launch = if (resume != null) {
-            buildLaunchCommand(folder, mode, model, claudeSessionId, resume = resume, accountSlug = accountSlug)
-        } else {
-            // The uuid is interpolated into a glob, so reduce it to the charset a
-            // uuid actually has; anything else could not name a transcript anyway.
-            val id = claudeSessionId.filter { it.isLetterOrDigit() || it == '-' }
-            // Same check the drift daemon uses: the uuid is globally unique, so
-            // globbing every project dir is enough and needs no cwd encoding.
-            // An account whose `projects/` is a REAL directory rather than the
-            // usual symlink (provisioned out of order) is looked at as well.
-            val accountProjects = claudeConfigDirFor(accountSlug)
-                ?.let { " || ls ${shellEscape(it)}/projects/*/$id.jsonl >/dev/null 2>&1" }
-                .orEmpty()
-            val resumeCmd = buildLaunchCommand(folder, mode, model, claudeSessionId, resume = true, accountSlug = accountSlug)
-            val freshCmd = buildLaunchCommand(folder, mode, model, claudeSessionId, resume = false, accountSlug = accountSlug)
-            "if ls \"\$HOME\"/.claude/projects/*/$id.jsonl >/dev/null 2>&1$accountProjects; " +
-                "then $resumeCmd; else $freshCmd; fi"
-        }
+        val launch = buildLaunchCommandOrServerDecided(folder, mode, model, claudeSessionId, resume, accountSlug)
         val inner = "cd \"\$HOME\"; " + launch
         fun sq(s: String) = "'" + s.replace("'", "'\\''") + "'"
         val loginRun = "bash -lc ${sq(inner)}"
