@@ -2265,7 +2265,12 @@ class SessionOrchestrator(
      */
     suspend fun resolveSessionAccount(sessionId: String): String? {
         val tab = tabManager.getTab(sessionId) ?: return null
-        val actual = accountService.readSessionAccountSlug(tab.server.id, tab.tmuxSessionName)
+        // Unknown — the probe timed out, or no claude is running (a dead pane
+        // has no CLAUDE_CONFIG_DIR either) — keeps the stored account. Reading
+        // either as "default" used to undo a fresh account switch.
+        val reading = accountService.readSessionAccountSlug(tab.server.id, tab.tmuxSessionName)
+        if (reading !is com.clauderemote.session.service.SessionAccountReading.Running) return tab.accountSlug
+        val actual = reading.slug
         if (actual != tab.accountSlug) {
             FileLogger.log(
                 TAG,

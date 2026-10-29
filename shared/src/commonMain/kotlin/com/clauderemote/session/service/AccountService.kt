@@ -243,9 +243,9 @@ internal class AccountService(
      * or persisted before the field existed. The chip must not claim an account
      * the process isn't on, so it is resolved from the process, not from storage.
      */
-    suspend fun readSessionAccountSlug(serverId: String, tmuxSessionName: String): String? =
+    suspend fun readSessionAccountSlug(serverId: String, tmuxSessionName: String): SessionAccountReading =
         withContext(Dispatchers.IO) {
-            if (tmuxSessionName.isBlank()) return@withContext null
+            if (tmuxSessionName.isBlank()) return@withContext SessionAccountReading.Unknown
             val out = try {
                 withServerSession(serverId) { sess ->
                     execReadWithWatchdog(sess, sessionAccountCmd(tmuxSessionName), totalMs = 10_000)
@@ -253,8 +253,8 @@ internal class AccountService(
             } catch (e: Exception) {
                 FileLogger.error(TAG, "readSessionAccountSlug($tmuxSessionName) failed: ${e.message}", e)
                 null
-            } ?: return@withContext null
-            parseSessionAccountSlug(out)
+            } ?: return@withContext SessionAccountReading.Unknown
+            parseSessionAccount(out)
         }
 
     /**
@@ -399,16 +399,37 @@ internal class AccountService(
             // see the apostrophes as part of the name ("can't find window:
             // 'claude-...'"), so every probe fell through to __DEFAULT__ and every
             // session claimed the default account.
+            //
+            // __DEFAULT__ only when a claude process was actually SEEN without the
+            // variable. A pane whose claude has died is a bare shell with no
+            // variable either, and reading that as "default account" made the
+            // app rewrite the session's stored account to default — the switch
+            // the user had just made, undone by the session it broke.
             val n = "'=" + tmuxSessionName.replace("'", "'\\''") + "'"
             return PATH_PREAMBLE +
                 "cfg() { tr '\\0' '\\n' < /proc/\$1/environ 2>/dev/null | " +
                 "sed -n 's/^CLAUDE_CONFIG_DIR=//p' | head -1; }; " +
+                "isc() { [ \"\$(cat /proc/\$1/comm 2>/dev/null)\" = claude ] && seen=1; }; seen=; " +
                 "for p in \$(tmux list-panes -t $n -F '#{pane_pid}' 2>/dev/null); do " +
                 "for pid in \$p \$(pgrep -P \$p 2>/dev/null); do " +
-                "d=\$(cfg \$pid); [ -n \"\$d\" ] && { echo \"\$d\"; exit 0; }; " +
+                "d=\$(cfg \$pid); [ -n \"\$d\" ] && { echo \"\$d\"; exit 0; }; isc \$pid; " +
                 "for g in \$(pgrep -P \$pid 2>/dev/null); do " +
-                "d=\$(cfg \$g); [ -n \"\$d\" ] && { echo \"\$d\"; exit 0; }; " +
-                "done; done; done; echo __DEFAULT__"
+                "d=\$(cfg \$g); [ -n \"\$d\" ] && { echo \"\$d\"; exit 0; }; isc \$g; " +
+                "done; done; done; [ -n \"\$seen\" ] && echo __DEFAULT__ || echo __NOCLAUDE__"
+        }
+
+        /**
+         * What the probe saw. [SessionAccountReading.Unknown] — no answer, or no
+         * claude running in the pane — must never be taken as the default
+         * account: only [SessionAccountReading.Running] may correct a stored slug.
+         */
+        internal fun parseSessionAccount(out: String): SessionAccountReading {
+            val line = out.lineSequence()
+                .map { it.trim() }
+                .firstOrNull { it.isNotEmpty() && !it.startsWith("+") }
+                ?: return SessionAccountReading.Unknown
+            if (line == "__NOCLAUDE__") return SessionAccountReading.Unknown
+            return SessionAccountReading.Running(parseSessionAccountSlug(line))
         }
 
         /**
@@ -641,4 +662,11 @@ internal class AccountService(
             // ~/.claude/{projects,plugins,settings.json,CLAUDE.md} are safe.
             "rm -rf \"\$D\" && echo REMOVED"
     }
+}
+
+/** Which account a session's running claude is on, or that nobody could tell. */
+internal sealed interface SessionAccountReading {
+    /** A claude process was seen; [slug] null is the default login. */
+    data class Running(val slug: String?) : SessionAccountReading
+    data object Unknown : SessionAccountReading
 }

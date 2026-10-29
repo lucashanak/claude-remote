@@ -96,6 +96,23 @@ class AccountLoginUrlTest {
         assertNull(AccountService.parseSessionAccountSlug("\n  \n"))
     }
 
+    /**
+     * A failed probe, or a pane whose claude has died, is UNKNOWN — never the
+     * default account. Taking it as default rewrote a just-switched session's
+     * stored account back to default.
+     */
+    @Test
+    fun noAnswerOrNoClaudeIsUnknownNotDefault() {
+        assertEquals(SessionAccountReading.Unknown, AccountService.parseSessionAccount(""))
+        assertEquals(SessionAccountReading.Unknown, AccountService.parseSessionAccount("\n  \n"))
+        assertEquals(SessionAccountReading.Unknown, AccountService.parseSessionAccount("__NOCLAUDE__\n"))
+        assertEquals(SessionAccountReading.Running(null), AccountService.parseSessionAccount("__DEFAULT__\n"))
+        assertEquals(
+            SessionAccountReading.Running("lukashanak@kontexta.cz"),
+            AccountService.parseSessionAccount("/home/lucas/.claude-remote/accounts/lukashanak@kontexta.cz\n"),
+        )
+    }
+
     @Test
     fun aConfigDirOutsideTheAccountsRootIsTreatedAsDefault() {
         // Someone running with CLAUDE_CONFIG_DIR pointed somewhere of their own
