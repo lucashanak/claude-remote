@@ -6,7 +6,6 @@ import android.content.Context
 import android.content.pm.PackageManager
 import android.media.AudioFormat
 import android.media.AudioRecord
-import android.media.MediaRecorder
 import androidx.core.content.ContextCompat
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -94,18 +93,17 @@ internal class ServerDictation(
             postOnMain { onError("AudioRecord není dostupný.") }
             return
         }
-        val recorder = runCatching {
-            AudioRecord(
-                MediaRecorder.AudioSource.VOICE_RECOGNITION,
-                SAMPLE_RATE, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT,
-                maxOf(minBuf, FRAME * 2 * 8),
-            )
+        // Through a connected Bluetooth headset's mic when there is one —
+        // see MicRoute (waits for the headset's call link, so off main).
+        val mic = runCatching {
+            Mic.open(context, SAMPLE_RATE, maxOf(minBuf, FRAME * 2 * 8))
         }.getOrElse {
             postOnMain { onError("Mikrofon nelze otevřít: ${it.message ?: "neznámá chyba"}") }
             return
         }
+        val recorder = mic.recorder
         if (recorder.state != AudioRecord.STATE_INITIALIZED) {
-            runCatching { recorder.release() }
+            mic.release()
             postOnMain { onError("AudioRecord se neinicializoval.") }
             return
         }
@@ -184,7 +182,7 @@ internal class ServerDictation(
             // fall through to cleanup
         } finally {
             runCatching { recorder.stop() }
-            runCatching { recorder.release() }
+            mic.release()
         }
     }
 

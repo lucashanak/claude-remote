@@ -6,7 +6,6 @@ import android.content.Context
 import android.content.pm.PackageManager
 import android.media.AudioFormat
 import android.media.AudioRecord
-import android.media.MediaRecorder
 import android.os.Handler
 import android.os.Looper
 import androidx.core.content.ContextCompat
@@ -93,6 +92,10 @@ internal class SonioxDictation(
     // Total μ-law bytes actually pushed to the socket, logged with the final
     // (parity with the watch): confirms the uplink stayed at half of raw PCM.
     @Volatile private var bytesSent = 0L
+    // For the log: which mic was heard, and how loud it got. "0 chars" with a
+    // peak near zero is a silent mic (the Bluetooth case), not a bad transcript.
+    @Volatile private var micLabel = "?"
+    @Volatile private var peak = 0
 
     // Single-shot silence timer (main thread). This is what ends dictation —
     // NOT Soniox's own <end> endpoint. Armed ONCE at capture start with a
@@ -271,7 +274,7 @@ internal class SonioxDictation(
         captureThread?.interrupt()
         captureThread = null
         val settled = synchronized(this) { finalText.toString() }.trim()
-        FileLogger.log(TAG, "final (${settled.length} chars, $bytesSent sent bytes)")
+        FileLogger.log(TAG, "final (${settled.length} chars, $bytesSent sent bytes, mic=$micLabel, peak=$peak)")
         postOnMain { onFinal(settled) }
         runCatching { webSocket.close(1000, null) }
     }
@@ -296,18 +299,18 @@ internal class SonioxDictation(
                 postOnMain { onError("AudioRecord není dostupný.") }
                 return@Thread
             }
-            val recorder = runCatching {
-                AudioRecord(
-                    MediaRecorder.AudioSource.VOICE_RECOGNITION,
-                    SAMPLE_RATE, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT,
-                    maxOf(minBuf, FRAME_BYTES * 8),
-                )
+            // Through a connected Bluetooth headset's mic when there is one —
+            // see MicRoute (waits for the headset's call link, so off main).
+            val mic = runCatching {
+                Mic.open(context, SAMPLE_RATE, maxOf(minBuf, FRAME_BYTES * 8))
             }.getOrElse {
                 postOnMain { onError("Mikrofon nelze otevřít: ${it.message ?: "neznámá chyba"}") }
                 return@Thread
             }
+            val recorder = mic.recorder
+            micLabel = mic.label
             if (recorder.state != AudioRecord.STATE_INITIALIZED) {
-                runCatching { recorder.release() }
+                mic.release()
                 postOnMain { onError("AudioRecord se neinicializoval.") }
                 return@Thread
             }
@@ -318,6 +321,12 @@ internal class SonioxDictation(
                 while (!stopped && !Thread.currentThread().isInterrupted) {
                     val n = recorder.read(buf, 0, buf.size)
                     if (n <= 0) continue
+                    var i = 0
+                    while (i + 1 < n) {
+                        val v = kotlin.math.abs((buf[i].toInt() and 0xFF) or (buf[i + 1].toInt() shl 8))
+                        if (v > peak) peak = v
+                        i += 2
+                    }
                     // s16le PCM → μ-law inline (n bytes in → n/2 bytes out),
                     // then straight to the socket. No codec, no extra thread.
                     val mulaw = pcm16leToMulaw(buf, n)
@@ -328,7 +337,7 @@ internal class SonioxDictation(
                 // fall through to cleanup
             } finally {
                 runCatching { recorder.stop() }
-                runCatching { recorder.release() }
+                mic.release()
             }
         }
         thread.isDaemon = true

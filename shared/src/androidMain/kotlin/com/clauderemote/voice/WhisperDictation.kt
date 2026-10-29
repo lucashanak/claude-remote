@@ -6,7 +6,6 @@ import android.content.Context
 import android.content.pm.PackageManager
 import android.media.AudioFormat
 import android.media.AudioRecord
-import android.media.MediaRecorder
 import androidx.core.content.ContextCompat
 import com.k2fsa.sherpa.onnx.FeatureConfig
 import com.k2fsa.sherpa.onnx.OfflineModelConfig
@@ -98,20 +97,19 @@ internal class WhisperDictation(
             postOnMain { onError("AudioRecord není dostupný.") }
             return
         }
-        val recorder = runCatching {
-            AudioRecord(
-                MediaRecorder.AudioSource.VOICE_RECOGNITION,
-                SAMPLE_RATE, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT,
-                maxOf(minBuf, WINDOW_SIZE * 2 * 8),
-            )
+        // Through a connected Bluetooth headset's mic when there is one —
+        // see MicRoute (waits for the headset's call link, so off main).
+        val mic = runCatching {
+            Mic.open(context, SAMPLE_RATE, maxOf(minBuf, WINDOW_SIZE * 2 * 8))
         }.getOrElse {
             runCatching { vad.release() }
             runCatching { recognizer.release() }
             postOnMain { onError("Mikrofon nelze otevřít: ${it.message ?: "neznámá chyba"}") }
             return
         }
+        val recorder = mic.recorder
         if (recorder.state != AudioRecord.STATE_INITIALIZED) {
-            runCatching { recorder.release() }
+            mic.release()
             runCatching { vad.release() }
             runCatching { recognizer.release() }
             postOnMain { onError("AudioRecord se neinicializoval.") }
@@ -143,7 +141,7 @@ internal class WhisperDictation(
             // Fall through to cleanup.
         } finally {
             runCatching { recorder.stop() }
-            runCatching { recorder.release() }
+            mic.release()
             runCatching { vad.release() }
             runCatching { recognizer.release() }
         }
