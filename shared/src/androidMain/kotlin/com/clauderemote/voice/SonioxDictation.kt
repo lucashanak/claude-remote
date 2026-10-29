@@ -96,6 +96,9 @@ internal class SonioxDictation(
     // peak near zero is a silent mic (the Bluetooth case), not a bad transcript.
     @Volatile private var micLabel = "?"
     @Volatile private var peak = 0
+    // ms from recording start to the first frame above a whisper; -1 = never.
+    // Tells a headset link that came up LATE from one that never carried audio.
+    @Volatile private var firstSoundMs = -1L
 
     // Single-shot silence timer (main thread). This is what ends dictation —
     // NOT Soniox's own <end> endpoint. Armed ONCE at capture start with a
@@ -274,7 +277,7 @@ internal class SonioxDictation(
         captureThread?.interrupt()
         captureThread = null
         val settled = synchronized(this) { finalText.toString() }.trim()
-        FileLogger.log(TAG, "final (${settled.length} chars, $bytesSent sent bytes, mic=$micLabel, peak=$peak)")
+        FileLogger.log(TAG, "final (${settled.length} chars, $bytesSent sent bytes, mic=$micLabel, peak=$peak, firstSound=${firstSoundMs}ms)")
         postOnMain { onFinal(settled) }
         runCatching { webSocket.close(1000, null) }
     }
@@ -317,6 +320,7 @@ internal class SonioxDictation(
             val buf = ByteArray(FRAME_BYTES)
             try {
                 recorder.startRecording()
+                val recordingSince = System.currentTimeMillis()
                 postOnMain { if (!stopped) onListening?.invoke() }
                 while (!stopped && !Thread.currentThread().isInterrupted) {
                     val n = recorder.read(buf, 0, buf.size)
@@ -327,6 +331,7 @@ internal class SonioxDictation(
                         if (v > peak) peak = v
                         i += 2
                     }
+                    if (firstSoundMs < 0 && peak > AUDIBLE_PEAK) firstSoundMs = System.currentTimeMillis() - recordingSince
                     // s16le PCM → μ-law inline (n bytes in → n/2 bytes out),
                     // then straight to the socket. No codec, no extra thread.
                     val mulaw = pcm16leToMulaw(buf, n)
@@ -395,5 +400,7 @@ internal class SonioxDictation(
         // `silenceMs` (re-armed on each word); this is only the long up-front
         // guard so a token-less session still ends.
         private const val NO_SPEECH_GUARD_MS = 12000L
+        /** s16 amplitude above room hiss (~1.5 % of full scale): someone is talking. */
+        private const val AUDIBLE_PEAK = 500
     }
 }

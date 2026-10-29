@@ -96,7 +96,7 @@ internal class ServerDictation(
         // Through a connected Bluetooth headset's mic when there is one —
         // see MicRoute (waits for the headset's call link, so off main).
         val mic = runCatching {
-            Mic.open(context, SAMPLE_RATE, maxOf(minBuf, FRAME * 2 * 8))
+            Mic.open(context, SAMPLE_RATE, maxOf(minBuf, FRAME * 2 * 8), useBluetooth = !continuous)
         }.getOrElse {
             postOnMain { onError("Mikrofon nelze otevřít: ${it.message ?: "neznámá chyba"}") }
             return
