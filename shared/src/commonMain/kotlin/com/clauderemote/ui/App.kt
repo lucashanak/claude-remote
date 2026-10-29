@@ -171,6 +171,7 @@ fun App(
     val connectionLabels by sessionOrchestrator.connectionLabels.collectAsState()
     val hookActiveSessions by sessionOrchestrator.hookActiveSessions.collectAsState()
     val contextPercents by sessionOrchestrator.contextPercents.collectAsState()
+    val activeModels by sessionOrchestrator.activeModels.collectAsState()
     val sessionUsagePercents by sessionOrchestrator.sessionUsagePercents.collectAsState()
     val weekUsagePercents by sessionOrchestrator.weekUsagePercents.collectAsState()
     val sessionResetMin by sessionOrchestrator.sessionResetMin.collectAsState()
@@ -1507,6 +1508,7 @@ fun App(
                         accountTags = buildAccountTags(terminalAccounts, tabs) { slugs ->
                             accountColorStorage.assign(slugs).mapValues { it.value.color }
                         },
+                        fableSessionIds = tabs.filter { runsFable(it, activeModels[it.id]) }.mapTo(HashSet()) { it.id },
                         onSwitchAccount = { id, slug -> sessionOrchestrator.switchSessionAccount(id, slug) },
                     )
                 }

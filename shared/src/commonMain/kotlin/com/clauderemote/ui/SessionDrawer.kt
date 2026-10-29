@@ -149,6 +149,8 @@ fun SessionDrawer(
     defaultMode: ClaudeMode = ClaudeMode.YOLO,
     /** Account chip per slug; empty hides it (single account). */
     accountTags: Map<String, AccountTag> = emptyMap(),
+    /** Sessions answering with Fable get a small badge. */
+    fableSessionIds: Set<String> = emptySet(),
 ) {
     if (!open && sessions.isEmpty() && remoteSessions.isEmpty()) return  // skip composition when not needed
 
@@ -442,6 +444,7 @@ fun SessionDrawer(
                                                     aliasOnly = row.inGroup,
                                                     defaultMode = defaultMode,
                                                     accountTag = accountTags[s.accountKey],
+                                                    fable = s.id in fableSessionIds,
                                                     onClick = {
                                                         onPick(s.id)
                                                         onClose()
@@ -704,6 +707,7 @@ private fun DrawerItem(
     /** Sessions in this mode show no pill — see [SessionDrawer]'s parameter. */
     defaultMode: ClaudeMode = ClaudeMode.YOLO,
     accountTag: AccountTag? = null,
+    fable: Boolean = false,
     onClick: () -> Unit,
     onLongPress: (() -> Unit)? = null,
 ) {
@@ -779,6 +783,7 @@ private fun DrawerItem(
                 horizontalArrangement = Arrangement.spacedBy(6.dp),
             ) {
                 if (session.mode != defaultMode) DrawerModePill(mode = session.mode)
+                if (fable) FableBadge()
                 if (accountTag != null) AccountTagChip(accountTag)
                 Text(
                     session.durationText,

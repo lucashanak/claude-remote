@@ -225,6 +225,8 @@ fun TerminalScreen(
      * see [buildAccountTags]. Empty with a single account, so rows stay clean.
      */
     accountTags: Map<String, AccountTag> = emptyMap(),
+    /** Sessions whose active model is Fable — they get a small badge in the lists. */
+    fableSessionIds: Set<String> = emptySet(),
     onSwitchAccount: ((sessionId: String, accountSlug: String?) -> Unit)? = null,
     /**
      * A physical keyboard is attached. Together with a landscape window this
@@ -589,6 +591,7 @@ fun TerminalScreen(
                     tmuxActivityByName = tmuxActivityByName,
                     defaultMode = appSettings?.defaultClaudeMode ?: com.clauderemote.model.ClaudeMode.YOLO,
                     accountTags = accountTags,
+                    fableSessionIds = fableSessionIds,
                     collapsedGroups = collapsedGroups,
                     onToggleGroup = toggleGroup,
                     modifier = Modifier.width(sidePanelWidth).fillMaxHeight()
@@ -1706,6 +1709,7 @@ fun TerminalScreen(
             },
             defaultMode = appSettings?.defaultClaudeMode ?: com.clauderemote.model.ClaudeMode.YOLO,
             accountTags = accountTags,
+            fableSessionIds = fableSessionIds,
         )
 
         // ── ExpandedInput overlay ──────────────────────────────────────────

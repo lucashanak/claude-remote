@@ -3,6 +3,7 @@ package com.clauderemote
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.awt.SwingPanel
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Window
 import androidx.compose.ui.window.application
@@ -520,6 +521,12 @@ fun main() = application {
                     }
                 }
         ) {
+        if (IS_MAC) {
+            DisposableEffect(window) {
+                FullscreenClickProbe.install(window)
+                onDispose { FullscreenClickProbe.uninstall() }
+            }
+        }
         // Force dark titlebar on macOS so it matches the app chrome.
         if (System.getProperty("os.name").lowercase().contains("mac")) {
             androidx.compose.runtime.SideEffect {
@@ -535,218 +542,236 @@ fun main() = application {
         val invertColorsState = androidx.compose.runtime.remember {
             androidx.compose.runtime.mutableStateOf(appSettings.invertColors)
         }
-        App(
-            serverStorage = serverStorage,
-            appSettings = appSettings,
-            folderPolicyStorage = folderPolicyStorage,
-            accountColorStorage = accountColorStorage,
-            tabManager = tabManager,
-            sessionOrchestrator = sessionOrchestrator,
-            sshKeyManager = sshKeyManager,
-            appVersion = System.getProperty("jpackage.app-version") ?: "dev",
-            onInstallUpdate = { bytes, info ->
-                try {
-                    val tmpDir = File(System.getProperty("java.io.tmpdir"), "claude-remote-update")
-                    tmpDir.mkdirs()
-                    if (IS_LINUX) {
-                        // Hand the downloaded distro package to the system's GUI
-                        // installer (polkit prompt) — we never had a Linux branch
-                        // before, so it fell through to the macOS `hdiutil` path
-                        // and crashed with "Cannot run program hdiutil".
-                        installLinuxUpdate(bytes, info, tmpDir)
-                    } else if (IS_MAC && info.dmgUrl.isNotBlank()) {
-                        val dmgFile = File(tmpDir, "ClaudeRemote-${info.version}.dmg")
-                        dmgFile.writeBytes(bytes)
-
-                        // Mount DMG silently
-                        val attachProc = ProcessBuilder("hdiutil", "attach", "-nobrowse", dmgFile.absolutePath)
-                            .redirectErrorStream(true)
-                            .start()
-                        val attachOutput = attachProc.inputStream.bufferedReader().readText()
-                        attachProc.waitFor()
-
-                        val mountPoint = attachOutput.lines()
-                            .lastOrNull { it.contains("/Volumes/") }
-                            ?.let { line -> line.substring(line.indexOf("/Volumes/")).trim() }
-                            ?: throw Exception("Could not determine DMG mount point.\nhdiutil output:\n$attachOutput")
-
-                        try {
-                            val appBundle = File(mountPoint).listFiles()
-                                ?.firstOrNull { it.name.endsWith(".app") }
-                                ?: throw Exception("No .app found in DMG at $mountPoint")
-                            val appDest = File("/Applications/${appBundle.name}")
-
-                            // Copy to /Applications (overwrites existing)
-                            ProcessBuilder("ditto", appBundle.absolutePath, appDest.absolutePath)
-                                .start().waitFor()
-
-                            // Remove quarantine
-                            ProcessBuilder("xattr", "-cr", appDest.absolutePath)
-                                .start().waitFor()
-
-                            // Launch relaunch script that waits for this process to exit, then opens the new app
-                            val pid = ProcessHandle.current().pid()
-                            val script = File(tmpDir, "relaunch.sh")
-                            script.writeText("#!/bin/bash\nwhile kill -0 $pid 2>/dev/null; do sleep 0.5; done\nopen '${appDest.absolutePath}'\n")
-                            script.setExecutable(true)
-                            ProcessBuilder("/bin/bash", script.absolutePath).start()
-
-                            FileLogger.log("Desktop", "macOS update installed: ${appDest.absolutePath}")
-                        } finally {
-                            ProcessBuilder("hdiutil", "detach", mountPoint, "-quiet").start()
+        // Diagnostic for the macOS full-screen click offset (rows hit one
+        // above the cursor). Logs where Compose thinks a press landed, to set
+        // against the AWT-level numbers FullscreenClickProbe logs alongside.
+        androidx.compose.foundation.layout.Box(
+            Modifier.then(
+                if (IS_MAC) Modifier.pointerInput(Unit) {
+                    awaitPointerEventScope {
+                        while (true) {
+                            val ev = awaitPointerEvent(androidx.compose.ui.input.pointer.PointerEventPass.Initial)
+                            if (ev.type == androidx.compose.ui.input.pointer.PointerEventType.Press) {
+                                ev.changes.firstOrNull()?.let { FullscreenClickProbe.onComposePress(it.position.x, it.position.y, density) }
+                            }
                         }
+                    }
+                } else Modifier
+            )
+        ) {
+            App(
+                serverStorage = serverStorage,
+                appSettings = appSettings,
+                folderPolicyStorage = folderPolicyStorage,
+                accountColorStorage = accountColorStorage,
+                tabManager = tabManager,
+                sessionOrchestrator = sessionOrchestrator,
+                sshKeyManager = sshKeyManager,
+                appVersion = System.getProperty("jpackage.app-version") ?: "dev",
+                onInstallUpdate = { bytes, info ->
+                    try {
+                        val tmpDir = File(System.getProperty("java.io.tmpdir"), "claude-remote-update")
+                        tmpDir.mkdirs()
+                        if (IS_LINUX) {
+                            // Hand the downloaded distro package to the system's GUI
+                            // installer (polkit prompt) — we never had a Linux branch
+                            // before, so it fell through to the macOS `hdiutil` path
+                            // and crashed with "Cannot run program hdiutil".
+                            installLinuxUpdate(bytes, info, tmpDir)
+                        } else if (IS_MAC && info.dmgUrl.isNotBlank()) {
+                            val dmgFile = File(tmpDir, "ClaudeRemote-${info.version}.dmg")
+                            dmgFile.writeBytes(bytes)
 
-                        kotlin.system.exitProcess(0)
-                    } else {
-                        val apkFile = File(tmpDir, "ClaudeRemote-${info.version}.apk")
-                        apkFile.writeBytes(bytes)
-                        java.awt.Desktop.getDesktop().open(apkFile)
-                        FileLogger.log("Desktop", "Update saved and opened: ${apkFile.absolutePath}")
-                    }
-                } catch (e: Exception) {
-                    FileLogger.error("Desktop", "Failed to install update: ${e.message}", e)
-                    throw e
-                }
-            },
-            onTerminalScreenVisible = {
-                val activeId = tabManager.activeTabId.value ?: return@App
-                val buffer = sessionOrchestrator.getBuffer(activeId)
-                val widget = termWidget
-                javax.swing.SwingUtilities.invokeLater {
-                    // Reapply terminal size — fixes green rectangle when reconnecting
-                    // from a different device (Android) that had a smaller terminal.
-                    // Pass widget dims as a fallback in case JediTerm hasn't yet fired
-                    // its first resize into the connector.
-                    val fallback = widget?.terminalTextBuffer?.let { b ->
-                        val c = b.width; val r = b.height
-                        if (c > 0 && r > 0) com.jediterm.core.util.TermSize(c, r) else null
-                    }
-                    connector.reapplySize(fallback)
-                    if (widget != null && buffer.isNotEmpty()) {
-                        widget.terminalPanel.clearBuffer()
-                        val clearSeq = "[H[2J[3J"
-                        connector.feedOutput(clearSeq + buffer)
-                        // Same rationale as onTabSwitched: explicit repaint
-                        // ensures the replayed content is rendered promptly
-                        // even when the panel regains focus asynchronously.
-                        widget.terminalPanel.repaint()
-                    }
-                    // The replayed buffer is a partial frame and reapplySize
-                    // is a no-op when the size didn't change — without an
-                    // explicit kick tmux never resends the full screen here
-                    // (same partial-paint bug as on tab switch).
-                    val kc = widget?.terminalTextBuffer?.width?.takeIf { it > 1 }
-                        ?: connector.lastTermSize?.columns
-                    val kr = widget?.terminalTextBuffer?.height?.takeIf { it > 0 }
-                        ?: connector.lastTermSize?.rows
-                    if (kc != null && kr != null) {
-                        sessionOrchestrator.kickRedraw(activeId, kc, kr)
-                    }
-                }
-            },
-            onPickFile = { callback ->
-                // Native picker per platform: zenity/kdialog portal on Linux
-                // (AWT FileDialog is unreliable inside a Compose window there),
-                // NSOpenPanel via java.awt.FileDialog on macOS. See
-                // pickFilesForAttach for the full rationale and safety nets.
-                pickFilesForAttach(callback = callback)
-            },
-            onSaveFile = { bytes, suggestedName ->
-                // Show the native save dialog on the EDT, then write bytes on a
-                // background thread so the EDT is never blocked by I/O.
-                javax.swing.SwingUtilities.invokeLater {
-                    try {
-                        val parent = appDialogParent()
-                        val dialog = java.awt.FileDialog(parent, "Save File", java.awt.FileDialog.SAVE)
-                        dialog.file = suggestedName
-                        dialog.isVisible = true
-                        val dir = dialog.directory
-                        val name = dialog.file
-                        if (dir != null && name != null) {
-                            val target = java.io.File(dir, name)
-                            Thread {
-                                try {
-                                    target.writeBytes(bytes)
-                                    com.clauderemote.util.FileLogger.log("Main", "Saved file: ${target.absolutePath}")
-                                } catch (e: Exception) {
-                                    com.clauderemote.util.FileLogger.error(
-                                        "Main", "Failed to write saved file: ${e.message}", e
-                                    )
-                                }
-                            }.start()
+                            // Mount DMG silently
+                            val attachProc = ProcessBuilder("hdiutil", "attach", "-nobrowse", dmgFile.absolutePath)
+                                .redirectErrorStream(true)
+                                .start()
+                            val attachOutput = attachProc.inputStream.bufferedReader().readText()
+                            attachProc.waitFor()
+
+                            val mountPoint = attachOutput.lines()
+                                .lastOrNull { it.contains("/Volumes/") }
+                                ?.let { line -> line.substring(line.indexOf("/Volumes/")).trim() }
+                                ?: throw Exception("Could not determine DMG mount point.\nhdiutil output:\n$attachOutput")
+
+                            try {
+                                val appBundle = File(mountPoint).listFiles()
+                                    ?.firstOrNull { it.name.endsWith(".app") }
+                                    ?: throw Exception("No .app found in DMG at $mountPoint")
+                                val appDest = File("/Applications/${appBundle.name}")
+
+                                // Copy to /Applications (overwrites existing)
+                                ProcessBuilder("ditto", appBundle.absolutePath, appDest.absolutePath)
+                                    .start().waitFor()
+
+                                // Remove quarantine
+                                ProcessBuilder("xattr", "-cr", appDest.absolutePath)
+                                    .start().waitFor()
+
+                                // Launch relaunch script that waits for this process to exit, then opens the new app
+                                val pid = ProcessHandle.current().pid()
+                                val script = File(tmpDir, "relaunch.sh")
+                                script.writeText("#!/bin/bash\nwhile kill -0 $pid 2>/dev/null; do sleep 0.5; done\nopen '${appDest.absolutePath}'\n")
+                                script.setExecutable(true)
+                                ProcessBuilder("/bin/bash", script.absolutePath).start()
+
+                                FileLogger.log("Desktop", "macOS update installed: ${appDest.absolutePath}")
+                            } finally {
+                                ProcessBuilder("hdiutil", "detach", mountPoint, "-quiet").start()
+                            }
+
+                            kotlin.system.exitProcess(0)
+                        } else {
+                            val apkFile = File(tmpDir, "ClaudeRemote-${info.version}.apk")
+                            apkFile.writeBytes(bytes)
+                            java.awt.Desktop.getDesktop().open(apkFile)
+                            FileLogger.log("Desktop", "Update saved and opened: ${apkFile.absolutePath}")
                         }
-                    } catch (e: Throwable) {
-                        com.clauderemote.util.FileLogger.error(
-                            "Main", "Save FileDialog failed: ${e.message}", e
-                        )
-                    }
-                }
-            },
-            onTestNotification = {
-                // Same call the real "Claude is waiting" alert makes, so the
-                // test proves the whole chain (notify-send on Linux, tray
-                // balloon on macOS/Windows) rather than a parallel code path.
-                sendDesktopNotification("Claude Remote", "Toto je testovací notifikace.")
-            },
-            onImportServers = {
-                pickTextFile("Import Servers") { name, json ->
-                    try {
-                        val count = serverStorage.importServers(json)
-                        FileLogger.log("Main", "Imported $count servers from $name")
-                        showDesktopMessage("Imported $count servers.")
                     } catch (e: Exception) {
-                        FileLogger.error("Main", "Import failed: ${e.message}", e)
-                        showDesktopMessage("Import failed: ${e.message}")
+                        FileLogger.error("Desktop", "Failed to install update: ${e.message}", e)
+                        throw e
                     }
+                },
+                onTerminalScreenVisible = {
+                    val activeId = tabManager.activeTabId.value ?: return@App
+                    val buffer = sessionOrchestrator.getBuffer(activeId)
+                    val widget = termWidget
+                    javax.swing.SwingUtilities.invokeLater {
+                        // Reapply terminal size — fixes green rectangle when reconnecting
+                        // from a different device (Android) that had a smaller terminal.
+                        // Pass widget dims as a fallback in case JediTerm hasn't yet fired
+                        // its first resize into the connector.
+                        val fallback = widget?.terminalTextBuffer?.let { b ->
+                            val c = b.width; val r = b.height
+                            if (c > 0 && r > 0) com.jediterm.core.util.TermSize(c, r) else null
+                        }
+                        connector.reapplySize(fallback)
+                        if (widget != null && buffer.isNotEmpty()) {
+                            widget.terminalPanel.clearBuffer()
+                            val clearSeq = "[H[2J[3J"
+                            connector.feedOutput(clearSeq + buffer)
+                            // Same rationale as onTabSwitched: explicit repaint
+                            // ensures the replayed content is rendered promptly
+                            // even when the panel regains focus asynchronously.
+                            widget.terminalPanel.repaint()
+                        }
+                        // The replayed buffer is a partial frame and reapplySize
+                        // is a no-op when the size didn't change — without an
+                        // explicit kick tmux never resends the full screen here
+                        // (same partial-paint bug as on tab switch).
+                        val kc = widget?.terminalTextBuffer?.width?.takeIf { it > 1 }
+                            ?: connector.lastTermSize?.columns
+                        val kr = widget?.terminalTextBuffer?.height?.takeIf { it > 0 }
+                            ?: connector.lastTermSize?.rows
+                        if (kc != null && kr != null) {
+                            sessionOrchestrator.kickRedraw(activeId, kc, kr)
+                        }
+                    }
+                },
+                onPickFile = { callback ->
+                    // Native picker per platform: zenity/kdialog portal on Linux
+                    // (AWT FileDialog is unreliable inside a Compose window there),
+                    // NSOpenPanel via java.awt.FileDialog on macOS. See
+                    // pickFilesForAttach for the full rationale and safety nets.
+                    pickFilesForAttach(callback = callback)
+                },
+                onSaveFile = { bytes, suggestedName ->
+                    // Show the native save dialog on the EDT, then write bytes on a
+                    // background thread so the EDT is never blocked by I/O.
+                    javax.swing.SwingUtilities.invokeLater {
+                        try {
+                            val parent = appDialogParent()
+                            val dialog = java.awt.FileDialog(parent, "Save File", java.awt.FileDialog.SAVE)
+                            dialog.file = suggestedName
+                            dialog.isVisible = true
+                            val dir = dialog.directory
+                            val name = dialog.file
+                            if (dir != null && name != null) {
+                                val target = java.io.File(dir, name)
+                                Thread {
+                                    try {
+                                        target.writeBytes(bytes)
+                                        com.clauderemote.util.FileLogger.log("Main", "Saved file: ${target.absolutePath}")
+                                    } catch (e: Exception) {
+                                        com.clauderemote.util.FileLogger.error(
+                                            "Main", "Failed to write saved file: ${e.message}", e
+                                        )
+                                    }
+                                }.start()
+                            }
+                        } catch (e: Throwable) {
+                            com.clauderemote.util.FileLogger.error(
+                                "Main", "Save FileDialog failed: ${e.message}", e
+                            )
+                        }
+                    }
+                },
+                onTestNotification = {
+                    // Same call the real "Claude is waiting" alert makes, so the
+                    // test proves the whole chain (notify-send on Linux, tray
+                    // balloon on macOS/Windows) rather than a parallel code path.
+                    sendDesktopNotification("Claude Remote", "Toto je testovací notifikace.")
+                },
+                onImportServers = {
+                    pickTextFile("Import Servers") { name, json ->
+                        try {
+                            val count = serverStorage.importServers(json)
+                            FileLogger.log("Main", "Imported $count servers from $name")
+                            showDesktopMessage("Imported $count servers.")
+                        } catch (e: Exception) {
+                            FileLogger.error("Main", "Import failed: ${e.message}", e)
+                            showDesktopMessage("Import failed: ${e.message}")
+                        }
+                    }
+                },
+                onPickKeyFile = { callback ->
+                    pickTextFile("Import Private Key") { _, text -> callback(text) }
+                },
+                onOpenUrl = { url ->
+                    // Do NOT log `url` — it carries the login/OAuth seam.
+                    try {
+                        if (IS_LINUX) Runtime.getRuntime().exec(arrayOf("xdg-open", url))
+                        else java.awt.Desktop.getDesktop().browse(java.net.URI(url))
+                    } catch (e: Exception) {
+                        com.clauderemote.util.FileLogger.error("Login", "openUrl failed: ${e.message}", e)
+                    }
+                },
+                exitApp = ::exitApplication,
+                // The pref is already written by the caller; the settings provider
+                // reads it live, so this only has to make the panel pick it up.
+                onApplyFontSize = { size ->
+                    FileLogger.log("TermGeom", "applyFontSize $size")
+                    javax.swing.SwingUtilities.invokeLater { termWidget?.applyFontSize() }
+                },
+                // Flip the heavyweight terminal at the same instant as the Compose
+                // chrome. Waiting for a recomposition to reach the SwingPanel took
+                // seconds on an idle terminal, so repaint straight on the EDT and
+                // update the live flag the settings provider reads on every paint.
+                // "Jump to latest" pill: reading the states here ties recomposition
+                // to the JediTerm scroll model, the same way Android reads them off
+                // its terminal handle.
+                terminalScrolledUp = TerminalScroll.scrolledUp.value,
+                terminalPendingOutput = TerminalScroll.pendingOutput.value,
+                onJumpToLatest = { TerminalScroll.jumpToLatest() },
+                onInvertColorsChanged = { invert ->
+                    invertColorsState.value = invert
+                    javax.swing.SwingUtilities.invokeLater {
+                        terminalInvertColors = INVERT_TERMINAL_AT_SOURCE && invert
+                        termWidget?.let { it.terminalPanel.repaint(); it.repaint() }
+                    }
+                },
+                terminalContent = { modifier ->
+                    DesktopTerminalView(
+                        modifier = modifier,
+                        connector = connector,
+                        appSettings = appSettings,
+                        // Compose state, so the SwingPanel really does recompose when
+                        // the toggle flips (a bare appSettings read never did).
+                        invertColors = invertColorsState.value
+                    )
                 }
-            },
-            onPickKeyFile = { callback ->
-                pickTextFile("Import Private Key") { _, text -> callback(text) }
-            },
-            onOpenUrl = { url ->
-                // Do NOT log `url` — it carries the login/OAuth seam.
-                try {
-                    if (IS_LINUX) Runtime.getRuntime().exec(arrayOf("xdg-open", url))
-                    else java.awt.Desktop.getDesktop().browse(java.net.URI(url))
-                } catch (e: Exception) {
-                    com.clauderemote.util.FileLogger.error("Login", "openUrl failed: ${e.message}", e)
-                }
-            },
-            exitApp = ::exitApplication,
-            // The pref is already written by the caller; the settings provider
-            // reads it live, so this only has to make the panel pick it up.
-            onApplyFontSize = { size ->
-                FileLogger.log("TermGeom", "applyFontSize $size")
-                javax.swing.SwingUtilities.invokeLater { termWidget?.applyFontSize() }
-            },
-            // Flip the heavyweight terminal at the same instant as the Compose
-            // chrome. Waiting for a recomposition to reach the SwingPanel took
-            // seconds on an idle terminal, so repaint straight on the EDT and
-            // update the live flag the settings provider reads on every paint.
-            // "Jump to latest" pill: reading the states here ties recomposition
-            // to the JediTerm scroll model, the same way Android reads them off
-            // its terminal handle.
-            terminalScrolledUp = TerminalScroll.scrolledUp.value,
-            terminalPendingOutput = TerminalScroll.pendingOutput.value,
-            onJumpToLatest = { TerminalScroll.jumpToLatest() },
-            onInvertColorsChanged = { invert ->
-                invertColorsState.value = invert
-                javax.swing.SwingUtilities.invokeLater {
-                    terminalInvertColors = INVERT_TERMINAL_AT_SOURCE && invert
-                    termWidget?.let { it.terminalPanel.repaint(); it.repaint() }
-                }
-            },
-            terminalContent = { modifier ->
-                DesktopTerminalView(
-                    modifier = modifier,
-                    connector = connector,
-                    appSettings = appSettings,
-                    // Compose state, so the SwingPanel really does recompose when
-                    // the toggle flips (a bare appSettings read never did).
-                    invertColors = invertColorsState.value
-                )
-            }
-        )
+            )
+        }
         }
     }
 }
@@ -1758,3 +1783,80 @@ private fun isReddishFgJedi(fg: TerminalColor?): Boolean {
         false
     }
 }
+
+/**
+ * Logs what a mouse press looks like at each layer while the window is in
+ * macOS full screen, where session rows were reported hit one row ABOVE the
+ * cursor. Not reproducible off a Mac, so it records instead of guessing:
+ * the OS pointer, the AWT event, the window insets and the content pane
+ * origin (AWT side), next to the position Compose received
+ * ([onComposePress]). Whichever pair disagrees names the layer that adds the
+ * offset. Capped per full-screen entry so it can't flood the mirrored log.
+ */
+private object FullscreenClickProbe {
+    private const val MAX_PER_ENTRY = 12
+    @Volatile private var window: java.awt.Window? = null
+    @Volatile private var remaining = 0
+    @Volatile private var wasFull = false
+    private var listener: java.awt.event.AWTEventListener? = null
+
+    private fun isFull(w: java.awt.Window): Boolean {
+        val screen = w.graphicsConfiguration?.bounds ?: return false
+        return w.bounds == screen
+    }
+
+    private fun describe(w: java.awt.Window): String {
+        val content = (w as? javax.swing.JFrame)?.contentPane
+        val contentOrigin = try { content?.locationOnScreen } catch (_: Exception) { null }
+        return "window=${w.bounds} screen=${w.graphicsConfiguration?.bounds} insets=${w.insets} " +
+            "contentOnScreen=$contentOrigin contentSize=${content?.size} " +
+            "scale=${w.graphicsConfiguration?.defaultTransform?.scaleY}"
+    }
+
+    fun install(w: java.awt.Window) {
+        window = w
+        val l = java.awt.event.AWTEventListener { ev ->
+            val me = ev as? java.awt.event.MouseEvent ?: return@AWTEventListener
+            if (me.id != java.awt.event.MouseEvent.MOUSE_PRESSED) return@AWTEventListener
+            val win = window ?: return@AWTEventListener
+            val full = isFull(win)
+            if (full && !wasFull) {
+                remaining = MAX_PER_ENTRY
+                FileLogger.log("FsProbe", "entered full screen: ${describe(win)}")
+            }
+            wasFull = full
+            if (!full || remaining <= 0) return@AWTEventListener
+            remaining--
+            val pointer = try { java.awt.MouseInfo.getPointerInfo()?.location } catch (_: Exception) { null }
+            val inWindow = javax.swing.SwingUtilities.convertPoint(me.component, me.point, win)
+            val content = (win as? javax.swing.JFrame)?.contentPane
+            val inContent = content?.let { javax.swing.SwingUtilities.convertPoint(me.component, me.point, it) }
+            FileLogger.log(
+                "FsProbe",
+                "awt press src=${me.component?.javaClass?.simpleName} event=${me.point} " +
+                    "onScreen=(${me.xOnScreen},${me.yOnScreen}) pointer=$pointer " +
+                    "inWindow=$inWindow inContent=$inContent ${describe(win)}"
+            )
+        }
+        listener = l
+        try {
+            java.awt.Toolkit.getDefaultToolkit().addAWTEventListener(l, java.awt.AWTEvent.MOUSE_EVENT_MASK)
+        } catch (e: Exception) {
+            FileLogger.log("FsProbe", "unavailable: ${e.message}")
+        }
+    }
+
+    fun uninstall() {
+        listener?.let { java.awt.Toolkit.getDefaultToolkit().removeAWTEventListener(it) }
+        listener = null
+        window = null
+    }
+
+    /** Compose-side press, in px of the root; also logged in dp for comparison. */
+    fun onComposePress(x: Float, y: Float, density: Float) {
+        val w = window ?: return
+        if (!isFull(w) || remaining <= 0) return
+        FileLogger.log("FsProbe", "compose press px=(${x.toInt()},${y.toInt()}) dp=(${(x / density).toInt()},${(y / density).toInt()})")
+    }
+}
+

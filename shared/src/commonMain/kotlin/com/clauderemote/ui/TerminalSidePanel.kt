@@ -108,6 +108,8 @@ internal fun SessionSidePanel(
     defaultMode: ClaudeMode = ClaudeMode.YOLO,
     /** Account chip per slug; empty hides it (single account). */
     accountTags: Map<String, AccountTag> = emptyMap(),
+    /** Sessions answering with Fable get a small badge. */
+    fableSessionIds: Set<String> = emptySet(),
     modifier: Modifier = Modifier
 ) {
     val c = CRTheme.colors
@@ -306,6 +308,7 @@ internal fun SessionSidePanel(
                                     // Only attached sessions know their account;
                                     // a bare tmux listing doesn't carry it.
                                     accountTag = item.tab?.let { accountTags[it.accountKey] },
+                                    fable = item.tab?.id in fableSessionIds,
                                     onTabSwitch = onTabSwitch,
                                     onTabClose = onTabClose,
                                     onAttachRemote = onAttachRemote,
@@ -506,6 +509,7 @@ private fun SidePanelSessionRow(
     aliasOnly: Boolean = false,
     defaultMode: ClaudeMode = ClaudeMode.YOLO,
     accountTag: AccountTag? = null,
+    fable: Boolean = false,
     onTabSwitch: (String) -> Unit,
     onTabClose: (String) -> Unit,
     onAttachRemote: ((com.clauderemote.model.RemoteSession) -> Unit)?,
@@ -580,6 +584,7 @@ private fun SidePanelSessionRow(
                     overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
                     modifier = Modifier.weight(1f),
                 )
+                if (fable) FableBadge()
                 if (accountTag != null) AccountTagChip(accountTag)
                 if (isActive && item.isConnected) {
                     IconButton(
@@ -621,6 +626,7 @@ private fun SidePanelSessionRow(
                         if (mode != null && mode != defaultMode) {
                             SidePanelModePill(mode = mode)
                         }
+                        if (fable) FableBadge()
                         if (accountTag != null) AccountTagChip(accountTag)
                     }
                 }

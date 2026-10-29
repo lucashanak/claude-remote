@@ -74,6 +74,12 @@ internal class TranscriptService(
     private val sawWorkSinceAttach = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
     private val contextTokenCollectors = java.util.concurrent.ConcurrentHashMap<String, kotlinx.coroutines.Job>()
 
+    // Model id of each session's newest real assistant message
+    // (e.g. `claude-fable-5-1`). What Claude is ACTUALLY answering with — the
+    // tab's launch model goes stale the moment someone runs /model.
+    private val _activeModels = kotlinx.coroutines.flow.MutableStateFlow<Map<String, String>>(emptyMap())
+    val activeModels: kotlinx.coroutines.flow.StateFlow<Map<String, String>> = _activeModels
+
     private val fetchJson = kotlinx.serialization.json.Json { ignoreUnknownKeys = true }
 
     /**
@@ -90,6 +96,15 @@ internal class TranscriptService(
     private fun startContextTokenCollector(sessionId: String, stream: TranscriptStream) {
         contextTokenCollectors.computeIfAbsent(sessionId) {
             scope.launch {
+                // Child of the ctx collector so dispose()'s one cancel stops both.
+                launch {
+                    stream.entries.collect { entries ->
+                        val model = latestAssistantModel(entries) ?: return@collect
+                        if (_activeModels.value[sessionId] != model) {
+                            _activeModels.update { it + (sessionId to model) }
+                        }
+                    }
+                }
                 stream.contextTokens.collect { tokens ->
                     if (tokens == null) {
                         // /clear or /compact reset the conversation — drop the
@@ -673,7 +688,10 @@ internal class TranscriptService(
     fun isConfirmed(id: String, uuid: String): Boolean = confirmedUuids[id] == uuid
 
     /** Drop [sessionId]'s derived ctx-% (disconnect). */
-    fun clearContextPercent(sessionId: String) { _contextPercents.update { it - sessionId } }
+    fun clearContextPercent(sessionId: String) {
+        _contextPercents.update { it - sessionId }
+        _activeModels.update { it - sessionId }
+    }
 
     /**
      * Unregister [sessionId] from its server's stream daemon on disconnect —
@@ -719,4 +737,19 @@ internal class TranscriptService(
         contextWindowTokens.remove(sessionId)
         sawWorkSinceAttach.remove(sessionId)
     }
+}
+
+/**
+ * Model id of the newest assistant message that came from a real model, or
+ * null when there is none yet. Skips `<synthetic>` — the rate-limit and
+ * transport errors Claude Code logs in the assistant's voice — which would
+ * otherwise read as "no model" right after a failed turn.
+ */
+internal fun latestAssistantModel(entries: List<TranscriptEntry>): String? {
+    for (i in entries.indices.reversed()) {
+        val e = entries[i] as? TranscriptEntry.AssistantText ?: continue
+        val m = e.model?.takeIf { it.isNotBlank() && !it.startsWith("<") } ?: continue
+        return m
+    }
+    return null
 }

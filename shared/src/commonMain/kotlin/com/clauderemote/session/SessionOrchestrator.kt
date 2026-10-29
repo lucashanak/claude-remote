@@ -243,6 +243,8 @@ class SessionOrchestrator(
 
     // Per-session context window usage (0-100) — owned by transcriptService.
     val contextPercents: kotlinx.coroutines.flow.StateFlow<Map<String, Int>> get() = transcriptService.contextPercents
+    /** Model id each session's latest answer came from — see TranscriptService.activeModels. */
+    val activeModels: kotlinx.coroutines.flow.StateFlow<Map<String, String>> get() = transcriptService.activeModels
 
     // Per-session SSH latency (ms) — owned by serverHealthService.
     val latencies: kotlinx.coroutines.flow.StateFlow<Map<String, Long>> get() = serverHealthService.latencies
