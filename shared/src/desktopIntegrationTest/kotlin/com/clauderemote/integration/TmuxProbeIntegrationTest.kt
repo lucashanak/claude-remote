@@ -70,21 +70,24 @@ class TmuxProbeIntegrationTest {
         val encoded = folder.absolutePath.replace(Regex("[^a-zA-Z0-9]"), "-")
         val transcript = File(fixture.home, ".claude/projects/$encoded/$uuid.jsonl")
 
-        assertFalse(
+        assertEquals(
+            false,
             probes.probeTranscriptExists(manager, folder.absolutePath, uuid),
-            "must be false before the transcript exists (fail-closed)",
+            "must be false before the transcript exists",
         )
 
         transcript.parentFile.mkdirs()
         transcript.writeText("""{"type":"user","message":{"role":"user","content":"hi"}}""" + "\n")
-        assertTrue(
+        assertEquals(
+            true,
             probes.probeTranscriptExists(manager, folder.absolutePath, uuid),
             "must be true once ${transcript.absolutePath} exists",
         )
 
         // A DIFFERENT uuid in the same project dir must still be false — proves the
         // probe matches the uuid, not merely the directory.
-        assertFalse(
+        assertEquals(
+            false,
             probes.probeTranscriptExists(manager, folder.absolutePath, UUID.randomUUID().toString()),
             "an unrelated uuid must not be reported as present",
         )

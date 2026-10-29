@@ -1088,7 +1088,10 @@ class SessionOrchestrator(
             stillTracked = { fetchCloseState()?.tracked ?: true },
             hasLivePeers = { serverHasOtherLiveSession(sshManager, session.tmuxSessionName) },
             hasTranscript = {
-                tmuxProbes.probeTranscriptExists(sshManager, session.folder, session.claudeSessionId!!)
+                // Unknown counts as "has one": a session with a uuid has almost
+                // always been spoken to, and `--session-id` against an existing
+                // conversation is refused outright.
+                tmuxProbes.probeTranscriptExists(sshManager, session.folder, session.claudeSessionId!!) ?: true
             },
         )
 

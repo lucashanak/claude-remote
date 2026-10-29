@@ -304,7 +304,13 @@ object ClaudeConfig {
         // the same prefix-match data-loss bug as kill-session above (measured
         // on tmux 3.5a: plain `-t` would respawn/send into a "name-2" sibling).
         val paneTarget = sq("=" + tmuxSessionName + ":")
-        return "tmux respawn-pane -k -t $paneTarget 2>/dev/null; " +
+        // The respawn names its command, a plain login shell. Bare, it reruns the
+        // pane's START command — and a pane rebuilt by restore.sh was started as
+        // `claude --resume <uuid>` under the account it had THEN. That claude
+        // came back up on the old login, and the send-keys below then typed the
+        // launch line into Claude's prompt and pressed Enter: the account never
+        // changed and Claude received a shell command as a message.
+        return "tmux respawn-pane -k -t $paneTarget 'bash -l' 2>/dev/null; " +
                 "sleep 0.4; " +
                 "tmux send-keys -t $paneTarget ${sq(loginRun)} Enter"
     }

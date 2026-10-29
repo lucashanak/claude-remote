@@ -311,7 +311,7 @@ class ClaudeConfigTest {
         // nesting this builder produces. The target is now the pane form
         // '=name:' (exact-match '=' plus the trailing ':' pane-target requires).
         assertEquals(
-            "tmux respawn-pane -k -t '=bob'\\''s session:' 2>/dev/null; sleep 0.4; " +
+            "tmux respawn-pane -k -t '=bob'\\''s session:' 'bash -l' 2>/dev/null; sleep 0.4; " +
                 "tmux send-keys -t '=bob'\\''s session:' 'bash -lc '\\''cd \"\$HOME\"; cd " +
                 "'\\''\\'\\'''\\''/proj'\\''\\'\\'''\\'' && claude --allow-dangerously-skip-permissions " +
                 "--resume uuid-1'\\''' Enter",
@@ -332,6 +332,19 @@ class ClaudeConfigTest {
         )
         assertTrue("tmux respawn-pane -k -t '=proj--cashy:' " in cmd)
         assertTrue("tmux send-keys -t '=proj--cashy:' " in cmd)
+    }
+
+    /**
+     * A pane rebuilt by restore.sh STARTS as `claude --resume …` under the
+     * account it had then. A bare respawn reran that, and the launch line was
+     * typed into Claude's prompt. The respawn must name a plain shell.
+     */
+    @Test
+    fun buildRestartCommand_respawnsIntoAPlainShellNotThePanesStartCommand() {
+        val cmd = ClaudeConfig.buildRestartCommand(
+            "proj--cashy", "/proj", ClaudeMode.NORMAL, ClaudeModel.DEFAULT, "uuid-1"
+        )
+        assertTrue("tmux respawn-pane -k -t '=proj--cashy:' 'bash -l' " in cmd, cmd)
     }
 
     @Test

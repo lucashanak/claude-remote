@@ -215,13 +215,18 @@ internal class TmuxProbes(
      * `$HOME`, then every `/` becomes `-` (matches Claude Code's on-disk layout
      * under `~/.claude/projects/`).
      *
-     * Fail-closed (returns false on probe error) so we don't try a `--resume`
-     * that we can't verify — it's safer to start fresh than to crash with
-     * "No conversation found".
+     * NULL when the probe could not answer (no session, channel timeout). It
+     * used to say false then, and false is not a safe guess: callers launch
+     * `--session-id` on it, which Claude refuses for an EXISTING conversation
+     * ("Session ID … is already in use") and leaves the pane a dead prompt.
+     * That is how an account switch during a flaky link killed a live
+     * conversation — the caller's own "probe failed → let the server decide"
+     * branch never ran, because this function swallowed the failure. Each
+     * caller now chooses what an unknown means for it.
      */
-    fun probeTranscriptExists(sshManager: SshManager, folder: String, uuid: String): Boolean {
+    fun probeTranscriptExists(sshManager: SshManager, folder: String, uuid: String): Boolean? {
         return try {
-            val sshSession = sshManager.getSession() ?: return false
+            val sshSession = sshManager.getSession() ?: return null
             val escapedFolder = folder.replace("'", "'\\''")
             val cmd = """
                 F='$escapedFolder'
@@ -241,10 +246,14 @@ internal class TmuxProbes(
             ch.connect(1500)
             val out = input.bufferedReader().readText().trim()
             ch.disconnect()
-            out.endsWith("YES")
+            when {
+                out.endsWith("YES") -> true
+                out.endsWith("NO") -> false
+                else -> null // closed before answering: unknown, not "no"
+            }
         } catch (e: Exception) {
             FileLogger.error(TAG, "Transcript probe failed for $uuid in $folder: ${e.message}", e)
-            false
+            null
         }
     }
 
