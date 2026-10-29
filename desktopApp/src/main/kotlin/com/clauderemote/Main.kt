@@ -480,6 +480,14 @@ fun main() = application {
     // Resurrect persisted tabs from previous app run before showing the window
     // so the user sees their sessions immediately (status DISCONNECTED while
     // reconnect spins up in the background, scoped to the orchestrator).
+    // Which build a mirrored log came from — without it there was no way to
+    // tell whether a reported run already had a given fix or probe.
+    FileLogger.log(
+        "Desktop",
+        "Started v${System.getProperty("jpackage.app-version") ?: "dev"} " +
+            "os=${System.getProperty("os.name")} ${System.getProperty("os.version")} " +
+            "java=${System.getProperty("java.runtime.version")}"
+    )
     sessionOrchestrator.restoreAndReconnect()
 
     Window(
@@ -1785,31 +1793,32 @@ private fun isReddishFgJedi(fg: TerminalColor?): Boolean {
 }
 
 /**
- * Logs what a mouse press looks like at each layer while the window is in
- * macOS full screen, where session rows were reported hit one row ABOVE the
- * cursor. Not reproducible off a Mac, so it records instead of guessing:
- * the OS pointer, the AWT event, the window insets and the content pane
- * origin (AWT side), next to the position Compose received
- * ([onComposePress]). Whichever pair disagrees names the layer that adds the
- * offset. Capped per full-screen entry so it can't flood the mirrored log.
+ * Logs what a mouse press looks like at each layer, for the macOS full-screen
+ * click offset (session rows hit one row ABOVE the cursor). Not reproducible
+ * off a Mac, so it records instead of guessing: the OS pointer, the AWT event,
+ * the window insets and the content pane origin (AWT side), next to the
+ * position Compose received ([onComposePress]). Whichever pair disagrees names
+ * the layer that adds the offset.
+ *
+ * Armed by any change of window bounds, NOT by a "window == screen" test: on a
+ * notched MacBook a full-screen window sits below the camera housing and never
+ * matches the screen rect, which is exactly how the first version of this
+ * probe stayed silent. Capped per bounds change so it can't flood the log.
  */
 private object FullscreenClickProbe {
-    private const val MAX_PER_ENTRY = 12
+    private const val MAX_PER_ENTRY = 8
     @Volatile private var window: java.awt.Window? = null
     @Volatile private var remaining = 0
-    @Volatile private var wasFull = false
+    @Volatile private var lastBounds: java.awt.Rectangle? = null
     private var listener: java.awt.event.AWTEventListener? = null
-
-    private fun isFull(w: java.awt.Window): Boolean {
-        val screen = w.graphicsConfiguration?.bounds ?: return false
-        return w.bounds == screen
-    }
 
     private fun describe(w: java.awt.Window): String {
         val content = (w as? javax.swing.JFrame)?.contentPane
         val contentOrigin = try { content?.locationOnScreen } catch (_: Exception) { null }
-        return "window=${w.bounds} screen=${w.graphicsConfiguration?.bounds} insets=${w.insets} " +
-            "contentOnScreen=$contentOrigin contentSize=${content?.size} " +
+        val screenInsets = try { java.awt.Toolkit.getDefaultToolkit().getScreenInsets(w.graphicsConfiguration) } catch (_: Exception) { null }
+        return "window=${w.bounds} screen=${w.graphicsConfiguration?.bounds} screenInsets=$screenInsets " +
+            "insets=${w.insets} contentOnScreen=$contentOrigin contentSize=${content?.size} " +
+            "extState=${(w as? java.awt.Frame)?.extendedState} " +
             "scale=${w.graphicsConfiguration?.defaultTransform?.scaleY}"
     }
 
@@ -1819,13 +1828,13 @@ private object FullscreenClickProbe {
             val me = ev as? java.awt.event.MouseEvent ?: return@AWTEventListener
             if (me.id != java.awt.event.MouseEvent.MOUSE_PRESSED) return@AWTEventListener
             val win = window ?: return@AWTEventListener
-            val full = isFull(win)
-            if (full && !wasFull) {
+            val bounds = win.bounds
+            if (bounds != lastBounds) {
+                lastBounds = bounds
                 remaining = MAX_PER_ENTRY
-                FileLogger.log("FsProbe", "entered full screen: ${describe(win)}")
+                FileLogger.log("FsProbe", "window geometry: ${describe(win)}")
             }
-            wasFull = full
-            if (!full || remaining <= 0) return@AWTEventListener
+            if (remaining <= 0) return@AWTEventListener
             remaining--
             val pointer = try { java.awt.MouseInfo.getPointerInfo()?.location } catch (_: Exception) { null }
             val inWindow = javax.swing.SwingUtilities.convertPoint(me.component, me.point, win)
@@ -1835,8 +1844,9 @@ private object FullscreenClickProbe {
                 "FsProbe",
                 "awt press src=${me.component?.javaClass?.simpleName} event=${me.point} " +
                     "onScreen=(${me.xOnScreen},${me.yOnScreen}) pointer=$pointer " +
-                    "inWindow=$inWindow inContent=$inContent ${describe(win)}"
+                    "inWindow=$inWindow inContent=$inContent"
             )
+            pendingCompose = true
         }
         listener = l
         try {
@@ -1852,11 +1862,13 @@ private object FullscreenClickProbe {
         window = null
     }
 
+    /** Set by the AWT press just logged, so its Compose twin is logged too. */
+    @Volatile private var pendingCompose = false
+
     /** Compose-side press, in px of the root; also logged in dp for comparison. */
     fun onComposePress(x: Float, y: Float, density: Float) {
-        val w = window ?: return
-        if (!isFull(w) || remaining <= 0) return
+        if (!pendingCompose) return
+        pendingCompose = false
         FileLogger.log("FsProbe", "compose press px=(${x.toInt()},${y.toInt()}) dp=(${(x / density).toInt()},${(y / density).toInt()})")
     }
 }
-
