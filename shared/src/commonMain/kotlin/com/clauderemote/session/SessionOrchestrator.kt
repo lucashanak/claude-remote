@@ -1850,7 +1850,11 @@ class SessionOrchestrator(
         # bounded wait — NEVER block forever (the acute deadlock symptom). On
         # timeout emit a marker and bail cleanly (→ SSH fallback), and because the
         # flock process exits at 5s it can't accumulate as a stuck waiter.
-        exec 9>"${'$'}CR/etserver.lock"
+        # etserver.start.lock, not etserver.lock: builds up to 1.0.553 left a
+        # background subshell holding etserver.lock for the daemon's whole life
+        # (see the start below), so a server that ran them keeps that lock taken
+        # until the next reboot. A fresh name makes this build work there at once.
+        exec 9>"${'$'}CR/etserver.start.lock"
         flock -w 5 9 || { echo ET_LOCK_TIMEOUT; exit 0; }
         NEED_START=1
         if [ -f "${'$'}CR/etserver.port" ] && pgrep -f "${'$'}CR/etserver" >/dev/null 2>&1; then
@@ -1872,16 +1876,20 @@ class SessionOrchestrator(
           while ss -tln 2>/dev/null | grep -q ":${'$'}PORT "; do PORT=${'$'}((PORT+1)); done
           # Start the daemon ANCHORED under the user systemd slice (like the tmux
           # server) so it survives THIS ephemeral SSH-exec scope's teardown, with
-          # the lock fd CLOSED (9>&-) and stdin detached (</dev/null). The `9>&-`
-          # is the core deadlock fix: the daemon must NOT inherit fd 9, or it holds
-          # the flock for its whole life and every later ensureEtServer blocks on
-          # `flock` → 15s timeout → ET always fell back to SSH and leaked stuck
-          # bash/flock. Fall back to `setsid nohup` when systemd-run is absent.
-          # Backgrounded (trailing &) so this script never blocks on the long-lived
-          # daemon; systemd-run --scope stays alive alongside etserver, so the `||`
-          # fallback only fires when systemd-run itself is unavailable.
-          systemd-run --user --scope --quiet "${'$'}CR/etserver" --port "${'$'}PORT" --serverfifo "${'$'}CR/et.sock" </dev/null >"${'$'}CR/etserver.log" 2>&1 9>&- ||
-            setsid nohup "${'$'}CR/etserver" --port "${'$'}PORT" --serverfifo "${'$'}CR/et.sock" </dev/null >"${'$'}CR/etserver.log" 2>&1 9>&- &
+          # stdin detached and the lock fd 9 CLOSED. Nothing that outlives this
+          # script may keep fd 9, or it holds the flock and every later
+          # ensureEtServer times out (ET_LOCK_TIMEOUT → SSH fallback).
+          # The redirections sit on the backgrounded { } group, not on the two
+          # commands: `A 9>&- || B 9>&- &` forks a subshell for the whole list,
+          # and that subshell kept fd 9 while it waited on etserver — for the
+          # daemon's entire life. On a backgrounded group the redirections run
+          # inside the forked subshell itself, so it closes fd 9 too.
+          # systemd-run --scope execs etserver in place, so the `||` fallback to
+          # `setsid nohup` only fires when systemd-run itself is unavailable.
+          {
+            systemd-run --user --scope --quiet "${'$'}CR/etserver" --port "${'$'}PORT" --serverfifo "${'$'}CR/et.sock" ||
+              setsid nohup "${'$'}CR/etserver" --port "${'$'}PORT" --serverfifo "${'$'}CR/et.sock"
+          } </dev/null >"${'$'}CR/etserver.log" 2>&1 9>&- &
           echo "${'$'}PORT" > "${'$'}CR/etserver.port"
           # Wait for the serverfifo socket (up to ~6s) instead of a blind `sleep 1`
           # — the et.sock race caused "No such file or directory" bootstraps.
