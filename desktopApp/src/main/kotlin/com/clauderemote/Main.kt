@@ -335,6 +335,7 @@ fun main() = application {
     val prefs = PlatformPreferences()
     val serverStorage = ServerStorage(prefs)
     val appSettings = AppSettings(prefs)
+    appSettings.publishCommFlags()
     val folderPolicyStorage = com.clauderemote.storage.FolderPolicyStorage(prefs)
     val accountColorStorage = com.clauderemote.storage.AccountColorStorage(prefs)
     val tabManager = TabManager()

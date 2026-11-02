@@ -61,6 +61,16 @@ class ServerTransportPool(private val serverStorage: ServerStorage) {
     fun anyUsableSession(): Session? = transports.firstOrNull { it.usable }?.session
 
     /**
+     * Seam: set the keepalive interval (MILLISECONDS) on every usable
+     * transport. Nothing calls it yet — [ConnectionRegistry.setKeepAliveIntervalAll]
+     * still goes through the SshManagers; the pool work will apply the pool-wide rule
+     * (including to newly connected transports) and re-point the registry.
+     */
+    fun setKeepAlive(ms: Int) {
+        transports.forEach { if (it.usable) try { it.session.setServerAliveInterval(ms) } catch (_: Exception) {} }
+    }
+
+    /**
      * Lease a connected transport for [server], connecting one if needed.
      * [lessee] identifies the holder for [release].
      */

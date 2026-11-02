@@ -93,6 +93,8 @@ kotlin {
             implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.7.3")
             implementation("com.github.mwiede:jsch:0.2.21")
         }
+        // LiveFileCanary (testsupport/) is shared with desktopTest; its self-test lives elsewhere.
+        defaultSourceSet.kotlin.srcDir("src/desktopTest/kotlin/com/clauderemote/testsupport")
     }
 }
 
@@ -114,6 +116,23 @@ tasks.named<Test>("desktopTest") {
         .withPropertyName("tmuxTargetScanSources")
         .withPathSensitivity(PathSensitivity.RELATIVE)
         .ignoreEmptyDirectories()
+}
+
+// HARD SAFETY INVARIANT for EVERY Test task (desktopTest, integrationTest, Android
+// unit tests): this dev box runs the user's live Claude sessions on the DEFAULT tmux
+// socket and the tests themselves execute inside one of those sessions, so the JVM
+// inherits TMUX/TMUX_PANE. A set TMUX *overrides* TMUX_TMPDIR, and without TMUX the
+// default socket is `$TMUX_TMPDIR/tmux-UID/default` — with TMUX_TMPDIR unset that is
+// the LIVE server. So: strip both variables and point TMUX_TMPDIR at a private
+// directory under build/. Any test (or hook-ev.sh) that runs `tmux` then talks to an
+// empty private server at worst. A fixture that sets its own TMUX_TMPDIR for a child
+// process (SshdFixture) keeps precedence over this one.
+tasks.withType<Test>().configureEach {
+    val tmuxTmp = layout.buildDirectory.dir("tmp/test-tmux")
+    environment.remove("TMUX")
+    environment.remove("TMUX_PANE")
+    environment("TMUX_TMPDIR", tmuxTmp.get().asFile.absolutePath)
+    doFirst { tmuxTmp.get().asFile.mkdirs() }
 }
 
 // `./gradlew :shared:integrationTest` — the slow lane. Not wired into `check`
@@ -149,14 +168,8 @@ val integrationTest by tasks.registering(Test::class) {
     outputs.upToDateWhen { false }
     outputs.cacheIf { false }
 
-    // HARD SAFETY INVARIANT. This dev box runs the user's live Claude sessions
-    // on the DEFAULT tmux socket, and the tests themselves execute inside one of
-    // those sessions — so the JVM inherits TMUX/TMUX_PANE. A set TMUX
-    // *overrides* TMUX_TMPDIR, which means a single stray `tmux kill-server`
-    // would destroy real work. Strip them from the test JVM here, and the
-    // fixture strips them again from every child process it spawns.
-    environment.remove("TMUX")
-    environment.remove("TMUX_PANE")
+    // TMUX/TMUX_PANE/TMUX_TMPDIR of the test JVM: see tasks.withType<Test>() above;
+    // the fixture strips TMUX again from every child process it spawns.
 
     // The CI workflow uploads these paths on failure; keep them where it looks.
     reports.junitXml.outputLocation.set(layout.buildDirectory.dir("test-results/integrationTest"))

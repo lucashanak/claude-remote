@@ -280,6 +280,7 @@ User preferences grouped by category:
 | Terminal | `fontSize` (8-32), `colorScheme`, `scrollback` (default 10000) |
 | Claude | `defaultMode`, `defaultModel` |
 | Connection | `defaultPort`, `connectionType`, `autoReconnect`, `connectTimeout` |
+| Connection (experimental) | `comm_pool`, `comm_exec`, `comm_hooks`, `comm_lazy`, `comm_fg_deadlink`, `comm_warm_tabs` (5-8), `comm_bg_park_grace_s` (10-3600), `comm_legacy_servers` — see [connection.md](connection.md#communication-redesign-flags-and-seams) |
 | UI (Android) | `suppressSystemKeyboard`, `hapticFeedback`, `themeMode` |
 | Security | `biometricLockEnabled` |
 
@@ -307,7 +308,7 @@ as before and it delegates to the services.
 | `ConnectionRegistry` | Per-session SSH/Mosh transports, per-server transport pools + connect gates, tab→server lookups. The seam every service uses to reach a live transport. |
 | `TransportResolver` | Tailscale/Cloudflare/direct transport selection (TTL cache, cooldown/fail-streak, early-death accounting) + connection-label state. |
 | `TmuxProbes` | Low-level tmux/shell primitives: `kickRedraw` + client refresh, pane-geometry probe, session/transcript existence probes, shell-prompt wait. |
-| `RemoteExec` (fn) | `execReadWithWatchdog` — one-shot exec with a hard wall-clock bound. |
+| `RemoteExec` (fn) | `execReadWithWatchdog` — one-shot exec with a hard wall-clock bound. The same file also holds the new `RemoteExec` / `ExecChannels` interfaces (see *Communication seams* below). |
 | `ServerHealthService` | Launcher reachability health + per-server latency polling. |
 | `GitStatusService` | Per-session git working-dir status (branch + dirty/ahead/behind). |
 | `UsageService` | 5h/week usage %, reset mins, usage tokens, ccusage polling. |
@@ -318,6 +319,28 @@ as before and it delegates to the services.
 | `ClaudeControlService` | User input send path + offline queue + Claude slash-control (model/effort/login/escape). |
 | `RemoteOpsService` | tmux copy-mode scroll + SFTP upload/download. |
 | `SessionPersistenceService` | Shared `sessions.json`, restore-script install, real-session-id refresh, forget/rename. |
+
+### Communication seams (stubs)
+
+New interfaces under `session/service/`, each with a production stub that keeps
+today's behaviour so the pieces behind them (transport pool, exec routing,
+reconcile, hooks) can be built in parallel without touching each other's files. They are reached through nullable
+`@Volatile` slots on `ConnectionRegistry` (`execSessions`, `execChannels`,
+`remoteExec`, `reconciler`, `bootstrap`; null = legacy) and the process-wide
+`CommFlags`. They are stubs: nothing in the app calls them yet.
+
+| Interface (file) | Stub | To be implemented in |
+|------------------|------|----------------|
+| `RemoteExec.run(serverId, cmd, stdin, totalMs, kind, paceStdin): ExecResult` (`RemoteExec.kt`) | `PooledRemoteExec` | transport pool |
+| `ExecChannels.use(serverId, kind, acquireTimeoutMs) { ch -> }` and `withPermit(...) { session -> }` (`RemoteExec.kt`) | `UngatedExecChannels` (no permits) | transport pool |
+| `ExecTransportManager` / `ExecSessionProvider`, `LinkState` (`ExecTransportManager.kt`) | `PooledExecTransportManager` | transport pool |
+| `ServerTransportPool.setKeepAlive(ms)`, `ExecTransportManager.setKeepAlive(ms)` | pool: applies to usable transports; manager stub: records it | transport pool |
+| `ServerBootstrap` (`ServerBootstrap.kt`) | `NoopServerBootstrap` | hooks bootstrap |
+| `ServerReconciler` (`ServerReconciler.kt`) | `LegacyServerReconciler` (executes today's forget rule) | reconcile |
+| `PersistenceClosures.recentlyClosedLocally(serverId, name, withinMs)` | `None` | reconcile |
+| `HookEventSink` | `NoOp` | hook-event reducer, wired in the orchestrator |
+| `HookCapContract` (CAP: per-config-dir `claude-remote-hookev.installed`, parser, verdict) | executable reference | reconcile reads, hooks install writes |
+| `CommLogFormat` (`data/60s` tail, `Attach` line) | final | emitted by the orchestrator / attach path |
 
 Services take their dependencies by constructor injection (the shared
 `CoroutineScope`, `ConnectionRegistry`, `TabManager`, an `isBackground` getter,

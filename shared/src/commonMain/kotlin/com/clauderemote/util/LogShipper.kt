@@ -78,14 +78,9 @@ class LogShipper(
         try {
             withContext(Dispatchers.IO) {
                 val ch = sess.openChannel("exec") as com.jcraft.jsch.ChannelExec
-                // Size-cap the remote file on each flush (10 MB → keep 5 MB
-                // tail) so a chatty install can't grow it unbounded.
-                ch.setCommand(
-                    "D=\"${'$'}HOME/.claude-remote/logs\"; mkdir -p \"${'$'}D\"; F=\"${'$'}D/$appId.log\"; " +
-                        "if [ -f \"${'$'}F\" ] && [ \"${'$'}(wc -c < \"${'$'}F\")\" -gt 10485760 ]; then " +
-                        "tail -c 5242880 \"${'$'}F\" > \"${'$'}F.tmp\" && mv \"${'$'}F.tmp\" \"${'$'}F\"; fi; " +
-                        "cat >> \"${'$'}F\""
-                )
+                // Size-cap the remote file on each flush (see REMOTE_CAP_BYTES) so a
+                // chatty install can't grow it unbounded.
+                ch.setCommand(remoteAppendCommand(appId))
                 val os = ch.outputStream
                 ch.connect(5_000)
                 try {
@@ -139,5 +134,28 @@ class LogShipper(
         private const val TAG = "LogShipper"
         private const val FLUSH_MS = 30_000L
         private const val MAX_LINES = 1000
+        /**
+         * Remote per-device log cap: above [REMOTE_CAP_BYTES] the file is cut back to
+         * its last [REMOTE_KEEP_BYTES]. Measured on a real install: 3.75 MB/day
+         * (7.96 MB in 2.12 days), so keeping 36 MB guarantees ~9.6 days of history
+         * right after a cut (the metrics need at least 7); a cut to half the cap would
+         * leave only ~5.3 days. The cap is 40 MB, a 4 MB hysteresis, so the cut (a
+         * rewrite of the whole file) happens about every 1.1 days instead of on every
+         * flush.
+         */
+        internal const val REMOTE_CAP_BYTES = 41_943_040L
+        internal const val REMOTE_KEEP_BYTES = 37_748_736L
+
+        /**
+         * Shell command run on the server for each flush: cap the log, then append
+         * stdin. The trim keeps the last [REMOTE_KEEP_BYTES] and drops the first
+         * (partial) line so the file starts on a line boundary.
+         */
+        internal fun remoteAppendCommand(appId: String): String =
+            "D=\"${'$'}HOME/.claude-remote/logs\"; mkdir -p \"${'$'}D\"; F=\"${'$'}D/$appId.log\"; " +
+                "if [ -f \"${'$'}F\" ] && [ \"${'$'}(wc -c < \"${'$'}F\")\" -gt $REMOTE_CAP_BYTES ]; then " +
+                "tail -c $REMOTE_KEEP_BYTES \"${'$'}F\" > \"${'$'}F.tmp\" && sed -i 1d \"${'$'}F.tmp\" && " +
+                "mv \"${'$'}F.tmp\" \"${'$'}F\"; fi; " +
+                "cat >> \"${'$'}F\""
     }
 }

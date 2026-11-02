@@ -38,6 +38,14 @@ internal class ConnectionRegistry(
     // jsch Sessions instead of each owning a TCP/WebSocket + KEX + auth.
     private val transportPools = java.util.concurrent.ConcurrentHashMap<String, ServerTransportPool>()
 
+    // --- Seam slots: null = legacy. The wiring step fills them, so no service constructor has to change. ---
+    /** Exec-session provider (ExecTransportManager). Null = legacy lookups. */
+    @Volatile var execSessions: ExecSessionProvider? = null
+    @Volatile var execChannels: ExecChannels? = null
+    @Volatile var remoteExec: RemoteExec? = null
+    @Volatile var reconciler: ServerReconciler? = null
+    @Volatile var bootstrap: ServerBootstrap? = null
+
     // --- SSH transports ---
     fun ssh(sessionId: String): SshManager? = connections[sessionId]
     fun putSsh(sessionId: String, mgr: SshManager) { connections[sessionId] = mgr }

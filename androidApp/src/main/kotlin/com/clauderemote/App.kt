@@ -2,6 +2,8 @@ package com.clauderemote
 
 import android.app.Application
 import android.util.Log
+import com.clauderemote.storage.AppSettings
+import com.clauderemote.storage.PlatformPreferences
 import com.clauderemote.util.FileLogger
 
 class App : Application() {
@@ -22,6 +24,10 @@ class App : Application() {
         } catch (_: Exception) { "?" }
 
         FileLogger.init(filesDir, appVersion)
+
+        // Every process of the app (UI, PhoneWearService) must see the user's
+        // communication flags, not the built-in defaults, before anything reads them.
+        AppSettings(PlatformPreferences(this)).publishCommFlags()
 
         // Catch uncaught exceptions
         val defaultHandler = Thread.getDefaultUncaughtExceptionHandler()

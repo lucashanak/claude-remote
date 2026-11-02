@@ -100,6 +100,58 @@ class AppSettings(private val prefs: KeyValueStore) {
         get() = prefs.getInt("ssh_connect_timeout", 15)
         set(value) = prefs.putInt("ssh_connect_timeout", value)
 
+    // Connection (experimental) — communication redesign flags (CommFlags).
+    // Raw switches; implications and server-side force-off are applied by
+    // CommFlags.resolve, never here.
+    var commPool: Boolean
+        get() = prefs.getBoolean("comm_pool", true)
+        set(value) = prefs.putBoolean("comm_pool", value)
+
+    var commExec: Boolean
+        get() = prefs.getBoolean("comm_exec", true)
+        set(value) = prefs.putBoolean("comm_exec", value)
+
+    var commHooks: Boolean
+        get() = prefs.getBoolean("comm_hooks", true)
+        set(value) = prefs.putBoolean("comm_hooks", value)
+
+    var commLazy: Boolean
+        get() = prefs.getBoolean("comm_lazy", false)
+        set(value) = prefs.putBoolean("comm_lazy", value)
+
+    var commFgDeadlink: Boolean
+        get() = prefs.getBoolean("comm_fg_deadlink", false)
+        set(value) = prefs.putBoolean("comm_fg_deadlink", value)
+
+    /** Stored as written; CommFlags clamps to 5..8 (and logs) when resolving. */
+    var commWarmTabs: Int
+        get() = prefs.getInt("comm_warm_tabs", com.clauderemote.session.service.CommFlags.WARM_TABS_DEFAULT)
+        set(value) = prefs.putInt("comm_warm_tabs", value)
+
+    var commBgParkGraceS: Int
+        get() = prefs.getInt("comm_bg_park_grace_s", com.clauderemote.session.service.CommFlags.BG_PARK_GRACE_DEFAULT_S)
+        set(value) = prefs.putInt("comm_bg_park_grace_s", value)
+
+    /**
+     * Server ids with every comm group OFF. No Settings UI yet. Stored as a
+     * comma-separated list in which `\` and `,` inside an id are backslash-escaped,
+     * so an id containing a comma survives the round trip (plain `a,b` lists written
+     * by older builds still parse the same way).
+     */
+    var commLegacyServers: Set<String>
+        get() = decodeIdSet(prefs.getString("comm_legacy_servers", ""))
+        set(value) = prefs.putString("comm_legacy_servers", encodeIdSet(value))
+
+    fun commFlagsRaw(): com.clauderemote.session.service.CommFlags.Raw =
+        com.clauderemote.session.service.CommFlags.Raw(
+            pool = commPool, exec = commExec, hooks = commHooks, lazy = commLazy,
+            fgDeadlink = commFgDeadlink, warmTabs = commWarmTabs, bgParkGraceS = commBgParkGraceS,
+            legacyServers = commLegacyServers,
+        )
+
+    /** Push the current switches into [com.clauderemote.session.service.CommFlags] (device defaults + per-server views). */
+    fun publishCommFlags() = com.clauderemote.session.service.CommFlags.set(commFlagsRaw())
+
     // UI
     var suppressSystemKeyboard: Boolean
         get() = prefs.getBoolean("suppress_system_keyboard", true)
@@ -386,4 +438,24 @@ class AppSettings(private val prefs: KeyValueStore) {
         crTerminalView = state.terminalView
         crTerminalScheme = state.terminalScheme
     }
+}
+
+internal fun encodeIdSet(ids: Set<String>): String =
+    ids.filter { it.isNotEmpty() }.joinToString(",") { it.replace("\\", "\\\\").replace(",", "\\,") }
+
+internal fun decodeIdSet(text: String): Set<String> {
+    val out = linkedSetOf<String>()
+    val cur = StringBuilder()
+    var i = 0
+    while (i < text.length) {
+        val ch = text[i]
+        when {
+            ch == '\\' && i + 1 < text.length -> { cur.append(text[i + 1]); i++ }
+            ch == ',' -> { cur.toString().trim().takeIf { it.isNotEmpty() }?.let(out::add); cur.clear() }
+            else -> cur.append(ch)
+        }
+        i++
+    }
+    cur.toString().trim().takeIf { it.isNotEmpty() }?.let(out::add)
+    return out
 }

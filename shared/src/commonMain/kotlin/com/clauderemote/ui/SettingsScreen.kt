@@ -17,6 +17,7 @@ import androidx.compose.ui.unit.dp
 import com.clauderemote.model.ClaudeMode
 import com.clauderemote.model.ClaudeModel
 import com.clauderemote.model.ConnectionType
+import com.clauderemote.session.service.CommFlags
 import com.clauderemote.storage.AppSettings
 import com.clauderemote.voice.WakeWordSettingsCard
 import com.clauderemote.ui.components.CRCard
@@ -388,6 +389,74 @@ fun SettingsScreen(
                 }
             }
 
+            // ── Connection (experimental) ───────────────────────────────────
+            // Communication-redesign switches. In this build they only feed
+            // CommFlags; the services behind them are seams that still run
+            // today's behaviour (see docs/connection.md), hence the labels.
+            SectionHeader("Connection (experimental)")
+            CRCard {
+                Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                    var commPool by remember { mutableStateOf(settings.commPool) }
+                    var commExec by remember { mutableStateOf(settings.commExec) }
+                    var commHooks by remember { mutableStateOf(settings.commHooks) }
+                    var commLazy by remember { mutableStateOf(settings.commLazy) }
+                    var commFg by remember { mutableStateOf(settings.commFgDeadlink) }
+                    var warmTabs by remember {
+                        mutableStateOf(settings.commWarmTabs.coerceIn(CommFlags.WARM_TABS_MIN, CommFlags.WARM_TABS_MAX))
+                    }
+                    val effective by CommFlags.deviceDefaults.collectAsState()
+
+                    // Shows what the code would actually do when the switch is on
+                    // but an implication turned the group off.
+                    @Composable
+                    fun EffectiveNote(group: String, on: Boolean) {
+                        if (!on || effective.isOn(group)) return
+                        val why = effective.notes.firstOrNull { it.startsWith("CommFlags: $group forced off because ") }
+                            ?.substringAfter("because ") ?: "a dependency is off"
+                        Text("Effective: off ($why)", style = CRType.monoTiny, color = CRTheme.colors.textDim)
+                    }
+
+                    SettingsSwitch(
+                        label = "Pooled transports (comm_pool) - no effect in this build",
+                        checked = commPool,
+                        onCheckedChange = { commPool = it; settings.commPool = it; settings.publishCommFlags() }
+                    )
+                    EffectiveNote(CommFlags.POOL, commPool)
+                    SettingsSwitch(
+                        label = "Exec channels (comm_exec) - no effect in this build",
+                        checked = commExec,
+                        onCheckedChange = { commExec = it; settings.commExec = it; settings.publishCommFlags() }
+                    )
+                    EffectiveNote(CommFlags.EXEC, commExec)
+                    SettingsSwitch(
+                        label = "Background hooks (comm_hooks) - no effect in this build",
+                        checked = commHooks,
+                        onCheckedChange = { commHooks = it; settings.commHooks = it; settings.publishCommFlags() }
+                    )
+                    EffectiveNote(CommFlags.HOOKS, commHooks)
+                    SettingsSwitch(
+                        label = "Lazy attach (comm_lazy) - no effect in this build",
+                        checked = commLazy,
+                        onCheckedChange = { commLazy = it; settings.commLazy = it; settings.publishCommFlags() }
+                    )
+                    EffectiveNote(CommFlags.LAZY, commLazy)
+                    SettingsSwitch(
+                        label = "Fast dead-link detection (comm_fg_deadlink) - no effect in this build",
+                        checked = commFg,
+                        onCheckedChange = { commFg = it; settings.commFgDeadlink = it; settings.publishCommFlags() }
+                    )
+                    EffectiveNote(CommFlags.FG_DEADLINK, commFg)
+                    SettingsSlider(
+                        label = "Warm tabs (comm_warm_tabs) - no effect in this build",
+                        value = warmTabs,
+                        range = CommFlags.WARM_TABS_MIN..CommFlags.WARM_TABS_MAX,
+                        onValueChange = { warmTabs = it },
+                        // Persist and publish once, when the drag ends.
+                        onValueChangeFinished = { settings.commWarmTabs = warmTabs; settings.publishCommFlags() },
+                    )
+                }
+            }
+
             // ── Notifications ───────────────────────────────────────────────
             SectionHeader("Notifications")
             CRCard {
@@ -643,6 +712,7 @@ private fun SettingsSlider(
     value: Int,
     range: IntRange,
     step: Int = 1,
+    onValueChangeFinished: (() -> Unit)? = null,
     onValueChange: (Int) -> Unit
 ) {
     val c = CRTheme.colors
@@ -657,6 +727,7 @@ private fun SettingsSlider(
         Slider(
             value = value.toFloat(),
             onValueChange = { onValueChange(it.toInt()) },
+            onValueChangeFinished = onValueChangeFinished,
             valueRange = range.first.toFloat()..range.last.toFloat(),
             steps = if (step > 1) ((range.last - range.first) / step - 1) else 0,
             colors = SliderDefaults.colors(

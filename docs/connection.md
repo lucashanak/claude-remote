@@ -296,6 +296,95 @@ Each session has a 256KB ring buffer for:
 - **Tab switching** — Replay buffered output when switching to a background tab
 - **Reconnection** — Restore terminal state after SSH drops
 
+## Communication redesign: flags and seams
+
+Experimental groups of the communication redesign. **In this build only the flags
+and the seams exist; every service behind them is a stub that delegates to the
+behaviour described above**, so switching any flag changes nothing yet. Settings ->
+*Connection (experimental)* edits them (each switch says "no effect in this build"
+and shows when an implication turned the group off). `CommFlags.deviceDefaults`
+(`StateFlow<Effective>`) is published by the Android `Application`, desktop `Main`
+and Settings on every change; code that acts for one server uses
+`CommFlags.effectiveFor(serverId)` / `effectiveFlow(serverId)`, never
+`deviceDefaults`.
+
+| Flag | Covers | Default |
+|------|--------|---------|
+| `comm_pool` | pool shell/exec role split, single-flight, exec transport manager | on |
+| `comm_exec` | exec routing, per-server reconcile, bootstrap, exec channel gate | on |
+| `comm_hooks` | background state from hooks | on |
+| `comm_lazy` | lazy attach | **off** |
+| `comm_fg_deadlink` | fast foreground dead-link detection | **off** |
+| `comm_warm_tabs` | warm tab count, clamped to 5-8 (a clamp is logged) | 6 |
+| `comm_bg_park_grace_s` | background park grace, clamped to 10-3600 s (a clamp is logged) | 120 |
+
+**Implications** (an invalid combination is downgraded and logged as
+`CommFlags: <x> forced off because <y>`): `exec => pool`; `hooks => pool and exec`;
+`lazy => pool and exec and hooks`; `fg_deadlink => pool`. Shell channels per
+transport: 8 only with `pool and exec`, otherwise today's 3.
+
+**Precedence** (what wins when they disagree), strongest first:
+1. the legacy set (`comm_legacy_servers`, server ids in the app preferences, no UI
+   yet): every group is off for those servers, whatever anything else says;
+2. server-side force-off for that server (below);
+3. the Settings switches, then the implications above.
+
+**Rollback ladder** (what to try, first resort first):
+1. Turn the group off in Settings on the device.
+2. On the server, `~/.claude-remote/client-flags.json`, e.g.
+   `{"off":["lazy","hooks"]}` (group names `pool exec hooks lazy fg_deadlink`),
+   turns groups off for every device talking to that server. The bootstrap applies
+   it per server through `CommFlags.applyServerOff(serverId, set)`; it can only turn
+   groups off. Whatever is forced off for a server is logged once per change as
+   `[<serverId>] CommFlags: <x> forced off because ...`.
+3. Put the server in the legacy set on a device (all groups off, no matter what).
+4. Revert the commit.
+
+**Hook installation is an explicit action**: the hooks bootstrap must not write
+anything to a server unless asked. The request is a one-shot event per server
+(`CommFlags.hookInstallRequests: SharedFlow<serverId>`, raised with
+`CommFlags.requestHooksInstall(serverId)`); nothing is stored, so a request made
+while nobody listens is gone and cannot turn into a later install. The Settings
+control that raises it comes with the hooks bootstrap.
+
+**Log formats** (`CommLogFormat`): the `data/60s:` line gets
+` | attached=<n> warm=<n> parked=<n> exec=<n>` appended at the END (prefix
+unchanged; parse `key=value` tolerantly; `warm/parked/exec` are 0 until their
+features land). The attach line is
+`Attach <sid> kind=cold|warm ms=<n> phase=shell=<ms>,prompt=<ms>,decide=<ms>,attach=<ms>,firstByte=<ms>`
+(the phase value is a list of `name=<ms>` items; absent phases are omitted, no
+phases at all is `phase=-`).
+The remote per-device log (`~/.claude-remote/logs/<install>.log`) is capped at 40 MB
+and cut back to its last 36 MB on a line boundary (at the measured 3.75 MB/day that
+is about 9.6 days of history after a cut).
+
+**Contract details the implementations rely on** (`RemoteExec.kt`, `HookCapContract.kt`):
+- `RemoteExec.run` returns a complete result or throws the typed
+  `ExecUnavailable(reason)`, never null and never a partial result: `NOT_UP`,
+  `GATE_TIMEOUT` (no permit in time), `TIMEOUT` (the wall-clock bound, enforced
+  independently of the caller, so cancelling the caller does not lift it), `REFUSED`
+  (the server refused the channel) and `IO` (stdin/stdout broke). `kind` must be
+  SHORT or LONG.
+- `ExecChannels.use` is scoped: the channel is disconnected and the permit released
+  on exit, permits reset with the transport generation. `withPermit` holds one permit
+  for a block that opens its own channels and gets the live session.
+- CAP (hooks active for a pane) = the shallowest process whose comm is exactly
+  `claude` in the pane's process subtree (the pane's own process included) started
+  strictly after the ten-digit epoch in `<CLAUDE_CONFIG_DIR>/claude-remote-hookev.installed`
+  (one marker per config dir, written only AFTER the settings.json that carries the
+  hooks was replaced), that config dir's `settings.json` carries `claude-remote-ev v`,
+  and neither its `settings.json` nor `settings.local.json` sets `disableAllHooks`.
+  Unknown inputs give "unknown", never "no". Limits: project-level and managed
+  settings are not examined; start times have one-second resolution, so the strict
+  `>` can only err towards "not capable".
+
+**Measured on OpenSSH 9.2 / jsch 0.2.21:** a channel refused by `MaxSessions` surfaces
+as `JSchException("channel is not opened.")` with `exitStatus == 2`
+(SSH_OPEN_CONNECT_FAILED), not 1; sshd logs `no more sessions`. Key spill logic on
+the message and accept exit statuses 1 and 2. At `LogLevel VERBOSE` every opened
+shell/exec channel logs `Starting session: forced-command (config) '<wrap.sh>' for
+<user> from <ip> port <p> id <n>`.
+
 ## Port Forwarding
 
 Configured per server in `SshServer.portForwards`:

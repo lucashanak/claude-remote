@@ -225,6 +225,27 @@ internal class SshdFixture private constructor(
         return s
     }
 
+    // ------------------------------------------------------- sshd log counters
+
+    /**
+     * Number of session channels sshd has started so far. Measured on OpenSSH 9.2 at
+     * LogLevel VERBOSE (see SshdFixtureSelfTest): every shell/exec channel logs one
+     * `Starting session: forced-command (config) '<root>/wrap.sh' for <user> from
+     * 127.0.0.1 port <p> id <n>` line (ForceCommand is why it says forced-command,
+     * not exec/shell). A channel REFUSED by MaxSessions logs `no more sessions`
+     * instead and is not counted here.
+     */
+    fun sessionChannelOpens(): Int = sshdLogLines().count { it.contains("Starting session:") }
+
+    /** Channels refused because the connection hit `MaxSessions` (`no more sessions`). */
+    fun refusedChannelOpens(): Int = sshdLogLines().count { it.trim().endsWith("no more sessions") }
+
+    /** Completed key-auth handshakes (`Accepted publickey`), i.e. transports opened with the right key. */
+    fun acceptedHandshakes(): Int = sshdLogLines().count { it.contains("Accepted publickey for ") }
+
+    private fun sshdLogLines(): List<String> =
+        File(root, "sshd.log").let { if (it.isFile) it.readLines() else emptyList() }
+
     // --------------------------------------------------------------- diagnostics
 
     /** Copy sshd/restore/drift logs into [logDir] so CI can upload them. */
@@ -427,14 +448,14 @@ internal class SshdFixture private constructor(
          * Start a fresh sandboxed sshd. Retries port selection: `ServerSocket(0)`
          * has an unavoidable bind race, so losing it once must not fail the suite.
          */
-        fun start(): SshdFixture {
+        fun start(extraSshdConfig: String = ""): SshdFixture {
             check(isSupported) { "SshdFixture.start() on an unsupported box — $unsupportedReason" }
             runCatching { sweepStaleRoots() }
             var lastError: Throwable? = null
             repeat(3) {
                 val root = mktempShortDir()
                 try {
-                    return build(root)
+                    return build(root, extraSshdConfig)
                 } catch (e: Throwable) {
                     lastError = e
                     runCatching {
@@ -449,6 +470,14 @@ internal class SshdFixture private constructor(
             throw IllegalStateException("could not start sandboxed sshd", lastError)
         }
 
+        /** Where this distribution keeps the out-of-process `sftp-server` (Debian, Arch, Fedora/macOS layouts). */
+        internal fun sftpServerPath(): String? = listOf(
+            "/usr/lib/openssh/sftp-server",
+            "/usr/lib/ssh/sftp-server",
+            "/usr/libexec/openssh/sftp-server",
+            "/usr/libexec/sftp-server",
+        ).firstOrNull { File(it).canExecute() }
+
         private fun mktempShortDir(): File {
             val p = ProcessBuilder("mktemp", "-d", "/tmp/crit.XXXXXX")
                 .redirectErrorStream(true).start()
@@ -457,7 +486,7 @@ internal class SshdFixture private constructor(
             return File(out).also { it.setReadable(true, true); it.setExecutable(true, true) }
         }
 
-        private fun build(root: File): SshdFixture {
+        private fun build(root: File, extraSshdConfig: String): SshdFixture {
             val user = System.getProperty("user.name")
             root.chmod("700")
 
@@ -484,6 +513,7 @@ internal class SshdFixture private constructor(
             // wrap.sh IS the sandbox — see the class doc. Every command through
             // this sshd, including ones production code builds itself, runs here.
             val wrap = File(root, "wrap.sh")
+            val sftpServer = sftpServerPath()
             wrap.writeText(
                 """
                 #!/usr/bin/env bash
@@ -501,6 +531,13 @@ internal class SshdFixture private constructor(
                 cd "${'$'}HOME" || exit 1
                 printf '%s %s\n' "${'$'}(date -u +%FT%TZ)" "${'$'}{SSH_ORIGINAL_COMMAND:-<shell>}" \
                     >> '${root.absolutePath}/remote-commands.log' 2>/dev/null
+                # SFTP subsystem (m11): `Subsystem sftp internal-sftp` is force-commanded
+                # too, so sshd runs this wrapper with SSH_ORIGINAL_COMMAND=internal-sftp.
+                # Serve it with the out-of-process server, already inside the sandbox
+                # HOME exported above.
+                ${if (sftpServer != null) """if [ "${'$'}{SSH_ORIGINAL_COMMAND:-}" = "internal-sftp" ]; then
+                    exec '$sftpServer'
+                fi""" else "# no sftp-server binary found on this box: SFTP is not served"}
                 if [ -n "${'$'}{SSH_ORIGINAL_COMMAND:-}" ]; then
                     exec bash -c "${'$'}SSH_ORIGINAL_COMMAND"
                 fi
@@ -527,7 +564,7 @@ internal class SshdFixture private constructor(
                 Subsystem sftp internal-sftp
                 LogLevel VERBOSE
 
-                """.trimIndent(),
+                """.trimIndent() + extraSshdConfig.trim().let { if (it.isEmpty()) "" else "$it\n" },
             )
 
             val sshdLog = File(root, "sshd.log")

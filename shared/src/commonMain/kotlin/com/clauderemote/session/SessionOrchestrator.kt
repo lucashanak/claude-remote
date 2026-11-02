@@ -119,7 +119,10 @@ class SessionOrchestrator(
                     pRx = null; pTx = null
                     ""
                 }
-                FileLogger.log(TAG, "data/60s: $mode sessions=$sessions(et=$etCount) conn=$conn | content term=${dTerm}KB tr=${dTr}KB poll=${dPoll}KB$netStr")
+                FileLogger.log(TAG, com.clauderemote.session.service.CommLogFormat.data60sLine(
+                    "data/60s: $mode sessions=$sessions(et=$etCount) conn=$conn | content term=${dTerm}KB tr=${dTr}KB poll=${dPoll}KB$netStr",
+                    connectionRegistry,
+                ))
                 pTerm = term; pTr = tr; pPoll = pl
             }
         }
