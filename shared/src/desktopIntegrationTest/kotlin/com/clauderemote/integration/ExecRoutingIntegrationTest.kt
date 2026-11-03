@@ -160,8 +160,11 @@ class ExecRoutingIntegrationTest {
     @Test fun capVerdictFollowsSettingsJsonOfARunningClaudeWithoutRestartingIt() = runBlocking {
         val bin = File(fixture.home, "bin").apply { mkdirs() }
         val claude = File(bin, "claude")
-        File("/bin/sleep").copyTo(claude, overwrite = true); claude.setExecutable(true)
-        newTmux("claude-server-cap", "${claude.absolutePath} 300")
+        // argv[0] stays "sleep": a multicall coreutils (uutils, ubuntu-26.04) copied to the name "claude" dispatches
+        // on argv[0] and exits at once, so the pane would die and the tmux session never show up
+        val sleepBin = File(ProcessBuilder("bash", "-c", "command -v sleep").start().inputStream.bufferedReader().readText().trim())
+        sleepBin.copyTo(claude, overwrite = true); claude.setExecutable(true)
+        newTmux("claude-server-cap", "bash -c 'exec -a sleep ${claude.absolutePath} 300'")
         newTmux("claude-server-peer")
         waitUntil(5_000, "claude-named process") {
             ReconcileParse.parse(runBlocking { registry.execRead(serverId, ManifestCommands.reconcileAll(listOf("claude-server-cap")))!! }, json)

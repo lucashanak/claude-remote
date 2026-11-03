@@ -164,7 +164,8 @@ class ReconcileParseTest {
             val sleepBin = File(ProcessBuilder("bash", "-c", "command -v sleep").start().inputStream.bufferedReader().readText().trim())
             fun spawn(copyTo: File): Long {
                 copyTo.parentFile.mkdirs(); sleepBin.copyTo(copyTo, overwrite = true); copyTo.setExecutable(true)
-                val pb = ProcessBuilder(copyTo.path, "300").also { it.environment()["CLAUDE_CONFIG_DIR"] = cfg.path; it.environment()["HOME"] = home.path }
+                // argv[0] stays "sleep": a multicall coreutils (uutils, ubuntu-26.04) copied to another name dispatches on argv[0] and exits
+                val pb = ProcessBuilder("bash", "-c", "exec -a sleep \"\$0\" 300", copyTo.path).also { it.environment()["CLAUDE_CONFIG_DIR"] = cfg.path; it.environment()["HOME"] = home.path }
                 return pb.start().also { procs += it }.pid()
             }
             val claudePid = spawn(File(root, "real/claude"))
