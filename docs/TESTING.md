@@ -47,6 +47,13 @@ namespace only fail in a release build. Before pushing Kotlin changes:
 
 CI runs this in the same job as the tests.
 
+### Whole-build gates
+
+`:desktopApp:test` and `:androidApp:testDebugUnitTest` have no test sources today
+but run under the same isolation if one is added. `:desktopApp:compileKotlin`,
+`:wearApp:compileReleaseKotlin` and the Android compiles above complete the
+set run before a push.
+
 ### Integration lane (real sshd + real tmux)
 
 ```bash
@@ -71,8 +78,122 @@ declarations are visible to tests without widening their visibility.
 
 Tests must never read or write the developer's real `~/.claude-remote/` or
 `~/.claude/`. Storage is reached through the `KeyValueStore` interface and
-faked in tests — the desktop `PlatformPreferences` writes to
-`~/.claude-remote/settings.properties`, i.e. the developer's live settings.
+faked in tests. The desktop `PlatformPreferences` writes to
+`~/.claude-remote/settings.properties` (relative to `user.home`), which is why
+Gradle redirects `user.home` for every test JVM (next section).
+
+## Live-box safety (read this before touching test infrastructure)
+
+The box that runs the tests also hosts the developer's live Claude sessions
+(tmux on the DEFAULT socket, `~/.claude`, `~/.claude-remote`), and the tests are
+usually started from inside one of those sessions. Four layers keep a test
+from touching any of it.
+
+**1. Environment of every Test task (root `build.gradle.kts`).** One
+`subprojects { tasks.withType<Test>() }` block covers every module (shared
+`desktopTest` and `integrationTest`, `androidApp`, `desktopApp`, `wearApp`,
+`terminal-*`), so a new module cannot be forgotten:
+
+| Setting | Why |
+|---|---|
+| `TMUX`, `TMUX_PANE` removed | a set `TMUX` overrides `TMUX_TMPDIR` and points tmux at the live server |
+| `TMUX_TMPDIR=<root>/build/t/tmux` | without it the default socket is `/tmp/tmux-<uid>/default`, the LIVE server. The socket path `<dir>/tmux-<uid>/default` must fit `sun_path` (107 bytes); in a checkout too deep for that the directory falls back to `$java.io.tmpdir/crit-tmux-<hash>` |
+| `PATH` starts with `scripts/test-shims` | its `tmux` refuses the live socket (below) |
+| `HOME` and the system property `user.home` = `<root>/build/t/home/<project>-<task>` | Java ignores `$HOME`; code that falls back to the home directory (`PlatformPreferences`, `EtManager`) writes into the sandbox. Every Test task has its own directory, emptied (links removed as links) before the task runs, so state of an earlier run or of a parallel task cannot leak in |
+| `clauderemote.live.home` = the REAL home | `LiveFileCanary` keeps watching the real one |
+| `TRANSCRIPT_HARNESS_ROOT` = real `~/.claude/projects` (unless set) | `RealTranscriptHarnessTest` only READS it and would otherwise skip silently under the redirected home |
+
+Environment is not a Gradle task input, so the block also declares the
+isolation values (as paths relative to the checkout, so two checkouts share cache entries) and the shim as inputs: changing them re-runs the tests instead
+of restoring an old result. `DesktopTestEnvTest` (desktopTest) and
+`ProbeEnvIntegrationTest` (the integration JVM) assert the result; the latter
+exists because the integration task is registered by hand and a `withType` that
+is narrowed by mistake would otherwise go unnoticed.
+
+**2. The `tmux` shim (`scripts/test-shims/tmux`).** It works out which socket
+tmux would use (same precedence as tmux: `-S`, `-L`, `$TMUX`, then
+`$TMUX_TMPDIR/tmux-<uid>/default`), resolves symlinks and `..`, and exits 97
+when that socket lives in `/tmp/tmux-<uid>/` or when `-L default` is used;
+otherwise it execs the next real `tmux`. It stops a child that clears or
+rewrites its environment (`ProcessBuilder.environment().clear()`,
+`unset TMUX_TMPDIR`, `TMUX_TMPDIR=/tmp`, `-S /tmp/tmux-<uid>/default`).
+`TmuxShimTest` runs it against a fake tmux that prints `REACHED`, so the test
+cannot touch the live server even when the shim is broken. The shim knows the
+global flags that take a value (`-S`, `-L`, `-f`, `-T`, `-c`) so a `-S` after them is still seen. The
+environment variable `TMUX_SHIM_LIVE_DIR` (default `/tmp/tmux-<uid>`) is a seam for that test only: it lets the
+test model "a link to the live directory" with a fake directory inside its own temp root.
+
+*Limit, stated plainly:* the shim is a PATH entry. A child that calls the real
+binary by absolute path (`/usr/local/bin/tmux`) or rebuilds `PATH` without it
+(`env -i PATH=/usr/bin tmux ...`) AND has no private `TMUX_TMPDIR` still reaches
+the live server. Closing that needs another UID or a mount namespace; nothing
+short of that can. Test code must start `tmux` by name and keep the environment
+it was given (or the one `LiveFileCanary.GuardEnv` provides).
+
+**3. Deleting test trees: `safeDeleteTree`.** On 2026-11-02 a test left a link `dirlink -> /tmp` in its scratch
+directory and its tear-down called Kotlin's recursive delete, which FOLLOWS links to directories: part of `/tmp` was deleted,
+including the socket directory of the live tmux server (every session restarted). Rules that follow from it:
+
+- a test never creates a link that points outside its own temp root (model "a link to a live path" with a fake path inside the
+  root);
+- tests and fixtures never call the recursive delete of `java.io.File`; they call `safeDeleteTree(root)` from `testsupport`, which
+  removes links as links, and refuses (throws before touching anything) unless the root is strictly inside `java.io.tmpdir` (and not
+  in the live `tmux-<uid>` directory) or strictly below `build/t` or `build/tmp`. `NoFollowingDeleteInTestsSyntaxTest` fails the build
+  when any test source outside the helper uses the forbidden call;
+- the first run of changed test infrastructure goes into a private `/tmp`:
+  `unshare --user --map-root-user --mount sh -c 'mount -t tmpfs tmpfs /tmp && exec <gradle command>'` (uid 0 inside: the live-socket
+  path there is `/tmp/tmux-0`, so the canary's tmux part is idle in that run).
+
+**4. `LiveFileCanary` for tests that run server-side scripts** (hook merge,
+`hook-ev.sh`, `ManifestCommands`). `canary.guard(token, testHome, tempRoot) { env -> ... }`:
+the block uses `env.home` as HOME, starts children with `env.start(pb)` and puts
+the unique `token` in its input. Afterwards, **also when the block threw**, the
+canary compares a fingerprint of the live home taken before and after:
+
+- every entry under `~/.claude-remote`, `~/.cache/claude-remote` and `~/.claude`
+  by TYPE (directory, symlink and its TARGET, file) and SHA-256 of the CONTENT,
+  so a truncation, an atomic rename, a delete-and-recreate, a symlink replaced
+  by a regular file with the same bytes and a marker created in a config dir
+  (`claude-remote-hookev.installed`) all fail;
+- `*.credentials.json` is never opened: size + mtime + inode only;
+- append-only live files (`logs/`, `events`, top-level `*.log`) must still
+  exist and not shrink; while they keep their inode they keep their first 64 KiB (a file
+  replaced by another inode that did not shrink is tolerated: the log shipper trims through a rename);
+  over 64 MiB only size and inode are compared;
+- live-rewritten entries are only checked for existence and type (list below);
+  `~/.claude.json` likewise;
+- the token must appear in no walked file content (UTF-8, UTF-16LE/BE, and base64 in each of its three alignments, which is how
+  `hook-ev.sh` writes names to `events`) and no path name;
+- the live tmux server, read-only, before and after: the socket FILE must still exist (a recursive delete through a link into `/tmp`
+  once removed it), no session may have vanished and not all clients may be gone;
+- every process started through `env.start(...)` and every process that carries the
+  guard's `CRIT_CANARY_TAG` environment variable (a detached grandchild inherits it) is
+  killed BEFORE the comparison, so nothing writes after the check.
+
+If the block and the check both fail the check's error is thrown and the block's
+exception is attached as suppressed; a test that expects the block to throw
+cannot hide damage. A failure that a live process could have caused says
+`FALSE ALARM` in its message: rerun to confirm. The token checks never are.
+
+*What is not watched (measured, not guessed).* Over 10 minutes of idle on the
+live box (21 samples 30 s apart, 69 885 entries), plus a scan of what changed over the last 10 hours of use, these changed
+on their own and are therefore reduced to existence/type: in `~/.claude` and in every
+`~/.claude-remote/accounts/<a>` — `projects`, `hud`, `backups`, `skills/synced`, `plugins/oh-my-claudecode` and `plugins/synced`,
+`.session-stats.json`, `.claude.json`, `policy-limits.json*`, `remote-settings.json*`, `sessions`, `state`, `cache`, `file-history`,
+`session-env`, `teams`, `mcp-needs-auth-cache.json`, plus the names the brief gave (`history.jsonl`, `statsig`, `todos`,
+`shell-snapshots`); in `~/.claude-remote` — `clients`, `usage`, `sessions.lock`; in `~/.cache/claude-remote` — `notify`.
+Trees that were only guessed to be live-written (`paste-cache`, `debug`, `tasks`, `.omc`, `stats-cache.json`,
+`gh-pr-status-cache.json`) are compared strictly; a false alarm there is rerun and, if real, measured and added.
+Also existence/type only: `~/.claude-remote/sessions.json*`, `sessions.restore.json*`, `forgotten*` (the app and the drift script
+rewrite them and create new entries beside them), `state/` and `mcp-needs-auth-cache.json` (also in the accounts), and below `skills`
+only `synced`, below `plugins` only `synced` and `oh-my-claudecode`; every other `plugins` file contributes its path name to the token
+search and `hooks*.json` outside `marketplaces` is compared by content (they inject hooks into every live session). User `skills`,
+`settings*.json` and the rest of a config dir are compared by content.
+Temp and lock files (`*.tmp.*`, `*.lock`, `.drift.*`) are not recorded because they come and go, and one that vanishes
+while the tree is walked is skipped; they are still searched for the token. Files over 64 MiB are compared by size/mtime/inode.
+Known blind spots: an in-place change of a credentials file that keeps size, mtime and inode;
+anything written below the live-rewritten trees; a test that swallows the canary's
+`AssertionError` itself (`assertFailsWith<AssertionError>` around `guard`).
 
 ## CI
 

@@ -1,8 +1,10 @@
 package com.clauderemote.canarytest
 
 import com.clauderemote.testsupport.LiveFileCanary
+import com.clauderemote.testsupport.safeDeleteTree
 import java.io.File
 import java.nio.file.Files
+import java.util.Base64
 import java.util.concurrent.TimeUnit
 import kotlin.test.AfterTest
 import kotlin.test.BeforeTest
@@ -13,6 +15,7 @@ import kotlin.test.assertNotEquals
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
+import kotlin.test.fail
 
 /** Self-test of [LiveFileCanary] against a FAKE live home — never touches the real one. */
 class LiveFileCanaryTest {
@@ -33,12 +36,18 @@ class LiveFileCanaryTest {
         File(live, ".claude/settings.json").writeText("{\"hooks\":{}}")
         File(live, ".claude-remote/accounts/x/settings.json").writeText("{\"acct\":1}")
         File(live, ".claude-remote/restore.sh").writeText("#!/bin/sh\n")
+        // like the box: account dirs are symlinks into ~/.claude
+        File(live, ".claude/hooks").mkdirs()
+        File(live, ".claude/hooks/a.sh").writeText("#!/bin/sh\necho a\n")
+        File(live, ".claude/projects").mkdirs()
+        File(live, ".claude.json").writeText("{\"n\":1}")
+        Files.createSymbolicLink(File(live, ".claude-remote/accounts/x/hooks").toPath(), File(live, ".claude/hooks").toPath())
         testRoot = File(base, "test").apply { mkdirs() }
         testHome = File(testRoot, "home").apply { mkdirs() }
-        canary = LiveFileCanary(live)
+        canary = LiveFileCanary(live, tmuxSocket = null) // the tests below never talk to a tmux server unless they start their own
     }
 
-    @AfterTest fun tearDown() { base.deleteRecursively() }
+    @AfterTest fun tearDown() { safeDeleteTree(base) }
 
     private fun guard(block: (LiveFileCanary.GuardEnv) -> Unit) = canary.guard(token, testHome, testRoot, block)
 
@@ -161,11 +170,200 @@ class LiveFileCanaryTest {
         assertTrue(trunc.message!!.contains("modified"))
     }
 
-    @Test fun credentialsFilesAreNeverOpenedButTheirNamesAreStillChecked() {
+
+    // ---- ways of damaging the live home that the first version of the canary did not notice ----
+
+    private fun failure(block: (LiveFileCanary.GuardEnv) -> Unit): AssertionError = assertFailsWith<AssertionError> { guard(block) }
+
+    @Test fun truncatingAnExistingFileWithoutTokenFails() {
+        val e = failure { File(live, ".claude-remote/restore.sh").writeText("") }
+        assertTrue(e.message!!.contains("restore.sh") && e.message!!.contains("modified"), e.message)
+    }
+
+    @Test fun atomicRenameOverALiveFileFails() {
+        val e = failure {
+            val tmp = File(live, ".claude-remote/restore.sh.tmp.1").apply { writeText("#!/bin/sh\necho swapped\n") }
+            Files.move(tmp.toPath(), File(live, ".claude-remote/restore.sh").toPath(), java.nio.file.StandardCopyOption.ATOMIC_MOVE)
+        }
+        assertTrue(e.message!!.contains("restore.sh") && e.message!!.contains("modified"), e.message)
+    }
+
+    @Test fun deleteAndRecreateWithDifferentContentFails() {
+        val e = failure { File(live, ".claude-remote/restore.sh").apply { delete(); writeText("#!/bin/sh\nrm -rf x\n") } }
+        assertTrue(e.message!!.contains("restore.sh") && e.message!!.contains("modified"), e.message)
+    }
+
+    @Test fun writeThroughTheAccountSymlinkIntoClaudeHooksFails() {
+        val viaAccount = File(live, ".claude-remote/accounts/x/hooks/a.sh")
+        val e = failure { viaAccount.writeText("#!/bin/sh\necho changed, no token\n") }
+        assertTrue(e.message!!.contains(".claude/hooks/a.sh") && e.message!!.contains("modified"), e.message)
+        viaAccount.writeText("#!/bin/sh\necho a\n")
+        val t = failure { viaAccount.appendText(token) }
+        assertTrue(t.message!!.contains("test token found in LIVE file"), t.message)
+    }
+
+    @Test fun hookMarkerInAClaudeConfigDirFails() {
+        val e = failure { File(live, ".claude/claude-remote-hookev.installed").writeText("1800000000\n") }
+        assertTrue(e.message!!.contains("claude-remote-hookev.installed") && e.message!!.contains("created"), e.message)
+        // the same marker written through an account's config dir symlink target
+        File(live, ".claude/claude-remote-hookev.installed").delete()
+    }
+
+    @Test fun tokenInClaudeJsonAndInClaudeHooksFails() {
+        val a = failure { File(live, ".claude.json").appendText(token) }
+        assertTrue(a.message!!.contains("test token found in LIVE file") && a.message!!.contains(".claude.json"), a.message)
+        File(live, ".claude.json").writeText("{\"n\":1}")
+        val b = failure { File(live, ".claude/hooks/a.sh").appendText(token) }
+        assertTrue(b.message!!.contains("test token found in LIVE file"), b.message)
+    }
+
+    @Test fun newDirectoryUnderClaudeHooksFails() {
+        val e = failure { File(live, ".claude/hooks/sub").mkdirs() }
+        assertTrue(e.message!!.contains("hooks/sub") && e.message!!.contains("created"), e.message)
+    }
+
+    @Test fun corruptionFollowedByAnExpectedExceptionStillFails() {
+        val e = assertFailsWith<AssertionError> {
+            canary.guard(token, testHome, testRoot) {
+                File(live, ".claude/settings.json").writeText("{\"hooks\":\"$token\"}")
+                throw IllegalStateException("the exception this test expects")
+            }
+        }
+        assertTrue(e.message!!.contains("settings.json"), e.message)
+        assertTrue(e.suppressed.any { it is IllegalStateException }, "the block's own exception must stay visible: ${e.suppressed.toList()}")
+    }
+
+    @Test fun aCleanBlockThatThrowsKeepsItsOwnException() {
+        val e = assertFailsWith<IllegalStateException> { guard { throw IllegalStateException("boom") } }
+        assertEquals("boom", e.message)
+    }
+
+    @Test fun detachedChildIsKilledBeforeTheCheckAndNeverWritesLater() {
+        val late = File(live, ".claude-remote/late.txt")
+        guard { env ->
+            // the shell exits at once; its background child is re-parented to init and would write 2 s later
+            env.start(ProcessBuilder("sh", "-c", "(sleep 2; echo late > '${late.path}') >/dev/null 2>&1 &")).waitFor(5, TimeUnit.SECONDS)
+        }
+        Thread.sleep(3500)
+        assertTrue(!late.exists(), "a detached child outlived the guard and wrote into the live home")
+    }
+
+    @Test fun childStartedWithApplyToCarriesTheTagSoItIsReapedToo() {
+        val late = File(live, ".claude-remote/late2.txt")
+        guard { env ->
+            env.applyTo(ProcessBuilder("sh", "-c", "(sleep 2; echo late > '${late.path}') >/dev/null 2>&1 &")).start().waitFor(5, TimeUnit.SECONDS)
+        }
+        Thread.sleep(3500)
+        assertTrue(!late.exists(), "tagged detached child was not reaped")
+    }
+
+    @Test fun deletedLiveLogAndTruncatedOrRewrittenEventsFail() {
+        File(live, ".claude-remote/logs/x.log").writeText("line one\nline two\n")
+        File(live, ".cache/claude-remote/events").writeText("e1\ne2\n")
+        val del = failure { File(live, ".claude-remote/logs/x.log").delete() }
+        assertTrue(del.message!!.contains("x.log") && del.message!!.contains("deleted"), del.message)
+        File(live, ".claude-remote/logs/x.log").writeText("line one\nline two\n")
+        val trunc = failure { File(live, ".cache/claude-remote/events").writeText("e1\n") }
+        assertTrue(trunc.message!!.contains("events") && trunc.message!!.contains("truncated or rewritten"), trunc.message)
+        File(live, ".cache/claude-remote/events").writeText("e1\ne2\n")
+        val rewrite = failure { File(live, ".cache/claude-remote/events").writeText("XX\nYY\nzzzz\n") }
+        assertTrue(rewrite.message!!.contains("truncated or rewritten"), rewrite.message)
+        // growing logs and appended events are the legitimate case
+        guard { File(live, ".claude-remote/logs/x.log").appendText("line three\n"); File(live, ".cache/claude-remote/events").appendText("e3\n") }
+    }
+
+    @Test fun credentialsFileIsCheckedBySizeMtimeInodeAndNeverOpened() {
         val cred = File(live, ".claude-remote/accounts/x/.credentials.json").apply { writeText("secret") }
-        // content with the token is not scanned (never opened), and an existing credentials file is not a path change
-        guard { cred.writeText(token) }
+        // rewritten to a different size: caught (before: only the name was looked at)
+        assertFailsWith<AssertionError> { guard { cred.writeText("") } }
+        cred.writeText("secret")
+        // same size, atomic replace = new inode: caught
+        assertFailsWith<AssertionError> {
+            guard {
+                val tmp = File(cred.parentFile, "cred.tmp").apply { writeText("SECRET") }
+                Files.move(tmp.toPath(), cred.toPath(), java.nio.file.StandardCopyOption.ATOMIC_MOVE)
+            }
+        }
+        // its name is still scanned for the token
         assertFailsWith<AssertionError> { guard { File(live, ".claude-remote/accounts/x/$token.credentials.json").writeText("") } }
+    }
+
+    @Test fun aCredentialsFileIsNeverOpenedNotEvenForTheTokenScan() {
+        // By design the canary does not read secrets, so an in-place change that keeps size, mtime and
+        // inode is invisible to it. That blind spot is exactly what proves the file is not hashed or scanned
+        // (a content hash would catch it, a token scan would find the token in it).
+        val cred = File(live, ".claude/.credentials.json").apply { writeText("secret") }
+        val mtime = cred.lastModified()
+        guard {
+            java.io.RandomAccessFile(cred, "rw").use { it.write("SECRET".toByteArray()) }
+            cred.setLastModified(mtime)
+        }
+        guard { java.io.RandomAccessFile(cred, "rw").use { it.write(token.toByteArray().copyOf(6)) }; cred.setLastModified(mtime) }
+    }
+
+    @Test fun symlinkReplacedByARegularFileWithTheSameBytesFails() {
+        val link = File(live, ".claude-remote/accounts/x/settings.local.json")
+        File(live, ".claude/settings.local.json").writeText("{\"l\":1}")
+        Files.createSymbolicLink(link.toPath(), File(live, ".claude/settings.local.json").toPath())
+        val e = failure {
+            val bytes = link.readBytes()
+            link.delete()
+            link.writeBytes(bytes)
+        }
+        assertTrue(e.message!!.contains("accounts/x/settings.local.json") && e.message!!.contains("changed type"), e.message)
+    }
+
+    @Test fun symlinkRetargetedToAnotherFileWithTheSameContentFails() {
+        File(live, ".claude/settings.local.json").writeText("{\"l\":1}")
+        File(live, ".claude/other.json").writeText("{\"l\":1}")
+        val link = File(live, ".claude-remote/accounts/x/settings.local.json")
+        Files.createSymbolicLink(link.toPath(), File(live, ".claude/settings.local.json").toPath())
+        val e = failure {
+            link.delete()
+            Files.createSymbolicLink(link.toPath(), File(live, ".claude/other.json").toPath())
+        }
+        assertTrue(e.message!!.contains("symlink target"), e.message)
+    }
+
+    @Test fun volatileLiveFilesMayChangeWithoutAFalseAlarm() {
+        // measured: written by live processes all the time (see CONFIG_LIVE_TOP / REMOTE_LIVE_NAMES)
+        File(live, ".claude/history.jsonl").writeText("a\n")
+        File(live, ".claude/projects/p").mkdirs()
+        File(live, ".claude-remote/clients").mkdirs()
+        File(live, ".claude-remote/clients/c1.json").writeText("{}")
+        File(live, ".cache/claude-remote/notify").writeText("n\n")
+        File(live, ".claude-remote/drift.log").writeText("d1\n")
+        File(live, ".claude-remote/accounts/x/backups").mkdirs()
+        File(live, ".claude-remote/accounts/x/.session-stats.json").writeText("{}")
+        guard {
+            File(live, ".claude-remote/accounts/x/backups/b1").writeText("b")
+            File(live, ".claude-remote/accounts/x/.session-stats.json").writeText("{\"s\":1}")
+            File(live, ".claude-remote/drift.log").appendText("d2\n")
+            File(live, ".claude-remote/.drift.live.AbC123").writeText("scratch") // the drift cron's scratch file: appears and vanishes
+            File(live, ".claude/settings.json.tmp.4242").apply { writeText("tmp"); delete() }
+            File(live, ".claude/.claude.json.lock").apply { mkdirs(); delete() }
+            File(live, ".claude-remote/.drift.live.AbC123").delete()
+            File(live, ".claude/history.jsonl").writeText("rewritten\n")
+            File(live, ".claude/projects/p/new.jsonl").writeText("x")
+            File(live, ".claude-remote/clients/c1.json").writeText("{\"t\":2}")
+            File(live, ".claude-remote/clients/c2.json").writeText("{}")
+            File(live, ".cache/claude-remote/notify").writeText("completely different\n")
+            File(live, ".claude.json").writeText("{\"n\":2}")
+        }
+        // ...but their EXISTENCE is still checked, and a leaked temp file is still searched for the token
+        assertFailsWith<AssertionError> { guard { File(live, ".claude/history.jsonl").delete() } }
+        val t = failure { File(live, ".claude/settings.json.tmp.1").writeText(token) }
+        assertTrue(t.message!!.contains("test token found in LIVE file"), t.message)
+        File(live, ".claude/settings.json.tmp.1").delete()
+        assertFailsWith<AssertionError> { guard { File(live, ".claude.json").delete() } }
+    }
+
+    @Test fun defaultLiveHomeIsTheRealOneNotTheRedirectedUserHome() {
+        // Gradle points user.home at build/t/home; the canary must keep watching the REAL home
+        val real = System.getProperty("clauderemote.live.home") ?: return // not run by Gradle
+        assertNotEquals(real, System.getProperty("user.home"), "user.home was not redirected for this Test task")
+        val field = LiveFileCanary::class.java.getDeclaredField("liveHome").apply { isAccessible = true }
+        assertEquals(File(real).path, (field.get(LiveFileCanary()) as File).path)
     }
 
     @Test fun mtimeChangeAloneIsNotAFailure() {
@@ -220,18 +418,292 @@ class LiveFileCanaryTest {
         }
     }
 
+    // ---- a file that disappears while the tree is walked (the drift cron's scratch files do this every minute) ----
+
+    @Test fun transientFilesThatVanishDuringTheWalkAreNotReportedAsCreated() {
+        val dir = File(live, ".claude-remote")
+        val ghosts = (1..8).map { File(dir, ".drift.tick.G$it") }
+        // the first entry the walk visits deletes the others, which were listed but are gone when the walk stats them
+        val walking = LiveFileCanary(live, tmuxSocket = null) { p -> if (p.startsWith(dir.toPath())) ghosts.forEach { if (it.toPath() != p) it.delete() } }
+        walking.guard(token, testHome, testRoot) { ghosts.forEach { it.writeText("") } }
+    }
+
+    @Test fun ordinaryFilesThatVanishDuringTheWalkAreNotReportedAsCreatedEither() {
+        val dir = File(live, ".claude-remote")
+        val ghosts = (1..8).map { File(dir, "plain.G$it") }
+        // the first entry the walk visits deletes ALL of them: the others are gone before their stat, the visited one before its read
+        val walking = LiveFileCanary(live, tmuxSocket = null) { p -> if (p.startsWith(dir.toPath())) ghosts.forEach { it.delete() } }
+        walking.guard(token, testHome, testRoot) { ghosts.forEach { it.writeText("x") } }
+    }
+
+    @Test fun aFileThatVanishesBetweenItsStatAndItsReadIsNotReported() {
+        val gone = File(live, ".claude-remote/selfdeleting.json")
+        val walking = LiveFileCanary(live, tmuxSocket = null) { p -> if (p.fileName.toString() == gone.name) gone.delete() }
+        walking.guard(token, testHome, testRoot) { gone.writeText("{}") }
+    }
+
+    @Test fun aFileThatReallyIsGoneAfterTheTestStillFails() {
+        File(live, ".claude-remote/keep.json").writeText("{}")
+        val e = failure { File(live, ".claude-remote/keep.json").delete() }
+        assertTrue(e.message!!.contains("keep.json") && e.message!!.contains("deleted"), e.message)
+    }
+
+    // ---- which live files may change (measured on the live box) ----
+
+    @Test fun filesTheAppAndTheDriftScriptRewriteMayChange() {
+        File(live, ".claude-remote/sessions.json").writeText("[1]")
+        File(live, ".claude-remote/sessions.restore.json").writeText("[1]")
+        File(live, ".claude-remote/sessions.restore.json.bak").writeText("[1]")
+        File(live, ".claude-remote/forgotten").writeText("a\n")
+        File(live, ".claude-remote/forgotten.d").mkdirs()
+        File(live, ".claude-remote/forgotten.rejected.20261102T094911Z").writeText("r")
+        File(live, ".claude/state").mkdirs()
+        File(live, ".claude/state/mcp-discover-verdicts.json").writeText("{}")
+        File(live, ".claude/mcp-needs-auth-cache.json").writeText("{}")
+        File(live, ".claude-remote/accounts/x/state").mkdirs()
+        File(live, ".claude-remote/accounts/x/mcp-needs-auth-cache.json").writeText("{}")
+        guard {
+            File(live, ".claude-remote/sessions.json").writeText("[2]")
+            File(live, ".claude-remote/sessions.restore.json").writeText("[2]")
+            File(live, ".claude-remote/sessions.restore.json.bak").writeText("[2]")
+            File(live, ".claude-remote/forgotten").appendText("b\n")
+            File(live, ".claude-remote/forgotten.d/new").writeText("n")
+            File(live, ".claude-remote/forgotten.rejected.20261103T000000Z").writeText("r2")
+            File(live, ".claude/state/mcp-discover-verdicts.json").writeText("{\"v\":1}")
+            File(live, ".claude/state/another.json").writeText("{}")
+            File(live, ".claude/mcp-needs-auth-cache.json").writeText("{\"v\":1}")
+            File(live, ".claude-remote/accounts/x/state/s.json").writeText("{}")
+            File(live, ".claude-remote/accounts/x/mcp-needs-auth-cache.json").writeText("{\"v\":1}")
+        }
+        // existence is still checked
+        assertFailsWith<AssertionError> { guard { File(live, ".claude-remote/sessions.json").delete() } }
+        assertFailsWith<AssertionError> { guard { File(live, ".claude/mcp-needs-auth-cache.json").delete() } }
+    }
+
+    @Test fun aTokenInASmallLiveWrittenFileIsStillFound() {
+        File(live, ".claude-remote/sessions.json").writeText("[]")
+        val e = failure { File(live, ".claude-remote/sessions.json").writeText("[\"$token\"]") }
+        assertTrue(e.message!!.contains("test token found in LIVE file") && e.message!!.contains("sessions.json"), e.message)
+    }
+
+    @Test fun treesThatWereOnlyGuessedAreComparedStrictly() {
+        for (dirName in listOf("paste-cache", "debug", "tasks", ".omc")) {
+            File(live, ".claude/$dirName").mkdirs()
+            val e = failure { File(live, ".claude/$dirName/x").writeText("x") }
+            assertTrue(e.message!!.contains("$dirName/x") && e.message!!.contains("created"), e.message)
+        }
+        File(live, ".claude/stats-cache.json").writeText("{}")
+        assertTrue(failure { File(live, ".claude/stats-cache.json").writeText("{\"a\":1}") }.message!!.contains("modified"))
+    }
+
+    @Test fun userSkillsAreComparedByContentButTheSyncCacheMayChange() {
+        File(live, ".claude/skills/mine").mkdirs()
+        File(live, ".claude/skills/mine/SKILL.md").writeText("# mine")
+        File(live, ".claude/skills/synced/s1").mkdirs()
+        File(live, ".claude/skills/synced/s1/manifest.json").writeText("{}")
+        guard {
+            File(live, ".claude/skills/synced/s1/manifest.json").writeText("{\"t\":1}")
+            File(live, ".claude/skills/synced/s2").mkdirs()
+        }
+        val e = failure { File(live, ".claude/skills/mine/SKILL.md").writeText("# injected") }
+        assertTrue(e.message!!.contains("skills/mine/SKILL.md") && e.message!!.contains("modified"), e.message)
+        assertTrue(failure { File(live, ".claude/skills/new/SKILL.md").apply { parentFile.mkdirs() }.writeText("x") }.message!!.contains("created"))
+    }
+
+    @Test fun pluginHookFilesAreComparedByContentButTheRestOfPluginsMayChange() {
+        val hooks = File(live, ".claude/plugins/cache/vendor/p/1.0/hooks/hooks.json")
+        hooks.parentFile.mkdirs(); hooks.writeText("{\"hooks\":{}}")
+        File(live, ".claude/plugins/cache/vendor/p/1.0/README.md").writeText("r")
+        File(live, ".claude/plugins/marketplaces/m/hooks").mkdirs()
+        File(live, ".claude/plugins/marketplaces/m/hooks/hooks.json").writeText("{}")
+        File(live, ".claude/plugins/oh-my-claudecode").mkdirs()
+        File(live, ".claude/plugins/oh-my-claudecode/.usage-cache-anthropic.json").writeText("{}")
+        guard {
+            File(live, ".claude/plugins/cache/vendor/p/1.0/README.md").writeText("changed")
+            File(live, ".claude/plugins/cache/vendor/p/1.0/new.js").writeText("x")
+            File(live, ".claude/plugins/known_marketplaces.json").writeText("{}")
+            File(live, ".claude/plugins/marketplaces/m/hooks/hooks.json").writeText("{\"synced\":1}") // a marketplace sync rewrites these
+            File(live, ".claude/plugins/oh-my-claudecode/.usage-cache-anthropic.json").writeText("{\"n\":1}")
+            File(live, ".claude/plugins/cache/temp_subdir_1793655325248.clone/hooks/hooks.json").apply { parentFile.mkdirs() }.writeText("{}")
+        }
+        val changed = failure { hooks.writeText("{\"hooks\":{\"PreToolUse\":[]}}") }
+        assertTrue(changed.message!!.contains("hooks/hooks.json") && changed.message!!.contains("modified"), changed.message)
+        hooks.writeText("{\"hooks\":{}}")
+        val added = failure { File(live, ".claude/plugins/cache/vendor/p/1.0/hooks/hooks.local.json").writeText("{}") }
+        assertTrue(added.message!!.contains("hooks.local.json") && added.message!!.contains("created"), added.message)
+    }
+
+    @Test fun aTokenInAPluginFileNameIsFound() {
+        val e = failure { File(live, ".claude/plugins/cache/vendor/$token").apply { parentFile.mkdirs() }.writeText("x") }
+        assertTrue(e.message!!.contains("NAME"), e.message)
+    }
+
+    @Test fun anAccountSymlinkIntoPluginsIsStillComparedByItsTarget() {
+        File(live, ".claude/plugins").mkdirs()
+        File(live, ".claude/plugins/a").mkdirs()
+        File(live, ".claude/plugins/b").mkdirs()
+        val link = File(live, ".claude-remote/accounts/x/plugins")
+        Files.createSymbolicLink(link.toPath(), File(live, ".claude/plugins/a").toPath())
+        val e = failure { link.delete(); Files.createSymbolicLink(link.toPath(), File(live, ".claude/plugins/b").toPath()) }
+        assertTrue(e.message!!.contains("symlink target"), e.message)
+    }
+
+    // ---- append-only files ----
+
+    @Test fun anAppendOnlyFileReplacedByAnotherInodeThatDidNotShrinkIsTolerated() {
+        val log = File(live, ".claude-remote/logs/x.log").apply { writeText("line one\nline two\n") }
+        guard {
+            // the log shipper trims through a temp file and a rename: same name, new inode, different head
+            val tmp = File(log.parentFile, "x.log.new").apply { writeText("ROTATED-HEAD\nline one\nline two\nline three\n") }
+            Files.move(tmp.toPath(), log.toPath(), java.nio.file.StandardCopyOption.ATOMIC_MOVE)
+        }
+    }
+
+    @Test fun anAppendOnlyFileReplacedByAShorterOneStillFails() {
+        val log = File(live, ".claude-remote/logs/x.log").apply { writeText("line one\nline two\n") }
+        val e = failure {
+            val tmp = File(log.parentFile, "x.log.new").apply { writeText("short\n") }
+            Files.move(tmp.toPath(), log.toPath(), java.nio.file.StandardCopyOption.ATOMIC_MOVE)
+        }
+        assertTrue(e.message!!.contains("truncated or rewritten"), e.message)
+    }
+
+    @Test fun anAppendOnlyFileRewrittenInPlaceToTheSameSizeStillFails() {
+        val log = File(live, ".claude-remote/logs/x.log").apply { writeText("line one\n") }
+        val e = failure { java.io.RandomAccessFile(log, "rw").use { it.write("LINE ONE\n".toByteArray()) } }
+        assertTrue(e.message!!.contains("truncated or rewritten"), e.message)
+    }
+
+    private fun sparse(f: File, bytes: Long) { java.io.RandomAccessFile(f, "rw").use { it.setLength(bytes) } }
+
+    @Test fun aHugeAppendOnlyFileMayGrowWithoutAFalseAlarm() {
+        val log = File(live, ".claude-remote/logs/huge.log")
+        sparse(log, LiveFileCanary.MAX_READ_BYTES + 1024)
+        guard { java.io.FileOutputStream(log, true).use { it.write("more\n".toByteArray()) } }
+        guard { } // and an untouched one
+    }
+
+    @Test fun aHugeAppendOnlyFileThatShrankOrChangedInodeFails() {
+        val log = File(live, ".claude-remote/logs/huge.log")
+        sparse(log, LiveFileCanary.MAX_READ_BYTES + 1024)
+        val shrunk = failure { sparse(log, LiveFileCanary.MAX_READ_BYTES + 100) }
+        assertTrue(shrunk.message!!.contains("truncated or rewritten"), shrunk.message)
+        sparse(log, LiveFileCanary.MAX_READ_BYTES + 1024)
+        val swapped = failure {
+            val tmp = File(log.parentFile, "huge.log.new"); sparse(tmp, LiveFileCanary.MAX_READ_BYTES + 4096)
+            Files.move(tmp.toPath(), log.toPath(), java.nio.file.StandardCopyOption.ATOMIC_MOVE)
+        }
+        assertTrue(swapped.message!!.contains("truncated or rewritten"), swapped.message)
+    }
+
+    // ---- the token in other encodings ----
+
+    // bytes that make the standard and the URL-safe base64 alphabets differ ("?>?" encodes to "Pz4/")
+    private val b64Token = "?>?>?>$token"
+
+    @Test fun tokenInBase64AtEveryAlignmentIsFound() {
+        for (offset in 0..2) for ((name, enc) in listOf("standard" to Base64.getEncoder(), "url-safe" to Base64.getUrlEncoder())) {
+            val encoded = enc.encodeToString(("a".repeat(offset) + b64Token).toByteArray())
+            val e = assertFailsWith<AssertionError>("$name offset $offset") {
+                canary.guard(b64Token, testHome, testRoot) { File(live, ".claude-remote/logs/x.log").writeText("v2 s $encoded x\n") }
+            }
+            assertTrue(e.message!!.contains("test token found in LIVE file"), "$name offset $offset: ${e.message}")
+        }
+    }
+
+    @Test fun tokenInABase64LineAppendedToTheLiveEventsFileIsFound() {
+        File(live, ".cache/claude-remote/events").writeText("old\n")
+        val line = "1730000000 " + Base64.getEncoder().encodeToString("session-$token".toByteArray()) + " stop\n"
+        val e = failure { File(live, ".cache/claude-remote/events").appendText(line) }
+        assertTrue(e.message!!.contains("test token found in LIVE file") && e.message!!.contains("events"), e.message)
+    }
+
+    @Test fun base64OfSomethingElseIsNotATokenHit() {
+        guard { File(live, ".claude-remote/logs/x.log").writeText(Base64.getEncoder().encodeToString("nothing to see".toByteArray())) }
+    }
+
+    // ---- the live tmux server ----
+
+    private fun tmuxAvailable(): Boolean = try { ProcessBuilder("tmux", "-V").redirectErrorStream(true).start().waitFor(5, TimeUnit.SECONDS) } catch (_: Exception) { false }
+
+    private fun tmux(sock: File, vararg args: String): Int {
+        val p = ProcessBuilder(listOf("tmux", "-S", sock.path) + args).redirectErrorStream(true).redirectOutput(ProcessBuilder.Redirect.DISCARD).start()
+        if (!p.waitFor(10, TimeUnit.SECONDS)) { p.destroyForcibly(); return -1 }
+        return p.exitValue()
+    }
+
+    private fun withPrivateTmux(block: (File) -> Unit) {
+        if (!tmuxAvailable()) return
+        val sock = File(base, "tm.sock")
+        try {
+            assertEquals(0, tmux(sock, "new-session", "-d", "-s", "keep"))
+            assertEquals(0, tmux(sock, "new-session", "-d", "-s", "other"))
+            block(sock)
+        } finally {
+            tmux(sock, "kill-server")
+        }
+    }
+
+    @Test fun aLiveTmuxSessionThatIsGoneAfterTheBlockFails() = withPrivateTmux { sock ->
+        val watching = LiveFileCanary(live, tmuxSocket = sock)
+        watching.guard(token, testHome, testRoot) { }
+        watching.guard(token, testHome, testRoot) { tmux(sock, "new-session", "-d", "-s", "added") } // a new session is fine
+        val e = assertFailsWith<AssertionError> { watching.guard(token, testHome, testRoot) { tmux(sock, "kill-session", "-t", "keep") } }
+        assertTrue(e.message!!.contains("live tmux session") && e.message!!.contains("keep"), e.message)
+        assertTrue(!e.message!!.contains("other"), e.message)
+    }
+
+    @Test fun aKilledLiveTmuxServerFails() = withPrivateTmux { sock ->
+        val e = assertFailsWith<AssertionError> { LiveFileCanary(live, tmuxSocket = sock).guard(token, testHome, testRoot) { tmux(sock, "kill-server") } }
+        assertTrue(e.message!!.contains("live tmux server"), e.message)
+    }
+
+    @Test fun losingEveryTmuxClientFailsButLosingNoneDoesNot() = withPrivateTmux { sock ->
+        val client = ProcessBuilder("tmux", "-S", sock.path, "-C", "attach", "-t", "keep")
+            .redirectOutput(ProcessBuilder.Redirect.DISCARD).redirectError(ProcessBuilder.Redirect.DISCARD).start() // control-mode client, stdin stays open
+        try {
+            val deadline = System.currentTimeMillis() + 10_000
+            val watching = LiveFileCanary(live, tmuxSocket = sock)
+            while (true) {
+                val p = ProcessBuilder("tmux", "-S", sock.path, "list-clients").redirectErrorStream(true).start()
+                if (p.inputStream.bufferedReader().readText().isNotBlank()) break
+                check(System.currentTimeMillis() < deadline) { "the control-mode client never showed up in list-clients" }
+                Thread.sleep(100)
+            }
+            watching.guard(token, testHome, testRoot) { } // clients unchanged
+            val e = assertFailsWith<AssertionError> { watching.guard(token, testHome, testRoot) { tmux(sock, "detach-client", "-s", "keep") } }
+            assertTrue(e.message!!.contains("client"), e.message)
+        } finally {
+            client.destroyForcibly()
+        }
+    }
+
+    @Test fun aDeletedLiveTmuxSocketFileFailsEvenWithoutAnyTmuxBinary() {
+        // a plain file stands in for the socket: only its existence is compared here, so this needs no tmux at all
+        val fake = File(base, "fake-live.sock").apply { writeText("") }
+        val e = assertFailsWith<AssertionError> { LiveFileCanary(live, tmuxSocket = fake).guard(token, testHome, testRoot) { fake.delete() } }
+        assertTrue(e.message!!.contains("socket file of the live tmux server"), e.message)
+        LiveFileCanary(live, tmuxSocket = fake.also { it.writeText("") }).guard(token, testHome, testRoot) { } // untouched: fine
+    }
+
+    @Test fun noTmuxServerBeforeAndAfterIsNotAProblem() {
+        LiveFileCanary(live, tmuxSocket = File(base, "no-such.sock")).guard(token, testHome, testRoot) { }
+    }
+
+
     @Test fun realHomeDefaultNoOpBlockPasses() {
         // Against the REAL home: only reads, writes nothing; proves the default wiring works on this box.
         val root = Files.createTempDirectory("canary-real").toFile()
         try { LiveFileCanary().guard(LiveFileCanary.newToken(), File(root, "h").apply { mkdirs() }, root) {} }
-        finally { root.deleteRecursively() }
+        finally { safeDeleteTree(root) }
     }
 }
 
 /**
- * Every Test task must run with no TMUX/TMUX_PANE and with TMUX_TMPDIR pointing below
- * `build/` (build.gradle.kts, tasks.withType<Test>), so a stray `tmux` call cannot reach the
- * live server on the default socket.
+ * Every Test task of every module must run with no TMUX/TMUX_PANE, a private TMUX_TMPDIR, the tmux shim
+ * first on PATH and a sandbox HOME/user.home (root build.gradle.kts, `subprojects { tasks.withType<Test>() }`),
+ * so a stray `tmux` call cannot reach the live server on the default socket and nothing falls back to
+ * the developer's real home.
  */
 class DesktopTestEnvTest {
     @Test fun tmuxEnvIsStrippedFromTheTestJvm() {
@@ -239,12 +711,31 @@ class DesktopTestEnvTest {
         assertNull(System.getenv("TMUX_PANE"))
     }
 
-    @Test fun tmuxSocketDirectoryIsPrivateUnderBuild() {
+    @Test fun tmuxSocketDirectoryIsPrivateAndShortEnoughForASocket() {
         val dir = System.getenv("TMUX_TMPDIR")
         assertNotNull(dir, "TMUX_TMPDIR must be set for tests, else tmux uses the live default socket")
-        assertTrue("/build/" in dir && dir.endsWith("/tmp/test-tmux"), "TMUX_TMPDIR=$dir must live under the module's build/ dir")
+        assertEquals(System.getProperty("clauderemote.test.tmuxTmpDir"), dir, "TMUX_TMPDIR is not the directory Gradle configured")
         assertTrue(File(dir).isDirectory, "the directory is created before the tests run")
         assertNotEquals("/tmp", dir)
+        assertTrue(!File(dir).canonicalPath.startsWith("/tmp/tmux-"), "TMUX_TMPDIR=$dir is the live socket directory")
+        // sun_path is 108 bytes including the NUL; tmux appends /tmux-<uid>/default
+        val uid = ProcessBuilder("id", "-u").start().inputStream.bufferedReader().readText().trim()
+        assertTrue(("$dir/tmux-$uid/default").length <= 107, "socket path too long for sun_path: $dir")
+    }
+
+    @Test fun homeAndUserHomeAreTheSandboxNotTheRealHome() {
+        val real = System.getProperty("clauderemote.live.home")
+        assertNotNull(real)
+        val sandbox = File(System.getProperty("user.home")).canonicalPath
+        assertNotEquals(File(real).canonicalPath, sandbox, "user.home still is the REAL home")
+        assertEquals(sandbox, File(System.getenv("HOME")).canonicalPath, "HOME env differs from user.home")
+        assertTrue("/build/t/" in "$sandbox/", "sandbox home $sandbox must be under build/t")
+    }
+
+    @Test fun theTmuxShimIsFirstOnPath() {
+        val first = System.getenv("PATH").split(File.pathSeparator).first()
+        assertEquals(File(System.getProperty("clauderemote.test.shimDir")).canonicalPath, File(first).canonicalPath)
+        assertTrue(File(first, "tmux").canExecute())
     }
 
     @Test fun tmuxCannotSeeTheLiveServer() {
@@ -257,5 +748,118 @@ class DesktopTestEnvTest {
         assertTrue(p.waitFor(20, TimeUnit.SECONDS), "tmux hung")
         assertNotEquals(0, p.exitValue(), "tmux answered from the test JVM — is it talking to the LIVE server? output=$out")
         assertTrue(!out.contains("/tmp/tmux-"), "tmux reported the default socket: $out")
+    }
+}
+
+/**
+ * `scripts/test-shims/tmux` against a FAKE "real tmux" (prints REACHED), so no case can ever touch the
+ * live server even when the shim is broken: a case is "refused" when the fake is not reached.
+ */
+class TmuxShimTest {
+    private val shim = File(System.getProperty("clauderemote.test.shimDir") ?: "scripts/test-shims", "tmux")
+    private lateinit var base: File
+    private lateinit var fakeDir: File
+    private val uid = ProcessBuilder("id", "-u").start().inputStream.bufferedReader().readText().trim()
+    private val liveSocket = "/tmp/tmux-$uid/default"
+
+    @BeforeTest fun setUp() {
+        base = Files.createTempDirectory("tmux-shim-test").toFile()
+        fakeDir = File(base, "fake").apply { mkdirs() }
+        File(fakeDir, "tmux").apply { writeText("#!/bin/sh\necho REACHED \"$@\"\n"); setExecutable(true) }
+    }
+
+    @AfterTest fun tearDown() { safeDeleteTree(base) }
+
+    /** Run the shim with EXACTLY [env] (nothing inherited), PATH = shim dir + fake tmux dir. */
+    private fun run(env: Map<String, String>, vararg args: String): Pair<Int, String> {
+        val pb = ProcessBuilder(listOf(shim.absolutePath) + args).redirectErrorStream(true)
+        pb.environment().clear()
+        pb.environment()["PATH"] = "${shim.parentFile.absolutePath}:${fakeDir.absolutePath}:/usr/bin:/bin"
+        pb.environment().putAll(env)
+        val p = pb.start()
+        val out = p.inputStream.bufferedReader().readText()
+        assertTrue(p.waitFor(20, TimeUnit.SECONDS))
+        return p.exitValue() to out
+    }
+
+    private fun assertRefused(env: Map<String, String>, vararg args: String) {
+        val (rc, out) = run(env, *args)
+        assertNotEquals(0, rc, "shim let it through: env=$env args=${args.toList()} out=$out")
+        assertTrue("REACHED" !in out, "the real tmux was reached: $out")
+    }
+
+    private fun assertAllowed(env: Map<String, String>, vararg args: String) {
+        val (rc, out) = run(env, *args)
+        assertEquals(0, rc, "shim refused a private socket: env=$env args=${args.toList()} out=$out")
+        assertTrue("REACHED" in out, out)
+    }
+
+    @Test fun refusesTheLiveDefaultSocketInEveryWayAChildCanReachIt() {
+        assertRefused(emptyMap(), "list-sessions")                                        // a child with a cleared environment
+        assertRefused(mapOf("TMUX_TMPDIR" to "/tmp"), "list-sessions")                    // TMUX_TMPDIR pointing at /tmp
+        assertRefused(mapOf("TMUX_TMPDIR" to "/tmp/"), "list-sessions")
+        assertRefused(mapOf("TMUX_TMPDIR" to "/tmp/../tmp//"), "list-sessions")
+        assertRefused(emptyMap(), "-S", liveSocket, "list-sessions")                      // an explicit -S on the live socket
+        // attached and clustered flag forms, with a PRIVATE TMUX_TMPDIR so only the parsed -S can make these refuse
+        val priv = mapOf("TMUX_TMPDIR" to base.path)
+        assertRefused(priv, "-S$liveSocket", "list-sessions")
+        assertRefused(priv, "-uS", liveSocket, "list-sessions")
+        assertRefused(priv, "-S", liveSocket, "list-sessions")
+        assertRefused(emptyMap(), "-L", "default", "list-sessions")
+        assertRefused(mapOf("TMUX_TMPDIR" to base.path), "-L", "default", "list-sessions") // -L default is refused even with a private TMUX_TMPDIR
+        assertRefused(emptyMap(), "-L", "other", "list-sessions")                         // another socket in the live directory
+        assertRefused(mapOf("TMUX" to "$liveSocket,123,4"), "list-sessions")              // inherited TMUX
+    }
+
+    @Test fun refusesTheLiveSocketBehindEveryGlobalFlagThatTakesAnArgument() {
+        // -c, -f and -T take a value; the parser must skip it and still see the -S/-L that follows
+        val priv = mapOf("TMUX_TMPDIR" to base.path)
+        for (flag in listOf("-c", "-f", "-T")) {
+            assertRefused(priv, flag, "x", "-S", liveSocket, "list-sessions")
+            assertRefused(priv, "${flag}x", "-S", liveSocket, "list-sessions")
+            assertRefused(priv, "-2$flag", "x", "-S", liveSocket, "list-sessions")
+            assertRefused(priv, flag, "x", "-L", "default", "list-sessions")
+        }
+        assertAllowed(priv, "-c", "x", "-S", File(base, "sock/tmux-$uid/default").path, "list-sessions")
+        assertAllowed(priv, "-f", "/dev/null", "-T", "RGB", "list-sessions")
+    }
+
+    /**
+     * A stand-in for the live socket directory INSIDE this test's own temp root, handed to the shim through
+     * TMUX_SHIM_LIVE_DIR. Links in these tests point only at it, never at a real path outside the temp root.
+     */
+    private fun fakeLiveDir(): File = File(base, "fake-live/tmux-$uid").apply { mkdirs() }
+
+    @Test fun refusesASymlinkedOrDottedPathToTheLiveSocket() {
+        val live = fakeLiveDir()
+        val liveEnv = mapOf("TMUX_SHIM_LIVE_DIR" to live.path)
+        val link = File(base, "sneaky").apply { Files.createSymbolicLink(toPath(), File(live, "default").toPath()) }
+        assertRefused(liveEnv, "-S", link.path, "list-sessions")
+        assertRefused(liveEnv, "-S", "${live.path}/../tmux-$uid/default", "list-sessions")
+        // the live directory reached through a link to its parent, as TMUX_TMPDIR
+        val dirLink = File(base, "dirlink").apply { Files.createSymbolicLink(toPath(), live.parentFile.toPath()) }
+        assertRefused(liveEnv + mapOf("TMUX_TMPDIR" to dirLink.path), "list-sessions")
+        // and the same dotted path against the real live directory name; only a string handed to a fake tmux
+        assertRefused(emptyMap(), "-S", "/tmp/tmux-$uid/../tmux-$uid/default", "list-sessions")
+    }
+
+    @Test fun letsAPrivateSocketThrough() {
+        assertAllowed(mapOf("TMUX_TMPDIR" to base.path), "list-sessions")
+        assertAllowed(emptyMap(), "-S", File(base, "sock/tmux-$uid/default").path, "new-session", "-d")
+        assertAllowed(mapOf("TMUX_TMPDIR" to base.path), "-L", "mine", "ls")
+        assertAllowed(mapOf("TMUX" to "${File(base, "s")},1,0"), "ls")
+        assertAllowed(emptyMap(), "-V")
+    }
+
+    @Test fun aChildThatClearsItsEnvironmentDoesNotSeeTheLiveServer() {
+        // PATH comes from the parent, TMUX_TMPDIR/TMUX are gone: what the real tmux would have done is use the live socket
+        assertRefused(emptyMap(), "-F", "#{socket_path}", "list-sessions")
+        // without any real tmux on PATH the shim fails closed too
+        val pb = ProcessBuilder(shim.absolutePath, "ls").redirectErrorStream(true)
+        pb.environment().clear(); pb.environment()["TMUX_TMPDIR"] = base.path
+        val p = pb.start()
+        p.inputStream.bufferedReader().readText()
+        assertTrue(p.waitFor(20, TimeUnit.SECONDS))
+        assertNotEquals(0, p.exitValue())
     }
 }

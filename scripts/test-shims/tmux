@@ -1,0 +1,77 @@
+#!/bin/bash
+# Test-only `tmux` shim, first on PATH of every Gradle Test task (root build.gradle.kts).
+#
+# This box runs the developer's LIVE Claude sessions on the default tmux socket
+# (/tmp/tmux-<uid>/default) and the tests run inside one of them. A test (or a script a test starts)
+# that ends up talking to that server could kill real sessions. The Gradle environment already
+# points TMUX_TMPDIR at a private directory; this shim covers the cases where a child drops or
+# rewrites that environment (`ProcessBuilder.environment().clear()`, `unset TMUX_TMPDIR`,
+# `TMUX_TMPDIR=/tmp`, `-S /tmp/tmux-<uid>/default`, `-L default`, an inherited $TMUX).
+#
+# It works out which socket tmux WOULD use (same precedence as tmux: -S, then -L, then $TMUX, then
+# $TMUX_TMPDIR/tmux-<uid>/default), resolves symlinks and `..`, and refuses (exit 97) when that is
+# the live socket directory. Otherwise it execs the next real tmux on PATH.
+#
+# What it CANNOT stop (needs another UID or a mount namespace): a child that calls the real binary
+# by absolute path (/usr/local/bin/tmux) or rebuilds PATH without this directory
+# (`env -i PATH=/usr/bin tmux ...`, a login shell that resets PATH) AND has no private TMUX_TMPDIR.
+
+uid=$(id -u)
+# TMUX_SHIM_LIVE_DIR is a test seam: the shim's own test points it at a fake directory inside its temp root.
+live_dir=${TMUX_SHIM_LIVE_DIR:-/tmp/tmux-$uid}
+self_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)
+
+canon() { realpath -m -- "$1" 2>/dev/null || printf '%s\n' "$1"; }
+
+sock="" lname="" version_only=0
+args=("$@")
+n=${#args[@]}
+i=0
+while [ "$i" -lt "$n" ]; do
+  a=${args[$i]}
+  case "$a" in
+    --) break ;;
+    -?*)
+      # a cluster of global flags; S, L, f, T, c take an argument (the rest of the cluster, or the next word)
+      rest=${a#-}
+      while [ -n "$rest" ]; do
+        c=${rest:0:1}; rest=${rest:1}
+        case "$c" in
+          S|L|f|T|c)
+            if [ -n "$rest" ]; then val=$rest; rest=""; else i=$((i + 1)); val=${args[$i]:-}; fi
+            [ "$c" = S ] && sock=$val
+            [ "$c" = L ] && lname=$val
+            ;;
+          V) version_only=1 ;;
+        esac
+      done
+      i=$((i + 1))
+      ;;
+    *) break ;;
+  esac
+done
+
+if [ "$version_only" = 0 ]; then
+  if [ -n "$sock" ]; then eff=$sock
+  elif [ -n "$lname" ]; then eff="${TMUX_TMPDIR:-/tmp}/tmux-$uid/$lname"
+  elif [ -n "${TMUX:-}" ] && [ "${TMUX:0:1}" != "," ]; then eff=${TMUX%%,*}
+  else eff="${TMUX_TMPDIR:-/tmp}/tmux-$uid/default"
+  fi
+  if [ "$(dirname "$(canon "$eff")")" = "$(canon "$live_dir")" ] || [ "$lname" = default ]; then
+    echo "test-shim tmux: refusing to talk to the live tmux server (socket '$eff'); tests must use a private -S/TMUX_TMPDIR socket" >&2
+    exit 97
+  fi
+fi
+
+real=""
+IFS=: read -r -a dirs <<< "${PATH:-}"
+for d in "${dirs[@]}"; do
+  [ -n "$d" ] || continue
+  [ "$(canon "$d")" = "$self_dir" ] && continue
+  if [ -x "$d/tmux" ] && [ ! -d "$d/tmux" ]; then real=$d/tmux; break; fi
+done
+if [ -z "$real" ]; then
+  echo "test-shim tmux: no real tmux on PATH" >&2
+  exit 127
+fi
+exec "$real" "$@"

@@ -3,6 +3,7 @@ package com.clauderemote.integration
 import com.clauderemote.model.AuthMethod
 import com.clauderemote.model.SshServer
 import com.clauderemote.storage.KeyValueStore
+import com.clauderemote.testsupport.safeDeleteTree
 import com.jcraft.jsch.ChannelExec
 import com.jcraft.jsch.Session
 import java.io.File
@@ -318,7 +319,7 @@ internal class SshdFixture private constructor(
         // [killTracked]). No pattern matching, so nothing this fixture did not
         // start can be caught in the blast radius.
         runCatching { killTracked() }
-        runCatching { root.deleteRecursively() }
+        runCatching { safeDeleteTree(root) }
     }
 
     /**
@@ -439,7 +440,7 @@ internal class SshdFixture private constructor(
                             .start().waitFor(10, TimeUnit.SECONDS)
                     }
                 }
-                runCatching { dir.deleteRecursively() }
+                runCatching { safeDeleteTree(dir) }
                 println("SshdFixture: swept stale fixture root ${dir.absolutePath}")
             }
         }
@@ -464,7 +465,7 @@ internal class SshdFixture private constructor(
                                 ProcessBuilder("kill", pid.toString()).start().waitFor()
                             }
                     }
-                    runCatching { root.deleteRecursively() }
+                    runCatching { safeDeleteTree(root) }
                 }
             }
             throw IllegalStateException("could not start sandboxed sshd", lastError)
@@ -522,7 +523,7 @@ internal class SshdFixture private constructor(
                 # See SshdFixture's safety note: a set TMUX overrides TMUX_TMPDIR and
                 # would point tmux at the user's REAL server full of live work.
                 unset TMUX TMUX_PANE
-                export PATH='${shims.absolutePath}':/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin
+                export PATH='${shims.absolutePath}':${System.getProperty("clauderemote.test.shimDir")?.let { "'$it':" } ?: ""}/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin
                 # mosh-server refuses to start unless the locale is UTF-8, and an
                 # sshd child inherits no LANG. C.UTF-8 keeps C collation/sorting
                 # (so sed/sort/jq behave exactly as before) and only supplies the
@@ -531,7 +532,7 @@ internal class SshdFixture private constructor(
                 cd "${'$'}HOME" || exit 1
                 printf '%s %s\n' "${'$'}(date -u +%FT%TZ)" "${'$'}{SSH_ORIGINAL_COMMAND:-<shell>}" \
                     >> '${root.absolutePath}/remote-commands.log' 2>/dev/null
-                # SFTP subsystem (m11): `Subsystem sftp internal-sftp` is force-commanded
+                # SFTP subsystem: `Subsystem sftp internal-sftp` is force-commanded
                 # too, so sshd runs this wrapper with SSH_ORIGINAL_COMMAND=internal-sftp.
                 # Serve it with the out-of-process server, already inside the sandbox
                 # HOME exported above.
