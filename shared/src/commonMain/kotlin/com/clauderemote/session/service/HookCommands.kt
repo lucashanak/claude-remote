@@ -174,7 +174,7 @@ internal object HookCommands {
         if [ -n "§{CLAUDE_CODE_SESSION_ID:-}" ] && [ -n "§SID" ] && [ "§SID" != "§CLAUDE_CODE_SESSION_ID" ]; then exit 0; fi
 
         # a PermissionRequest for AskUserQuestion is covered by the `ask` event
-        if [ "§EV" = perm ] && printf '%s' "§D" | grep -q '"tool_name"[[:space:]]*:[[:space:]]*"AskUserQuestion"'; then exit 0; fi
+        if [ "§EV" = perm ] && printf '%s' "§D" | sed 's/"tool_input".*//' | grep -q '"tool_name"[[:space:]]*:[[:space:]]*"AskUserQuestion"'; then exit 0; fi
 
         C="§{CLAUDE_PID:-}"
         if [ -z "§C" ] || [ ! -d "/proc/§C" ]; then
@@ -304,6 +304,15 @@ internal object HookCommands {
             return {'matcher': matcher, 'hooks': [{'type': 'command', 'command': CMD % (MARK, VER, ev), 'timeout': 5}]}
 
 
+        # our command always STARTS with ': claude-remote-ev v<N>;'; a foreign hook that merely
+        # mentions the marker somewhere (a path, a comment) is not ours and is never touched
+        MARK_RE = re.compile(r'^: ' + re.escape(MARK) + r' v([0-9]+);')
+
+
+        def ours(c):
+            return MARK_RE.match(str(c)) is not None
+
+
         def cmds(e):
             out = []
             if isinstance(e, dict):
@@ -317,11 +326,11 @@ internal object HookCommands {
 
 
         def is_ev(e):
-            return any(MARK in c for c in cmds(e))
+            return any(ours(c) for c in cmds(e))
 
 
         def is_ev_hook(h):
-            return isinstance(h, dict) and MARK in str(h.get('command', ''))
+            return isinstance(h, dict) and ours(h.get('command', ''))
 
 
         def strip(e):
@@ -336,11 +345,17 @@ internal object HookCommands {
                 if len(rest) == len(hs):
                     return e
                 return dict(e, hooks=rest) if rest else None
-            return None if MARK in str(e.get('command', '')) else e
+            return None if ours(e.get('command', '')) else e
 
 
         def strip_list(lst):
-            return [x for x in (strip(e) for e in lst) if x is not None]
+            # an item that is not an entry (null, a string...) is somebody else's: it stays
+            out = []
+            for e in lst:
+                x = strip(e)
+                if x is not None or not isinstance(e, dict):
+                    out.append(x)
+            return out
 
 
         def is_canonical(lst, want):
@@ -352,7 +367,7 @@ internal object HookCommands {
                 hs = e.get('hooks')
                 if isinstance(hs, list):
                     found += [(e.get('matcher'), h) for h in hs if is_ev_hook(h)]
-                elif MARK in str(e.get('command', '')):
+                elif ours(e.get('command', '')):
                     found.append((None, e))
             return len(found) == 1 and found[0][0] == want['matcher'] and found[0][1] == want['hooks'][0]
 
@@ -360,7 +375,8 @@ internal object HookCommands {
         def versions(e):
             out = []
             for c in cmds(e):
-                for m in re.finditer(re.escape(MARK) + r' v([0-9]+)', c):
+                m = MARK_RE.match(c)
+                if m:
                     out.append(int(m.group(1)))
             return out
 
@@ -542,6 +558,16 @@ internal object HookCommands {
                                 os.unlink(rp)
                             except OSError:
                                 pass
+                    else:
+                        # Somebody else rewrote the file; if what is there now already is our canonical
+                        # state (install) or has none of ours (remove), the job is done: EXISTS lets the
+                        # caller write the marker instead of reporting hooks that run as not installed.
+                        try:
+                            probe = json.loads(cur.decode('utf-8'))
+                            if isinstance(probe, dict) and merge(probe, mode) == 'EXISTS':
+                                return 'EXISTS'
+                        except Exception:
+                            pass
                     return 'FAILED'
                 return 'FIXED'
             return 'FAILED'

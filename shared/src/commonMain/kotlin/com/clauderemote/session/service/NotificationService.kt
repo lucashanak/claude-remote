@@ -209,6 +209,9 @@ internal class NotificationService(
     private val streamOrNull: (String) -> TranscriptStream?,
     // Bridge to the facade's public `var onClaudeNeedsInput`.
     private val onNeedsInput: (String, String, Boolean, String?) -> Unit,
+    // The session's current activity: a live v2 `stop` may only LEAVE an approval, never overwrite
+    // the ready state the legacy Stop marker (which lands first) has already set.
+    private val activityOf: (String) -> SessionActivity? = { null },
 ) {
     // Prompt detection for notifications — quiescence-based, reads rendered screen state.
     internal val promptDetector = InputPromptDetector().apply {
@@ -797,7 +800,10 @@ internal class NotificationService(
             hookSink.onActivity(w.serverId, e.tmux, e.atMs)
             if (r.callWorking) hookSink.onClaudeWorking(w.serverId, e.tmux, true)
             if (r.checkUuid) hookSink.onCheckUuid(w.serverId, e.tmux)
-            r.activity?.let { updateActivity(sessionId, it) }
+            r.activity?.let { act ->
+                val onlyLeavesApproval = e.ev == "stop" && act == SessionActivity.WORKING
+                if (!onlyLeavesApproval || activityOf(sessionId) == SessionActivity.APPROVAL_NEEDED) updateActivity(sessionId, act)
+            }
             val n = r.notify ?: return@onSessionLane
             kotlinx.coroutines.delay(hookSettleMs)
             if (w.reducer.isSuperseded(e.tmux, e.atMs)) return@onSessionLane

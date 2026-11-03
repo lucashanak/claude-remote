@@ -34,6 +34,12 @@ class PromptDialogDedupTest {
         assertTrue(d.allow("s", screen, 16_000))
     }
 
+    @Test fun aHeldBackNotificationIsNotRecordedInItsOwnSourceEither() {
+        assertTrue(d.allow("s", hook, 1_000))
+        assertFalse(d.allow("s", screen, 10_000), "held back")
+        assertTrue(d.allow("s", hook, 20_000), "the held-back screen call must not count as a screen notification: the next dialog is never swallowed")
+    }
+
     @Test fun forgetDropsTheMemory() {
         assertTrue(d.allow("s", hook, 1_000))
         d.forget("s")

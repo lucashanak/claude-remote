@@ -117,6 +117,16 @@ class HookEventReducerTest {
         assertNull(r.reduce(ev("perm", t0 - 300_000, tmux = "c"), later, 0).notify)
     }
 
+    @Test fun anAskStampedBeforeTheStartIsTheBacklogToo() {
+        val t0 = now
+        val r = HookEventReducer()
+        r.reduce(ev("work", t0, tmux = "a"), t0, 0)
+        val later = t0 + 120_000
+        // 150 s old: past the 60 s of the replayed backlog, well inside the 10 min of a live event
+        assertNull(r.reduce(ev("ask", t0 - 30_000, tmux = "c", extra = "Which one?"), later, 0).notify, "an ask from the replayed backlog does not buzz")
+        assertNotNull(r.reduce(ev("ask", t0 + 30_000, tmux = "b", extra = "Which one?"), later, 0).notify, "one from after the start does, at the same age class")
+    }
+
     @Test fun theFirstEventOfAColdStartNotifiesOnlyWithin60Seconds() {
         val old = HookEventReducer().reduce(ev("perm", now - 61_000), now, 0)
         assertNull(old.notify, "a replayed backlog line must not buzz after a cold start")

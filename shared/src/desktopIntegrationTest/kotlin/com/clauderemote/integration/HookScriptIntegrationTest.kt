@@ -9,6 +9,10 @@ import com.clauderemote.model.SessionActivity
 import com.clauderemote.session.TabManager
 import com.clauderemote.session.service.BootstrapScript
 import com.clauderemote.session.service.CommFlags
+import com.clauderemote.session.service.ExecChannels
+import com.clauderemote.session.service.ExecKind
+import com.clauderemote.session.service.ExecUnavailable
+import com.clauderemote.session.service.ExecUnavailableReason
 import com.clauderemote.session.service.ConnectionRegistry
 import com.clauderemote.session.service.HookCommands
 import com.clauderemote.session.service.HookEvent
@@ -554,6 +558,13 @@ class HookScriptIntegrationTest {
         assertEquals(emptyList(), events())
     }
 
+    @Test fun aPermissionRequestForAnMcpToolWhoseInputNamesAskUserQuestionIsStillEmitted() = guarded {
+        val mcp = "perm\t{\"session_id\":\"s-mcp\",\"hook_event_name\":\"PermissionRequest\",\"tool_name\":\"mcp__notes__write\",\"tool_input\":{\"tool_name\":\"AskUserQuestion\",\"text\":\"x\"}}"
+        launch("t-mcp", chainScript("s-mcp", mcp), "exec")
+        val ev = events()
+        assertEquals(listOf("perm"), ev.map { it.ev }, "only the tool_name before tool_input decides: $ev")
+    }
+
     // ------------------------------------------------- the watcher, end to end
 
     private class WatcherRig(val service: NotificationService, val scope: CoroutineScope, val manager: SshManager) {
@@ -574,11 +585,13 @@ class HookScriptIntegrationTest {
     private fun <T> withWatcher(
         tmux: String,
         bootstrap: com.clauderemote.session.service.ServerBootstrap? = null,
+        execChannels: ExecChannels? = null,
         block: (WatcherRig, String) -> T,
     ): T {
         val tabs = TabManager()
         val registry = ConnectionRegistry(ServerStorage(InMemoryKeyValueStore()), tabs)
         registry.bootstrap = bootstrap
+        registry.execChannels = execChannels
         val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
         val manager = SshManager(ServerStorage(InMemoryKeyValueStore()))
         runBlocking { manager.connect(fixture.server, onOutput = {}, onConnectionLost = {}) }
@@ -594,6 +607,7 @@ class HookScriptIntegrationTest {
         val service = NotificationService(
             scope = scope, registry = registry, tabManager = tabs, isBackground = { true },
             updateActivity = { id, a -> rig.activity += id to a },
+            activityOf = { id -> rig.activity.lastOrNull { it.first == id }?.second },
             lastAssistantEntry = { null }, entriesOf = { emptyList() }, streamOrNull = { null },
             onNeedsInput = { id, hint, _, body -> rig.needsInput += Triple(id, hint, body) },
         )
@@ -638,6 +652,45 @@ class HookScriptIntegrationTest {
             appendEvent("perm", "claude-server-other", "x")
             Thread.sleep(1_500)
             assertEquals(n, rig.activity.size)
+        }
+    }
+
+    @Test fun aLiveStopAfterTheLegacyMarkerLeavesTheSessionReadyAndAStopThatEndsADialogLeavesApproval() = guarded {
+        val tmux = "claude-server-w6"
+        val marker = File(fixture.home, ".cache/claude-remote/notify")
+        withWatcher(tmux) { rig, sid ->
+            appendEvent("perm", tmux, "Bash: ls")
+            waitUntil(15_000, "APPROVAL_NEEDED") { rig.activity.lastOrNull() == (sid to SessionActivity.APPROVAL_NEEDED) }
+            // the legacy Stop marker lands first (20 of 20 runs), the v2 stop of the same turn right behind it
+            marker.appendText("claude-remote-notify $tmux ${System.currentTimeMillis() / 1000}\n")
+            waitUntil(15_000, "ready from the legacy marker") { rig.activity.lastOrNull() == (sid to SessionActivity.WAITING_FOR_INPUT) }
+            appendEvent("stop", tmux)
+            Thread.sleep(2_500)
+            assertEquals(sid to SessionActivity.WAITING_FOR_INPUT, rig.activity.last(), "the v2 stop must not overwrite ready: ${rig.activity.toList()}")
+
+            // a stop that arrives while the dialog still stands does leave APPROVAL
+            appendEvent("perm", tmux, "Bash: pwd")
+            waitUntil(15_000, "APPROVAL_NEEDED again") { rig.activity.lastOrNull() == (sid to SessionActivity.APPROVAL_NEEDED) }
+            appendEvent("stop", tmux)
+            waitUntil(15_000, "WORKING after a stop that ends the dialog") { rig.activity.lastOrNull() == (sid to SessionActivity.WORKING) }
+        }
+    }
+
+    @Test fun theWatcherAsksTheGateForALongPermitNeverAShortOne() = guarded {
+        val kinds = Collections.synchronizedList(mutableListOf<ExecKind>())
+        // a gate whose exec transport is not up: the watcher must have asked for LONG, then fall back to the tab's session
+        val gate = object : ExecChannels {
+            override suspend fun <T> use(serverId: String, kind: ExecKind, acquireTimeoutMs: Long, block: suspend (com.jcraft.jsch.Channel) -> T): T {
+                kinds += kind
+                throw ExecUnavailable(ExecUnavailableReason.NOT_UP)
+            }
+            override suspend fun <T> withPermit(serverId: String, kind: ExecKind, acquireTimeoutMs: Long, block: suspend (com.jcraft.jsch.Session) -> T): T =
+                throw ExecUnavailable(ExecUnavailableReason.NOT_UP)
+        }
+        withWatcher("claude-server-w7", execChannels = gate) { rig, sid ->
+            assertTrue(kinds.isNotEmpty(), "the watcher went through the gate")
+            assertEquals(setOf(ExecKind.LONG), kinds.toSet(), "a long-lived tail is a LONG permit: $kinds")
+            assertTrue(rig.service.hookActiveSessions.value.contains(sid), "and fell back to the tab's session")
         }
     }
 

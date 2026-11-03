@@ -422,13 +422,13 @@ fun SettingsScreen(
                     }
 
                     SettingsSwitch(
-                        label = "Pooled transports (comm_pool): tabs of a server share connections; off = one per tab, as before",
+                        label = "Pooled transports (comm_pool): tabs of a server share connections with single-flight reconnect; off = legacy lease, 3 tabs per connection",
                         checked = commPool,
                         onCheckedChange = { commPool = it; settings.commPool = it; settings.publishCommFlags() }
                     )
                     EffectiveNote(CommFlags.POOL, commPool)
                     SettingsSwitch(
-                        label = "Exec channels (comm_exec): background reads run on their own connection per server; off = on a tab's, as before",
+                        label = "Exec channels (comm_exec): background reads run on a separate exec connection per server; off = on a tab's connection, as before",
                         checked = commExec,
                         onCheckedChange = { commExec = it; settings.commExec = it; settings.publishCommFlags() }
                     )

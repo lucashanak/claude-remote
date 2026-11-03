@@ -272,6 +272,39 @@ class HookMergeTest {
         assertEquals(theirs, settings.readText(), "their newer write is not destroyed by a rollback")
     }
 
+    @Test fun aForeignHookThatOnlyMentionsOurMarkerInItsPathAndANullItemSurviveInstallStatusAndRemove() = guarded { env ->
+        val archiver = "\$HOME/bin/claude-remote-events-archiver.sh"
+        val foreignEntry = """{"matcher":"","hooks":[{"type":"command","command":"$archiver"}]}"""
+        val aNewerLookingMention = """{"matcher":"","hooks":[{"type":"command","command":"echo claude-remote-ev v99 is somebody else's"}]}"""
+        write("""{"hooks":{"Stop":[$foreignEntry,null,$aNewerLookingMention],"Notification":[$foreignEntry]}}""")
+        assertEquals("ABSENT", merge(env, "status").text.lineSequence().first { it.startsWith("HOOKS_V2_STATE=") }.substringAfter('=').trim(), "a mention is not an install")
+        val o = merge(env)
+        assertEquals("HOOKS_V2_FIXED", result(o), "a mention of the marker is no NEWER version: ${o.text}")
+        for (name in listOf("Stop", "Notification")) {
+            assertTrue(events(name).joinToString("").contains(archiver), "$name keeps the foreign hook: ${events(name)}")
+        }
+        assertTrue(events("Stop").any { it is kotlinx.serialization.json.JsonNull }, "the null item stays: ${events("Stop")}")
+        assertTrue(events("Stop").joinToString("").contains("somebody else's"))
+        assertEquals("HOOKS_V2_REMOVE_FIXED", result(merge(env, "remove")))
+        val removed = settings.readText()
+        assertTrue(removed.contains(archiver) && removed.contains("somebody else's"), "the removal keeps them: $removed")
+        assertTrue(events("Stop").any { it is kotlinx.serialization.json.JsonNull }, "and the null item")
+        assertFalse(removed.contains(": claude-remote-ev v"), "while every command of ours is gone")
+    }
+
+    @Test fun aWriteByOthersThatLeavesOurStateCanonicalIsExistsAndTheMarkerIsWritten() = guarded { env ->
+        write(realBoxShape())
+        val point = "        os.replace(tmp, rp)\n"
+        val script = HookCommands.hooksV2Py("install")
+        assertTrue(script.contains(point), "injection point exists")
+        // somebody changes a top-level key right after our replace: the comparison fails, but all seven of our entries stand
+        val inject = "        d2 = json.load(open(rp)); d2['theme'] = 'changed-by-claude'; open(rp, 'w').write(json.dumps(d2, indent=2))\n"
+        val o = merge(env, script = script.replace(point, point + inject))
+        assertEquals("HOOKS_V2_EXISTS", result(o), o.text)
+        assertEquals("changed-by-claude", (read()["theme"] as kotlinx.serialization.json.JsonPrimitive).content, "their write is left alone")
+        assertTrue(File(home, ".claude/${HookCapContract.MARKER_FILE_NAME}").exists(), "hooks that run are not reported as not installed")
+    }
+
     @Test fun anEntryWhoseHooksIsNotAListIsLeftAloneAndDoesNotCrashTheMerge() = guarded { env ->
         write("""{"hooks":{"Notification":[{"matcher":"","hooks":5,"command":"foreign-cmd"}]}}""")
         val o = merge(env)
