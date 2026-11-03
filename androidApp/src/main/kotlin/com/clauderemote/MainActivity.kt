@@ -278,6 +278,11 @@ class MainActivity : FragmentActivity() {
         accountColorStorage = com.clauderemote.storage.AccountColorStorage(prefs)
         tabManager = TabManager()
         val sessionStorage = com.clauderemote.storage.SessionStorage(prefs)
+        // A recreated activity (a configuration change the manifest does not absorb, the system destroying it) builds a
+        // new orchestrator with its own tab list; the one it replaces is unreachable from the UI from here on, but its
+        // exec transports would go on reconnecting for ever. Closing just those leaves every tab as it was: the old
+        // tabs' own connections and loops are untouched, and the user only ever sees the new orchestrator's tabs.
+        val replacedOrchestrator = OrchestratorHolder.orchestrator
         sessionOrchestrator = SessionOrchestrator(serverStorage, tabManager, sessionStorage)
         // Mirror FileLogger to the server (per-install file) — makes phone
         // logs readable from the dev box without adb.
@@ -285,6 +290,7 @@ class MainActivity : FragmentActivity() {
         // Expose to non-Compose entry points (notification RemoteInput reply,
         // future Wear data layer).
         OrchestratorHolder.orchestrator = sessionOrchestrator
+        replacedOrchestrator?.releaseExecLayer()
         // Keep the Wear companion app's session list in sync (Data Layer).
         WearSync.start(applicationContext, tabManager, sessionOrchestrator)
         // WearSync already observes the tab list to prune its own per-session
@@ -623,7 +629,9 @@ class MainActivity : FragmentActivity() {
         // background stint (HyperOS battery management kills sockets silently)
         // connectivity is often already up when the user returns — no edge, no
         // reconnect, sessions look dead until an app restart. Resume is the
-        // user-visible "I'm back" moment, so sweep here too.
+        // user-visible "I'm back" moment, so sweep here too. The exec transports first (idempotent):
+        // a connection that died in the background is back before the tabs ask for it.
+        sessionOrchestrator.ensureExecTransports()
         reconnectDeadTabs("onResume")
     }
 
@@ -739,6 +747,8 @@ class MainActivity : FragmentActivity() {
             cm.registerDefaultNetworkCallback(object : android.net.ConnectivityManager.NetworkCallback() {
                 override fun onAvailable(network: android.net.Network) {
                     FileLogger.log("Network", "Default network available, checking for dead sessions")
+                    // exec transports before the tabs reconnect (they keep the shell cap and the forwards)
+                    sessionOrchestrator.onNetworkAvailable()
                     reconnectDeadTabs("onAvailable")
                 }
 

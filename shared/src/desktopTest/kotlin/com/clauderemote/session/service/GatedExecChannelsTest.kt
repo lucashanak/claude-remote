@@ -63,7 +63,7 @@ class GatedExecChannelsTest {
     ) = GatedExecChannels(
         m, { fallback }, upWaitMs, longFallbackAfterMs, limits,
         onTransportTrouble = { openFailures.incrementAndGet() },
-        reserveFallback = { _, _ -> synchronized(reserved) { reserved += "reserve" } },
+        reserveFallback = { _, _ -> synchronized(reserved) { reserved += "reserve" }; true },
         releaseFallback = { _, _ -> synchronized(reserved) { reserved += "release" } },
     )
 
@@ -246,6 +246,21 @@ class GatedExecChannelsTest {
         val e = assertFailsWith<ExecUnavailable> { g.use("s", ExecKind.LONG, acquireTimeoutMs = 150) { 1 } }
         assertEquals(ExecUnavailableReason.GATE_TIMEOUT, e.reason, "the second LONG waits although the total budget has room")
         release.complete(Unit); first.await()
+    }
+
+    @Test fun aFallbackStreamThatLostTheRoomToAnotherClaimantDoesNotStartAndHoldsNoPermit() = bounded {
+        val reserved = mutableListOf<String>()
+        val fb = sessionWith()
+        val g = GatedExecChannels(
+            Manager(null), { fb }, 100, 100,
+            GatedExecChannels.Limits(short = 2, long = 1, fallbackLong = 1),
+            reserveFallback = { _, _ -> synchronized(reserved) { reserved += "reserve" }; false },
+            releaseFallback = { _, _ -> synchronized(reserved) { reserved += "release" } },
+        )
+        val e = assertFailsWith<ExecUnavailable> { g.use("s", ExecKind.LONG) { } }
+        assertEquals(ExecUnavailableReason.NOT_UP, e.reason)
+        assertEquals(listOf("reserve"), reserved, "nothing was counted, so nothing is given back")
+        assertEquals(Triple(0, 0, 0), g.held("s"), "the local permit came back")
     }
 
     @Test fun aFallbackStreamIsCountedAgainstTheShellTransportAndGivenBack() = bounded {

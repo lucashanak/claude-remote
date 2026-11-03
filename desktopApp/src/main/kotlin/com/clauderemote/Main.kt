@@ -506,7 +506,11 @@ fun main() = application {
         // scattered per-callback.
         DisposableEffect(window) {
             val listener = object : java.awt.event.WindowFocusListener {
-                override fun windowGainedFocus(e: java.awt.event.WindowEvent) { windowFocused = true }
+                override fun windowGainedFocus(e: java.awt.event.WindowEvent) {
+                    windowFocused = true
+                    // the desktop's "I'm back": every server that has a tab gets its exec transport (idempotent)
+                    sessionOrchestrator.ensureExecTransports()
+                }
                 override fun windowLostFocus(e: java.awt.event.WindowEvent) { windowFocused = false }
             }
             window.addWindowFocusListener(listener)

@@ -193,4 +193,41 @@ class SingleFlightTest {
         gate.complete(Unit)
         assertFailsWith<IllegalStateException> { f.result.await() }
     }
+
+    // ---- the bound on connects running at once ----------------------------------------------------
+
+    @Test fun aBoundOnParallelConnectsRefusesTheFourthFlightAndAdmitsItAfterOneEnds() = bounded {
+        val mutex = Mutex()
+        val flight = SingleFlight<String, Res>(CoroutineScope(SupervisorJob() + Dispatchers.Default), mutex, publish = { _, _ -> }, dispose = { })
+        val gates = List(4) { CompletableDeferred<Unit>() }
+        val joined = mutex.withLock {
+            (0 until 3).map { i -> flight.tryJoin("k", capacity = 1, maxParallel = 3) { gates[i].await(); Res(i) } }
+        }
+        assertTrue(joined.all { it != null })
+        assertEquals(3, mutex.withLock { flight.inflight })
+        // every flight is full (capacity 1) and three already run: nothing new may start
+        assertEquals(null, mutex.withLock { flight.tryJoin("k", capacity = 1, maxParallel = 3) { gates[3].await(); Res(3) } })
+        assertEquals(3, mutex.withLock { flight.started })
+        val oldest = mutex.withLock { flight.pending("k") }!!
+        assertSame(joined[0], oldest, "a refused claimant waits for the oldest connect")
+        gates[0].complete(Unit)
+        oldest.result.await()
+        val again = mutex.withLock { flight.tryJoin("k", capacity = 1, maxParallel = 3) { gates[3].await(); Res(3) } }
+        assertTrue(again != null, "a slot is free again")
+        assertEquals(4, mutex.withLock { flight.started })
+        assertEquals(3, mutex.withLock { flight.peakInflight }, "never more than the bound ran at once")
+        gates.forEach { it.complete(Unit) }
+    }
+
+    @Test fun aClaimantStillJoinsAPendingFlightWithRoomWhenTheBoundIsReached() = bounded {
+        val mutex = Mutex()
+        val flight = SingleFlight<String, Res>(CoroutineScope(SupervisorJob() + Dispatchers.Default), mutex, publish = { _, _ -> }, dispose = { })
+        val gate = CompletableDeferred<Unit>()
+        mutex.withLock {
+            val a = flight.tryJoin("k", capacity = 4, maxParallel = 1) { gate.await(); Res(1) }!!
+            val b = flight.tryJoin("k", capacity = 4, maxParallel = 1) { gate.await(); Res(2) }
+            assertSame(a, b, "room left in the one running connect")
+        }
+        gate.complete(Unit)
+    }
 }

@@ -59,6 +59,16 @@ internal class LegacyServerReconciler(
     override fun unregister(sessionId: String) { registered.remove(sessionId) }
 
     override suspend fun checkClosed(sessionId: String, delayMs: Long) {
+        try {
+            doCheckClosed(sessionId, delayMs)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            FileLogger.log(TAG, "checkClosed($sessionId) failed: ${e.javaClass.simpleName}: ${e.message}")
+        }
+    }
+
+    private suspend fun doCheckClosed(sessionId: String, delayMs: Long) {
         if (delayMs > 0) delay(delayMs)
         if (sessionId !in registered) {
             FileLogger.log(TAG, "checkClosed($sessionId) skipped: not registered (any more)")
@@ -177,7 +187,16 @@ internal class ExecServerReconciler(
             val names = (registered.filterValues { it == serverId }.keys.mapNotNull(tmuxNameOf) +
                 extraNames[serverId].orEmpty()).toSet()
             execCount.incrementAndGet()
-            val out = run(serverId, ManifestCommands.reconcileAll(names.sorted()), 20_000) ?: return@withLock null
+            // A failed exec (timeout, refused channel, io) is "no answer", not an exception for whoever asked:
+            // the callers run in fire-and-forget coroutines of the app, where it would end the process.
+            val out = try {
+                run(serverId, ManifestCommands.reconcileAll(names.sorted()), 20_000)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                FileLogger.log(TAG, "reconcile exec for $serverId failed: ${e.javaClass.simpleName}: ${e.message}")
+                null
+            } ?: return@withLock null
             val snapshot = ReconcileParse.parse(out, json)
             // Names that tmux no longer has (renamed or closed tabs) would otherwise stay in the pane filter forever.
             snapshot.tmuxNames?.let { present -> extraNames[serverId]?.retainAll { it in present } }
@@ -223,6 +242,16 @@ internal class ExecServerReconciler(
     }
 
     override suspend fun checkClosed(sessionId: String, delayMs: Long) {
+        try {
+            doCheckClosed(sessionId, delayMs)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            FileLogger.log(TAG, "checkClosed($sessionId) failed: ${e.javaClass.simpleName}: ${e.message}")
+        }
+    }
+
+    private suspend fun doCheckClosed(sessionId: String, delayMs: Long) {
         if (delayMs > 0) delay(delayMs)
         if (!registered.containsKey(sessionId)) {
             FileLogger.log(TAG, "checkClosed($sessionId) skipped: not registered (any more)")
@@ -243,6 +272,16 @@ internal class ExecServerReconciler(
     }
 
     override suspend fun checkUuid(sessionId: String) {
+        try {
+            doCheckUuid(sessionId)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            FileLogger.log(TAG, "checkUuid($sessionId) failed: ${e.javaClass.simpleName}: ${e.message}")
+        }
+    }
+
+    private suspend fun doCheckUuid(sessionId: String) {
         val serverId = registered[sessionId] ?: serverIdOf(sessionId) ?: return
         val name = tmuxNameOf(sessionId) ?: return
         var r = round(serverId, maxAgeMs = 2_000) ?: return

@@ -45,6 +45,8 @@ class ExecServerReconcilerTest {
         var onForget: suspend (String) -> Unit = {}
         /** What the exec itself does before it answers (a slow link). */
         var onRun: suspend () -> Unit = {}
+        /** What adopting a uuid does before it is recorded. */
+        var onAdopt: suspend () -> Unit = {}
     }
 
     private fun TestScopeHelper.reconciler(host: Host, periodMs: Long = 15_000) = ExecServerReconciler(
@@ -53,7 +55,7 @@ class ExecServerReconcilerTest {
         serverIdOf = { if (it in host.tabs) "srv" else null },
         tmuxNameOf = { host.tabs[it] },
         tabUuidOf = { host.uuids[it] },
-        adoptUuid = { sid, uuid, source -> host.adopted += Triple(sid, uuid, source) },
+        adoptUuid = { sid, uuid, source -> host.onAdopt(); host.adopted += Triple(sid, uuid, source) },
         forget = { host.onForget(it); host.forgotten += it },
         isBackground = { host.background },
         periodMs = periodMs,
@@ -344,5 +346,43 @@ class ExecServerReconcilerTest {
         advanceTimeBy(10_000)
         assertTrue(host.commands.isNotEmpty())
         assertTrue(host.forgotten.isEmpty(), "forgot ${host.forgotten}: a tab that is no longer registered is nobody's to forget")
+    }
+
+    // ---- a failing exec or adoption never leaves the reconciler as an exception ------------------------
+
+    @Test fun aFailingExecIsNoAnswerForTheOnDemandCallsNotAnException() = runTest {
+        val host = Host(mapOf("a" to "claude-server-a"))
+        host.onRun = { throw ExecUnavailable(ExecUnavailableReason.TIMEOUT) }
+        val rec = TestScopeHelper(backgroundScope) { currentTime }.reconciler(host, periodMs = 3_600_000)
+        rec.register("a")
+        advanceTimeBy(1_001)
+        assertNull(rec.capability("srv", "claude-server-a"), "no answer, not an exception")
+        rec.checkClosed("a", 0)
+        rec.checkUuid("a")
+        assertTrue(host.forgotten.isEmpty())
+    }
+
+    @Test fun aFailureWhileAdoptingAUuidDoesNotLeaveCheckUuidOrCheckClosed() = runTest {
+        val host = Host(mapOf("a" to "claude-server-a"))
+        host.output = out(
+            tmux = listOf("claude-server-a"),
+            panes = listOf("claude-server-a 100"),
+            ps = listOf("100 1 bash", "102 100 claude"),
+            claude = listOf("EXE 102 -", "CAPF 102 1 0", "SID 102 $uuidA"),
+        )
+        host.onAdopt = { throw IllegalStateException("the store broke") }
+        val rec = TestScopeHelper(backgroundScope) { currentTime }.reconciler(host, periodMs = 3_600_000)
+        rec.register("a")
+        advanceTimeBy(1_001)
+        rec.checkUuid("a")
+        rec.checkClosed("a", 0)
+    }
+
+    @Test fun cancellationOfAnExecIsNotSwallowedByTheReconciler() = runTest {
+        val host = Host(mapOf("a" to "claude-server-a"))
+        host.onRun = { throw CancellationException("cancelled") }
+        val rec = TestScopeHelper(backgroundScope) { currentTime }.reconciler(host, periodMs = 3_600_000)
+        rec.register("a")
+        assertFailsWith<CancellationException> { rec.capability("srv", "claude-server-a") }
     }
 }

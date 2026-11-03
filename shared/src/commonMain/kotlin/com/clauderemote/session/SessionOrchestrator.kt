@@ -8,11 +8,28 @@ import com.clauderemote.model.*
 import com.clauderemote.session.transcript.TranscriptEntry
 import com.clauderemote.session.service.ConnectionRegistry
 import com.clauderemote.session.service.execReadWithWatchdog
+import com.clauderemote.session.service.CommFlags
+import com.clauderemote.session.service.CommLogFormat
+import com.clauderemote.session.service.DefaultServerBootstrap
+import com.clauderemote.session.service.ExecKind
+import com.clauderemote.session.service.ExecUnavailable
+import com.clauderemote.session.service.ExecUnavailableReason
+import com.clauderemote.session.service.GatedExecChannels
+import com.clauderemote.session.service.HookEventSink
+import com.clauderemote.session.service.LinkState
+import com.clauderemote.session.service.ManifestCommands
+import com.clauderemote.session.service.PoolExecTransportManager
+import com.clauderemote.session.service.PooledRemoteExec
+import com.clauderemote.session.service.ServerBootstrap
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.update
 import com.clauderemote.storage.ServerStorage
 import com.clauderemote.storage.SessionStorage
 import com.clauderemote.util.FileLogger
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.isActive
@@ -40,20 +57,38 @@ class SessionOrchestrator(
     private val tabManager: TabManager,
     private val sessionStorage: SessionStorage? = null
 ) {
-    private val connectionRegistry = ConnectionRegistry(serverStorage, tabManager)
+    internal val connectionRegistry = ConnectionRegistry(serverStorage, tabManager)
 
     // Shared background scope for all per-session/per-server loops. Declared
     // early so collaborator services can take it by constructor injection.
+    // The handler is a safety net: on Android an exception nobody caught in a launched coroutine ends the
+    // process, and almost everything the exec layer starts here ends in a network call that can throw. The
+    // launch sites of the exec paths catch and name their own failure ([launchGuarded]); this one only logs
+    // what slipped through.
     private val reconnectScope = kotlinx.coroutines.CoroutineScope(
-        kotlinx.coroutines.Dispatchers.IO + kotlinx.coroutines.SupervisorJob()
+        kotlinx.coroutines.Dispatchers.IO + kotlinx.coroutines.SupervisorJob() +
+            CoroutineExceptionHandler { _, e -> FileLogger.error(TAG, "Uncaught exception in a background coroutine", e) }
     )
+
+    /** [reconnectScope].launch that catches (not [CancellationException]) and logs [what] instead of leaving the exception to the app. */
+    private fun launchGuarded(what: String, block: suspend () -> Unit): kotlinx.coroutines.Job = reconnectScope.launch {
+        try {
+            block()
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            FileLogger.error(TAG, "$what failed", e)
+        }
+    }
 
     init {
         // Route one-off SSH ops (scanRemoteSessions, status/transcript polls)
         // onto an existing pooled transport instead of a fresh SSH-over-CF
         // handshake each time — the dominant idle data drain.
+        // With exec routing on, only a pooled transport that still has channel headroom (the exec
+        // transport is down and the tabs sit 8 to a transport: a one-off op there would be refused).
         com.clauderemote.connection.SshSessionHelper.liveSessionProvider = { server ->
-            connectionRegistry.pooledSession(server.id)
+            connectionRegistry.fallbackPooledSession(server.id)
         }
 
         // Data-usage snapshot every 60s so we can see where the bytes actually
@@ -67,6 +102,7 @@ class SessionOrchestrator(
             // machine-wide, that is tens of gigabytes in the first line. The
             // first sample only seeds the baseline.
             var pRx: Long? = null; var pTx: Long? = null
+            var pExec = 0
             while (true) {
                 kotlinx.coroutines.delay(60_000) // throws on scope cancel → loop ends
                 val term = com.clauderemote.util.DataMeter.terminalBytes()
@@ -119,9 +155,14 @@ class SessionOrchestrator(
                     pRx = null; pTx = null
                     ""
                 }
-                FileLogger.log(TAG, com.clauderemote.session.service.CommLogFormat.data60sLine(
+                // exec= is the reconcile load of the minute (execs issued), not a running total.
+                val execNow = connectionRegistry.reconcileExecCount()
+                val dExec = execNow - pExec
+                pExec = execNow
+                FileLogger.log(TAG, CommLogFormat.data60sLine(
                     "data/60s: $mode sessions=$sessions(et=$etCount) conn=$conn | content term=${dTerm}KB tr=${dTr}KB poll=${dPoll}KB$netStr",
                     connectionRegistry,
+                    exec = dExec,
                 ))
                 pTerm = term; pTr = tr; pPoll = pl
             }
@@ -152,7 +193,7 @@ class SessionOrchestrator(
     )
 
     // Per-session activity state + per-session OMC remote-status pollers.
-    private val statusService = com.clauderemote.session.service.StatusService(
+    internal val statusService = com.clauderemote.session.service.StatusService(
         reconnectScope, connectionRegistry, tabManager, { isInBackground },
         { id -> transcriptService.markWorkSeen(id) },
         { id -> gitStatusService.probeOnIdle(id) },
@@ -161,13 +202,14 @@ class SessionOrchestrator(
     // Input-prompt detection, needs-input notifications, Stop-hook watcher,
     // login flow, and the offline pending-input queue. Declared after the
     // services it bridges to (statusService/transcriptService) exist.
-    private val notificationService = com.clauderemote.session.service.NotificationService(
+    internal val notificationService = com.clauderemote.session.service.NotificationService(
         reconnectScope, connectionRegistry, tabManager, { isInBackground },
         { id, act -> statusService.updateActivity(id, act) },
         { id -> transcriptService.lastAssistantEntry(id) },
         { id -> transcriptService.entries(id) },
         { id -> transcriptService.streamOrNull(id) },
         { sid, hint, active, body -> onClaudeNeedsInput?.invoke(sid, hint, active, body) },
+        { id -> statusService.sessionActivities.value[id] },
     )
 
     // Per-session terminal output buffer (ring buffer) + pty size tracking.
@@ -195,7 +237,7 @@ class SessionOrchestrator(
     // Shared sessions.json (fetch/cache/push), the systemd restore-service
     // installer + restore/drift scripts, per-session real-UUID refresh
     // pollers, and the forget/rename lifecycle edits.
-    private val persistence = com.clauderemote.session.service.SessionPersistenceService(
+    internal val persistence = com.clauderemote.session.service.SessionPersistenceService(
         reconnectScope, connectionRegistry, tabManager, serverStorage, sessionStorage,
         transcriptService, terminalIO, { isInBackground }, ::readRealSessionId,
         // Lambda, not a method reference: tmuxProbes is declared BELOW this
@@ -211,6 +253,28 @@ class SessionOrchestrator(
     // short-TTL resolved-transport cache. Declared after the deps it uses.
     private val transportResolver = com.clauderemote.session.service.TransportResolver(reconnectScope, connectionRegistry)
     private val tmuxProbes = com.clauderemote.session.service.TmuxProbes(reconnectScope, connectionRegistry, tabManager, terminalIO)
+
+    /**
+     * One exec transport per server: its own SSH connection for everything that is not a tab's terminal
+     * (polls, reconcile, probes, uploads, the notify watcher, the stream daemon, log shipping). Installed
+     * into the registry's slots by [wireExecLayer]; [CommFlags] (`comm_exec`, per server) decides whether
+     * anything uses it. Lambdas, not bound references: [transportResolver] is a property declared above,
+     * but the manager must not capture a half-built object if the order of these declarations changes.
+     */
+    internal val execManager = PoolExecTransportManager(
+        scope = reconnectScope,
+        poolOf = { connectionRegistry.transportPool(it) },
+        serverOf = { serverStorage.getServer(it) },
+        resolve = { transportResolver.resolveTransport(it) },
+        onEarlyDeath = { server, eff, lifetimeMs -> transportResolver.noteServerEarlyDeath(server, eff, lifetimeMs) },
+        onStable = { server, eff -> transportResolver.noteServerTransportStable(server, eff) },
+    )
+
+    /** Servers whose exec transport this orchestrator started, so [disconnectAll] can close them. */
+    private val execEnsuredServers = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
+
+    /** Attach phase timing per session, from the connect until the first terminal byte after `tmux attach` (the `Attach` log line). */
+    private val attachTraces = java.util.concurrent.ConcurrentHashMap<String, AttachTrace>()
 
     /**
      * Platform-provided screen snapshot reader. Must marshal onto the thread that
@@ -415,15 +479,32 @@ class SessionOrchestrator(
             notificationService.startNotifyWatcher(sessionId, tmuxSessionName, serverId)
         }
         gitStatusService.startGitStatusPolling(sessionId)
-        connectionRegistry.ssh(sessionId)?.let { conn ->
-            persistence.startSessionIdRefresh(sessionId, tmuxSessionName, conn)
-        }
+        startReconcileLoop(sessionId, tmuxSessionName)
         // Keep a transcript stream running for every connected session so the
         // notification body (last assistant message) is available even in Raw
         // view, not only after the Chat view has subscribed.
         transcriptService.ensureTranscriptStream(sessionId)
         // …and feed it from the shared per-server stream daemon.
         transcriptService.registerStreamWatch(sessionId)
+    }
+
+    /**
+     * One reconcile per server replaces the per-tab session-id loop when exec routing is on for the server;
+     * the per-tab loop (which also guards itself) stays for the legacy path. Exactly one of the two runs for a
+     * tab: switching routing at run time ([onExecFlagChanged]) calls this again and the other one is stopped.
+     */
+    private fun startReconcileLoop(sessionId: String, tmuxSessionName: String) {
+        val reconciler = connectionRegistry.reconciler
+        val serverId = connectionRegistry.serverIdOf(sessionId)
+        if (reconciler != null && serverId != null && connectionRegistry.execActive(serverId)) {
+            persistence.stopIdRefresh(sessionId)
+            reconciler.register(sessionId)
+        } else {
+            reconciler?.unregister(sessionId)
+            connectionRegistry.ssh(sessionId)?.let { conn ->
+                persistence.startSessionIdRefresh(sessionId, tmuxSessionName, conn)
+            }
+        }
     }
 
     @Volatile private var isInBackground = false
@@ -441,10 +522,201 @@ class SessionOrchestrator(
         FileLogger.log(TAG, "Network lost — tearing down ${connectionRegistry.transportPoolCount()} transport pool(s)")
         // Our own teardown must not count as Tailscale early-death strikes.
         transportResolver.markNetworkTeardown()
+        // The exec transports first: they park in DownNetwork (no strike, no backoff climb) before the
+        // teardown kills their sessions, which would otherwise read as a death of the exec transport.
+        execManager.onNetworkLost()
         connectionRegistry.teardownAllTransports()
         // The AUTO decision was made on the old network — a Wi-Fi→LTE switch
         // changes Tailscale reachability, so re-probe on the next resolve.
         transportResolver.clearResolvedCache()
+        // The auto-reconnects of the dead tabs start now, before the network is back.
+        openReconnectWave()
+    }
+
+    /**
+     * The default network is back (Android `onAvailable`). Wakes the exec transports and makes sure every
+     * server that has a tab has one, BEFORE the dead tabs reconnect: the first reconnects of the wave wait
+     * for it a moment ([awaitExecForWave]), so their leases find it up and get the shell cap of 8, and the
+     * tab-side execs run on it.
+     */
+    fun onNetworkAvailable() {
+        openReconnectWave()
+        execManager.onNetworkAvailable()
+        ensureExecTransports()
+    }
+
+    /** End of the window in which a reconnect waits for its server's exec transport, see [awaitExecForWave]. */
+    @Volatile private var reconnectWaveUntil = 0L
+
+    private fun openReconnectWave() {
+        reconnectWaveUntil = System.currentTimeMillis() + EXEC_WAVE_WAIT_MS
+    }
+
+    /**
+     * The first reconnects after a restore or a network change wait up to [EXEC_WAVE_WAIT_MS] (together, not
+     * each: the window opens once per event) for the exec transport of their server that is just coming up.
+     * The shell cap is 8 only while it is Up, and leases made before that get 3: a wave of 49 tabs would
+     * open 17 transports where 7 do. A transport that is Down (backing off), closed or switched off is not
+     * waited for.
+     */
+    internal suspend fun awaitExecForWave(serverId: String) {
+        val left = reconnectWaveUntil - System.currentTimeMillis()
+        if (left <= 0 || !connectionRegistry.execActive(serverId) || connectionRegistry.execUp(serverId)) return
+        val st = execManager.state(serverId).value
+        if (st !is LinkState.Connecting && st !is LinkState.DownNetwork) return
+        kotlinx.coroutines.withTimeoutOrNull(left) { execManager.await(serverId, left) }
+    }
+
+    /**
+     * Make sure the exec transport and the per-server bootstrap exist for every server that has a tab
+     * (idempotent; foreground, network back, first connect of a tab). Fire and forget.
+     */
+    fun ensureExecTransports() {
+        for (serverId in tabManager.tabs.value.map { it.server.id }.distinct()) {
+            ensureExecTransport(serverId)
+            kickBootstrap(serverId)
+        }
+    }
+
+    /**
+     * The exec transport of [serverId] lives while the server has a tab (one that is not being closed);
+     * calling this again is free. It also starts the watch on the server's `exec` flag, which closes the
+     * transport when the flag goes off at run time and starts it again when it comes back.
+     */
+    internal fun ensureExecTransport(serverId: String) {
+        if (!hasLiveTab(serverId)) return
+        watchExecFlag(serverId)
+        if (!CommFlags.effectiveFor(serverId).exec) return
+        execEnsuredServers.add(serverId)
+        execManager.ensure(serverId)
+    }
+
+    /** A tab of [serverId] that is not on its way out ([closingIds]). */
+    private fun hasLiveTab(serverId: String): Boolean =
+        tabManager.tabs.value.any { it.server.id == serverId && it.id !in closingIds }
+
+    /** Tabs whose [disconnectSession] is running: they no longer count as a reason to keep a server's exec transport. */
+    private val closingIds = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
+
+    /** One watcher per server with tabs on the server's `exec` flag ([CommFlags.effectiveFlow]); ends with the last tab. */
+    private val execFlagWatchers = java.util.concurrent.ConcurrentHashMap<String, kotlinx.coroutines.Job>()
+
+    private fun watchExecFlag(serverId: String) {
+        execFlagWatchers.computeIfAbsent(serverId) {
+            reconnectScope.launch {
+                var seen = CommFlags.effectiveFor(serverId).exec
+                CommFlags.effectiveFlow(serverId).map { it.exec }.distinctUntilChanged().collect { on ->
+                    if (on == seen) return@collect
+                    seen = on
+                    try {
+                        onExecFlagChanged(serverId, on)
+                    } catch (e: CancellationException) {
+                        throw e
+                    } catch (e: Exception) {
+                        FileLogger.error(TAG, "Switching exec routing ${if (on) "on" else "off"} for $serverId failed", e)
+                    }
+                }
+            }
+        }
+    }
+
+    /**
+     * The `exec` group of [serverId] changed while tabs are open (Settings, the legacy set, a server-side
+     * force-off). Off: the exec transport is closed (its supervisor would otherwise keep reviving it and
+     * feeding the Tailscale strike rule), its port forwards go back to a shell transport, and every tab
+     * returns to the per-tab loop. On: the other way round, and the bootstrap runs again.
+     */
+    private suspend fun onExecFlagChanged(serverId: String, on: Boolean) {
+        val tabsOfServer = tabManager.tabs.value.filter { it.server.id == serverId && it.id !in closingIds }
+        if (tabsOfServer.isEmpty()) return
+        if (on) {
+            FileLogger.log(TAG, "exec routing is on again for $serverId — starting its exec transport")
+            movePortForwards(serverId, toExec = true)
+            ensureExecTransport(serverId)
+            kickBootstrap(serverId)
+        } else {
+            FileLogger.log(TAG, "exec routing was switched off for $serverId — closing its exec transport")
+            execEnsuredServers.remove(serverId)
+            execManager.close(serverId)
+            movePortForwards(serverId, toExec = false)
+        }
+        for (t in tabsOfServer) startReconcileLoop(t.id, t.tmuxSessionName)
+    }
+
+    /**
+     * The port forwards of [serverId] ride the exec transport while it owns them (the shells skipped them at
+     * connect). When it is closed they go to a live shell transport; when it comes back they leave it.
+     */
+    private suspend fun movePortForwards(serverId: String, toExec: Boolean) {
+        val forwards = serverStorage.getServer(serverId)?.portForwards.orEmpty()
+        if (forwards.isEmpty()) return
+        val sessions = connectionRegistry.sshEntries()
+            .filter { connectionRegistry.serverIdOf(it.key) == serverId && it.value.isConnected }
+            .mapNotNull { it.value.getSession() }
+            .distinct()
+        for (pf in forwards) {
+            if (toExec) {
+                for (sess in sessions) try {
+                    when (pf.type) { "L" -> sess.delPortForwardingL(pf.localPort); "R" -> sess.delPortForwardingR(pf.remotePort) }
+                } catch (_: Exception) { }
+            } else {
+                // The exec transport is released in the background after close(): its listener keeps the port
+                // until its connection is gone, so the first tries may find it bound.
+                var ok = false
+                for (attempt in 1..FORWARD_MOVE_TRIES) {
+                    ok = sessions.any { sess ->
+                        try {
+                            when (pf.type) {
+                                "L" -> sess.setPortForwardingL(pf.localPort, pf.remoteHost, pf.remotePort)
+                                "R" -> sess.setPortForwardingR(pf.remotePort, pf.remoteHost, pf.localPort)
+                            }
+                            true
+                        } catch (_: Exception) { false }
+                    }
+                    if (ok) break
+                    kotlinx.coroutines.delay(FORWARD_MOVE_RETRY_MS)
+                }
+                FileLogger.log(TAG, "Port forward ${pf.type} ${pf.localPort} " + if (ok) "moved to a shell transport" else "could not be moved to a shell transport")
+            }
+        }
+    }
+
+    /** The exec group is off for [serverId] because the SERVER's `client-flags.json` says so (not this device's switches or the legacy set). */
+    private fun execForcedOffByServer(serverId: String): Boolean =
+        !CommFlags.effectiveFor(serverId).exec && CommFlags.resolve(CommFlags.raw(), serverId).exec
+
+    /**
+     * The bootstrap exec of [serverId] (memoized, single flight) without waiting for it. Only when something can
+     * answer it: the exec transport is up or a tab of the server is connected (a transport that does not exist
+     * yet would make it fail and back off for 10 s, and the connects of the wave would then find it suppressed).
+     * A server whose exec group the server itself forced off is included: the bootstrap reads its flags over a
+     * tab transport, so deleting the force-off file lifts it.
+     */
+    private fun kickBootstrap(serverId: String) {
+        val b = connectionRegistry.bootstrap ?: return
+        if (!connectionRegistry.execActive(serverId) && !execForcedOffByServer(serverId)) return
+        if (!connectionRegistry.execUp(serverId) &&
+            connectionRegistry.sessionIdsOnServer(serverId).none { connectionRegistry.ssh(it)?.isConnected == true }) return
+        launchGuarded("Bootstrap of $serverId") { b.ensure(serverId) }
+    }
+
+    /** One round of the 10-minute flags refresh: foreground only (nobody sees a flag change while the app sleeps; the resume re-reads). */
+    internal suspend fun flagsRefreshTick() {
+        if (!isInBackground) refreshServerFlags()
+    }
+
+    /**
+     * Re-read `client-flags.json` of every server that has a tab and runs exec routing or has it forced off by the
+     * server (a force-off is lifted by deleting the file, which only this read can notice).
+     */
+    internal suspend fun refreshServerFlags() {
+        val b = connectionRegistry.bootstrap ?: return
+        for (serverId in tabManager.tabs.value.map { it.server.id }.distinct()) {
+            if (!connectionRegistry.execActive(serverId) && !execForcedOffByServer(serverId)) continue
+            try { b.refreshFlags(serverId) } catch (e: CancellationException) { throw e } catch (e: Exception) {
+                FileLogger.log(TAG, "refreshFlags $serverId failed: ${e.javaClass.simpleName}: ${e.message}")
+            }
+        }
     }
 
     private var logShipper: com.clauderemote.util.LogShipper? = null
@@ -473,7 +745,17 @@ class SessionOrchestrator(
             appId = appId,
             scope = reconnectScope,
             liveSession = { connectionRegistry.anyLiveSession() },
+            // Through the exec layer, SHORT: one flush is a one-off command, and the shipper must not open
+            // a channel outside the per-server channel budget. The server with the most tabs carries it.
+            execFlush = ::shipLogChunk,
         ).also { it.start() }
+    }
+
+    /** One flush of the log shipper: a SHORT exec on the server that carries the most tabs. False = it did not arrive (the shipper keeps its buffer). */
+    internal suspend fun shipLogChunk(cmd: String, bytes: ByteArray): Boolean {
+        val serverId = tabManager.tabs.value.groupingBy { it.server.id }.eachCount().maxByOrNull { it.value }?.key
+        return serverId != null &&
+            connectionRegistry.execRun(serverId, cmd, bytes, totalMs = 10_000, kind = ExecKind.SHORT)?.exitStatus == 0
     }
 
     /** Call from onPause/onResume to pause heavy background work and save battery. */
@@ -485,6 +767,8 @@ class SessionOrchestrator(
         // Starlink-handover detection. JSch applies the new interval live.
         val keepAlive = if (background) 60_000 else 10_000
         connectionRegistry.setKeepAliveIntervalAll(keepAlive)
+        // The exec transports reconnect at a slower pace in the background (nobody waits, the radio does).
+        execManager.background = background
     }
 
     /** Remove a deleted server's health entry so no stale state leaks. */
@@ -646,6 +930,8 @@ class SessionOrchestrator(
         terminalIO.initBuffer(sessionId)
         tabManager.addTab(session)
         FileLogger.log(TAG, "Launching session: ${server.name} → $folder (${connectionType.name}, ${mode.name}, ${model.name}, account=${accountSlug ?: "default"})")
+        // The exec transport comes first: it owns the port forwards and the shell cap of the server.
+        ensureExecTransport(server.id)
 
         try {
             when (connectionType) {
@@ -662,16 +948,25 @@ class SessionOrchestrator(
             // Persist session for app-restart and server-reboot recovery.
             sessionStorage?.upsert(SessionStorage.fromClaudeSession(session))
             connectionRegistry.ssh(sessionId)?.let { conn ->
-                reconnectScope.launch {
-                    persistence.ensureRestoreService(conn)
-                    // Launching (or deliberately attaching to) this tmux name is
-                    // positive intent that it is alive, so drop any tombstone
-                    // left by an earlier close of the SAME name. Must precede
-                    // the push: the push filters tombstoned names out of the
-                    // manifest, so a stale tombstone would otherwise keep this
-                    // brand-new session out of the restore manifest entirely.
-                    persistence.clearTombstone(conn, tmuxSessionName)
-                    persistence.pushSessionsToServer(conn, server.id)
+                launchGuarded("Server-side bookkeeping of $tmuxSessionName") {
+                    if (connectionRegistry.execActive(server.id)) {
+                        // Over the exec transport: no attached shell needed. When none is usable right now the
+                        // step waits for it once instead of being dropped; the push goes out even if the
+                        // tombstone could not be cleared (the failure is logged by the call).
+                        whenExecUp(server.id, "restore service install") { persistence.ensureRestoreService(server.id) }
+                        whenExecUp(server.id, "tombstone clear of $tmuxSessionName") { persistence.clearTombstone(server.id, tmuxSessionName) }
+                        whenExecUp(server.id, "sessions.json push") { persistence.pushSessionsToServer(server.id) }
+                    } else {
+                        persistence.ensureRestoreService(conn)
+                        // Launching (or deliberately attaching to) this tmux name is
+                        // positive intent that it is alive, so drop any tombstone
+                        // left by an earlier close of the SAME name. Must precede
+                        // the push: the push filters tombstoned names out of the
+                        // manifest, so a stale tombstone would otherwise keep this
+                        // brand-new session out of the restore manifest entirely.
+                        persistence.clearTombstone(conn, tmuxSessionName)
+                        persistence.pushSessionsToServer(conn, server.id)
+                    }
                 }
             }
             session.copy(status = SessionStatus.ACTIVE)
@@ -680,6 +975,20 @@ class SessionOrchestrator(
             tabManager.updateTabStatus(sessionId, SessionStatus.ERROR)
             throw e
         }
+    }
+
+    /**
+     * One-off server-side step [step] of [serverId]: when it reports "no usable transport" (false) it is tried again
+     * once the exec transport is up, for at most [ONE_OFF_WAIT_MS]; with no exec transport to wait for it is dropped
+     * and said so (the next launch or the reconcile repeats what matters).
+     */
+    private suspend fun whenExecUp(serverId: String, what: String, step: suspend () -> Boolean) {
+        if (step()) return
+        if (execManager.await(serverId, ONE_OFF_WAIT_MS) == null) {
+            FileLogger.log(TAG, "$what for $serverId dropped: no usable transport and the exec transport did not come up")
+            return
+        }
+        step()
     }
 
     /**
@@ -694,7 +1003,9 @@ class SessionOrchestrator(
         // FIX 4: when switching away from a session whose activity is APPROVAL_NEEDED,
         // reset it to WAITING_FOR_INPUT — we can no longer read its screen to confirm
         // the dialog is still showing, so leaving APPROVAL_NEEDED would produce a stale
-        // "needs attention" badge (#55) that never clears.
+        // "needs attention" badge (#55) that never clears. Exception: an approval a HOOK
+        // reported (the pane's own claude said it, and the next hook event of the pane ends
+        // it) younger than [HookApprovalPolicy.MAX_AGE_MS] stays — see [hookApprovalSurvivesSwitch].
         val previousId = tabManager.activeTabId.value
         // Everything below repaints the ONE shared emulator for [id] and points
         // the prompt detector at it, so it may only run once [id] really is the
@@ -708,7 +1019,8 @@ class SessionOrchestrator(
             return
         }
         if (previousId != null && previousId != id &&
-            statusService.currentActivity(previousId) == SessionActivity.APPROVAL_NEEDED) {
+            statusService.currentActivity(previousId) == SessionActivity.APPROVAL_NEEDED &&
+            !hookApprovalSurvivesSwitch(previousId)) {
             statusService.updateActivity(previousId, SessionActivity.WAITING_FOR_INPUT)
         }
         notificationService.promptDetector.onUserInput(id)
@@ -808,6 +1120,10 @@ class SessionOrchestrator(
         // and calls back with forceSsh=true to fall back to plain SSH if the ET
         // path can't be established (avoids recursing back into connectEt).
         if (session.server.preferEternal && !forceSsh) { connectEt(session, isNewTmuxSession); return }
+        // Before the first shell of the server connects: the exec transport carries the port forwards and
+        // decides the shell cap of every lease below.
+        ensureExecTransport(session.server.id)
+        val trace = AttachTrace().also { attachTraces[session.id] = it }
         val sshManager = SshManager(serverStorage, transportPool = connectionRegistry.transportPool(session.server.id))
         connectionRegistry.putSsh(session.id, sshManager)
 
@@ -817,6 +1133,11 @@ class SessionOrchestrator(
 
         fun emit(text: String) {
             terminalIO.append(session.id, text)
+            // The first byte after the attach command closes the `Attach` line of this connect.
+            attachTraces[session.id]?.firstByte(text)?.let { line ->
+                attachTraces.remove(session.id)
+                FileLogger.log(TAG, CommLogFormat.attach(session.id, cold = true, line.totalMs, line.phasesMs))
+            }
             val isActive = tabManager.activeTabId.value == session.id
             if (isActive) {
                 onTerminalOutput?.invoke(session.id, text)
@@ -940,6 +1261,7 @@ class SessionOrchestrator(
         }
         transportResolver.noteConnectResult(session.server, sshEffective, ok = true)
         transportResolver.recordConnectSuccess(session.id, session.server, sshEffective)
+        trace.phase("shell")
 
         // Wait for shell prompt (detect $ or # or >, max 3s)
         tmuxProbes.waitForShellPrompt(session.id, 3000)
@@ -949,16 +1271,12 @@ class SessionOrchestrator(
             sshManager.sendInput(session.server.startupCommand + "\n")
             tmuxProbes.waitForShellPrompt(session.id, 3000)
         }
+        trace.phase("prompt")
 
-        // Ensure Claude Code's Stop hook is configured → enables hook-based
-        // idle detection (fast, reliable) instead of screen-state polling.
-        notificationService.ensureStopHook(sshManager)
-        // Install/refresh the transcript stream daemon script (one shared
-        // delta channel per server instead of per-session polling).
-        transcriptService.ensureStreamd(sshManager)
+        ensureServerSetup(session.server.id, sshManager)
 
         // Tmux
-        sendTmuxCommand(sshManager, session, isNewTmuxSession, checkClosedElsewhere)
+        sendTmuxCommand(sshManager, session, isNewTmuxSession, checkClosedElsewhere, trace)
         notificationService.promptDetector.suppressFor(session.id, 3000) // suppress during tmux screen redraw
 
         // Apply the effective terminal dimensions — TerminalView won't fire
@@ -1043,12 +1361,36 @@ class SessionOrchestrator(
         val now = System.currentTimeMillis()
         if (!AttachExitDetector.shouldProbe(now, attachExitProbes[session.id])) return
         attachExitProbes[session.id] = now
-        reconnectScope.launch {
-            if (tabManager.getTab(session.id) == null) return@launch
-            val ssh = connectionRegistry.ssh(session.id) ?: return@launch
-            if (tmuxProbes.probeTmuxSession(ssh, session.tmuxSessionName)) return@launch
+        launchGuarded("Attach-exit check of ${session.tmuxSessionName}") {
+            if (tabManager.getTab(session.id) == null) return@launchGuarded
+            val ssh = connectionRegistry.ssh(session.id) ?: return@launchGuarded
+            if (connectionRegistry.execActive(session.server.id)) {
+                // The per-server reconcile decides under the tightened forget rule (tombstoned, gone from
+                // `list-sessions`, another live session exists); a tab it forgets is done here.
+                connectionRegistry.reconciler?.checkClosed(session.id, 0)
+                if (tabManager.getTab(session.id) == null) return@launchGuarded
+                if (tmuxProbes.probeTmuxSession(session.server.id, session.tmuxSessionName)) return@launchGuarded
+            } else if (tmuxProbes.probeTmuxSession(ssh, session.tmuxSessionName)) return@launchGuarded
             FileLogger.log(TAG, "Attach for '${session.tmuxSessionName}' exited and the session is gone — resolving")
             reconnectSession(session.id)
+        }
+    }
+
+    /**
+     * Server-side setup a tab's tmux command relies on: Claude Code's Stop hook configured (hook-based idle
+     * detection instead of screen-state polling) and the transcript stream daemon script in place (one shared
+     * delta channel per server). With exec routing on for the server that is the per-server bootstrap: one
+     * exec, memoized, so 20 tabs cost one run; the connect waits for it at most [BOOTSTRAP_WAIT_MS], which
+     * keeps the order hooks -> tmux when the server answers quickly and never holds the attach hostage when
+     * it does not (the bootstrap goes on in its own scope). Routing off: the per-tab calls, as before.
+     */
+    internal suspend fun ensureServerSetup(serverId: String, sshManager: SshManager) {
+        val bootstrap = connectionRegistry.bootstrap
+        if (bootstrap != null && connectionRegistry.execActive(serverId)) {
+            kotlinx.coroutines.withTimeoutOrNull(BOOTSTRAP_WAIT_MS) { bootstrap.ensure(serverId) }
+        } else {
+            notificationService.ensureStopHook(sshManager)
+            transcriptService.ensureStreamd(sshManager)
         }
     }
 
@@ -1057,6 +1399,7 @@ class SessionOrchestrator(
         session: ClaudeSession,
         isNew: Boolean,
         checkClosedElsewhere: Boolean = false,
+        trace: AttachTrace? = null,
     ) {
         // The decision itself lives in TmuxLaunchDecider — pure, exhaustively
         // tested (TmuxLaunchDecisionTest), and lazy: each probe below is an SSH
@@ -1084,7 +1427,12 @@ class SessionOrchestrator(
             isNew = isNew,
             checkClosedElsewhere = checkClosedElsewhere,
             hasClaudeSessionId = session.claudeSessionId != null,
-            tmuxExists = { tmuxProbes.probeTmuxSession(sshManager, session.tmuxSessionName) },
+            // Routed: over the exec transport (no round trip on the tab's own shell transport, which is
+            // busy with the attach); legacy: on the tab's own session, as before.
+            tmuxExists = {
+                if (connectionRegistry.execActive(session.server.id)) tmuxProbes.probeTmuxSession(session.server.id, session.tmuxSessionName)
+                else tmuxProbes.probeTmuxSession(sshManager, session.tmuxSessionName)
+            },
             // Both fail OPEN when the probe couldn't answer: not tombstoned,
             // still tracked — a network blip must never read as "closed".
             tombstoned = { fetchCloseState()?.tombstoned == true },
@@ -1094,7 +1442,12 @@ class SessionOrchestrator(
                 // Only a confident YES is taken. A NO can be wrong too — the probe
                 // does not see an account's own projects/ dir — and an unknown is
                 // unknown, so both let the server look for the transcript itself.
-                if (tmuxProbes.probeTranscriptExists(sshManager, session.folder, session.claudeSessionId!!) == true) true else null
+                val exists = if (connectionRegistry.execActive(session.server.id)) {
+                    tmuxProbes.probeTranscriptExists(session.server.id, session.folder, session.claudeSessionId!!)
+                } else {
+                    tmuxProbes.probeTranscriptExists(sshManager, session.folder, session.claudeSessionId!!)
+                }
+                if (exists == true) true else null
             },
         )
 
@@ -1171,7 +1524,9 @@ class SessionOrchestrator(
         if (decision !is TmuxLaunchDecision.FreshLaunch) {
             FileLogger.log(TAG, "Attaching to tmux: $command")
         }
+        trace?.phase("decide")
         sshManager.sendInput(command + "\n")
+        trace?.attachSent(command)
     }
 
     /**
@@ -1273,6 +1628,10 @@ class SessionOrchestrator(
                     connectionRegistry.ssh(session.id)?.disconnect()
                     connectionRegistry.removeSsh(session.id)
 
+                    // exec transport first (idempotent), then the shell
+                    ensureExecTransport(session.server.id)
+                    awaitExecForWave(session.server.id)
+                    val trace = AttachTrace().also { attachTraces[session.id] = it }
                     val sshManager = SshManager(serverStorage, transportPool = connectionRegistry.transportPool(session.server.id))
                     connectionRegistry.putSsh(session.id, sshManager)
 
@@ -1310,12 +1669,14 @@ class SessionOrchestrator(
                     }
                     transportResolver.noteConnectResult(session.server, reEffective, ok = true)
                     transportResolver.recordConnectSuccess(session.id, session.server, reEffective)
+                    trace.phase("shell")
 
                     // Wait for shell prompt, clear garbage, then attach tmux
                     tmuxProbes.waitForShellPrompt(session.id, 3000)
                     sshManager.sendInput("\u0003\n") // Ctrl-C + Enter to clear
                     kotlinx.coroutines.delay(100)
-                    sendTmuxCommand(sshManager, session, false, checkClosedElsewhere = true)
+                    trace.phase("prompt")
+                    sendTmuxCommand(sshManager, session, false, checkClosedElsewhere = true, trace = trace)
                     notificationService.promptDetector.suppressFor(session.id, 3000) // suppress during tmux screen redraw after reconnect
 
                     // Re-send terminal dimensions — the TerminalView hasn't
@@ -1992,6 +2353,8 @@ class SessionOrchestrator(
             // (and MOSH/ET choice) would use the stale value.
             val session = serverStorage.getServer(tab.server.id)?.let { tab.copy(server = it) } ?: tab
             FileLogger.log(TAG, "Reconnecting session $sessionId to ${session.server.name}")
+            ensureExecTransport(session.server.id)
+            awaitExecForWave(session.server.id)
             // A reconnected session has a running Claude that may already be idle
             // waiting for input — bypass the brand-new-session startup guard so
             // the first idle after restore can notify.
@@ -2076,10 +2439,23 @@ class SessionOrchestrator(
 
 
     suspend fun disconnectSession(sessionId: String) {
+        // From now on this tab is no reason to keep (or start again) its server's exec transport: a reconnect
+        // that is still in flight must not revive it behind the close below.
+        closingIds.add(sessionId)
+        try {
+            disconnectSessionNow(sessionId)
+        } finally {
+            closingIds.remove(sessionId)
+        }
+    }
+
+    private suspend fun disconnectSessionNow(sessionId: String) {
         reconnectRetryJobs.remove(sessionId)?.cancel()
         _reconnectStatus.update { it - sessionId }
         gitStatusService.stopPolling(sessionId)
         persistence.stopIdRefresh(sessionId)
+        connectionRegistry.reconciler?.unregister(sessionId)
+        attachTraces.remove(sessionId)
         // Cancel any debounced redraw + forget the pinned window size while the
         // tab (and with it the tmux name) is still around.
         tmuxProbes.dispose(sessionId, tabManager.getTab(sessionId)?.tmuxSessionName)
@@ -2125,6 +2501,13 @@ class SessionOrchestrator(
         gitStatusService.clearSession(sessionId)
         notificationService.clearPendingCount(sessionId)
         tabManager.removeTab(sessionId)
+        // The exec transport lives while the server has a tab: closed only now that the tab is gone, so a
+        // reconnect of this very tab (which checked that it exists) cannot start it again afterwards.
+        if (serverId != null && tabManager.tabs.value.none { it.server.id == serverId }) {
+            execFlagWatchers.remove(serverId)?.cancel()
+            execEnsuredServers.remove(serverId)
+            execManager.close(serverId)
+        }
         // After removal, the active tab may have shifted to another session.
         // Fire onTabSwitched so the platform terminal clears the now-stale
         // SSH/bash content and replays the new active session's buffer —
@@ -2138,7 +2521,21 @@ class SessionOrchestrator(
     suspend fun disconnectAll() {
         connectionRegistry.allSsh().forEach { it.disconnect() }
         connectionRegistry.clearSsh()
+        releaseExecLayer()
         terminalIO.clearAllBuffers()
+    }
+
+    /**
+     * Close every exec transport this orchestrator started and stop watching the exec flags. Nothing is
+     * revived: [ensureExecTransport] starts it again for a server that still has a tab. The Android activity
+     * calls it on the orchestrator it replaces (a recreated activity builds a new orchestrator with its own
+     * tabs; the old one's supervisors would otherwise reconnect for ever).
+     */
+    fun releaseExecLayer() {
+        execFlagWatchers.values.forEach { it.cancel() }
+        execFlagWatchers.clear()
+        for (serverId in execEnsuredServers.toList()) execManager.close(serverId)
+        execEnsuredServers.clear()
     }
 
     fun getConnection(sessionId: String): SshManager? = connectionRegistry.ssh(sessionId)
@@ -2351,7 +2748,7 @@ class SessionOrchestrator(
         sessionStorage?.upsert(SessionStorage.fromClaudeSession(updated))
         FileLogger.log(TAG, "Switching $sessionId to account ${target ?: "default"} (resume ${tab.claudeSessionId})")
 
-        reconnectScope.launch {
+        launchGuarded("Account switch of $sessionId") {
             // Provision on demand: the user may be moving a session onto an
             // account whose dir was removed, or one provisioned by another device.
             // Idempotent, and skipped entirely for the default account.
@@ -2359,7 +2756,9 @@ class SessionOrchestrator(
             restartClaude(sessionId)
             // Push the manifest so the server-side restore/drift scripts relaunch
             // this session under the NEW account after a reboot or a self-heal.
-            connectionRegistry.ssh(sessionId)?.let { conn ->
+            if (connectionRegistry.execActive(tab.server.id)) {
+                persistence.pushSessionsToServer(tab.server.id)
+            } else connectionRegistry.ssh(sessionId)?.let { conn ->
                 persistence.pushSessionsToServer(conn, tab.server.id)
             }
             // The chips belong to the login — start (idempotently) the poller for
@@ -2377,14 +2776,19 @@ class SessionOrchestrator(
     fun restoreAndReconnect() {
         val restored = persistence.restorePersistedTabs()
         if (restored.isEmpty()) return
+        // One exec transport per server, started before the first tab of it connects (the tabs'
+        // own connects then find it coming up and the port forwards go to it, not to a shell).
+        restored.map { it.server.id }.distinct().forEach { ensureExecTransport(it) }
         // Concurrent, not sequential: a strictly sequential loop over N restored
         // tabs made the LAST tab wait N × (connect+attach) after a cold start —
         // with 20+ tabs that's tens of seconds, long enough that an impatient
         // user hit "Reconnect" on a tab whose turn just hadn't come up yet.
-        // Safe to parallelize: each server's connectGate (Semaphore(3)) already
-        // caps concurrent handshakes to that server, so this doesn't storm a
-        // just-recovered link — it only removes the ARTIFICIAL serialization
-        // across tabs/servers on top of that existing cap.
+        // Safe to parallelize: with the pool on, the pool bounds the handshakes to a server (at most
+        // [ServerTransportPool.MAX_PARALLEL_HANDSHAKES] at once, ceil(N / shell cap) in all), with it off the
+        // legacy gate of 3 does, so this doesn't storm a just-recovered link — it only removes the ARTIFICIAL
+        // serialization across tabs/servers. The first reconnects wait a moment for the exec transport just
+        // started above, so that their leases get the shell cap of 8 ([awaitExecForWave]).
+        openReconnectWave()
         reconnectScope.launch {
             restored.map { s -> async { try { reconnectSession(s.id) } catch (_: Exception) {} } }
                 .forEach { it.join() }
@@ -2426,8 +2830,103 @@ class SessionOrchestrator(
      */
     private fun generateUuidV4(): String = java.util.UUID.randomUUID().toString()
 
+    /** Where the start (server clock) of a hook-reported approval comes from; a seam so the switch rule can be driven without a watcher. */
+    internal var approvalSinceOf: (serverId: String, tmuxName: String) -> Long? =
+        { serverId, tmux -> notificationService.hookApprovalSince(serverId, tmux) }
+
+    /** FIX 4 exception: the hook-reported approval of [sessionId] is recent enough to survive leaving the tab. */
+    private fun hookApprovalSurvivesSwitch(sessionId: String): Boolean {
+        val tab = tabManager.getTab(sessionId) ?: return false
+        return HookApprovalPolicy.survivesSwitch(
+            sinceMs = approvalSinceOf(tab.server.id, tab.tmuxSessionName),
+            nowMs = System.currentTimeMillis(),
+            hooksOn = CommFlags.effectiveFor(tab.server.id).hooks,
+        )
+    }
+
+    /** The tab of [serverId] whose tmux session is [tmuxName] (names are only unique per server), or null. */
+    private fun sessionIdOf(serverId: String, tmuxName: String): String? =
+        tabManager.tabs.value.firstOrNull { it.server.id == serverId && it.tmuxSessionName == tmuxName }?.id
+
+    /**
+     * Fills the registry's seam slots with the real exec layer, in ONE step: a half-wired layer (a manager
+     * without the gate, a gate without the bootstrap) would route some callers to an exec transport that
+     * nobody keeps alive. Everything stays behind the flags: with `comm_exec` off for a server every
+     * lookup behaves as before.
+     */
+    private fun wireExecLayer() {
+        val reg = connectionRegistry
+        val channels = GatedExecChannels(
+            execManager,
+            // a long stream may borrow a tab transport while the exec transport is down, but only one with room
+            fallbackSession = { reg.fallbackPooledSession(it) },
+            onTransportTrouble = { execManager.noteChannelTrouble(it) },
+            // decided under the pool's lock: the look above and this claim may be a moment apart (false = the room is gone)
+            reserveFallback = { id, session -> reg.transportPool(id).reserveFallbackChannel(session) },
+            releaseFallback = { id, session -> reg.transportPool(id).releaseChannel(session) },
+        )
+        val remote = PooledRemoteExec(channels)
+        reg.execSessions = execManager
+        reg.execChannels = channels
+        reg.remoteExec = remote
+        // Built on first use: the bootstrap listens to the process-wide install / remove requests of Settings
+        // from the moment it exists, and an orchestrator that never connects anything must not hold that
+        // subscription (a request nobody can serve is dropped, not queued).
+        reg.bootstrap = LazyServerBootstrap {
+            DefaultServerBootstrap(
+                scope = reconnectScope,
+                exec = remote,
+                // exec transport down: the bootstrap still runs, on a tab transport that has room
+                fallback = { serverId, cmd, totalMs ->
+                    reg.execOnTab(serverId, cmd, totalMs) ?: throw ExecUnavailable(ExecUnavailableReason.NOT_UP)
+                },
+                serverName = { serverStorage.getServer(it)?.name ?: it },
+            )
+        }
+        reg.reconciler = persistence.newExecReconciler()
+        // withSession (history scan, folder browser, command fetcher, ...) holds a SHORT permit on the exec transport
+        com.clauderemote.connection.SshSessionHelper.execChannelsProvider = { serverId -> reg.activeExecChannels(serverId) }
+        notificationService.closures = persistence
+        notificationService.hookSink = object : HookEventSink {
+            override fun onClaudeWorking(serverId: String, tmuxName: String, working: Boolean) {
+                // a hook `work` event re-arms the notify latch exactly like the statusline does
+                if (working) sessionIdOf(serverId, tmuxName)?.let { notificationService.promptDetector.onClaudeWorking(it) }
+            }
+            override fun onCheckUuid(serverId: String, tmuxName: String) {
+                val sid = sessionIdOf(serverId, tmuxName) ?: return
+                launchGuarded("checkUuid of $tmuxName") { reg.reconciler?.checkUuid(sid) }
+            }
+            override fun onCheckClosed(serverId: String, tmuxName: String, delayMs: Long) {
+                val sid = sessionIdOf(serverId, tmuxName) ?: return
+                launchGuarded("checkClosed of $tmuxName") { reg.reconciler?.checkClosed(sid, delayMs) }
+            }
+        }
+        // The flags a server forces off are re-read while the app is in the foreground.
+        launchGuarded("The flags refresh loop") {
+            while (true) {
+                kotlinx.coroutines.delay(FLAGS_REFRESH_MS)
+                flagsRefreshTick()
+            }
+        }
+    }
+
+    init {
+        // Last in the class body: every property the wiring touches exists by now.
+        wireExecLayer()
+    }
+
     companion object {
         private const val TAG = "SessionOrchestrator"
+        /** Foreground re-read of `client-flags.json` per server. */
+        internal const val FLAGS_REFRESH_MS = 10L * 60 * 1000
+        /** How long a connect waits for the first bootstrap of its server before it goes on (the order hooks -> tmux is kept when it is quick). */
+        internal const val BOOTSTRAP_WAIT_MS = 3_000L
+        /** How long the first reconnects of a wave wait, together, for their server's exec transport (shell cap 8 needs it up). */
+        internal const val EXEC_WAVE_WAIT_MS = 3_000L
+        /** A one-off operation (restore install, tombstone, manifest push) that found no transport waits this long for the exec transport. */
+        internal const val ONE_OFF_WAIT_MS = 60_000L
+        private const val FORWARD_MOVE_TRIES = 20
+        private const val FORWARD_MOVE_RETRY_MS = 250L
         /** Sentinel returned by [downloadFile] when the remote file exceeds [DOWNLOAD_SIZE_LIMIT]. */
         val DOWNLOAD_TOO_LARGE: ByteArray = ByteArray(0)
         private const val DOWNLOAD_SIZE_LIMIT = 200L * 1024 * 1024 // 200 MB
@@ -2440,4 +2939,87 @@ class SessionOrchestrator(
          */
         private const val RESTART_ALL_GAP_MS = 1_500L
     }
+}
+
+
+/**
+ * Phase timing of one attach, for the `Attach <sid> kind=cold ms=<n> phase=...` line: `shell` (transport lease
+ * and shell channel), `prompt` (shell prompt and startup command), `decide` (server setup, tmux probes and the
+ * decision, up to sending the command), `attach` (sending it), `firstByte` (until the first terminal output
+ * of tmux after it). Each phase is the time since the previous mark.
+ *
+ * The pty echoes the typed command back about one round trip after it was sent, which says nothing about tmux:
+ * [firstByte] skips that echo (the command text itself, and the escape sequences and line breaks around it) and
+ * closes on the first thing that is not part of it, or on tmux switching to its alternate screen.
+ */
+internal class AttachTrace(private val clock: () -> Long = System::currentTimeMillis) {
+    class Done(val totalMs: Long, val phasesMs: Map<String, Long>)
+
+    private val startedAt = clock()
+    private var mark = startedAt
+    private val phases = LinkedHashMap<String, Long>()
+    @Volatile private var sent = false
+    /** What is still to come of the echo of the sent command (printable characters only, no blanks). */
+    private var echoLeft = ""
+
+    @Synchronized fun phase(name: String) {
+        val now = clock()
+        phases[name] = now - mark
+        mark = now
+    }
+
+    /** [command] was just sent: its echo is not tmux's output. */
+    @Synchronized fun attachSent(command: String = "") {
+        phase("attach")
+        echoLeft = visible(command)
+        sent = true
+    }
+
+    /** The finished trace on the first output [chunk] after [attachSent] that is not the echo of the command, else null (cheap: it runs for every output chunk). */
+    fun firstByte(chunk: String): Done? {
+        if (!sent) return null
+        return synchronized(this) {
+            if (!sent) return null
+            var rest = visible(chunk)
+            val n = minOf(rest.length, echoLeft.length)
+            if (n > 0 && rest.regionMatches(0, echoLeft, 0, n)) {
+                // all of it is (a part of) the echo
+                rest = rest.substring(n)
+                echoLeft = echoLeft.substring(n)
+            }
+            if (rest.isEmpty() && !chunk.contains(ALT_SCREEN)) return null
+            sent = false
+            phase("firstByte")
+            Done(clock() - startedAt, phases.toMap())
+        }
+    }
+
+    private companion object {
+        /** tmux switching the client to its alternate screen: the first thing a successful attach prints. */
+        const val ALT_SCREEN = "\u001B[?1049h"
+        val ESCAPES = Regex("\u001B\\[[0-9;?]*[ -/]*[@-~]|\u001B[()][A-Za-z0-9]|\u001B[=>]")
+        fun visible(text: String): String = ESCAPES.replace(text, "").filterNot { it.isWhitespace() || it == '\b' }
+    }
+}
+
+/**
+ * FIX 4 exception: leaving a tab resets its APPROVAL to ready because the screen can no longer confirm the
+ * dialog, except when a hook reported it recently. The pane's own claude said so, and the next hook event of
+ * the pane (any of them) ends it, so it cannot go stale the way a screen guess does. After [MAX_AGE_MS] the
+ * old rule applies again. [sinceMs] is the SERVER clock of the event; the device clock is within seconds of
+ * it, so the age is judged on the absolute difference (a clock hours off proves nothing: the rule falls back).
+ */
+internal object HookApprovalPolicy {
+    const val MAX_AGE_MS = 10L * 60 * 1000
+
+    fun survivesSwitch(sinceMs: Long?, nowMs: Long, hooksOn: Boolean): Boolean =
+        hooksOn && sinceMs != null && kotlin.math.abs(nowMs - sinceMs) < MAX_AGE_MS
+}
+
+/** A [ServerBootstrap] created by [create] the first time anything calls it. */
+internal class LazyServerBootstrap(create: () -> ServerBootstrap) : ServerBootstrap {
+    private val delegate by lazy(create)
+    override suspend fun ensure(serverId: String) = delegate.ensure(serverId)
+    override fun invalidate(serverId: String) = delegate.invalidate(serverId)
+    override suspend fun refreshFlags(serverId: String) = delegate.refreshFlags(serverId)
 }

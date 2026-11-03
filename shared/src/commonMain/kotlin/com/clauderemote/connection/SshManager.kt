@@ -277,10 +277,13 @@ class SshManager(
         disconnected = true
         onConnectionLost = null
         FileLogger.log(TAG, "Disconnecting...")
+        // The channel first: the read loop sits in a BLOCKING read of its stream (cancelling the coroutine does
+        // not interrupt it), so joining it before the channel is closed waited for the shell to say something -
+        // minutes for a quiet one. Closing the channel ends that read at once.
+        try { channel?.disconnect() } catch (_: Exception) {}
         readJob?.cancelAndJoin()
         readJob = null
         ioScope.coroutineContext[Job]?.cancelAndJoin()
-        try { channel?.disconnect() } catch (_: Exception) {}
         if (leased) {
             // Shared transport: NEVER disconnect the session — sibling tabs
             // ride it. Release the lease; the pool disconnects it when the

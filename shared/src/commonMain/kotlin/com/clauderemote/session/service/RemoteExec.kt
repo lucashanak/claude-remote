@@ -350,9 +350,11 @@ internal class GatedExecChannels(
     private val onTransportTrouble: (String) -> Unit = {},
     /**
      * A long stream starts on the shell transport [fallbackSession] returned: the owner of that
-     * transport must count the channel against its capacity (`ServerTransportPool.reserveChannel`).
+     * transport must count the channel against its capacity, deciding under its lock whether it still fits
+     * (`ServerTransportPool.reserveFallbackChannel`); false = the room went to someone else between the
+     * look and the claim, and the stream does not start ([ExecUnavailableReason.NOT_UP]).
      */
-    private val reserveFallback: suspend (String, com.jcraft.jsch.Session) -> Unit = { _, _ -> },
+    private val reserveFallback: suspend (String, com.jcraft.jsch.Session) -> Boolean = { _, _ -> true },
     /** The fallback stream ended: give the capacity back (`ServerTransportPool.releaseChannel`). */
     private val releaseFallback: suspend (String, com.jcraft.jsch.Session) -> Unit = { _, _ -> },
 ) : ExecChannels {
@@ -464,8 +466,12 @@ internal class GatedExecChannels(
             val permit = waitForPermit(serverId, gate, where, isLong, gen, session, deadline)
             // the transport may have died or been replaced while we waited
             if (permit != null && where == Where.FALLBACK) {
-                kotlinx.coroutines.withContext(kotlinx.coroutines.NonCancellable) { reserveFallback(serverId, session) }
-                return permit
+                val counted = kotlinx.coroutines.withContext(kotlinx.coroutines.NonCancellable) { reserveFallback(serverId, session) }
+                if (counted) return permit
+                // refused: give the local permit back WITHOUT telling the pool (it counted nothing)
+                synchronized(permit.gate) { if (permit.gate.fallback > 0) permit.gate.fallback-- }
+                permit.gate.version.update { it + 1 }
+                throw ExecUnavailable(ExecUnavailableReason.NOT_UP)
             }
             if (permit != null && manager.generation(serverId) == gen && session.isConnected) return permit
             if (permit != null) release(permit)

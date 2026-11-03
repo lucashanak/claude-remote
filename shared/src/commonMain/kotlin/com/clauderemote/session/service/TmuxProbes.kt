@@ -152,9 +152,12 @@ internal class TmuxProbes(
                 val refreshCmd = "tmux list-clients -t '=$escaped' -F '#{client_name}' 2>/dev/null" +
                     " | while IFS= read -r c; do tmux refresh-client -t \"\$c\" 2>/dev/null && echo OK; done"
                 if (serverId != null && registry.execActive(serverId)) {
-                    // Exec transport: a refresh must not cost the attached shell's own channel budget.
+                    // Exec transport: a refresh must not cost the attached shell's own channel budget. With the
+                    // exec transport down execRead falls back to a tab transport WITH room (counted); no room is
+                    // no kick, never a channel of the attached shell's own session (the geometry fallback of the
+                    // caller needs none).
                     val out = registry.execRead(serverId, refreshCmd, totalMs = 1_500)
-                    if (out != null) return@withContext out.contains("OK")
+                    return@withContext out?.contains("OK") ?: false
                 }
                 val sshSession = conn.getSession() ?: return@withContext false
                 val ch = sshSession.openChannel("exec") as com.jcraft.jsch.ChannelExec

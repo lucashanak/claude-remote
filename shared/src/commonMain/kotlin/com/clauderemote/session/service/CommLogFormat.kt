@@ -29,11 +29,13 @@ object CommLogFormat {
 
     /**
      * The whole `data/60s:` line: today's [prefix] (everything that was logged before
-     * the redesign, byte for byte) followed by [dataTail]. `warm`, `parked` and `exec`
-     * are 0 until the features that count them exist. Pure apart from reading the
-     * registry, so the invariant "prefix unchanged, tail last" is testable without
-     * running the orchestrator's 60 s loop.
+     * the redesign, byte for byte) followed by [dataTail]. `warm` and `parked` are 0 until
+     * the features that count them exist. `exec` is the number of reconcile execs issued
+     * in the minute just ended ([exec], measured by the caller; 0 with the reconciler not
+     * wired), summed over ALL servers: the load of the per-server reconcile, which should stay at
+     * or below 6 per server (so about 6 times the number of servers in all). Pure apart from reading the registry, so the invariant "prefix unchanged,
+     * tail last" is testable without running the orchestrator's 60 s loop.
      */
-    internal fun data60sLine(prefix: String, registry: ConnectionRegistry): String =
-        prefix + dataTail(attached = registry.allSsh().count { it.isConnected }, warm = 0, parked = 0, exec = 0)
+    internal fun data60sLine(prefix: String, registry: ConnectionRegistry, exec: Int = 0): String =
+        prefix + dataTail(attached = registry.allSsh().count { it.isConnected }, warm = 0, parked = 0, exec = exec)
 }

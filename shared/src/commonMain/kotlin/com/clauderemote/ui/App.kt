@@ -1537,6 +1537,8 @@ fun App(
                         notificationsBlocked = notificationsBlocked,
                         onFontSizeChange = applyTerminalFontSize,
                         onTranscriptFontChange = applyTranscriptFontPercent,
+                        // the install / remove buttons of hooks v2 are per server
+                        hookServers = serverList.map { it.id to it.name },
                     )
                 }
 

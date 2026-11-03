@@ -65,11 +65,23 @@ internal class SingleFlight<K : Any, T : Any>(
      * Claim one slot of a pending connect for [key], starting [connect] when every
      * pending one is full. [capacity] is how many claimants one connect may serve.
      */
-    fun join(key: K, capacity: Int, connect: suspend () -> T): Flight<K, T> {
+    fun join(key: K, capacity: Int, connect: suspend () -> T): Flight<K, T> =
+        tryJoin(key, capacity, Int.MAX_VALUE, connect)!!
+
+    /**
+     * [join] with a bound on the connects of one [key] running at the same time: when every pending
+     * connect is full and [maxParallel] of them already run, nothing is started and the result is null.
+     * The caller then waits for one of them ([pending]) and asks again. This is what keeps a reconnect
+     * wave from opening ceil(N / capacity) handshakes at once against a server whose sshd throttles new
+     * connections (`MaxStartups`), whatever gate stands in front of the pool.
+     */
+    fun tryJoin(key: K, capacity: Int, maxParallel: Int, connect: suspend () -> T): Flight<K, T>? {
         check(mutex.isLocked) { "SingleFlight.join needs the owner's mutex" }
         require(capacity >= 1)
+        require(maxParallel >= 1)
         val list = flights.getOrPut(key) { mutableListOf() }
         val existing = list.firstOrNull { it.claims < minOf(it.capacity, capacity) }
+        if (existing == null && list.size >= maxParallel) return null
         val flight = existing ?: Flight<K, T>(key, capacity).also { f ->
             list += f
             started++
@@ -78,6 +90,12 @@ internal class SingleFlight<K : Any, T : Any>(
         }
         flight.claims++
         return flight
+    }
+
+    /** The oldest connect of [key] still running (what a claimant refused by [tryJoin] waits for), or null. Under the lock. */
+    fun pending(key: K): Flight<K, T>? {
+        check(mutex.isLocked) { "SingleFlight.pending needs the owner's mutex" }
+        return flights[key]?.firstOrNull()
     }
 
     /** A claimant gave up before the connect finished. A no-op once it has finished. */

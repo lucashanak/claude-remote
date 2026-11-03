@@ -321,15 +321,21 @@ as before and it delegates to the services.
 | `RemoteOpsService` | tmux copy-mode scroll + SFTP upload/download. |
 | `SessionPersistenceService` | Shared `sessions.json`, restore-script install, real-session-id refresh, forget/rename. |
 
-### Communication seams (stubs)
+### Communication seams and their wiring
 
 New interfaces under `session/service/`, each with a production stub that keeps
 today's behaviour so the pieces behind them (transport pool, exec routing,
-reconcile, hooks) can be built in parallel without touching each other's files. They are reached through nullable
+reconcile, hooks) could be built in parallel without touching each other's files. They are reached through nullable
 `@Volatile` slots on `ConnectionRegistry` (`execSessions`, `execChannels`,
 `remoteExec`, `reconciler`, `bootstrap`; null = legacy) and the process-wide
 `CommFlags`. The transport pool (`ServerTransportPool`, `SingleFlight`) is live behind
-`comm_pool`; the exec-side pieces are not constructed by the app yet. The services reach
+`comm_pool`. `SessionOrchestrator.wireExecLayer()` fills ALL the slots in one step in its
+constructor (the real classes: `PoolExecTransportManager`, `GatedExecChannels`,
+`PooledRemoteExec`, `DefaultServerBootstrap`, `ExecServerReconciler`) and connects the
+notification service's `HookEventSink` and `PersistenceClosures`; the flags decide per server
+whether anything uses them (connection.md "Wiring in the orchestrator"); the orchestrator also watches
+each server's `exec` flag, so the kill switch closes (or restarts) the exec transport at run time. The stubs stay for
+tests and as the documented legacy behaviour. The services reach
 exec through the routing helpers of `ConnectionRegistry` (`execRun`, `execRead`,
 `useChannel`) and `SshSessionHelper.withSession` (see connection.md "Exec routing"), which
 only deviate from legacy when the slots are wired and the `exec` group is on for the server.
@@ -340,12 +346,12 @@ only deviate from legacy when the slots are wired and the `exec` group is on for
 | `ExecChannels.use(serverId, kind, acquireTimeoutMs) { ch -> }` and `withPermit(...) { session -> }` (`RemoteExec.kt`) | `UngatedExecChannels` (no permits); real: `GatedExecChannels` (permits per kind, void with the transport generation, LONG fallback) | transport pool |
 | `ExecTransportManager` / `ExecSessionProvider`, `LinkState` (`ExecTransportManager.kt`) | `PooledExecTransportManager`; real: `PoolExecTransportManager` (one EXEC transport per server, supervisor, backoff, forwards) | transport pool |
 | `ServerTransportPool.setKeepAlive(ms)`, `ExecTransportManager.setKeepAlive(ms)` | pool: applies to every live transport and to later ones; manager stub: records it | transport pool |
-| `ServerBootstrap` (`ServerBootstrap.kt`) | `NoopServerBootstrap`; implemented by `DefaultServerBootstrap` (not wired yet) | wiring |
+| `ServerBootstrap` (`ServerBootstrap.kt`) | `NoopServerBootstrap`; implemented by `DefaultServerBootstrap`, wired (built on first use) by the orchestrator | wiring |
 | `ServerReconciler` (`ServerReconciler.kt`) | `LegacyServerReconciler` (executes today's forget rule); real one: `ExecServerReconciler` (one `reconcileAll` exec per server, see connection.md "Reconcile") | reconcile |
 | `PersistenceClosures.recentlyClosedLocally(serverId, name, withinMs)` | `None`; `SessionPersistenceService` implements it | reconcile |
-| `HookEventSink` | `NoOp`; `NotificationService.hookSink` calls it | hook-event reducer, wired in the orchestrator |
+| `HookEventSink` | `NoOp`; `NotificationService.hookSink` calls it; the orchestrator's sink re-arms the notify latch and asks the reconciler for `checkUuid` / `checkClosed` | hook-event reducer, wired in the orchestrator |
 | `HookCapContract` (CAP: marker in the config dir's settings.json, no `disableAllHooks`; `claude-remote-hookev.installed` is audit only) | executable reference | reconcile reads, hooks install writes |
-| `CommLogFormat` (`data/60s` tail, `Attach` line) | final | emitted by the orchestrator / attach path |
+| `CommLogFormat` (`data/60s` tail, `Attach` line) | final | emitted by the orchestrator (`data/60s exec=` = reconcile execs of the minute; `Attach` per connect and reconnect) |
 
 Services take their dependencies by constructor injection (the shared
 `CoroutineScope`, `ConnectionRegistry`, `TabManager`, an `isBackground` getter,

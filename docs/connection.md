@@ -315,7 +315,10 @@ A transport has a **role** and the pool key is `(host, port, viaProxy, role)`:
 - `comm_pool` **on**: under the mutex the pool takes a free slot of a live transport (slots
   promised to waiters of a pending handshake count as taken) or joins a pending handshake;
   the handshake itself runs outside the mutex in a pool-owned coroutine (`SingleFlight`). A
-  reconnect wave of N tabs therefore starts at most `ceil(N / cap)` handshakes, in parallel.
+  reconnect wave of N tabs therefore starts at most `ceil(N / cap)` handshakes, at most
+  `MAX_PARALLEL_HANDSHAKES` = 3 of them at once (the bound lives in the pool: `SingleFlight.tryJoin`
+  refuses a fourth connect of the key and the claimant waits for the oldest one, then asks again; see
+  "Handshake gate").
   A cancelled initiator neither cancels the handshake for the others nor leaks its session:
   when the handshake finishes with nobody left it is disconnected. A failed handshake fails
   every waiter at once and is forgotten.
@@ -402,16 +405,12 @@ has closed.
 ## Communication redesign: flags and seams
 
 Experimental groups of the communication redesign. `comm_pool` acts on the
-transport pool (previous section); the exec transport manager and the channel budget exist
-but nothing constructs them in the app yet (the shell cap therefore stays 3 until the exec
-transport is wired). **The other groups are still mostly stubs that delegate to the
-behaviour described above**, so switching such a flag changes nothing yet; the per-server
-bootstrap and the hook-event path (below) are implemented but not wired into the connect
-path in this build, except that `comm_hooks` already decides whether the notify watcher
-also follows the hook events. Settings -> *Connection (experimental)* edits the flags (each
-label says what the switch does today, `comm_pool` included: it is read by the connection
-layer per server; a switch that nothing reads says "no effect in this build"; every switch
-shows when an implication turned its group off). `CommFlags.deviceDefaults`
+transport pool (previous section). The exec layer (exec transport manager, channel gate,
+bootstrap, reconcile, hook sink) is wired by the orchestrator in one step, see "Wiring in
+the orchestrator" below: with `comm_exec` on for a server everything that is not a tab's
+terminal runs on that server's exec transport, with it off every lookup behaves as before.
+Settings -> *Connection (experimental)* edits the flags (each label says what the switch
+does; every switch shows when an implication turned its group off). `CommFlags.deviceDefaults`
 (`StateFlow<Effective>`) is published by the Android `Application`, desktop `Main`
 and Settings on every change; code that acts for one server uses
 `CommFlags.effectiveFor(serverId)` / `effectiveFlow(serverId)`, never
@@ -462,8 +461,10 @@ rewrite is the file `~/.claude-remote/hookev.off` on the server.
 
 **Log formats** (`CommLogFormat`): the `data/60s:` line gets
 ` | attached=<n> warm=<n> parked=<n> exec=<n>` appended at the END (prefix
-unchanged; parse `key=value` tolerantly; `warm/parked/exec` are 0 until their
-features land). The attach line is
+unchanged; parse `key=value` tolerantly; `warm` and `parked` are 0 until lazy attach
+exists; `exec` is the number of reconcile execs issued in the minute just ended, the
+load of the per-server reconcile, summed over ALL servers: with several servers expect about 6 per server,
+not 6 in all). The attach line is
 `Attach <sid> kind=cold|warm ms=<n> phase=shell=<ms>,prompt=<ms>,decide=<ms>,attach=<ms>,firstByte=<ms>`
 (the phase value is a list of `name=<ms>` items; absent phases are omitted, no
 phases at all is `phase=-`).
@@ -498,19 +499,158 @@ is about 9.6 days of history after a cut).
   inputs give "unknown", never "no". Limits: project-level and managed
   settings are not examined.
 
+### Wiring in the orchestrator
+
+`SessionOrchestrator` fills the registry's slots in ONE step (`wireExecLayer`, last in the class
+body): `PoolExecTransportManager` (`execSessions`), `GatedExecChannels` (`execChannels`),
+`PooledRemoteExec` over the gate (`remoteExec`), `DefaultServerBootstrap` (`bootstrap`, built on
+first use: it listens to the process-wide install / remove requests of Settings from the moment it
+exists, and a request nobody can serve is dropped), `SessionPersistenceService.newExecReconciler()`
+(`reconciler`), `SshSessionHelper.execChannelsProvider`, the `HookEventSink` and
+`PersistenceClosures` of the notification service. A half-wired layer would route callers to an
+exec transport nobody keeps alive, so there is no partial state. The shell cap of a server's pool is
+8 only while its exec transport is UP (`ConnectionRegistry.execUp` is the pool's `execWired`).
+
+Lifecycle:
+- `ensureExecTransport(serverId)` (idempotent, free to repeat; `ensure` is single flight, so 20 tabs
+  cost one handshake) runs before the first connect of a tab of the server: `launchSession`,
+  `reconnectSession`, every `autoReconnect` attempt, `restoreAndReconnect` (once per server, before the
+  tabs start), and `ensureExecTransports()` for every server that has a tab (Android `onResume`,
+  desktop window focus, `onNetworkAvailable`).
+- `onNetworkLost()` tells the exec manager BEFORE it tears the pooled transports down: the exec
+  transports park in `DownNetwork` (no strike, no backoff climb) instead of reading the teardown as a
+  death. `onNetworkAvailable()` (Android `onAvailable`) wakes them and ensures every server's, before the
+  dead tabs reconnect.
+- **The first reconnects of a wave wait for the exec transport.** The shell cap is 8 only while the exec
+  transport is UP, so a lease made while it is still `Connecting` / `DownNetwork` gets 3: 49 tabs would open
+  17 transports where 7 do. `restoreAndReconnect`, `onNetworkLost` and `onNetworkAvailable` open a window of
+  3 s (`EXEC_WAVE_WAIT_MS`, together, not per tab); `reconnectSession` and `autoReconnect` wait inside it for
+  `execManager.await(serverId)` when the exec transport is `Connecting` or `DownNetwork` (not when it is
+  Down in a backoff, closed or switched off). Whatever is not up by then connects at cap 3 as before.
+- `setBackgroundMode` sets `PoolExecTransportManager.background` (slower reconnect pace) next to the
+  keepalive. The desktop never reports a background mode.
+- `close(serverId)` runs in `disconnectSession` once the LAST tab of the server is gone (after `removeTab`;
+  a tab that is being closed is in `closingIds` and no longer counts as a reason to start the transport, so a
+  reconnect of it that is still in flight cannot revive it behind the close), and in `releaseExecLayer()`.
+  `disconnectAll()` calls the latter; no platform calls `disconnectAll` today. The Android `MainActivity`
+  calls `releaseExecLayer()` on the orchestrator it replaces: a recreated activity builds a new orchestrator
+  with its own `TabManager`, so the old one is unreachable from the UI, and its exec supervisors would
+  reconnect for ever. (Closing just them leaves every tab as the user sees it; the old orchestrator's own
+  tab connections are a leak that predates the exec layer and is untouched.)
+- **Kill switch at run time.** The orchestrator watches `CommFlags.effectiveFlow(serverId).exec` of every
+  server that has a tab. `exec` going off (Settings, the legacy set, a server-side force-off) closes the
+  server's exec transport (its supervisor would otherwise revive it and feed the Tailscale strike rule),
+  hands its port forwards to a live shell transport and puts every tab back on its per-tab session-id loop;
+  `exec` coming back starts the transport, takes the forwards back from the shells, runs the bootstrap and
+  puts the tabs back on the reconcile. Exactly one of the per-tab loop and the reconcile runs for a tab
+  (`register` stops the loop, the legacy start unregisters). While shells are still packed 8 to a transport,
+  the paths that went back to the legacy lookups are counted and need room too (`ConnectionRegistry.needsRoom`:
+  routing on, or some shell transport carries more than 3 shells).
+- Per tab: with routing on, `attachSessionRuntime` registers the tab with the reconciler (one reconcile
+  per server) instead of starting the per-tab session-id loop; `disconnectSession` unregisters it. The
+  attach-exit path asks `reconciler.checkClosed` first (it forgets a tab under the tightened rule).
+- Connect: with routing on, `ensureServerSetup` runs the per-server bootstrap (one exec, memoized) and
+  waits for it at most 3 s before the tmux command, so the order hooks -> tmux holds when the server
+  answers quickly and the attach is never held hostage when it does not; the per-tab Stop-hook and
+  streamd ensures stay for the legacy path. `tmuxExists` / `hasTranscript` of the launch decision and the
+  restore-service install, tombstone clear and manifest push of `launchSession` use the by-server-id
+  overloads (exec transport); with routing off they run on the tab's own session as before.
+- `refreshFlags` of every server that has a tab and runs exec routing, or has it forced off by the server's
+  `client-flags.json` (not by this device), every 10 minutes while the app is in the foreground: a server-side
+  force-off takes effect without a reconnect, and deleting the file lifts it the same way (the read goes over
+  a tab transport with room while the exec transport is closed). The bootstrap itself is kicked (resume, focus,
+  network back, exec transport up) only when something can answer it: the exec transport is up or a tab of the
+  server is connected; a bootstrap that fails with "no transport" backs off for 10 s and would suppress the
+  ones of the connects.
+- One-off server-side steps of `launchSession` (restore-service install, tombstone clear, manifest push) that
+  find no usable transport wait for the exec transport once (60 s) instead of being dropped; the install is
+  remembered only after it succeeded, and a tombstone that could not be cleared is logged and does not stop the
+  push. Every coroutine the exec paths launch catches and logs its failure (`launchGuarded`), and the
+  orchestrator's scope has a `CoroutineExceptionHandler` as a net: on Android an exception nobody caught ends
+  the process. `ExecServerReconciler.round` / `checkClosed` / `checkUuid` never throw (a failed exec is "no answer").
+- Hook sink: `work` re-arms the notify latch of the tab (like the statusline does), `start` asks the
+  reconciler for the tab's uuid, a forget.log line asks it to check whether the tab is closed
+  (`checkClosed` after the delay). Tabs are found by `(serverId, tmux name)`.
+- FIX 4 (leaving a tab resets its APPROVAL to ready): a hook-reported approval (the pane's own claude said
+  so; `NotificationService.hookApprovalSince`) younger than 10 minutes, on a server with hooks on, stays;
+  the next hook event of the pane ends it. Anything else is reset as before.
+- The log shipper flushes through `execRun` (SHORT, 10 s) on the server with the most tabs.
+- `data/60s exec=` is the reconcile execs of the minute, summed over all servers. Each attach logs
+  `Attach <sid> kind=cold ms=<n> phase=shell=..,prompt=..,decide=..,attach=..,firstByte=..` when the first
+  tmux output after the attach command arrives: `shell` (lease and shell channel), `prompt` (shell prompt, startup
+  command), `decide` (server setup, tmux probes and the decision up to sending the command), `attach`
+  (sending it), `firstByte` (until the first output that is not the pty's echo of the command: the echo comes
+  about one round trip after the send and is skipped; tmux's switch to the alternate screen also counts).
+  `warm` attaches do not exist yet.
+
+Limits of the wiring that are known and accepted (they are not bugs to fix next):
+- FIX 4: a hook-reported approval lasts until the next hook event of the pane. PostToolUse is not one of them, so
+  after the user answered on the screen and a long tool runs, a later screen guess of APPROVAL can survive a tab
+  switch for up to the 10 minutes of the rule. `approvalSince` is not cleared by the answer on screen.
+- The desktop reports no background mode and has no network callbacks (`onNetworkLost` / `onNetworkAvailable`
+  are Android's): it relies on the 10 s x 2 keepalive and the 5 s supervision poll of the exec transport.
+- The close-state and peer probes of a tab's connect run on the tab's own shell session (see "Fallback with headroom").
+- Tests: `aDamagedHookScriptWithAValidHeaderIsRewrittenAndAnIntactOneIsKept` (lane H) failed once in a run and
+  passed on repeat (watch it); the hang test of the capped hook script checks only the time bound, not that the
+  process is gone.
+
+### Fallback with headroom
+
+The shell cap of 8 is decided when a tab leases, but the fallbacks happen later: when the exec
+transport is down, short execs, the bootstrap, the watcher and the stream daemon fall back to a tab
+transport, and tabs sit 8 to a transport (sshd's default `MaxSessions` is 10). A fallback must not land on
+a transport without room, so while exec routing is on a fallback only uses a shell transport where
+`shells + reserved slots + borrowed channels + 1 + 2 <= 10` (`ServerTransportPool.fallbackHeadroom`, 2 =
+channels left for the tabs' own transient channels, `FALLBACK_RESERVE`). A transport packed with 8 shells
+has none: the fallback gets `NOT_UP` (callers skip the round, the watcher retries) until the exec
+transport is back, which the manager retries with its backoff (at most 30 s in the foreground). The polls of a
+tab (`TranscriptStream`, `SessionStatusPoller`) and the redraw kick, which used to fall back to the tab's own
+session without any check, take a counted channel through `ConnectionRegistry.reserveTabChannel` and skip the
+tick (the kick: use the geometry fallback) when there is no room. Short
+fallbacks, `useChannel` fallbacks and the bootstrap's hold ONE counted channel for the whole call
+(`reserveFallbackChannel`, decided under the pool mutex so two callers cannot take the last slot) and give
+it back in `finally`; the LONG fallback of `GatedExecChannels` counts its channel the same way through the
+gate's `reserveFallback` hooks. Chosen over "back to cap 3 after exec has been down for X s" because it
+needs no migration of live shells and costs nothing while the exec transport is up. Limits: the headroom
+lookups used by `liveServerSession` (the notify watcher's own fallback, which opens its channel itself) and
+`fallbackPooledSession` (`SshSessionHelper.withSession`'s pooled step, the LONG fallback's pick) only look,
+they do not count, so two callers can both see the last slot; the reserve of 2 absorbs that. The LONG
+fallback of the watcher is therefore bounded but not exact. The LONG fallback of `GatedExecChannels` claims
+its channel with a check-and-reserve under the pool mutex: when the room went to someone else between the look
+and the claim the stream does not start (`NOT_UP`). The close-state and peer probes of a tab's connect
+(`fetchCloseState`, `serverHasOtherLiveSession`) still run on the tab's own shell session (no by-server-id
+overload): in a wave of reconnects on a transport packed with 8 shells they can be refused by `MaxSessions`
+(they fail open); a limit of this wiring, accepted.
+
+### Handshake gate
+
+`connectGate(serverId)` was a `Semaphore(3)` in front of `SshManager.connect`. With the pool's single flight
+(`comm_pool` on) it is harmful: a tab holds its permit while it waits for the handshake it joined, so at most
+three tabs are inside `connect` and the handshakes of a wave run one at a time. Measured against a real sshd
+with 20 tabs and the exec transport up (`ExecWiringIntegrationTest`): behind the gate of 3 the wave took
+382 ms with at most 1 handshake in flight; with the pooled gate 85 ms with 3 in flight (both 3 handshakes in
+total). So with `comm_pool` on the gate is practically open (256 permits); with it off the gate of 3 stays.
+
+That gate was also what kept a wave at cap 3 (exec transport not up yet: 49 tabs = 17 handshakes) from
+opening them all at once. The bound now lives in the pool, where it holds whatever stands in front of it: at
+most 3 handshakes of a transport key at once. Measured against a real sshd with `MaxStartups 10:30:100`, 49
+leases and no exec transport: peak 3 in flight, 17 handshakes, nothing dropped (without the bound: peak 17 and
+`drop connection ... past MaxStartups`).
+
 ### Exec routing
 
-When the exec seam is wired (the `execSessions`/`remoteExec` slots are set) and the `exec`
-group is on for a server, everything that is not the attached terminal talks to that
+When the exec seam is wired (the orchestrator sets the `execSessions`/`remoteExec` slots
+in its constructor) and the `exec` group is on for a server, everything that is not the attached terminal talks to that
 server through the server's exec transport instead of borrowing a tab's shell:
 
 - `execRun` / `execRead` / `useChannel` run a command, a read-only command or a scoped
   channel through `RemoteExec` / `ExecChannels`. When the exec transport is not UP
-  (`NOT_UP`) they fall back to a live tab session of the server; any other
+  (`NOT_UP`) they fall back to a live tab session of the server that still has channel
+  headroom (see "Fallback with headroom"); any other
   `ExecUnavailable` (timeout, refused channel, io, permit wait) is thrown, never retried
   on another transport. `ConnectionRegistry.liveServerSession` / `anyLiveSession` never
   hand out the exec session, because it would be used without a permit: they return a
-  connected tab session only. A permanent stream (notify watcher, stream daemon) takes
+  connected tab session only (with routing on, `liveServerSession` only one with channel headroom). A permanent stream (notify watcher, stream daemon) takes
   its channel from `useChannel` with the long kind; a one-off operation (usage poll,
   upload, log shipping) uses the short kind with a total time limit, so the two long
   permits are never used up by work that ends.
@@ -638,14 +778,19 @@ shape is `FAILED` and nothing is written; an entry of a newer version is `NEWER`
 nothing is written (builds never flap); per event list the non-canonical marked
 items are taken out of their entries and the canonical entry appended; a foreign hook
 that shares an entry with ours stays (only our items are removed, in install and in
-remove), other entries are never touched; before a write a backup `settings.json.claude-remote.bak.<epoch>` is made
+remove), other entries are never touched. An item is ours only when its command
+STARTS with `: claude-remote-ev v<N>;` (the shape the installer writes); a foreign hook
+that merely mentions the name, say in a path, is left alone and does not count as a
+version, and a `null` or non-object item in a hook list stays; before a write a backup `settings.json.claude-remote.bak.<epoch>` is made
 (newest 5 kept); compare-and-swap on inode and mtime right before the replace (Claude
 and OMC do not take our lock), up to 3 rounds; after the write the file is re-read
 and every other top-level key and every hook that is not ours (also inside an entry that
 carries our marker) must be unchanged, otherwise the backup is put back and the result
 is `FAILED`. The backup is put back only while the file is still exactly what the merge
 wrote; if Claude or OMC rewrote it meanwhile, the result is `FAILED` and their newer
-write is left alone. The CAP marker
+write is left alone, unless what is in the file then already is our canonical state
+(install) or holds none of ours (remove): that is reported as `EXISTS` and the marker
+is written, so hooks that run are not reported as not installed. The CAP marker
 `<config dir>/claude-remote-hookev.installed` is written after the replace (and on
 `EXISTS` when missing). Output tokens: `HOOKS_V2_FIXED|EXISTS|NEWER|FAILED`,
 `ACCOUNTS_MERGED=<n>`; removal prints `HOOKS_V2_REMOVE_FIXED|EXISTS|FAILED`; the
@@ -675,7 +820,11 @@ exists, its SHA-256 match, so a damaged file with a valid header is rewritten):
    `$CLAUDE_CODE_SESSION_ID` when both are known (whitespace around `:` in the JSON is
    fine). **Main pane only:** the hook's pane must be the first pane of the session's
    first window (the one the app attaches to). With agent teams in tmux mode a
-   teammate is a split pane of the same session; its hooks are dropped.
+   teammate is a split pane of the same session; its hooks are dropped. Known limit:
+   the hook compares with the first pane of the session's first window, while the app
+   attaches to `=name:` (the active pane of the current window); today the two coincide
+   (one window, one pane; teammates are created with `split-window -d` behind the lead),
+   so a layout with a second window or a moved lead pane would need the comparison revisited.
 4. No python on the path of `work`, `askdone`, `stop`, `start`, `end`. `ask` and
    `perm` use python only to shorten the questions or the tool, and still emit
    without it (empty detail).
@@ -684,7 +833,9 @@ exists, its SHA-256 match, so a damaged file with a valid header is rewritten):
    20 MB nothing is appended. `extra` is UTF-8 capped at 600 bytes: `ask` = the
    questions with option labels, `perm` = `<tool>: <description|command|path>`,
    `stop` = `bg` when background tasks are pending, `start` = `source=<s>
-   exe=<claude version>`.
+   exe=<claude version>`. The script needs `mktemp` (its tmux answer goes to a temp
+   file): with `/tmp` full or not writable every event is silently dropped, and a hook
+   killed by SIGKILL leaves its temp file behind (the exit trap does not run).
 6. Subagents and in-process teammates share the pid, pane and session id of the lead,
    so their `ask`/`perm` are emitted for the lead's tab; a teammate in its own tmux
    pane is dropped (see 3). A `PermissionRequest` for
@@ -719,10 +870,13 @@ for that session changes nothing; `work` -> WORKING (and re-arms the prompt latc
 `perm`/`ask` -> approval needed with a start time, `askdone` -> WORKING, `end` ->
 IDLE, `start` -> UUID re-check (nothing is adopted from a hook; it leaves a pending
 approval alone, and a `start` right after an `end`, i.e. `/clear`, leaves the session
-ready, not idle). `stop` always clears an approval (the session goes to WORKING, the
-legacy Stop marker then makes it ready); without an approval it flips to ready only
-when the event is old (a replay), because live the legacy marker does it after the
-notification body is resolved. "Old" is 5 s plus the uncertainty of the measured
+ready, not idle). A `stop` that finds the session still in APPROVAL leaves it for
+WORKING (the legacy Stop marker then makes it ready); a live `stop` never overwrites
+a session that is no longer in APPROVAL, because the legacy marker of the same turn
+normally lands first and has already made it ready (`NotificationService.dispatchHookEvent`
+asks the status service for the current activity). Without an approval a `stop`
+flips to ready only when the event is old (a replay), because live the legacy marker
+does it after the notification body is resolved. "Old" is 5 s plus the uncertainty of the measured
 clock skew. A notification
 for `perm`/`ask` is raised only for a session not in the foreground, only when the
 event is younger than 10 min (60 s for an event stamped before the watcher's first

@@ -959,6 +959,18 @@ DTIMER_EOF
      * (no systemd, e.g. macOS, BSD), the in-app reconnect path still works.
      */
     private val installedRestoreServers = mutableSetOf<String>()
+    /** Installs running right now, so 20 tabs launching at once run one; moved to [installedRestoreServers] only on success. */
+    private val installingRestoreServers = mutableSetOf<String>()
+
+    private fun beginRestoreInstall(serverId: String): Boolean = synchronized(installedRestoreServers) {
+        serverId !in installedRestoreServers && installingRestoreServers.add(serverId)
+    }
+
+    /** A failed install (no transport, an exception) is not remembered: the next launch on the server tries again. */
+    private fun endRestoreInstall(serverId: String, ok: Boolean) = synchronized(installedRestoreServers) {
+        installingRestoreServers.remove(serverId)
+        if (ok) installedRestoreServers.add(serverId)
+    }
 
     /**
      * Pull the authoritative `~/.claude-remote/sessions.json` from the
@@ -1234,11 +1246,8 @@ DTIMER_EOF
 
     suspend fun ensureRestoreService(sshManager: SshManager) {
         val serverId = tabManager.tabs.value.firstOrNull { registry.ssh(it.id) === sshManager }?.server?.id
-        if (serverId != null) {
-            synchronized(installedRestoreServers) {
-                if (!installedRestoreServers.add(serverId)) return
-            }
-        }
+        if (serverId != null && !beginRestoreInstall(serverId)) return
+        var ok = false
         try {
             val out = withContext(Dispatchers.IO) {
                 val sshSession = sshManager.getSession() ?: return@withContext "NO_SESSION"
@@ -1252,24 +1261,35 @@ DTIMER_EOF
                 text
             }
             logRestoreInstall(out)
+            ok = out != "NO_SESSION"
         } catch (e: Exception) {
             FileLogger.error(TAG, "Restore service install failed: ${e.message}", e)
+        } finally {
+            if (serverId != null) endRestoreInstall(serverId, ok)
         }
     }
 
-    /** [ensureRestoreService] by server id, over the exec transport (no tab shell needed). Once per server per app run. */
-    suspend fun ensureRestoreService(serverId: String) {
-        synchronized(installedRestoreServers) {
-            if (!installedRestoreServers.add(serverId)) return
-        }
+    /**
+     * [ensureRestoreService] by server id, over the exec transport (no tab shell needed). Once per server per app
+     * run, once it succeeded. False = there was no usable transport (nothing was installed, nothing is
+     * remembered): the caller may ask again when one is up.
+     */
+    suspend fun ensureRestoreService(serverId: String): Boolean {
+        if (!beginRestoreInstall(serverId)) return true
+        var ok = false
         try {
             val out = registry.execRead(serverId, INSTALL_RESTORE_COMMAND, totalMs = 15_000)?.trim() ?: "NO_SESSION"
             logRestoreInstall(out)
+            ok = out != "NO_SESSION"
         } catch (e: kotlinx.coroutines.CancellationException) {
             throw e
         } catch (e: Exception) {
             FileLogger.error(TAG, "Restore service install failed: ${e.message}", e)
+            return true // a real failure of the command: asking again at once would fail the same way
+        } finally {
+            endRestoreInstall(serverId, ok)
         }
+        return ok
     }
 
     private fun logRestoreInstall(out: String) {
@@ -1331,8 +1351,8 @@ DTIMER_EOF
      * tab session): the merge payload goes to stdin, paced like every upload. A parked tab
      * can therefore still re-sync the manifest (rename, close).
      */
-    suspend fun pushSessionsToServer(serverId: String) {
-        val storage = sessionStorage ?: return
+    suspend fun pushSessionsToServer(serverId: String): Boolean {
+        val storage = sessionStorage ?: return true
         try {
             val payload = storage.serializeForServer(serverId)
             val res = registry.execRun(
@@ -1342,7 +1362,10 @@ DTIMER_EOF
                 totalMs = 15_000,
             )
             when {
-                res == null -> FileLogger.log(TAG, "sessions.json sync skipped for $serverId: no usable transport")
+                res == null -> {
+                    FileLogger.log(TAG, "sessions.json sync skipped for $serverId: no usable transport")
+                    return false
+                }
                 res.exitStatus != 0 -> FileLogger.error(
                     TAG,
                     "sessions.json sync exec exited with ${res.exitStatus} for $serverId — restore service may use stale data",
@@ -1355,6 +1378,28 @@ DTIMER_EOF
         } catch (e: Exception) {
             FileLogger.error(TAG, "sessions.json sync failed for $serverId: ${e.message}", e)
         }
+        return true
+    }
+
+    /**
+     * Drop every tombstone of [tmuxSessionName] over the exec transport, [clearTombstone] by server id. False =
+     * no usable transport (retry later); a command that exited non-zero is logged like the legacy variant does.
+     */
+    suspend fun clearTombstone(serverId: String, tmuxSessionName: String): Boolean {
+        val res = try {
+            registry.execRun(serverId, ManifestCommands.clearTombstone(tmuxSessionName), totalMs = 5_000)
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            FileLogger.error(TAG, "clearTombstone($tmuxSessionName) failed: ${e.message}", e)
+            return true
+        }
+        if (res == null) {
+            FileLogger.log(TAG, "clearTombstone($tmuxSessionName) skipped for $serverId: no usable transport")
+            return false
+        }
+        if (res.exitStatus != 0) FileLogger.error(TAG, "clearTombstone($tmuxSessionName) exited with ${res.exitStatus}", null)
+        return true
     }
 
     /**
@@ -1544,6 +1589,9 @@ DTIMER_EOF
     }
 
     /** Cancel this session's sessions.json UUID-refresh poller (called from disconnectSession). */
+    /** The per-tab session-id loop of [sessionId] is running (tests: exactly one of it and the per-server reconcile may run). */
+    internal fun idRefreshActive(sessionId: String): Boolean = sessionIdRefreshJobs[sessionId]?.isActive == true
+
     fun stopIdRefresh(sessionId: String) {
         sessionIdRefreshJobs.remove(sessionId)?.cancel()
     }

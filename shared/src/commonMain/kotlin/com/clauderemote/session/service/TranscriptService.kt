@@ -197,7 +197,7 @@ internal class TranscriptService(
         val tab = tabManager.getTab(sessionId) ?: return
         val stream = synchronized(transcriptLock) {
             val s = transcriptStreams.getOrPut(sessionId) {
-                TranscriptStream(tab.server, tab.folder, scope, liveSession = { registry.ssh(sessionId)?.getSession() }, isBackground = { isBackground() }, isActiveTab = { tabManager.activeTabId.value == sessionId }, daemonActive = { serverStreamDaemons[tab.server.id]?.live == true }, viaExec = { registry.execActive(tab.server.id) })
+                TranscriptStream(tab.server, tab.folder, scope, liveSession = { registry.ssh(sessionId)?.getSession() }, isBackground = { isBackground() }, isActiveTab = { tabManager.activeTabId.value == sessionId }, daemonActive = { serverStreamDaemons[tab.server.id]?.live == true }, viaExec = { registry.execActive(tab.server.id) }, reserveTabChannel = { registry.reserveTabChannel(tab.server.id, it) }, releaseTabChannel = { registry.releaseTabChannel(tab.server.id, it) })
             }
             startContextTokenCollector(sessionId, s)
             s
@@ -210,7 +210,7 @@ internal class TranscriptService(
             ?: return kotlinx.coroutines.flow.MutableStateFlow(emptyList())
         val stream = synchronized(transcriptLock) {
             val s = transcriptStreams.getOrPut(sessionId) {
-                TranscriptStream(tab.server, tab.folder, scope, liveSession = { registry.ssh(sessionId)?.getSession() }, isBackground = { isBackground() }, isActiveTab = { tabManager.activeTabId.value == sessionId }, daemonActive = { serverStreamDaemons[tab.server.id]?.live == true }, viaExec = { registry.execActive(tab.server.id) })
+                TranscriptStream(tab.server, tab.folder, scope, liveSession = { registry.ssh(sessionId)?.getSession() }, isBackground = { isBackground() }, isActiveTab = { tabManager.activeTabId.value == sessionId }, daemonActive = { serverStreamDaemons[tab.server.id]?.live == true }, viaExec = { registry.execActive(tab.server.id) }, reserveTabChannel = { registry.reserveTabChannel(tab.server.id, it) }, releaseTabChannel = { registry.releaseTabChannel(tab.server.id, it) })
             }
             // Derive the ctx-window % from this stream's token usage. Inside the
             // lock so it binds to the exact stream instance and stays atomic with
@@ -283,7 +283,7 @@ internal class TranscriptService(
             ?: return kotlinx.coroutines.flow.MutableStateFlow(null)
         val stream = synchronized(transcriptLock) {
             transcriptStreams.getOrPut(sessionId) {
-                TranscriptStream(tab.server, tab.folder, scope, liveSession = { registry.ssh(sessionId)?.getSession() }, isBackground = { isBackground() }, isActiveTab = { tabManager.activeTabId.value == sessionId }, daemonActive = { serverStreamDaemons[tab.server.id]?.live == true }, viaExec = { registry.execActive(tab.server.id) })
+                TranscriptStream(tab.server, tab.folder, scope, liveSession = { registry.ssh(sessionId)?.getSession() }, isBackground = { isBackground() }, isActiveTab = { tabManager.activeTabId.value == sessionId }, daemonActive = { serverStreamDaemons[tab.server.id]?.live == true }, viaExec = { registry.execActive(tab.server.id) }, reserveTabChannel = { registry.reserveTabChannel(tab.server.id, it) }, releaseTabChannel = { registry.releaseTabChannel(tab.server.id, it) })
             }
         }
         return stream.status
@@ -300,7 +300,7 @@ internal class TranscriptService(
             ?: return kotlinx.coroutines.flow.MutableStateFlow(false)
         val stream = synchronized(transcriptLock) {
             transcriptStreams.getOrPut(sessionId) {
-                TranscriptStream(tab.server, tab.folder, scope, liveSession = { registry.ssh(sessionId)?.getSession() }, isBackground = { isBackground() }, isActiveTab = { tabManager.activeTabId.value == sessionId }, daemonActive = { serverStreamDaemons[tab.server.id]?.live == true }, viaExec = { registry.execActive(tab.server.id) })
+                TranscriptStream(tab.server, tab.folder, scope, liveSession = { registry.ssh(sessionId)?.getSession() }, isBackground = { isBackground() }, isActiveTab = { tabManager.activeTabId.value == sessionId }, daemonActive = { serverStreamDaemons[tab.server.id]?.live == true }, viaExec = { registry.execActive(tab.server.id) }, reserveTabChannel = { registry.reserveTabChannel(tab.server.id, it) }, releaseTabChannel = { registry.releaseTabChannel(tab.server.id, it) })
             }
         }
         return stream.historyTruncated

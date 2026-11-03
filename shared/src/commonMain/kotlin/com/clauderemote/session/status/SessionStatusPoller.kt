@@ -56,6 +56,9 @@ class SessionStatusPoller(
     private val isBackground: () -> Boolean = { false },
     /** True when exec routing is active for this server: poll through the exec transport and never open a connection of our own (a tick without a live transport is skipped). */
     private val viaExec: () -> Boolean = { false },
+    /** The fallback to the tab's own session (exec routing on, exec transport not up) is counted and refused without room: see [com.clauderemote.session.transcript.TranscriptStream]. */
+    private val reserveTabChannel: suspend (com.jcraft.jsch.Session) -> Boolean = { true },
+    private val releaseTabChannel: suspend (com.jcraft.jsch.Session) -> Unit = {},
 ) {
     private val _status = MutableStateFlow(RemoteSessionStatus())
     val status: StateFlow<RemoteSessionStatus> = _status.asStateFlow()
@@ -120,7 +123,12 @@ class SessionStatusPoller(
                         }
                     } catch (e: ExecUnavailable) {
                         if (e.reason != ExecUnavailableReason.NOT_UP) throw e
-                        if (shared == null) null else execStat(shared, statCmd)
+                        if (shared == null || !reserveTabChannel(shared)) null
+                        else try {
+                            execStat(shared, statCmd)
+                        } finally {
+                            withContext(kotlinx.coroutines.NonCancellable) { releaseTabChannel(shared) }
+                        }
                     }
                 } else if (shared != null) {
                     execStat(shared, statCmd)

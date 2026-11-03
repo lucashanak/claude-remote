@@ -25,15 +25,16 @@ class App : Application() {
 
         FileLogger.init(filesDir, appVersion)
 
-        // Every process of the app (UI, PhoneWearService) must see the user's
-        // communication flags, not the built-in defaults, before anything reads them.
-        AppSettings(PlatformPreferences(this)).publishCommFlags()
-
         // Catch uncaught exceptions
         val defaultHandler = Thread.getDefaultUncaughtExceptionHandler()
         Thread.setDefaultUncaughtExceptionHandler { thread, throwable ->
             FileLogger.error("CRASH", "Uncaught exception on ${thread.name}", throwable)
             defaultHandler?.uncaughtException(thread, throwable)
         }
+
+        // Every process of the app (UI, PhoneWearService) must see the user's
+        // communication flags, not the built-in defaults, before anything reads them. After the crash
+        // handler on purpose: a failure while reading the settings is then logged instead of lost.
+        AppSettings(PlatformPreferences(this)).publishCommFlags()
     }
 }

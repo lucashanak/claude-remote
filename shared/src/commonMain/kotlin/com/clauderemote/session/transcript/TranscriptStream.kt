@@ -79,6 +79,13 @@ class TranscriptStream(
      * short-lived connection).
      */
     private val viaExec: () -> Boolean = { false },
+    /**
+     * With exec routing on and the exec transport not up, a poll falls back to the tab's own session. The channel
+     * it opens there must be counted against the transport and refused when the tabs sit 8 to a transport
+     * (`MaxSessions`): [reserveTabChannel] false = skip the tick, [releaseTabChannel] gives the count back.
+     */
+    private val reserveTabChannel: suspend (com.jcraft.jsch.Session) -> Boolean = { true },
+    private val releaseTabChannel: suspend (com.jcraft.jsch.Session) -> Unit = {},
 ) {
     private val _entries = MutableStateFlow<List<TranscriptEntry>>(emptyList())
     val entries: StateFlow<List<TranscriptEntry>> = _entries.asStateFlow()
@@ -270,8 +277,12 @@ class TranscriptStream(
                 }
             } catch (e: ExecUnavailable) {
                 if (e.reason != ExecUnavailableReason.NOT_UP) throw e
-                if (shared == null) return@withLock
-                pollOnce(shared, safeFolder, safeUuid, byteOffset)
+                if (shared == null || !reserveTabChannel(shared)) return@withLock
+                try {
+                    pollOnce(shared, safeFolder, safeUuid, byteOffset)
+                } finally {
+                    kotlinx.coroutines.withContext(kotlinx.coroutines.NonCancellable) { releaseTabChannel(shared) }
+                }
             }
         } else if (shared != null) {
             pollOnce(shared, safeFolder, safeUuid, byteOffset)

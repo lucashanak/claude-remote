@@ -218,6 +218,41 @@ class ServerTransportPool(
         transports.firstOrNull { it.session === session }?.let { if (it.extraChannels > 0) it.extraChannels-- }
     }
 
+    /** Some usable shell transport carries more shells than the legacy cap: only then does a transient channel risk `MaxSessions`. */
+    internal fun hasPackedTransport(): Boolean =
+        transports.any { it.usable && it.role == TransportRole.SHELL && it.lessees.size > SHELLS_PER_TRANSPORT }
+
+    /**
+     * Whether one more TRANSIENT channel (a fallback exec while the exec transport is down) fits on
+     * [session]'s shell transport and still leaves [FALLBACK_RESERVE] channels of sshd's
+     * [SSHD_MAX_SESSIONS] free for the tabs' own short channels: shells + reserved slots + channels already
+     * borrowed + 1 + reserve <= 10. A transport packed with 8 shells (cap 8) has none, so the fallback is
+     * refused instead of running into sshd's refusal. A session this pool does not know says nothing: true.
+     */
+    internal fun fallbackHeadroom(session: Session): Boolean {
+        val t = transports.firstOrNull { it.session === session && it.role == TransportRole.SHELL } ?: return true
+        return t.usable && !t.full && t.hasFallbackHeadroom()
+    }
+
+    /** A usable shell transport that has [fallbackHeadroom], or null. Look-only: nothing is counted (see [reserveFallbackChannel]). */
+    internal fun fallbackSessionWithHeadroom(): Session? =
+        transports.firstOrNull { it.usable && it.role == TransportRole.SHELL && !it.full && it.hasFallbackHeadroom() }?.session
+
+    /**
+     * Take one transient channel on [session]'s shell transport if it has [fallbackHeadroom] (counted against
+     * the cap like [reserveChannel], decided under the mutex so two callers cannot both take the last slot).
+     * Pair with [releaseChannel]. True for a session this pool does not know (nothing to count).
+     */
+    internal suspend fun reserveFallbackChannel(session: Session): Boolean = mutex.withLock {
+        val t = transports.firstOrNull { it.session === session && it.role == TransportRole.SHELL } ?: return@withLock true
+        if (!t.usable || t.full || !t.hasFallbackHeadroom()) return@withLock false
+        t.extraChannels++
+        true
+    }
+
+    private fun Transport.hasFallbackHeadroom(): Boolean =
+        lessees.size + reserved + extraChannels + 1 + FALLBACK_RESERVE <= SSHD_MAX_SESSIONS
+
     /** The route (`lan|tunnel|cf|unknown`) the pooled [session] took; `unknown` if it is not ours. */
     internal fun routeOf(session: Session): String = transports.firstOrNull { it.session === session }?.route ?: "unknown"
 
@@ -279,12 +314,15 @@ class ServerTransportPool(
     private sealed interface Step {
         class Ready(val session: Session) : Step
         class Wait(val flight: SingleFlight.Flight<Key, Transport>) : Step
+        /** [MAX_PARALLEL_HANDSHAKES] connects of the key already run: wait for one to end, then ask again. */
+        class Throttled(val flight: SingleFlight.Flight<Key, Transport>) : Step
     }
 
     /**
      * Single-flight lease. Under the mutex: a usable transport with a free slot
      * (counting the slots promised to waiters), else a slot of a pending handshake
-     * (joining one, or starting one when all are full). The wait for the handshake
+     * (joining one, or starting one when all are full and fewer than
+     * [MAX_PARALLEL_HANDSHAKES] of the key run). The wait for the handshake
      * is OUTSIDE the mutex.
      */
     private suspend fun leaseV2(
@@ -307,11 +345,23 @@ class ServerTransportPool(
                     FileLogger.log(TAG, "Leased existing transport to ${server.host} (${t.lessees.size} ${role.label}s)")
                     Step.Ready(t.session)
                 } else {
-                    Step.Wait(flights.join(key, cap) { newTransport(server, connectTimeout, role) })
+                    val joined = flights.tryJoin(key, cap, MAX_PARALLEL_HANDSHAKES) { newTransport(server, connectTimeout, role) }
+                    if (joined != null) Step.Wait(joined) else Step.Throttled(flights.pending(key)!!)
                 }
             }
             when (step) {
                 is Step.Ready -> return step.session
+                is Step.Throttled -> {
+                    // Not a claimant of that connect: just wait until it has ended (a success publishes a
+                    // transport with room for the next ones or leaves the slot to a new connect, a failure
+                    // lets the next claimant start afresh) and look again.
+                    try {
+                        step.flight.result.await()
+                    } catch (e: CancellationException) {
+                        if (!currentCoroutineContext().isActive) throw e
+                    } catch (_: Throwable) {
+                    }
+                }
                 is Step.Wait -> {
                     val t0 = System.currentTimeMillis()
                     val t = try {
@@ -492,6 +542,12 @@ class ServerTransportPool(
         private const val TAG = "ServerTransportPool"
         private const val DEFAULT_KEEPALIVE_MS = 10_000
         private const val MAX_LEASE_ATTEMPTS = 3
+        /**
+         * Handshakes of one transport key that may run at once. OpenSSH's default `MaxStartups` 10:30:100 starts
+         * dropping new connections at 10 unauthenticated ones (and through Cloudflare they all come from one
+         * address); 3 is also what the handshake gate of the single-connection design allowed.
+         */
+        internal const val MAX_PARALLEL_HANDSHAKES = 3
         // OpenSSH's default MaxSessions is 10 channels per connection, and the
         // transient exec load scales with the number of SESSIONS on the
         // transport (each runs its own transcript/git/sessionId probes, which
@@ -503,5 +559,12 @@ class ServerTransportPool(
         // (`comm_pool` off, or the exec transport of the server not wired yet); with it the cap is 8
         // (CommFlags).
         private const val SHELLS_PER_TRANSPORT = 3
+        /** OpenSSH's default `MaxSessions`: channels one connection may carry. */
+        internal const val SSHD_MAX_SESSIONS = 10
+        /**
+         * Channels of a shell transport that a fallback exec leaves free: the tabs' own transient channels
+         * (the redraw kick, the probes that stay attach-only) still need room when the exec transport is down.
+         */
+        internal const val FALLBACK_RESERVE = 2
     }
 }
