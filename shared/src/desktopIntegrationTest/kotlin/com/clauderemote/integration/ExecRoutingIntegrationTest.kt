@@ -77,8 +77,8 @@ class ExecRoutingIntegrationTest {
 
     private fun newTmux(name: String, command: String = "sleep 300") {
         fixture.startTmuxServer()
-        fixture.tmux("new-session", "-d", "-s", name, command)
-        waitUntil(5_000, "tmux session $name") { name in fixture.tmuxSessions() }
+        val r = fixture.tmux("new-session", "-d", "-s", name, command)
+        waitUntil(5_000, "tmux session $name (new-session exit=${r.exit} said: ${r.out.trim()}; command: $command)") { name in fixture.tmuxSessions() }
     }
 
     // ---- allowFresh = false: no new TCP ------------------------------------------------------
@@ -160,32 +160,34 @@ class ExecRoutingIntegrationTest {
     @Test fun capVerdictFollowsSettingsJsonOfARunningClaudeWithoutRestartingIt() = runBlocking {
         val bin = File(fixture.home, "bin").apply { mkdirs() }
         val claude = File(bin, "claude")
-        // argv[0] stays "sleep": a multicall coreutils (uutils, ubuntu-26.04) copied to the name "claude" dispatches
-        // on argv[0] and exits at once, so the pane would die and the tmux session never show up
-        val sleepBin = File(ProcessBuilder("bash", "-c", "command -v sleep").start().inputStream.bufferedReader().readText().trim())
-        sleepBin.copyTo(claude, overwrite = true); claude.setExecutable(true)
-        newTmux("claude-server-cap", "bash -c 'exec -a sleep ${claude.absolutePath} 300'")
+        // A copy of bash sleeping in a child (the trailing `:` stops bash exec-ing it): comm and exe are "claude" whatever
+        // coreutils is installed. A copied `sleep` is no stand-in: uutils (ubuntu-26.04) is one multicall binary that picks the
+        // tool from its own file name and exits for the unknown name "claude", so the pane died and the session never showed.
+        val bashBin = File(ProcessBuilder("bash", "-c", "command -v bash").start().inputStream.bufferedReader().readText().trim())
+        bashBin.copyTo(claude, overwrite = true); claude.setExecutable(true)
+        newTmux("claude-server-cap", "'${claude.absolutePath}' -c 'sleep 300; :'")
         newTmux("claude-server-peer")
-        waitUntil(5_000, "claude-named process") {
-            ReconcileParse.parse(runBlocking { registry.execRead(serverId, ManifestCommands.reconcileAll(listOf("claude-server-cap")))!! }, json)
-                .claude?.isNotEmpty() == true
-        }
-        fun cap(): Boolean? = ReconcileParse.parse(
-            runBlocking { registry.execRead(serverId, ManifestCommands.reconcileAll(listOf("claude-server-cap")))!! }, json,
-        ).capability("claude-server-cap")
+        var lastOut = ""
+        fun reconcileOut(names: List<String>): String = runBlocking { registry.execRead(serverId, ManifestCommands.reconcileAll(names))!! }.also { lastOut = it }
+        try {
+            waitUntil(5_000, "claude-named process") {
+                ReconcileParse.parse(reconcileOut(listOf("claude-server-cap")), json).claude?.isNotEmpty() == true
+            }
+        } catch (e: AssertionError) { throw AssertionError("${e.message}; last reconcile output: $lastOut; tmux: ${fixture.tmuxSessions()}") }
+        fun cap(): Boolean? = ReconcileParse.parse(reconcileOut(listOf("claude-server-cap")), json).capability("claude-server-cap")
 
         val cfg = File(fixture.home, ".claude").apply { mkdirs() }
-        assertEquals(false, cap(), "no settings.json: hooks are not installed")
+        assertEquals(false, cap(), "no settings.json: hooks are not installed: $lastOut")
         File(cfg, "settings.json").writeText("""{"hooks":{"Stop":[{"hooks":[{"command":"claude-remote-ev v2 stop"}]}]}}""")
-        assertEquals(true, cap(), "installed after the claude started: capable at once (hot reload)")
+        assertEquals(true, cap(), "installed after the claude started: capable at once (hot reload): $lastOut")
         File(cfg, "settings.local.json").writeText("""{"disableAllHooks": true}""")
-        assertEquals(false, cap())
+        assertEquals(false, cap(), lastOut)
         File(cfg, "settings.local.json").delete()
-        assertEquals(true, cap())
+        assertEquals(true, cap(), lastOut)
         File(cfg, "settings.json").writeText("{}")
-        assertEquals(false, cap())
-        assertNull(ReconcileParse.parse(registry.execRead(serverId, ManifestCommands.reconcileAll(listOf("claude-server-peer")))!!, json).capability("claude-server-peer"),
-            "a pane without claude is unknown, not a no")
+        assertEquals(false, cap(), lastOut)
+        assertNull(ReconcileParse.parse(reconcileOut(listOf("claude-server-peer")), json).capability("claude-server-peer"),
+            "a pane without claude is unknown, not a no: $lastOut")
     }
 
     // ---- SFTP through the exec channels for a parked tab --------------------------------------

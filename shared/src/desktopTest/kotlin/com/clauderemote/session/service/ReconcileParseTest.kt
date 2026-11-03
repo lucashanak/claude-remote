@@ -161,17 +161,21 @@ class ReconcileParseTest {
             val home = File(root, "home").apply { mkdirs() }
             val cfg = File(root, "cfg").apply { mkdirs() }
             val bin = File(root, "bin")
-            val sleepBin = File(ProcessBuilder("bash", "-c", "command -v sleep").start().inputStream.bufferedReader().readText().trim())
+            // A copy of bash that sleeps in a child (the trailing `:` stops bash exec-ing the last command): comm and exe are the
+            // copy's name, whatever coreutils is installed. A copied `sleep` is no stand-in: uutils (ubuntu-26.04) is one multicall
+            // binary that picks the tool from its own file name (not argv[0]) and exits for an unknown name like "claude".
+            val bashBin = File(ProcessBuilder("bash", "-c", "command -v bash").start().inputStream.bufferedReader().readText().trim())
             fun spawn(copyTo: File): Long {
-                copyTo.parentFile.mkdirs(); sleepBin.copyTo(copyTo, overwrite = true); copyTo.setExecutable(true)
-                // argv[0] stays "sleep": a multicall coreutils (uutils, ubuntu-26.04) copied to another name dispatches on argv[0] and exits
-                val pb = ProcessBuilder("bash", "-c", "exec -a sleep \"\$0\" 300", copyTo.path).also { it.environment()["CLAUDE_CONFIG_DIR"] = cfg.path; it.environment()["HOME"] = home.path }
+                copyTo.parentFile.mkdirs(); bashBin.copyTo(copyTo, overwrite = true); copyTo.setExecutable(true)
+                val pb = ProcessBuilder(copyTo.path, "-c", "sleep 300 & trap 'kill \$!' TERM; wait; :").also { it.environment()["CLAUDE_CONFIG_DIR"] = cfg.path; it.environment()["HOME"] = home.path }
                 return pb.start().also { procs += it }.pid()
             }
             val claudePid = spawn(File(root, "real/claude"))
             val versionPid = spawn(File(root, "share/claude/versions/2.1.316")) // comm 2.1.316, exe under claude/versions/
             val rgPid = spawn(File(root, "share/vendor/2.1.317"))              // comm 2.1.317, exe elsewhere
-            Thread.sleep(200)
+            Thread.sleep(500)
+            val alive = procs.map { it.isAlive }
+            assertTrue(alive.all { it }, "stand-in claude processes alive=$alive (their output: ${procs.filter { !it.isAlive }.joinToString { it.errorStream.bufferedReader().readText() }})")
 
             val token = "tok" + System.nanoTime()
             val names = listOf("claude-server-a$token", "claude-server-my proj's tab", "claude-server-čeština")
@@ -219,12 +223,12 @@ class ReconcileParseTest {
             assertEquals(uuid, s.manifestUuid(names[0]))
             // the real claude: exe read, marker found, no disable, session file + transcript
             val f = s.claude!![claudePid.toInt()]!!
-            assertEquals(true, f.markerInSettings); assertEquals(false, f.disableAllHooks); assertEquals(uuid, f.uuid)
-            assertEquals(uuid, s.liveUuid(names[0]))
-            assertEquals(true, s.capability(names[0]))
+            assertEquals(true, f.markerInSettings, lastOut); assertEquals(false, f.disableAllHooks, lastOut); assertEquals(uuid, f.uuid, lastOut)
+            assertEquals(uuid, s.liveUuid(names[0]), lastOut)
+            assertEquals(true, s.capability(names[0]), lastOut)
             // version-number comm: counted only when its exe lies under claude/versions/
-            assertEquals(true, s.capability(tricky))
-            assertNull(s.capability(names[2]), "an exe outside claude/versions/ is no claude")
+            assertEquals(true, s.capability(tricky), lastOut)
+            assertNull(s.capability(names[2]), "an exe outside claude/versions/ is no claude: $lastOut")
 
             // the standalone uuid probe: the shallowest subtree process with a session file, transcript required
             fun probe(): String = LiveFileCanary().guard(token, home, root) { env ->
@@ -235,7 +239,7 @@ class ReconcileParseTest {
                 val p = pb.start()
                 p.inputStream.bufferedReader().readText().trim().also { p.waitFor() }
             }
-            assertEquals(uuid, probe())
+            assertEquals(uuid, probe(), "uuid probe")
             File(cfg, "projects/p/$uuid.jsonl").renameTo(File(cfg, "projects/p/$uuid.jsonl.gone"))
             assertEquals("", probe(), "a session file whose transcript does not exist yet answers nothing")
             File(cfg, "projects/p/$uuid.jsonl.gone").renameTo(File(cfg, "projects/p/$uuid.jsonl"))
