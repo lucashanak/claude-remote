@@ -45,6 +45,9 @@ class SshManager(
 
     @Volatile private var disconnected = false
 
+    /** Keepalive (ms) for a transport this manager opens itself; [setKeepAliveInterval] updates it. */
+    @Volatile private var keepAliveMs = 10_000
+
     val isConnected: Boolean get() = !disconnected && session?.isConnected == true && channel?.isConnected == true
 
     /**
@@ -66,92 +69,89 @@ class SshManager(
         // Note: xterm reset sequences removed — they caused DA response
         // (0;276;0c) to leak into SSH shell as text input
 
-        val sess = if (transportPool != null) {
-            // Shared transport: one handshake serves up to 5 tabs.
-            leased = true
-            transportPool.lease(server, connectTimeout, this@SshManager)
-        } else {
-            val jsch = JSch()
-            if (server.authMethod == AuthMethod.KEY && server.privateKey != null) {
-                jsch.addIdentity("key", server.privateKey.toByteArray(), null, null)
+        // Pool v2 (comm_pool ON for this server): the exec transport carries the L/R port
+        // forwards and a refused shell channel (MaxSessions) spills to another transport.
+        val poolV2 = transportPool != null && com.clauderemote.session.service.CommFlags.effectiveFor(server.id).pool
+        var spillLeft = if (poolV2) 1 else 0
+        var sess: Session
+        lateinit var ch: ChannelShell
+        lateinit var inputStream: java.io.InputStream
+        while (true) {
+            sess = if (transportPool != null) {
+                // Shared transport: one handshake serves up to `shellCap` tabs.
+                leased = true
+                transportPool.lease(server, connectTimeout, this@SshManager)
+            } else {
+                openStandaloneTransport(server)
             }
-            val own = jsch.getSession(server.username, server.host, server.port)
-            if (server.authMethod == AuthMethod.PASSWORD && server.password != null) {
-                own.setPassword(server.password)
-            }
-            own.setConfig("StrictHostKeyChecking", "no")
-            // Compression — same rationale as ServerTransportPool.connectTransport.
-            own.setConfig("compression.s2c", "zlib@openssh.com,zlib,none")
-            own.setConfig("compression.c2s", "zlib@openssh.com,zlib,none")
-            // Keepalive via the EXPLICIT API, not setConfig: JSch's interval is in
-            // MILLISECONDS and the setConfig string key isn't reliably applied —
-            // the old setConfig("ServerAliveInterval","30") was either ignored or
-            // meant a 30ms interval. 10s × 2 misses ⇒ a silently-dead link (NAT
-            // timeout, radio handoff on a flaky roaming network) is detected in
-            // ~20s instead of never/90s, which is what re-arms auto-reconnect.
-            own.setServerAliveInterval(10_000)
-            own.setServerAliveCountMax(2)
-            own.userInfo = TofuUserInfo(server.host, serverStorage)
-            own.timeout = connectTimeout
+            session = sess
+            FileLogger.log(TAG, "SSH session ready (leased=$leased)")
 
-            // Cloudflare Tunnel: route SSH over WebSocket instead of direct TCP
-            if (server.useCloudflareProxy) {
-                FileLogger.log(TAG, "Using Cloudflare tunnel proxy for ${server.host}")
-                own.setProxy(CloudflareProxy(server.host, server.cloudflareToken))
-            }
-            own.connect(connectTimeout)
-            own
-        }
-        session = sess
-        FileLogger.log(TAG, "SSH session ready (leased=$leased)")
-
-        // Port forwarding
-        for (pf in server.portForwards) {
-            try {
-                when (pf.type) {
-                    "L" -> {
-                        sess.setPortForwardingL(pf.localPort, pf.remoteHost, pf.remotePort)
-                        onOutput("\u001B[33mPort forward: L${pf.localPort} -> ${pf.remoteHost}:${pf.remotePort}\u001B[0m\r\n")
-                    }
-                    "R" -> {
-                        sess.setPortForwardingR(pf.remotePort, pf.remoteHost, pf.localPort)
-                        onOutput("\u001B[33mPort forward: R${pf.remotePort} -> ${pf.remoteHost}:${pf.localPort}\u001B[0m\r\n")
+            // Port forwarding. On a pool-v2 server the exec transport owns the forwards
+            // (registered once there, re-registered after each reconnect), so a shell
+            // session must not bind the same ports again.
+            if (transportPool?.execForwardsOwned(server.id) != true) {
+                for (pf in server.portForwards) {
+                    try {
+                        when (pf.type) {
+                            "L" -> {
+                                sess.setPortForwardingL(pf.localPort, pf.remoteHost, pf.remotePort)
+                                onOutput("\u001B[33mPort forward: L${pf.localPort} -> ${pf.remoteHost}:${pf.remotePort}\u001B[0m\r\n")
+                            }
+                            "R" -> {
+                                sess.setPortForwardingR(pf.remotePort, pf.remoteHost, pf.localPort)
+                                onOutput("\u001B[33mPort forward: R${pf.remotePort} -> ${pf.remoteHost}:${pf.localPort}\u001B[0m\r\n")
+                            }
+                        }
+                    } catch (e: Exception) {
+                        // On a shared (leased) transport the first tab already
+                        // registered the forward — the rebind failure is expected
+                        // noise for every later tab, not an error worth printing.
+                        if (leased) FileLogger.log(TAG, "Port forward on shared transport: ${e.message}")
+                        else onOutput("\u001B[31mPort forward failed: ${e.message}\u001B[0m\r\n")
                     }
                 }
-            } catch (e: Exception) {
-                // On a shared (leased) transport the first tab already
-                // registered the forward — the rebind failure is expected
-                // noise for every later tab, not an error worth printing.
-                if (leased) FileLogger.log(TAG, "Port forward on shared transport: ${e.message}")
-                else onOutput("\u001B[31mPort forward failed: ${e.message}\u001B[0m\r\n")
             }
-        }
 
-        // Streams MUST be obtained before connect() (jsch wires the pipe into
-        // the channel's IO at that point; data arriving pre-getInputStream is
-        // lost). The whole open sequence releases the pool lease on failure —
-        // otherwise a dead manager holds a shell slot until the next
-        // reconnect attempt/teardown gets around to disconnect().
-        val ch: ChannelShell
-        val inputStream: java.io.InputStream
-        try {
-            ch = sess.openChannel("shell") as ChannelShell
-            ch.setPtyType("xterm-256color")
-            // Open the pty at the real terminal size. Without this jsch defaults
-            // to 80x24, which leaves tmux panes not filling the window for any
-            // session that (re)connected while backgrounded (its onResize never
-            // fired, so no post-attach resize corrected it).
-            ch.setPtySize(initialCols, initialRows, initialCols * 8, initialRows * 16)
-            inputStream = ch.inputStream
-            outputStream = ch.outputStream
-            ch.connect(connectTimeout)
-        } catch (e: Exception) {
-            if (leased) {
-                transportPool?.release(this@SshManager)
-                leased = false
-                session = null
+            // Streams MUST be obtained before connect() (jsch wires the pipe into
+            // the channel's IO at that point; data arriving pre-getInputStream is
+            // lost). The whole open sequence releases the pool lease on failure —
+            // otherwise a dead manager holds a shell slot until the next
+            // reconnect attempt/teardown gets around to disconnect().
+            var opened: ChannelShell? = null
+            try {
+                val c = sess.openChannel("shell") as ChannelShell
+                opened = c
+                c.setPtyType("xterm-256color")
+                // Open the pty at the real terminal size. Without this jsch defaults
+                // to 80x24, which leaves tmux panes not filling the window for any
+                // session that (re)connected while backgrounded (its onResize never
+                // fired, so no post-attach resize corrected it).
+                c.setPtySize(initialCols, initialRows, initialCols * 8, initialRows * 16)
+                inputStream = c.inputStream
+                outputStream = c.outputStream
+                c.connect(connectTimeout)
+                ch = c
+                break
+            } catch (e: Exception) {
+                val wasLeased = leased
+                // Spill: the server refused the channel because this transport is at its
+                // MaxSessions. Mark it full BEFORE giving the lease back (else another tab could be
+                // handed the same full transport in between), then lease again once.
+                val spill = wasLeased && spillLeft > 0 && isChannelRefused(e, opened)
+                if (spill) transportPool?.reportFull(sess)
+                if (leased) {
+                    transportPool?.release(this@SshManager)
+                    leased = false
+                    session = null
+                }
+                if (spill) {
+                    spillLeft--
+                    FileLogger.log(TAG, "Shell open refused (${e.message}, exitStatus=${opened?.exitStatus}) — spilling to another transport")
+                    continue
+                }
+                throw e
             }
-            throw e
         }
         channel = ch
         // Keep the resize no-op check consistent with the pty size we opened at.
@@ -188,6 +188,46 @@ class SshManager(
 
         sess
     }
+
+    /** Our own TCP/WebSocket transport (no pool): KEX + auth for this manager alone. */
+    private suspend fun openStandaloneTransport(server: SshServer): Session {
+        val jsch = JSch()
+        if (server.authMethod == AuthMethod.KEY && server.privateKey != null) {
+            jsch.addIdentity("key", server.privateKey.toByteArray(), null, null)
+        }
+        val own = jsch.getSession(server.username, server.host, server.port)
+        if (server.authMethod == AuthMethod.PASSWORD && server.password != null) {
+            own.setPassword(server.password)
+        }
+        own.setConfig("StrictHostKeyChecking", "no")
+        // Compression — same rationale as ServerTransportPool.connectTransport.
+        own.setConfig("compression.s2c", "zlib@openssh.com,zlib,none")
+        own.setConfig("compression.c2s", "zlib@openssh.com,zlib,none")
+        // Keepalive via the EXPLICIT API, not setConfig: JSch's interval is in
+        // MILLISECONDS and the setConfig string key isn't reliably applied —
+        // the old setConfig("ServerAliveInterval","30") was either ignored or
+        // meant a 30ms interval. 10s × 2 misses ⇒ a silently-dead link (NAT
+        // timeout, radio handoff on a flaky roaming network) is detected in
+        // ~20s instead of never/90s, which is what re-arms auto-reconnect.
+        // [keepAliveMs] is 10 s until [setKeepAliveInterval] changes it.
+        own.setServerAliveInterval(keepAliveMs)
+        own.setServerAliveCountMax(2)
+        own.userInfo = TofuUserInfo(server.host, serverStorage)
+        own.timeout = connectTimeout
+
+        // Cloudflare Tunnel: route SSH over WebSocket instead of direct TCP
+        if (server.useCloudflareProxy) {
+            FileLogger.log(TAG, "Using Cloudflare tunnel proxy for ${server.host}")
+            own.setProxy(CloudflareProxy(server.host, server.cloudflareToken))
+        }
+        own.connect(connectTimeout)
+        return own
+    }
+
+    /** `channel is not opened.` with an exit status of 1 or 2 is jsch's report of a channel the server refused (MaxSessions). */
+    private fun isChannelRefused(e: Exception, ch: com.jcraft.jsch.Channel?): Boolean =
+        e is com.jcraft.jsch.JSchException && e.message?.contains("channel is not opened") == true &&
+            (ch?.exitStatus ?: -1) in 1..2
 
     fun sendInput(data: String) {
         if (disconnected) return
@@ -309,7 +349,11 @@ class SshManager(
      * foreground for fast dead-link detection. No-op if not connected.
      */
     fun setKeepAliveInterval(ms: Int) {
-        try { session?.setServerAliveInterval(ms) } catch (_: Throwable) {}
+        keepAliveMs = ms
+        // A leased session is a pool transport: apply the interval pool-wide so the
+        // pool's other transports and the ones it connects later use it too.
+        if (leased) transportPool?.setKeepAlive(ms)
+        else try { session?.setServerAliveInterval(ms) } catch (_: Throwable) {}
     }
 
     /**
@@ -333,7 +377,7 @@ class SshManager(
         sess.timeout = 10_000
         // Same keepalive as the main connect (ms!): cleanup execs must not hang
         // forever on a silently-dead link.
-        sess.setServerAliveInterval(10_000)
+        sess.setServerAliveInterval(keepAliveMs)
         sess.setServerAliveCountMax(2)
         if (server.useCloudflareProxy) {
             sess.setProxy(CloudflareProxy(server.host, server.cloudflareToken))

@@ -5,6 +5,7 @@ import com.clauderemote.model.SshServer
 import com.clauderemote.util.FileLogger
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
@@ -217,6 +218,37 @@ internal class TransportResolver(
         recordTailscaleFailure(session.server)
     }
 
+    /**
+     * A SERVER-level early death: the exec transport (not a tab) died [lifetimeMs] after it came
+     * up (or failed to connect, lifetime 0). Feeds the same 2-strike TS→CF cooldown the tabs use.
+     * Only a Tailscale endpoint strikes (Cloudflare is the last resort, there is nowhere to fall
+     * back to), only a young one, and never one we tore down ourselves for a network change.
+     */
+    fun noteServerEarlyDeath(
+        server: com.clauderemote.model.SshServer,
+        eff: com.clauderemote.model.SshServer,
+        lifetimeMs: Long,
+    ) {
+        if (!isTailscaleEffective(server, eff)) return
+        if (lifetimeMs >= TS_EARLY_DEATH_MS) return
+        if (System.currentTimeMillis() - lastNetworkTeardownAt < 5_000) return
+        FileLogger.log(TAG, "Tailscale exec transport died ${lifetimeMs}ms after connect for ${server.name}")
+        recordTailscaleFailure(server)
+    }
+
+    /**
+     * The server's exec transport stayed up past the early-death window: the Tailscale path is proven
+     * (the same confirmation a tab gives after 30 s), so the strike streak and any cooldown start over.
+     */
+    fun noteServerTransportStable(
+        server: com.clauderemote.model.SshServer,
+        eff: com.clauderemote.model.SshServer,
+    ) {
+        if (!isTailscaleEffective(server, eff)) return
+        tailscaleCooldownUntil.remove(server.id)
+        tailscaleFailStreak.remove(server.id)
+    }
+
     /** One CF strike, fed by post-connect EARLY DEATHS on the Cloudflare path. */
     private fun recordCloudflareEarlyDeath(server: com.clauderemote.model.SshServer) {
         // Shells share a transport (SHELLS_PER_TRANSPORT), so one transport
@@ -308,7 +340,16 @@ internal class TransportResolver(
             else com.clauderemote.model.ServerTransport.CLOUDFLARE
             val eff = server.forTransport(chosen)
             if (eff.host != server.host || eff.useCloudflareProxy != server.useCloudflareProxy) {
-                FileLogger.log(TAG, "Transport for ${server.name}: $chosen -> ${eff.host} (cf=${eff.useCloudflareProxy})")
+                // route=: which kind of path a NEW connection takes (a Tailscale endpoint reached over the
+                // LAN with the VPN off is not a tunnel); read from the routing table, nothing is sent.
+                // Off the caller's thread and bounded: a hostname may need a DNS lookup.
+                // A blocking DNS lookup cannot be interrupted, so the probe runs detached and we only
+                // wait for it for a bounded time; a slow lookup ends up as "unknown" and finishes on its own.
+                val probe = scope.async(Dispatchers.IO) {
+                    com.clauderemote.connection.RouteKind.probe(eff.host, eff.port, eff.useCloudflareProxy)
+                }
+                val route = kotlinx.coroutines.withTimeoutOrNull(1_500) { probe.await() } ?: "unknown"
+                FileLogger.log(TAG, "Transport for ${server.name}: $chosen -> ${eff.host} (cf=${eff.useCloudflareProxy}) route=$route")
             }
             resolvedTransportCache[server.id] = ResolvedTransport(System.currentTimeMillis(), eff)
             eff

@@ -1,9 +1,12 @@
 package com.clauderemote.session.service
 
+import com.clauderemote.util.FileLogger
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.util.concurrent.atomic.AtomicBoolean
@@ -73,6 +76,12 @@ internal enum class ExecUnavailableReason { NOT_UP, GATE_TIMEOUT, TIMEOUT, REFUS
 internal class ExecUnavailable(
     val reason: ExecUnavailableReason,
     message: String = "exec unavailable: $reason",
+    /**
+     * Only with [ExecUnavailableReason.REFUSED]: jsch's `channel is not opened.` with an exit status of
+     * 1 or 2 — the server refused the channel (`MaxSessions`), so ONE retry shortly after is worth it
+     * (a sibling channel may have closed). Any other refusal is not retried.
+     */
+    val spillable: Boolean = false,
 ) : Exception(message)
 
 /**
@@ -139,8 +148,13 @@ internal interface ExecChannels {
 internal class UngatedExecChannels(
     private val sessionOf: (String) -> com.jcraft.jsch.Session?,
 ) : ExecChannels {
-    private fun liveSession(serverId: String): com.jcraft.jsch.Session =
-        sessionOf(serverId)?.takeIf { it.isConnected } ?: throw ExecUnavailable(ExecUnavailableReason.NOT_UP)
+    private fun liveSession(serverId: String): com.jcraft.jsch.Session {
+        // a throwing provider is "no usable transport" for the caller, never a stray exception
+        val s = try { sessionOf(serverId) } catch (e: CancellationException) { throw e } catch (e: Exception) {
+            throw ExecUnavailable(ExecUnavailableReason.NOT_UP, "exec unavailable: session lookup failed: ${e.javaClass.simpleName}: ${e.message}")
+        }
+        return s?.takeIf { it.isConnected } ?: throw ExecUnavailable(ExecUnavailableReason.NOT_UP)
+    }
 
     override suspend fun <T> use(
         serverId: String,
@@ -170,11 +184,16 @@ internal class UngatedExecChannels(
 }
 
 /**
- * Stub: today's behaviour — one exec on the pooled/live session bounded by a
- * watchdog (compare [execReadWithWatchdog]), additionally returning the exit
- * status and supporting paced stdin, with the typed error contract of [RemoteExec].
+ * One exec on a pooled session bounded by a watchdog (compare [execReadWithWatchdog]),
+ * additionally returning the exit status and supporting paced stdin, with the typed
+ * error contract of [RemoteExec]. Works with any [ExecChannels] (the ungated stub or
+ * the gated one of the exec transport).
  */
-internal class PooledRemoteExec(private val channels: ExecChannels) : RemoteExec {
+internal class PooledRemoteExec(
+    private val channels: ExecChannels,
+    /** Pause before the single retry of a spillable refusal. */
+    private val refusedRetryDelayMs: Long = 200,
+) : RemoteExec {
     override suspend fun run(
         serverId: String,
         cmd: String,
@@ -184,57 +203,327 @@ internal class PooledRemoteExec(private val channels: ExecChannels) : RemoteExec
         paceStdin: Pace,
     ): ExecResult {
         require(kind != ExecKind.SFTP) { "RemoteExec.run is exec-only; use ExecChannels.use(kind = SFTP)" }
-        return channels.use(serverId, kind) { raw ->
-            val ch = raw as com.jcraft.jsch.ChannelExec
-            ch.setCommand(cmd)
-            val out = if (stdin != null) ch.outputStream else null
-            ch.inputStream = null
-            val input = ch.inputStream
-            val timedOut = AtomicBoolean(false)
-            // Own scope, NOT a child of the caller: if the caller is cancelled while
-            // parked in a blocking read, the wall-clock bound must still fire and
-            // free the IO thread.
-            val watchdog = CoroutineScope(Dispatchers.Default).launch {
-                delay(totalMs)
-                timedOut.set(true)
-                try { ch.disconnect() } catch (_: Exception) {}
-            }
+        val deadline = System.nanoTime() + totalMs * 1_000_000
+        var retried = false
+        while (true) {
+            val remainingMs = (deadline - System.nanoTime()) / 1_000_000
+            if (remainingMs <= 0) throw ExecUnavailable(ExecUnavailableReason.TIMEOUT, "exec timed out after $totalMs ms")
             try {
-                val result = withContext(Dispatchers.IO) {
-                    ch.connect(5000)
-                    if (stdin != null && out != null) {
-                        var off = 0
-                        while (off < stdin.size) {
-                            val n = minOf(paceStdin.chunkBytes, stdin.size - off)
-                            out.write(stdin, off, n)
-                            out.flush()
-                            off += n
-                            if (off < stdin.size) delay(paceStdin.delayMs)
-                        }
-                        out.close()
-                    }
-                    val text = input.bufferedReader().readText()
-                    // exit-status arrives just after EOF; give it a short bounded wait
-                    var waited = 0
-                    while (ch.exitStatus < 0 && waited < 2000 && !timedOut.get()) { delay(20); waited += 20 }
-                    ExecResult(text, ch.exitStatus)
+                return runOnce(serverId, cmd, stdin, deadline, totalMs, kind, paceStdin)
+            } catch (e: ExecUnavailable) {
+                // Spill: `channel is not opened.` + exit status 1/2 = MaxSessions. A sibling channel may
+                // have closed a moment later, so retry exactly once inside the same wall-clock bound.
+                if (e.reason == ExecUnavailableReason.REFUSED && e.spillable && !retried) {
+                    retried = true
+                    FileLogger.log("RemoteExec", "exec channel refused for $serverId (${e.message}) — retrying once")
+                    delay(refusedRetryDelayMs)
+                    continue
                 }
-                if (timedOut.get()) throw ExecUnavailable(ExecUnavailableReason.TIMEOUT, "exec timed out after $totalMs ms")
-                result
-            } catch (e: CancellationException) {
                 throw e
-            } catch (e: Exception) {
-                throw when {
-                    timedOut.get() -> ExecUnavailable(ExecUnavailableReason.TIMEOUT, "exec timed out after $totalMs ms")
-                    e is ExecUnavailable -> e
-                    e is com.jcraft.jsch.JSchException && e.message?.contains("channel is not opened") == true ->
-                        ExecUnavailable(ExecUnavailableReason.REFUSED, "exec unavailable: ${e.message} (exitStatus=${ch.exitStatus})")
-                    else -> ExecUnavailable(ExecUnavailableReason.IO, "exec unavailable: ${e.javaClass.simpleName}: ${e.message}")
-                }
-            } finally {
-                watchdog.cancel()
-                try { ch.disconnect() } catch (_: Exception) {}
             }
         }
     }
+
+    private suspend fun runOnce(
+        serverId: String,
+        cmd: String,
+        stdin: ByteArray?,
+        deadline: Long,
+        totalMs: Long,
+        kind: ExecKind,
+        paceStdin: Pace,
+    ): ExecResult = channels.use(
+        serverId, kind,
+        // waiting for a permit and for the transport counts against the same wall-clock bound
+        acquireTimeoutMs = minOf(ACQUIRE_MS, ((deadline - System.nanoTime()) / 1_000_000).coerceAtLeast(1)),
+    ) { raw ->
+        val ch = raw as? com.jcraft.jsch.ChannelExec
+            ?: throw ExecUnavailable(ExecUnavailableReason.IO, "exec unavailable: channel is not an exec channel (${raw.javaClass.simpleName})")
+        // what is left of the bound after the permit and the channel open
+        val leftMs = (deadline - System.nanoTime()) / 1_000_000
+        if (leftMs <= 0) throw ExecUnavailable(ExecUnavailableReason.TIMEOUT, "exec timed out after $totalMs ms")
+        val timedOut = AtomicBoolean(false)
+        // Own scope, NOT a child of the caller: if the caller is cancelled while
+        // parked in a blocking read, the wall-clock bound must still fire and
+        // free the IO thread. Started before the first channel call so it bounds those too.
+        val watchdog = CoroutineScope(Dispatchers.Default).launch {
+            delay(leftMs)
+            timedOut.set(true)
+            try { ch.disconnect() } catch (_: Exception) {}
+        }
+        try {
+            val result = withContext(Dispatchers.IO) {
+                ch.setCommand(cmd)
+                val out = if (stdin != null) ch.outputStream else null
+                ch.inputStream = null
+                val input = ch.inputStream
+                // never wait for the connect longer than what is left of the bound
+                ch.connect(minOf(CONNECT_MS, leftMs).toInt())
+                if (stdin != null && out != null) {
+                    var off = 0
+                    while (off < stdin.size) {
+                        // the remote side is gone (the command exited without reading everything):
+                        // stop feeding it; its exit status says what happened
+                        if (ch.isClosed || ch.isEOF) break
+                        val n = minOf(paceStdin.chunkBytes, stdin.size - off)
+                        out.write(stdin, off, n)
+                        out.flush()
+                        off += n
+                        if (off < stdin.size) delay(paceStdin.delayMs)
+                    }
+                    // a close on an already-closed channel is not an error (the status below tells the story)
+                    try { out.close() } catch (_: java.io.IOException) {}
+                }
+                val text = input.bufferedReader().readText()
+                // exit-status arrives just after EOF; give it a short bounded wait
+                var waited = 0
+                while (ch.exitStatus < 0 && waited < 2000 && !timedOut.get()) { delay(20); waited += 20 }
+                // EOF without a status AND a dead transport = the output is a fragment, not a result
+                if (ch.exitStatus < 0 && !timedOut.get() && !sessionConnected(ch)) {
+                    throw ExecUnavailable(ExecUnavailableReason.IO, "exec unavailable: transport lost before the command finished (partial output discarded)")
+                }
+                ExecResult(text, ch.exitStatus)
+            }
+            if (timedOut.get()) throw ExecUnavailable(ExecUnavailableReason.TIMEOUT, "exec timed out after $totalMs ms")
+            result
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            throw when {
+                timedOut.get() -> ExecUnavailable(ExecUnavailableReason.TIMEOUT, "exec timed out after $totalMs ms")
+                e is ExecUnavailable -> e
+                e is com.jcraft.jsch.JSchException && e.message?.contains("channel is not opened") == true ->
+                    ExecUnavailable(
+                        ExecUnavailableReason.REFUSED,
+                        "exec unavailable: ${e.message} (exitStatus=${ch.exitStatus})",
+                        spillable = ch.exitStatus in 1..2,
+                    )
+                else -> ExecUnavailable(ExecUnavailableReason.IO, "exec unavailable: ${e.javaClass.simpleName}: ${e.message}")
+            }
+        } finally {
+            watchdog.cancel()
+            try { ch.disconnect() } catch (_: Exception) {}
+        }
+    }
+
+    /** Whether the channel's transport is still up; an unknown session counts as up (nothing to conclude). */
+    private fun sessionConnected(ch: com.jcraft.jsch.Channel): Boolean =
+        try { ch.session.isConnected } catch (_: Exception) { true }
+
+    private companion object {
+        const val CONNECT_MS = 5_000L
+        const val ACQUIRE_MS = 5_000L
+    }
+}
+
+/**
+ * [ExecChannels] over the exec transport: the channel budget of one server is
+ * enforced HERE, so the sum of all exec/SFTP channels stays below the sshd's
+ * `MaxSessions` (default 10) whatever the callers do.
+ *
+ * Permits per server: SHORT 6 (SFTP shares them), LONG 2 (notify watcher, streamd),
+ * 8 channels in total. Permits belong to a transport GENERATION
+ * ([ExecTransportManager.generation]): when the transport dies every permit of the
+ * old generation is void and waiters re-evaluate against the new one — a leaked
+ * permit cannot outlive its transport.
+ *
+ * When the exec transport is not UP: a SHORT/SFTP call fails with
+ * [ExecUnavailableReason.NOT_UP] after [upWaitMs] (the caller falls back to its tab
+ * session); a LONG call waits [longFallbackAfterMs] and then opens on the live shell
+ * transport instead ([fallbackSession]) under its own small limit
+ * ([Limits.fallbackLong]), because the watcher/streamd must not go dark just because
+ * the exec transport is reconnecting.
+ *
+ * A fallback stream is counted against the shell transport it borrowed ([reserveFallback]) and is
+ * ended when the exec transport comes Up again, so its owner reopens it on the exec transport.
+ *
+ * [onTransportTrouble] is told when opening or using a channel failed in a way that
+ * may mean the transport is dead (the manager then checks it at once instead of at
+ * its next 5 s poll).
+ */
+internal class GatedExecChannels(
+    private val manager: ExecTransportManager,
+    private val fallbackSession: (String) -> com.jcraft.jsch.Session? = { null },
+    private val upWaitMs: Long = 2_000,
+    private val longFallbackAfterMs: Long = 3_000,
+    private val limits: Limits = Limits(),
+    private val onTransportTrouble: (String) -> Unit = {},
+    /**
+     * A long stream starts on the shell transport [fallbackSession] returned: the owner of that
+     * transport must count the channel against its capacity (`ServerTransportPool.reserveChannel`).
+     */
+    private val reserveFallback: suspend (String, com.jcraft.jsch.Session) -> Unit = { _, _ -> },
+    /** The fallback stream ended: give the capacity back (`ServerTransportPool.releaseChannel`). */
+    private val releaseFallback: suspend (String, com.jcraft.jsch.Session) -> Unit = { _, _ -> },
+) : ExecChannels {
+    data class Limits(val short: Int = 6, val long: Int = 2, val fallbackLong: Int = 2) {
+        val total: Int get() = short + long
+    }
+
+    private enum class Where { EXEC, FALLBACK }
+
+    private class Gate {
+        var gen: Long = -1
+        var short = 0
+        var long = 0
+        var fallback = 0
+        /** Bumped on every release / reset so waiters wake. */
+        val version = kotlinx.coroutines.flow.MutableStateFlow(0L)
+    }
+
+    private class Permit(
+        val serverId: String,
+        val gate: Gate,
+        val where: Where,
+        val isLong: Boolean,
+        val gen: Long,
+        val session: com.jcraft.jsch.Session,
+    )
+
+    private val gates = java.util.concurrent.ConcurrentHashMap<String, Gate>()
+
+    /** Permits currently held on [serverId]'s exec transport: (short, long, fallback). For tests and diagnostics. */
+    fun held(serverId: String): Triple<Int, Int, Int> =
+        gates[serverId]?.let { g -> synchronized(g) { Triple(g.short, g.long, g.fallback) } } ?: Triple(0, 0, 0)
+
+    override suspend fun <T> use(
+        serverId: String,
+        kind: ExecKind,
+        acquireTimeoutMs: Long,
+        block: suspend (com.jcraft.jsch.Channel) -> T,
+    ): T {
+        val permit = acquire(serverId, kind, acquireTimeoutMs)
+        try {
+            val ch = try {
+                permit.session.openChannel(if (kind == ExecKind.SFTP) "sftp" else "exec")
+            } catch (e: com.jcraft.jsch.JSchException) {
+                onTransportTrouble(serverId)
+                throw ExecUnavailable(ExecUnavailableReason.NOT_UP, "exec unavailable: ${e.message}")
+            }
+            try {
+                return if (permit.where == Where.FALLBACK) endWhenExecIsUp(serverId, ch, block) else block(ch)
+            } catch (e: ExecUnavailable) {
+                if (e.reason == ExecUnavailableReason.IO) onTransportTrouble(serverId)
+                throw e
+            } finally {
+                try { ch.disconnect() } catch (_: Exception) {}
+            }
+        } finally {
+            release(permit)
+        }
+    }
+
+    /** Runs [block] on a fallback channel and disconnects [ch] (the stream sees EOF) as soon as the exec transport is Up. */
+    private suspend fun <T> endWhenExecIsUp(
+        serverId: String,
+        ch: com.jcraft.jsch.Channel,
+        block: suspend (com.jcraft.jsch.Channel) -> T,
+    ): T = kotlinx.coroutines.coroutineScope {
+        val monitor = launch(Dispatchers.Default) {
+            manager.state(serverId).first { it is LinkState.Up }
+            FileLogger.log("RemoteExec", "exec transport of $serverId is up again — ending the fallback stream")
+            try { ch.disconnect() } catch (_: Exception) {}
+        }
+        try { block(ch) } finally { monitor.cancel() }
+    }
+
+    override suspend fun <T> withPermit(
+        serverId: String,
+        kind: ExecKind,
+        acquireTimeoutMs: Long,
+        block: suspend (com.jcraft.jsch.Session) -> T,
+    ): T {
+        val permit = acquire(serverId, kind, acquireTimeoutMs)
+        try {
+            return block(permit.session)
+        } finally {
+            release(permit)
+        }
+    }
+
+    private suspend fun acquire(serverId: String, kind: ExecKind, acquireTimeoutMs: Long): Permit {
+        val deadline = System.nanoTime() + acquireTimeoutMs * 1_000_000
+        val gate = gates.getOrPut(serverId) { Gate() }
+        val isLong = kind == ExecKind.LONG
+        var stale = 0
+        while (true) {
+            val gen = manager.generation(serverId)
+            // a transport that is down in a backoff will not come up within the wait: do not make every poll pay it
+            val state = manager.state(serverId).value
+            val waitUp = if (state is LinkState.Down || state is LinkState.Closed) 0
+            else minOf(if (isLong) longFallbackAfterMs else upWaitMs, remainingMs(deadline).coerceAtLeast(0))
+            var session = manager.session(serverId) ?: if (waitUp > 0) manager.await(serverId, waitUp) else null
+            var where = Where.EXEC
+            if (session == null) {
+                val fb = if (isLong) {
+                    try { fallbackSession(serverId)?.takeIf { it.isConnected } } catch (e: CancellationException) { throw e } catch (_: Exception) { null }
+                } else null
+                session = fb ?: throw ExecUnavailable(ExecUnavailableReason.NOT_UP)
+                where = Where.FALLBACK
+            }
+            val permit = waitForPermit(serverId, gate, where, isLong, gen, session, deadline)
+            // the transport may have died or been replaced while we waited
+            if (permit != null && where == Where.FALLBACK) {
+                kotlinx.coroutines.withContext(kotlinx.coroutines.NonCancellable) { reserveFallback(serverId, session) }
+                return permit
+            }
+            if (permit != null && manager.generation(serverId) == gen && session.isConnected) return permit
+            if (permit != null) release(permit)
+            if (++stale >= 3) throw ExecUnavailable(ExecUnavailableReason.NOT_UP, "exec unavailable: the exec transport kept changing")
+        }
+    }
+
+    /** The permit, or null when the transport generation moved on while waiting (caller re-evaluates). */
+    private suspend fun waitForPermit(
+        serverId: String,
+        gate: Gate,
+        where: Where,
+        isLong: Boolean,
+        gen: Long,
+        session: com.jcraft.jsch.Session,
+        deadline: Long,
+    ): Permit? {
+        while (true) {
+            val seen = gate.version.value
+            val got = synchronized(gate) {
+                if (where == Where.EXEC) {
+                    if (gate.gen != gen) {
+                        if (gate.gen > gen) return null // a newer generation already runs
+                        gate.gen = gen
+                        gate.short = 0; gate.long = 0   // the old transport's permits are void
+                    }
+                    if (isLong) {
+                        if (gate.long < limits.long && gate.short + gate.long < limits.total) { gate.long++; true } else false
+                    } else {
+                        if (gate.short < limits.short && gate.short + gate.long < limits.total) { gate.short++; true } else false
+                    }
+                } else {
+                    if (gate.fallback < limits.fallbackLong) { gate.fallback++; true } else false
+                }
+            }
+            if (got) return Permit(serverId, gate, where, isLong, gen, session)
+            if (where == Where.EXEC && manager.generation(serverId) != gen) return null
+            val left = remainingMs(deadline)
+            if (left <= 0) throw ExecUnavailable(ExecUnavailableReason.GATE_TIMEOUT, "exec unavailable: no channel permit within the acquire timeout")
+            // wake on a release, and re-check the generation at least every 250 ms
+            kotlinx.coroutines.withTimeoutOrNull(minOf(left, 250)) { gate.version.first { it != seen } }
+        }
+    }
+
+    private suspend fun release(p: Permit) {
+        if (p.where == Where.FALLBACK) {
+            kotlinx.coroutines.withContext(kotlinx.coroutines.NonCancellable) { releaseFallback(p.serverId, p.session) }
+        }
+        synchronized(p.gate) {
+            when (p.where) {
+                Where.FALLBACK -> if (p.gate.fallback > 0) p.gate.fallback--
+                Where.EXEC -> if (p.gate.gen == p.gen) {
+                    if (p.isLong) { if (p.gate.long > 0) p.gate.long-- } else { if (p.gate.short > 0) p.gate.short-- }
+                }
+            }
+        }
+        p.gate.version.update { it + 1 }
+    }
+
+    private fun remainingMs(deadline: Long): Long = (deadline - System.nanoTime()) / 1_000_000
 }
