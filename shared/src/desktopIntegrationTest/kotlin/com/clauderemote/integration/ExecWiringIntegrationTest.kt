@@ -51,6 +51,8 @@ class ExecWiringIntegrationTest {
     private val logLines = CopyOnWriteArrayList<String>()
     private val savedPlatformLog = FileLogger.platformLog
     private val savedSink = FileLogger.remoteSink
+    private val savedExecChannels = SshSessionHelper.execChannelsProvider
+    private val savedLiveSession = SshSessionHelper.liveSessionProvider
 
     // every wait in here is bounded by its own timeout; this is the last resort that fails a test whose blocking
     // call never returns instead of hanging the suite
@@ -68,15 +70,20 @@ class ExecWiringIntegrationTest {
     }
 
     @After fun tearDown() {
-        FileLogger.platformLog = savedPlatformLog
-        FileLogger.remoteSink = savedSink
-        SshSessionHelper.execChannelsProvider = null
-        SshSessionHelper.liveSessionProvider = null
+        // The orchestrator's loops (notify watcher, reconcile, bootstrap retry, reconnects, stats) run on its own
+        // scope and outlive the test unless it is ended: they logged into the next test's log lines and reconnected
+        // against its server (a second "Server bootstrap integration:" line, a 16-session watcher from another test).
         if (::orchestrator.isInitialized) {
+            orchestrator.shutdownForTest()
             orchestrator.connectionRegistry.teardownAllTransports()
             runCatching { orchestrator.execManager.close(serverId) }
         }
         managers.forEach { it.shutdownForTest() }
+        FileLogger.platformLog = savedPlatformLog
+        FileLogger.remoteSink = savedSink
+        // process-global providers (every orchestrator overwrites them): put back what was there before the test
+        SshSessionHelper.execChannelsProvider = savedExecChannels
+        SshSessionHelper.liveSessionProvider = savedLiveSession
         CommFlags.resetForTest()
         fixture?.close()
     }
@@ -218,7 +225,11 @@ class ExecWiringIntegrationTest {
         orchestrator.execManager.close(serverId)
 
         runBlocking {
-            assertEquals("a", registry.execRead(serverId, "echo a")!!.trim(), "7 + 1 + the reserve of 2 = 10: one fits")
+            val first = try { registry.execRead(serverId, "echo a") } catch (e: Exception) {
+                throw AssertionError("first fallback failed: $e; sshd started ${f.sessionChannelOpens()} sessions, refused ${f.refusedChannelOpens()}; sshd.log tail:\n" +
+                    File(f.root, "sshd.log").readLines().takeLast(30).joinToString("\n"), e)
+            }
+            assertEquals("a", first!!.trim(), "7 + 1 + the reserve of 2 = 10: one fits")
             val inside = CompletableDeferred<Unit>()
             val release = CompletableDeferred<Unit>()
             val stream = launch(Dispatchers.IO) {

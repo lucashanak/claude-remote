@@ -2538,6 +2538,16 @@ class SessionOrchestrator(
         execEnsuredServers.clear()
     }
 
+    /**
+     * For tests that build an orchestrator per test inside one JVM: [releaseExecLayer] plus ending the background
+     * scope. Without it the notify watchers, reconcile loops, bootstrap retries and the 60 s stats loop of a finished
+     * test keep running and log into (and reconnect against) the next test.
+     */
+    internal fun shutdownForTest() {
+        releaseExecLayer()
+        reconnectScope.coroutineContext[kotlinx.coroutines.Job]?.cancel()
+    }
+
     fun getConnection(sessionId: String): SshManager? = connectionRegistry.ssh(sessionId)
 
     /**
