@@ -269,6 +269,7 @@ internal class NotifyEpochTracker {
 internal object NotifyKeys {
     private const val STOP_PREFIX = "stop#"
     private const val DETECTION_PREFIX = "prompt#"
+    private const val HOOK_PREFIX = "hook#"
 
     /** A Stop-hook completion: (tmux session, marker epoch) names it exactly. */
     fun stop(tmuxName: String, epochSec: Long): String = "$STOP_PREFIX$tmuxName#$epochSec"
@@ -284,11 +285,14 @@ internal object NotifyKeys {
      */
     fun detection(type: PromptType, seq: Long): String = "$DETECTION_PREFIX${type.name}#$seq"
 
+    /** A hook-reported permission / question: (tmux session, event, server-clock ms) names it exactly. */
+    fun hook(ev: String, tmuxName: String, atMs: Long): String = "$HOOK_PREFIX$ev#$tmuxName#$atMs"
+
     /**
      * Whether [key] names an event that must be told to the user even if
      * another notification for the session just went out.
      *
-     * Only screen-detected PROMPTS qualify. Answering one permission prompt and
+     * Only PROMPTS qualify: screen-detected ones and hook-reported `perm` / `ask`. Answering one permission prompt and
      * being asked for the next one two seconds later is two things the user has
      * to act on, and the debounce window swallowed the second.
      *
@@ -298,5 +302,44 @@ internal object NotifyKeys {
      * is exactly what the window is for. A key-less caller (a malformed marker
      * line) cannot be identified at all, so it stays debounced too.
      */
-    fun isDebounceExempt(key: String?): Boolean = key != null && key.startsWith(DETECTION_PREFIX)
+    fun isDebounceExempt(key: String?): Boolean =
+        key != null && (key.startsWith(DETECTION_PREFIX) || key.startsWith(HOOK_PREFIX))
+
+    fun isHook(key: String?): Boolean = key != null && key.startsWith(HOOK_PREFIX)
+
+    fun isDetection(key: String?): Boolean = key != null && key.startsWith(DETECTION_PREFIX)
+}
+
+/**
+ * One dialog, one notification. With hooks installed a permission dialog or a question
+ * on a background tab is reported twice: by the hook event and by the screen detector
+ * (different keys, both exempt from the debounce). Whichever source notifies first wins;
+ * the OTHER source is held back for [windowMs] after it. Repeats from the SAME source
+ * pass (answering one dialog and getting the next is two things to act on), and a held
+ * back notification does not count as one, so the next dialog is never swallowed.
+ */
+internal class PromptDialogDedup(private val windowMs: Long = WINDOW_MS) {
+    enum class Source { HOOK, SCREEN }
+
+    private val lock = Any()
+    private val lastHook = HashMap<String, Long>()
+    private val lastScreen = HashMap<String, Long>()
+
+    /** True when [source] may notify for [sessionId] now; records it then. */
+    fun allow(sessionId: String, source: Source, nowMs: Long): Boolean = synchronized(lock) {
+        val (own, other) = if (source == Source.HOOK) lastHook to lastScreen else lastScreen to lastHook
+        val o = other[sessionId]
+        if (o != null && nowMs - o in 0 until windowMs) return@synchronized false
+        own[sessionId] = nowMs
+        true
+    }
+
+    fun forget(sessionId: String) = synchronized(lock) {
+        lastHook.remove(sessionId); lastScreen.remove(sessionId)
+        Unit
+    }
+
+    companion object {
+        const val WINDOW_MS = 15_000L
+    }
 }

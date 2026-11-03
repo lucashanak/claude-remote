@@ -57,6 +57,10 @@ class TmuxTargetSyntaxTest {
         // tmux-server SIGSEGV. Not worth it for a theoretical `__anchor__*`
         // collision.
         "kill-session -t __anchor__",
+        // hook-ev.sh: `§TMUX_PANE` is a pane ID (`%12`) that tmux itself put into the hook's
+        // environment: unique and exact by construction, no name is looked up. (`§` stands
+        // for `$` in the Kotlin raw string, see HookCommands.)
+        "display-message -p -t \"§TMUX_PANE\"",
     )
 
     private fun kotlinSources(): List<File> =

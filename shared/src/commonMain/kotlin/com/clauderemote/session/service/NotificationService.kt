@@ -33,9 +33,10 @@ private const val MARKER_PATH = "~/.cache/claude-remote/notify"
 private const val MARKER_DIR = "~/.cache/claude-remote"
 
 /**
- * The pre-migration marker file. Still tailed because an already-running
- * `claude` keeps using the hook it snapshotted at startup; see the watcher.
- * Remove both this and that half of the tail once servers have cycled.
+ * The pre-migration marker file. Still tailed because claude-local sessions keep
+ * the legacy hook that appends here, and sessions started before the move may not
+ * have reloaded their settings; see the watcher. Remove both this and that half of
+ * the tail only when no config on the box carries the /tmp hook any more.
  */
 private const val LEGACY_MARKER_PATH = "/tmp/claude-notify"
 
@@ -53,12 +54,130 @@ private fun shellQuote(path: String): String {
     return prefix + "'" + rest.replace("'", "'\\''") + "'"
 }
 
+/** `~/.claude-remote/forget.log`: one line per tombstone any device wrote (see ManifestCommands.tombstone). */
+private const val FORGET_LOG_PATH = "~/.claude-remote/forget.log"
+
+/** Rotate the events file at most once per 24 h, so concurrent readers are not disturbed every few minutes. */
+private const val EVENTS_ROTATE_MIN_INTERVAL_MIN = 1440
+
+/**
+ * The shell command of the per-server watcher channel.
+ *
+ * Without [withHooks] it is the legacy command, character for character. With it,
+ * the same channel also follows the hook events file and the forget log, and
+ * rotates the events file (> [MARKER_MAX_LINES] lines, keep [MARKER_KEEP_LINES],
+ * at most once per 24 h, BEFORE `tail` starts so it never sees a truncation).
+ * `tail -n 25` is per file, so the Stop replay is never starved by the others.
+ *
+ * BOTH marker paths are tailed: the old /tmp file is still appended to by
+ * claude-local sessions (their own settings carry the legacy hook) and by sessions
+ * that have not reloaded settings since the move. `-q` suppresses the
+ * "==> file <==" headers, `-F` retries a path that does not exist yet, and a
+ * marker that lands in both files is dropped by epoch identity. The old file is
+ * deliberately NOT deleted or truncated: other processes still append to it.
+ */
+internal fun buildNotifyWatcherCommand(withHooks: Boolean): String {
+    val marker = shellQuote(MARKER_PATH)
+    val head = "echo claude-remote-clock \$(date +%s); " +
+        "mkdir -p ${shellQuote(MARKER_DIR)} && touch $marker && chmod 600 $marker; " +
+        "if [ \"\$(wc -l < $marker)\" -gt $MARKER_MAX_LINES ]; then " +
+        "tail -n $MARKER_KEEP_LINES $marker > $marker.rot && mv $marker.rot $marker && " +
+        "chmod 600 $marker; fi; "
+    if (!withHooks) return head + "tail -q -n 25 -F $marker ${shellQuote(LEGACY_MARKER_PATH)}"
+    val ev = shellQuote(HookCommands.EVENTS_PATH)
+    return head +
+        "touch $ev && chmod 600 $ev; " +
+        "if [ -z \"\$(find $ev.rotated -mmin -$EVENTS_ROTATE_MIN_INTERVAL_MIN 2>/dev/null)\" ] && " +
+        "[ \"\$(wc -l < $ev)\" -gt $MARKER_MAX_LINES ]; then " +
+        "tail -n $MARKER_KEEP_LINES $ev > $ev.rot && mv $ev.rot $ev && chmod 600 $ev && touch $ev.rotated; fi; " +
+        "tail -q -n 25 -F $marker ${shellQuote(LEGACY_MARKER_PATH)} $ev ${shellQuote(FORGET_LOG_PATH)}"
+}
+
 /**
  * Body of a Stop-hook notification when no assistant text could be resolved.
  * Taken from the detector's own INPUT_PROMPT hint so the two phrasings — and
  * the language they are in — cannot drift apart.
  */
 private val READY_HINT = PromptType.INPUT_PROMPT.displayHint
+
+/**
+ * Shell command run via SSH exec to ensure `~/.claude/settings.json` on the
+ * remote server contains a `Stop` hook that appends to [MARKER_PATH].
+ * Uses `python3` for safe JSON merge (preserves all existing content).
+ * Idempotent — checks for our marker string before adding.
+ *
+ * Three things this script must survive, because it runs on EVERY
+ * connectSsh (so several tabs on one server race it) against a file Claude
+ * Code itself writes:
+ *  - a `Stop` value that is not a list (a dict, or a string): iterating it
+ *    yielded its keys/characters and the rewrite replaced the user's config
+ *    with that garbage. We now refuse to touch a shape we do not understand
+ *    and report HOOK_FAILED — screen-scrape detection covers the session,
+ *    and the user's configuration survives.
+ *  - an unparseable settings.json: reported as HOOK_FAILED instead of a
+ *    traceback, and never rewritten from a half-read state.
+ *  - a torn write: the new content goes to a temp file in the same
+ *    directory and is `os.replace`d in (atomic on POSIX), with an
+ *    `flock` spanning the read AND the write so concurrent copies of this
+ *    script serialize instead of losing each other's edits.
+ */
+internal val LEGACY_STOP_HOOK_COMMAND: String = """
+        python3 -c "
+import json, os, fcntl, shlex, tempfile
+p = os.path.expanduser('~/.claude/settings.json')
+os.makedirs(os.path.dirname(p), exist_ok=True)
+lock = open(p + '.claude-remote.lock', 'a+')
+fcntl.flock(lock, fcntl.LOCK_EX)
+try:
+    d = {}
+    if os.path.exists(p):
+        try:
+            with open(p) as f: d = json.load(f)
+        except Exception:
+            print('HOOK_FAILED')
+            raise SystemExit(0)
+    if not isinstance(d, dict): d = {}
+    hooks = d.get('hooks')
+    if not isinstance(hooks, dict):
+        hooks = {}
+        d['hooks'] = hooks
+    stop = hooks.get('Stop')
+    if stop is None: stop = []
+    if not isinstance(stop, list):
+        # A shape this script does not understand. Rewriting it would silently
+        # destroy whatever the user (or a future Claude Code format) put there,
+        # so bail and let screen-scrape detection cover the session instead.
+        print('HOOK_FAILED')
+        raise SystemExit(0)
+    marker = 'claude-remote-notify'
+    out = os.path.expanduser('$MARKER_PATH')
+    q = shlex.quote(out)
+    qd = shlex.quote(os.path.dirname(out))
+    cmd = \"mkdir -p %s && touch %s && chmod 600 %s && echo claude-remote-notify \$(tmux -u display-message -p '#S' 2>/dev/null || echo unknown) \$(date +%%s) >> %s\" % (qd, q, q, q)
+    want = {'matcher': '', 'hooks': [{'type': 'command', 'command': cmd}]}
+    def has_marker(e):
+        if not isinstance(e, dict): return False
+        if marker in str(e.get('command', '')): return True
+        for h in e.get('hooks') or []:
+            if isinstance(h, dict) and marker in str(h.get('command', '')): return True
+        return False
+    canonical_ok = any(e == want for e in stop if isinstance(e, dict))
+    stale = [e for e in stop if has_marker(e) and e != want]
+    if canonical_ok and not stale:
+        print('HOOK_EXISTS')
+    else:
+        hooks['Stop'] = [e for e in stop if not has_marker(e)] + [want]
+        mode = (os.stat(p).st_mode & 0o777) if os.path.exists(p) else 0o600
+        fd, tmp = tempfile.mkstemp(dir=os.path.dirname(p), prefix='.claude-remote-settings-')
+        with os.fdopen(fd, 'w') as f: json.dump(d, f, indent=2)
+        os.chmod(tmp, mode)
+        os.replace(tmp, p)
+        print('HOOK_FIXED')
+finally:
+    fcntl.flock(lock, fcntl.LOCK_UN)
+    lock.close()
+" 2>&1 || echo 'HOOK_FAILED'
+""".trimIndent()
 
 /**
  * Input-prompt detection, "Claude needs input" notifications, the SHARED
@@ -155,6 +274,14 @@ internal class NotificationService(
     private val _pendingCounts = kotlinx.coroutines.flow.MutableStateFlow<Map<String, Int>>(emptyMap())
     val pendingCounts: kotlinx.coroutines.flow.StateFlow<Map<String, Int>> = _pendingCounts
 
+    private val dialogDedup = PromptDialogDedup()
+
+    private fun dialogSource(eventKey: String?): PromptDialogDedup.Source? = when {
+        NotifyKeys.isHook(eventKey) -> PromptDialogDedup.Source.HOOK
+        NotifyKeys.isDetection(eventKey) -> PromptDialogDedup.Source.SCREEN
+        else -> null
+    }
+
     /** Dispatch [onNeedsInput] no more than once per [notifyDebounceMs] per
      *  session — protects against rapid duplicate fires from the Stop-hook stream
      *  and from the screen-state fallback firing on transient quiescence. */
@@ -189,6 +316,10 @@ internal class NotificationService(
         val proceed = synchronized(lastNotifiedKey) {
             if (key != null && lastNotifiedKey[sessionId] == key) {
                 FileLogger.log(TAG, "Suppressed needs-input for $sessionId (same event)")
+                false
+            } else if (dialogSource(eventKey)?.let { !dialogDedup.allow(sessionId, it, now) } == true) {
+                // The same dialog was already announced by the other source (hook event vs screen).
+                FileLogger.log(TAG, "Suppressed needs-input for $sessionId (the same dialog was just announced by the other source)")
                 false
             } else {
                 // The debounce collapses repeats of one event, and a screen
@@ -234,8 +365,38 @@ internal class NotificationService(
          * closes the piped stream, so the read returns and the `finally` runs.
          */
         @Volatile var channel: com.jcraft.jsch.ChannelExec? = null
+        /** Hook-event state of this server (dedup LRU, per-session order, pending approvals). */
+        val reducer = HookEventReducer()
+        /** Replay guard for forget.log lines. */
+        val forgets = ForgetTracker()
     }
     private val serverNotifyWatchers = java.util.concurrent.ConcurrentHashMap<String, ServerNotifyWatcher>()
+
+    /**
+     * Where hook events that reach beyond this service go (latch re-arm on `work`,
+     * UUID re-check on `start`, closed-elsewhere check from forget.log). Defaults to
+     * a no-op; the orchestrator wiring replaces it.
+     */
+    @Volatile internal var hookSink: HookEventSink = HookEventSink.NoOp
+
+    /** "This device just closed that session" (forget.log lines we wrote ourselves must not trigger a check). */
+    @Volatile internal var closures: PersistenceClosures = PersistenceClosures.None
+
+    /**
+     * Server-clock start (epoch ms) of the hook-reported approval pending for
+     * [tmuxName] on [serverId], or null. For "asking since 12 min" in the UI and
+     * for the policy that a hook approval younger than 10 min survives a tab switch.
+     */
+    internal fun hookApprovalSince(serverId: String, tmuxName: String): Long? =
+        serverNotifyWatchers[serverId]?.reducer?.approvalSince(tmuxName)
+
+    /** Pause between a `perm` / `ask` event and its notification, so an answer that follows in the same replay cancels it. */
+    private val hookSettleMs = 250L
+
+    /** A forget.log line of a session this device did not just close; one retry follows the first check. */
+    private val forgetRetryMs = 5_000L
+    private val forgetCheckDelayMs = 3_000L
+    private val closedLocallyWindowMs = 60_000L
 
     /** Per-session timestamp of the last "needs input" dispatch, used to debounce
      *  the Stop-hook fire stream — claude can emit several markers in quick
@@ -310,83 +471,10 @@ internal class NotificationService(
     // ---- Claude Code Stop-hook integration ----
 
     /**
-     * Shell command run via SSH exec to ensure `~/.claude/settings.json` on the
-     * remote server contains a `Stop` hook that appends to [MARKER_PATH].
-     * Uses `python3` for safe JSON merge (preserves all existing content).
-     * Idempotent — checks for our marker string before adding.
-     *
-     * Three things this script must survive, because it runs on EVERY
-     * connectSsh (so several tabs on one server race it) against a file Claude
-     * Code itself writes:
-     *  - a `Stop` value that is not a list (a dict, or a string): iterating it
-     *    yielded its keys/characters and the rewrite replaced the user's config
-     *    with that garbage. We now refuse to touch a shape we do not understand
-     *    and report HOOK_FAILED — screen-scrape detection covers the session,
-     *    and the user's configuration survives.
-     *  - an unparseable settings.json: reported as HOOK_FAILED instead of a
-     *    traceback, and never rewritten from a half-read state.
-     *  - a torn write: the new content goes to a temp file in the same
-     *    directory and is `os.replace`d in (atomic on POSIX), with an
-     *    `flock` spanning the read AND the write so concurrent copies of this
-     *    script serialize instead of losing each other's edits.
+     * The legacy `Stop` hook ensure ([LEGACY_STOP_HOOK_COMMAND], kept verbatim at file
+     * level so the bootstrap can run it inside its single exec). See there.
      */
-    private val ENSURE_HOOK_COMMAND = """
-        python3 -c "
-import json, os, fcntl, shlex, tempfile
-p = os.path.expanduser('~/.claude/settings.json')
-os.makedirs(os.path.dirname(p), exist_ok=True)
-lock = open(p + '.claude-remote.lock', 'a+')
-fcntl.flock(lock, fcntl.LOCK_EX)
-try:
-    d = {}
-    if os.path.exists(p):
-        try:
-            with open(p) as f: d = json.load(f)
-        except Exception:
-            print('HOOK_FAILED')
-            raise SystemExit(0)
-    if not isinstance(d, dict): d = {}
-    hooks = d.get('hooks')
-    if not isinstance(hooks, dict):
-        hooks = {}
-        d['hooks'] = hooks
-    stop = hooks.get('Stop')
-    if stop is None: stop = []
-    if not isinstance(stop, list):
-        # A shape this script does not understand. Rewriting it would silently
-        # destroy whatever the user (or a future Claude Code format) put there,
-        # so bail and let screen-scrape detection cover the session instead.
-        print('HOOK_FAILED')
-        raise SystemExit(0)
-    marker = 'claude-remote-notify'
-    out = os.path.expanduser('$MARKER_PATH')
-    q = shlex.quote(out)
-    qd = shlex.quote(os.path.dirname(out))
-    cmd = \"mkdir -p %s && touch %s && chmod 600 %s && echo claude-remote-notify \$(tmux -u display-message -p '#S' 2>/dev/null || echo unknown) \$(date +%%s) >> %s\" % (qd, q, q, q)
-    want = {'matcher': '', 'hooks': [{'type': 'command', 'command': cmd}]}
-    def has_marker(e):
-        if not isinstance(e, dict): return False
-        if marker in str(e.get('command', '')): return True
-        for h in e.get('hooks') or []:
-            if isinstance(h, dict) and marker in str(h.get('command', '')): return True
-        return False
-    canonical_ok = any(e == want for e in stop if isinstance(e, dict))
-    stale = [e for e in stop if has_marker(e) and e != want]
-    if canonical_ok and not stale:
-        print('HOOK_EXISTS')
-    else:
-        hooks['Stop'] = [e for e in stop if not has_marker(e)] + [want]
-        mode = (os.stat(p).st_mode & 0o777) if os.path.exists(p) else 0o600
-        fd, tmp = tempfile.mkstemp(dir=os.path.dirname(p), prefix='.claude-remote-settings-')
-        with os.fdopen(fd, 'w') as f: json.dump(d, f, indent=2)
-        os.chmod(tmp, mode)
-        os.replace(tmp, p)
-        print('HOOK_FIXED')
-finally:
-    fcntl.flock(lock, fcntl.LOCK_UN)
-    lock.close()
-" 2>&1 || echo 'HOOK_FAILED'
-    """.trimIndent()
+    private val ENSURE_HOOK_COMMAND = LEGACY_STOP_HOOK_COMMAND
 
     /**
      * Ensure the Claude Code `Stop` hook is present on the remote server. Runs
@@ -465,6 +553,34 @@ finally:
         }
     }
 
+    /**
+     * Runs [block] on the watcher's long-lived exec channel and disconnects it afterwards. The
+     * server's exec transport carries it as a LONG permit when exec routing is on for the server
+     * (no permit-less channel on a session that already has all of its permits spoken for);
+     * otherwise, or when that transport is not up, it is a channel on a live tab session, as
+     * before. False when there is no usable connection at all. [block] runs at most once.
+     */
+    private suspend fun useWatcherChannel(serverId: String, block: suspend (com.jcraft.jsch.Channel) -> Unit): Boolean {
+        val gated = registry.execChannels
+        if (gated != null && CommFlags.effectiveFor(serverId).exec) {
+            var entered = false
+            try {
+                gated.use(serverId, ExecKind.LONG) { ch -> entered = true; block(ch) }
+                return true
+            } catch (e: ExecUnavailable) {
+                if (entered || e.reason != ExecUnavailableReason.NOT_UP) throw e
+            }
+        }
+        val session = registry.liveServerSession(serverId) ?: return false
+        val ch = session.openChannel("exec")
+        try {
+            block(ch)
+        } finally {
+            try { ch.disconnect() } catch (_: Exception) {}
+        }
+        return true
+    }
+
     private suspend fun runServerNotifyWatcher(w: ServerNotifyWatcher) = kotlinx.coroutines.coroutineScope {
         // Retry loop: the exec channel can die silently (mobile networks,
         // HyperOS battery management kill the socket without dropping the
@@ -473,171 +589,183 @@ finally:
         // background sessions then had no detection path at all.
         var attempt = 0
         while (isActive && w.tmuxToSession.isNotEmpty()) {
-            // Hoisted so the finally can ALWAYS disconnect it — if connect() or
-            // readLine() throws, a channel declared inside the try would leak
-            // on the shared long-lived session, one per retry.
-            var ch: com.jcraft.jsch.ChannelExec? = null
             try {
-                val sshSession = registry.liveServerSession(w.serverId)
-                if (sshSession == null) {
+                // The long-lived tail is ONE stream: it goes through useWatcherChannel (a LONG permit
+                // of the server's exec transport when that runs, else a tab's session), never around it.
+                val ran = useWatcherChannel(w.serverId) { opened ->
+                    val ch = opened as com.jcraft.jsch.ChannelExec
+                    try {
+                        // Emit the server clock first (learns phone↔server skew), then
+                        // tail INCLUDING the last 25 lines: markers appended while the
+                        // watcher was down (channel drop + retry backoff) used to be
+                        // lost forever — a completion during a reconnect window never
+                        // notified. The per-session epoch identity below makes replaying
+                        // the recent backlog safe. The marker file is created here too,
+                        // with mode 600, so the first tail on a fresh server works and
+                        // the file never appears world-readable even for an instant.
+                        //
+                        // BOTH marker paths are tailed (see buildNotifyWatcherCommand): the
+                        // old /tmp one is still written by claude-local sessions, whose
+                        // own settings carry the legacy hook, and by sessions that were
+                        // started before the move and have not reloaded settings.
+                        // DROP it only when no claude-local config carries the /tmp hook
+                        // any more. The old file is deliberately NOT deleted or
+                        // truncated here: other processes still append to it.
+                        //
+                        // Rotation runs BEFORE tail starts, never while it follows, so
+                        // tail cannot see a truncation and replay from the top.
+                        // One decision per (re)connect: comm_hooks OFF (or a legacy / force-off
+                        // server) keeps today's command and ignores the new prefixes.
+                        val hooksOn = CommFlags.effectiveFor(w.serverId).hooks
+                        ch.setCommand(buildNotifyWatcherCommand(hooksOn))
+                        ch.inputStream = null
+                        val reader = ch.inputStream.bufferedReader()
+                        val connectStartedAt = System.currentTimeMillis()
+                        ch.connect(5000)
+
+                        // Under the monitor so a session registering right now can't
+                        // slip between `live = true` and the fan-out and miss both —
+                        // and so `channel` is visible to unregisterNotifyWatcher before
+                        // anything can observe this watcher as live. Publishing it
+                        // outside left a window where a last-session disconnect
+                        // cancelled the job, saw a null channel, and left the coroutine
+                        // parked in readLine() forever: the exact leak this closes.
+                        synchronized(w) {
+                            w.channel = ch
+                            w.live = true
+                            w.tmuxToSession.values.forEach { setHookActive(it, true) }
+                        }
+                        if (attempt > 0) {
+                            // First success after a watcher reconnect: a settings.json that was
+                            // rewritten meanwhile (Claude, OMC) is repaired by a fresh ensure.
+                            registry.bootstrap?.let { b ->
+                                b.invalidate(w.serverId)
+                                scope.launch { b.ensure(w.serverId) }
+                            }
+                        }
+                        attempt = 0
+                        // Offset (ms) between this device's clock and the server's,
+                        // learned from the "claude-remote-clock <epoch>" line the
+                        // channel emits first (echo runs before tail, so it always
+                        // precedes any marker). Lets us reject stale markers by AGE
+                        // despite clock skew.
+                        var clockSkewMs: Long? = null
+                        // How far that skew can be off: the server's `date +%s` is truncated to the second and
+                        // the line only arrives after the exec started (bounded by the time since connect).
+                        var clockErrMs = 1_000L
+                        FileLogger.log(TAG, "Notify watcher started for server ${w.serverId} (${w.tmuxToSession.size} sessions)")
+
+                        while (isActive && ch.isConnected) {
+                            val line = kotlinx.coroutines.withContext(Dispatchers.IO) {
+                                reader.readLine()
+                            } ?: break
+                            // Server clock probe (emitted once, first): learn skew.
+                            if (line.startsWith("claude-remote-clock")) {
+                                line.trim().split(Regex("\\s+")).getOrNull(1)?.toLongOrNull()?.let { serverEpochSec ->
+                                    clockSkewMs = System.currentTimeMillis() - serverEpochSec * 1000L
+                                    clockErrMs = 1_000L + (System.currentTimeMillis() - connectStartedAt)
+                                }
+                                continue
+                            }
+                            if (hooksOn) {
+                                if (line.startsWith(HookEventLine.PREFIX)) {
+                                    dispatchHookEvent(w, line, clockSkewMs ?: 0L, clockErrMs)
+                                    continue
+                                }
+                                if (line.startsWith("[") && line.contains("] forget:")) {
+                                    dispatchForgetLine(w, line, clockSkewMs ?: 0L)
+                                    continue
+                                }
+                            }
+                            if (!line.startsWith("claude-remote-notify")) continue
+                            // EXACT tmux-session match. The marker line is
+                            // "claude-remote-notify <#S> <epoch>" and ALL sessions on a
+                            // server share one marker file, so a substring match cross-
+                            // fired between sessions whose names are prefixes of each
+                            // other (e.g. "cashy" matched "cashy-test"). Dispatch on the
+                            // second whitespace token exactly.
+                            val parts = line.trim().split(Regex("\\s+"))
+                            val markerTmux = parts.getOrNull(1) ?: continue
+                            val sessionId = w.tmuxToSession[markerTmux] ?: continue
+                            val markerEpochSec = parts.getOrNull(2)?.toLongOrNull()
+                            // Identity, not age. The marker file is append-only and we
+                            // replay its last 25 lines on every (re)connect, so a marker
+                            // we have already SEEN is a replay and is dropped; one we
+                            // have not seen is a completion the user is waiting on and
+                            // notifies however late it arrives — a frozen socket
+                            // flushing minutes of buffered bytes is indistinguishable
+                            // from a replay by age, which is how the old two-minute
+                            // filter killed exactly the notification that mattered.
+                            // Malformed lines (null epoch) fall through to
+                            // fireNeedsInput's own dedup unchanged.
+                            var claim: NotifyEpochTracker.Claim? = null
+                            if (markerEpochSec != null) {
+                                val ageMs = System.currentTimeMillis() - (markerEpochSec * 1000L + (clockSkewMs ?: 0L))
+                                // FIRST sighting for this session in this process. With
+                                // no baseline, "never seen" and "newer than anything
+                                // seen" are the same thing, so the replayed backlog of a
+                                // file shared by every session on the server would buzz
+                                // the user once per session for completions they
+                                // answered hours ago. Record it as seen, flip the dot,
+                                // stay quiet. From the second marker on, identity alone
+                                // decides — so a genuinely late marker still notifies,
+                                // which is the case the age filter used to break.
+                                when (val outcome = notifyEpochs.observe(
+                                    sessionId, markerEpochSec, ageMs, firstSightingGraceMs,
+                                )) {
+                                    is NotifyEpochTracker.Outcome.Primed -> {
+                                        FileLogger.log(TAG, "Priming Stop-hook baseline for $sessionId (epoch $markerEpochSec, age ${ageMs}ms) — activity only")
+                                        // Seed the message id too, so the first REAL
+                                        // notification for this session has the id gate
+                                        // behind it and not just the timestamp bounds.
+                                        lastAssistantEntry(sessionId)?.id
+                                            ?.let { lastNotifiedAssistantId.putIfAbsent(sessionId, it) }
+                                        flipToWaiting(sessionId)
+                                        continue
+                                    }
+                                    is NotifyEpochTracker.Outcome.Replay -> {
+                                        FileLogger.log(TAG, "Suppressed replayed Stop hook for $sessionId (epoch $markerEpochSec <= last seen)")
+                                        continue
+                                    }
+                                    is NotifyEpochTracker.Outcome.Claimed -> claim = outcome.claim
+                                }
+                                // Sanity bound only — see notifyAbsurdAgeMs. The session
+                                // really is idle, so still flip the dot; just don't buzz.
+                                if (ageMs > notifyAbsurdAgeMs) {
+                                    FileLogger.log(TAG, "Stop hook for $sessionId is ${ageMs}ms old — activity only, no notification")
+                                    flipToWaiting(sessionId)
+                                    continue
+                                }
+                            }
+                            FileLogger.log(TAG, "Stop hook fired for $sessionId: $line")
+                            // Hand the marker to its own coroutine: resolving the body
+                            // can take up to bodyPollMs, and doing that here stalled the
+                            // tail reader — markers for OTHER sessions on this server
+                            // queued behind it and their activity dots lagged by the
+                            // same amount.
+                            val claimForSession = claim
+                            onSessionLane(sessionId) {
+                                handleStopMarker(sessionId, markerTmux, markerEpochSec, claimForSession)
+                            }
+                        }
+                    } finally {
+                        w.channel = null
+                        try { ch.disconnect() } catch (_: Exception) {}
+                        synchronized(w) {
+                            w.live = false
+                            w.tmuxToSession.values.forEach { setHookActive(it, false) }
+                        }
+                    }
+                }
+                if (!ran) {
                     // No live connection right now (mid-reconnect). Keep probing
                     // — the shared watcher rides ANY session's connection, so it
                     // resumes as soon as the first tab on this server is back.
                     kotlinx.coroutines.delay(5_000)
                     continue
                 }
-                ch = sshSession.openChannel("exec") as com.jcraft.jsch.ChannelExec
-                // Emit the server clock first (learns phone↔server skew), then
-                // tail INCLUDING the last 25 lines: markers appended while the
-                // watcher was down (channel drop + retry backoff) used to be
-                // lost forever — a completion during a reconnect window never
-                // notified. The per-session epoch identity below makes replaying
-                // the recent backlog safe. The marker file is created here too,
-                // with mode 600, so the first tail on a fresh server works and
-                // the file never appears world-readable even for an instant.
-                //
-                // BOTH paths are tailed. Claude Code snapshots its hooks at
-                // process start, so every `claude` already running in tmux keeps
-                // appending to the old world-writable /tmp file no matter what
-                // we write to settings.json — reading only the new path would
-                // kill completion detection for every pre-existing session until
-                // the user restarted Claude in each pane. `-q` suppresses the
-                // "==> file <==" headers so the parser below is unchanged, `-F`
-                // retries a path that does not exist yet, and a marker that
-                // somehow lands in both files is dropped by epoch identity.
-                // DROP the /tmp path (and this comment) once every server has
-                // been through a Claude restart. The old file is deliberately
-                // NOT deleted or truncated here: other processes still append
-                // to it, and removing a file out from under them is worse than
-                // leaving it.
-                //
-                // Rotation runs BEFORE tail starts, never while it follows, so
-                // tail cannot see a truncation and replay from the top.
-                val marker = shellQuote(MARKER_PATH)
-                ch.setCommand(
-                    "echo claude-remote-clock \$(date +%s); " +
-                        "mkdir -p ${shellQuote(MARKER_DIR)} && touch $marker && chmod 600 $marker; " +
-                        "if [ \"\$(wc -l < $marker)\" -gt $MARKER_MAX_LINES ]; then " +
-                        "tail -n $MARKER_KEEP_LINES $marker > $marker.rot && mv $marker.rot $marker && " +
-                        "chmod 600 $marker; fi; " +
-                        "tail -q -n 25 -F $marker ${shellQuote(LEGACY_MARKER_PATH)}"
-                )
-                ch.inputStream = null
-                val reader = ch.inputStream.bufferedReader()
-                ch.connect(5000)
-
-                // Under the monitor so a session registering right now can't
-                // slip between `live = true` and the fan-out and miss both —
-                // and so `channel` is visible to unregisterNotifyWatcher before
-                // anything can observe this watcher as live. Publishing it
-                // outside left a window where a last-session disconnect
-                // cancelled the job, saw a null channel, and left the coroutine
-                // parked in readLine() forever: the exact leak this closes.
-                synchronized(w) {
-                    w.channel = ch
-                    w.live = true
-                    w.tmuxToSession.values.forEach { setHookActive(it, true) }
-                }
-                attempt = 0
-                // Offset (ms) between this device's clock and the server's,
-                // learned from the "claude-remote-clock <epoch>" line the
-                // channel emits first (echo runs before tail, so it always
-                // precedes any marker). Lets us reject stale markers by AGE
-                // despite clock skew.
-                var clockSkewMs: Long? = null
-                FileLogger.log(TAG, "Notify watcher started for server ${w.serverId} (${w.tmuxToSession.size} sessions)")
-
-                while (isActive && ch.isConnected) {
-                    val line = kotlinx.coroutines.withContext(Dispatchers.IO) {
-                        reader.readLine()
-                    } ?: break
-                    // Server clock probe (emitted once, first): learn skew.
-                    if (line.startsWith("claude-remote-clock")) {
-                        line.trim().split(Regex("\\s+")).getOrNull(1)?.toLongOrNull()?.let { serverEpochSec ->
-                            clockSkewMs = System.currentTimeMillis() - serverEpochSec * 1000L
-                        }
-                        continue
-                    }
-                    if (!line.startsWith("claude-remote-notify")) continue
-                    // EXACT tmux-session match. The marker line is
-                    // "claude-remote-notify <#S> <epoch>" and ALL sessions on a
-                    // server share one marker file, so a substring match cross-
-                    // fired between sessions whose names are prefixes of each
-                    // other (e.g. "cashy" matched "cashy-test"). Dispatch on the
-                    // second whitespace token exactly.
-                    val parts = line.trim().split(Regex("\\s+"))
-                    val markerTmux = parts.getOrNull(1) ?: continue
-                    val sessionId = w.tmuxToSession[markerTmux] ?: continue
-                    val markerEpochSec = parts.getOrNull(2)?.toLongOrNull()
-                    // Identity, not age. The marker file is append-only and we
-                    // replay its last 25 lines on every (re)connect, so a marker
-                    // we have already SEEN is a replay and is dropped; one we
-                    // have not seen is a completion the user is waiting on and
-                    // notifies however late it arrives — a frozen socket
-                    // flushing minutes of buffered bytes is indistinguishable
-                    // from a replay by age, which is how the old two-minute
-                    // filter killed exactly the notification that mattered.
-                    // Malformed lines (null epoch) fall through to
-                    // fireNeedsInput's own dedup unchanged.
-                    var claim: NotifyEpochTracker.Claim? = null
-                    if (markerEpochSec != null) {
-                        val ageMs = System.currentTimeMillis() - (markerEpochSec * 1000L + (clockSkewMs ?: 0L))
-                        // FIRST sighting for this session in this process. With
-                        // no baseline, "never seen" and "newer than anything
-                        // seen" are the same thing, so the replayed backlog of a
-                        // file shared by every session on the server would buzz
-                        // the user once per session for completions they
-                        // answered hours ago. Record it as seen, flip the dot,
-                        // stay quiet. From the second marker on, identity alone
-                        // decides — so a genuinely late marker still notifies,
-                        // which is the case the age filter used to break.
-                        when (val outcome = notifyEpochs.observe(
-                            sessionId, markerEpochSec, ageMs, firstSightingGraceMs,
-                        )) {
-                            is NotifyEpochTracker.Outcome.Primed -> {
-                                FileLogger.log(TAG, "Priming Stop-hook baseline for $sessionId (epoch $markerEpochSec, age ${ageMs}ms) — activity only")
-                                // Seed the message id too, so the first REAL
-                                // notification for this session has the id gate
-                                // behind it and not just the timestamp bounds.
-                                lastAssistantEntry(sessionId)?.id
-                                    ?.let { lastNotifiedAssistantId.putIfAbsent(sessionId, it) }
-                                flipToWaiting(sessionId)
-                                continue
-                            }
-                            is NotifyEpochTracker.Outcome.Replay -> {
-                                FileLogger.log(TAG, "Suppressed replayed Stop hook for $sessionId (epoch $markerEpochSec <= last seen)")
-                                continue
-                            }
-                            is NotifyEpochTracker.Outcome.Claimed -> claim = outcome.claim
-                        }
-                        // Sanity bound only — see notifyAbsurdAgeMs. The session
-                        // really is idle, so still flip the dot; just don't buzz.
-                        if (ageMs > notifyAbsurdAgeMs) {
-                            FileLogger.log(TAG, "Stop hook for $sessionId is ${ageMs}ms old — activity only, no notification")
-                            flipToWaiting(sessionId)
-                            continue
-                        }
-                    }
-                    FileLogger.log(TAG, "Stop hook fired for $sessionId: $line")
-                    // Hand the marker to its own coroutine: resolving the body
-                    // can take up to bodyPollMs, and doing that here stalled the
-                    // tail reader — markers for OTHER sessions on this server
-                    // queued behind it and their activity dots lagged by the
-                    // same amount.
-                    val claimForSession = claim
-                    onSessionLane(sessionId) {
-                        handleStopMarker(sessionId, markerTmux, markerEpochSec, claimForSession)
-                    }
-                }
             } catch (e: Exception) {
                 FileLogger.error(TAG, "Notify watcher failed for server ${w.serverId}: ${e.message}", e)
-            } finally {
-                w.channel = null
-                try { ch?.disconnect() } catch (_: Exception) {}
-                synchronized(w) {
-                    w.live = false
-                    w.tmuxToSession.values.forEach { setHookActive(it, false) }
-                }
             }
             if (!isActive || w.tmuxToSession.isEmpty()) break
             attempt++
@@ -646,6 +774,59 @@ finally:
             kotlinx.coroutines.delay(backoffMs)
         }
         FileLogger.log(TAG, "Notify watcher stopped for server ${w.serverId}")
+    }
+
+    /**
+     * One `claude-remote-ev` line: reduce it ([HookEventReducer]) and apply the result
+     * on the session's lane (after everything already dispatched for it).
+     * Background sessions only get a notification; the active tab in the foreground is
+     * covered by the screen detector, so a second alert is not raised for it.
+     */
+    private fun dispatchHookEvent(w: ServerNotifyWatcher, line: String, skewMs: Long, skewErrMs: Long) {
+        val e = HookEventLine.parse(line)
+        if (e == null) {
+            FileLogger.log(TAG, "Hook event line not understood: ${line.take(120)}")
+            return
+        }
+        val sessionId = w.tmuxToSession[e.tmux] ?: return
+        val r = w.reducer.reduce(e, System.currentTimeMillis(), skewMs, skewErrMs)
+        if (r.ignored != null) return
+        val isActive = tabManager.activeTabId.value == sessionId
+        FileLogger.log(TAG, "Hook event ${e.ev} for $sessionId (${if (isActive) "fg" else "bg"}) age=${r.ageMs}")
+        onSessionLane(sessionId) {
+            hookSink.onActivity(w.serverId, e.tmux, e.atMs)
+            if (r.callWorking) hookSink.onClaudeWorking(w.serverId, e.tmux, true)
+            if (r.checkUuid) hookSink.onCheckUuid(w.serverId, e.tmux)
+            r.activity?.let { updateActivity(sessionId, it) }
+            val n = r.notify ?: return@onSessionLane
+            kotlinx.coroutines.delay(hookSettleMs)
+            if (w.reducer.isSuperseded(e.tmux, e.atMs)) return@onSessionLane
+            if (isActive && !isBackground()) return@onSessionLane
+            val hint = if (n.kind == "ask") PromptType.INPUT_PROMPT.displayHint else PromptType.PERMISSION_PROMPT.displayHint
+            fireNeedsInput(sessionId, hint, isActive, eventKey = n.key, body = n.text)
+            hookSink.onNotify(w.serverId, e.tmux, n.kind, n.text)
+        }
+    }
+
+    /**
+     * One `forget.log` line: a tombstone some device wrote. For a tab of ours that this
+     * device did not just close, ask the reconciler whether the session is really gone
+     * (after a delay, because the tombstone is written BEFORE the kill), once more later.
+     */
+    private fun dispatchForgetLine(w: ServerNotifyWatcher, line: String, skewMs: Long) {
+        val f = ForgetLine.parse(line) ?: return
+        val sessionId = w.tmuxToSession[f.name] ?: return
+        if (!w.forgets.shouldAct(f, System.currentTimeMillis(), skewMs)) return
+        if (closures.recentlyClosedLocally(w.serverId, f.name, closedLocallyWindowMs)) {
+            FileLogger.log(TAG, "forget.log: ${f.name} was closed by this device, no check")
+            return
+        }
+        FileLogger.log(TAG, "forget.log: ${f.name} tombstoned elsewhere, checking $sessionId")
+        scope.launch {
+            hookSink.onCheckClosed(w.serverId, f.name, forgetCheckDelayMs)
+            kotlinx.coroutines.delay(forgetRetryMs)
+            hookSink.onCheckClosed(w.serverId, f.name, forgetCheckDelayMs)
+        }
     }
 
     /**
@@ -837,6 +1018,7 @@ finally:
     fun unregisterNotifyWatcher(serverId: String, sessionId: String) {
         serverNotifyWatchers[serverId]?.let { w ->
             synchronized(w) {
+                w.tmuxToSession.entries.filter { it.value == sessionId }.forEach { w.reducer.forget(it.key) }
                 w.tmuxToSession.entries.removeAll { it.value == sessionId }
                 // Conditional remove(key, value): only cancel if this exact
                 // instance is still the registered watcher AND nobody

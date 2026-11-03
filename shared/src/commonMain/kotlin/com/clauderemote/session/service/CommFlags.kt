@@ -38,7 +38,7 @@ object CommFlags {
     const val BG_PARK_GRACE_MIN_S = 10
     const val BG_PARK_GRACE_MAX_S = 3600
 
-    /** Shell channels per transport: 8 only with pool AND exec, else today's 3 (§1.3). */
+    /** Shell channels per transport: 8 only with the pool AND the exec transport, else the 3 of the single-connection design. */
     const val SHELL_CAP_LEGACY = 3
     const val SHELL_CAP_V2 = 8
 
@@ -156,8 +156,14 @@ object CommFlags {
     private val _hookInstallRequests = MutableSharedFlow<String>(extraBufferCapacity = 16, onBufferOverflow = BufferOverflow.DROP_OLDEST)
     val hookInstallRequests: SharedFlow<String> = _hookInstallRequests.asSharedFlow()
 
-    /** Ask for hooks to be installed on [serverId] now. Returns false if the buffer refused it. */
-    fun requestHooksInstall(serverId: String): Boolean = _hookInstallRequests.tryEmit(serverId)
+    /**
+     * Ask for hooks to be installed on [serverId] now. Returns false, and drops the
+     * request, when nobody is collecting [hookInstallRequests] (or the buffer refused
+     * it): the caller can tell the user that nothing happened, and the request cannot
+     * linger and fire later.
+     */
+    fun requestHooksInstall(serverId: String): Boolean =
+        _hookInstallRequests.subscriptionCount.value > 0 && _hookInstallRequests.tryEmit(serverId)
 
     /** Called by MainActivity / desktop Main at start and by Settings on every change. */
     fun set(newRaw: Raw): Unit = synchronized(lock) {

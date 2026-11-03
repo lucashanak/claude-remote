@@ -18,6 +18,8 @@ import com.clauderemote.model.ClaudeMode
 import com.clauderemote.model.ClaudeModel
 import com.clauderemote.model.ConnectionType
 import com.clauderemote.session.service.CommFlags
+import com.clauderemote.session.service.HookCommands
+import com.clauderemote.session.service.HookInstallControl
 import com.clauderemote.storage.AppSettings
 import com.clauderemote.voice.WakeWordSettingsCard
 import com.clauderemote.ui.components.CRCard
@@ -63,6 +65,8 @@ fun SettingsScreen(
      * the row stays hidden.
      */
     notificationsBlocked: () -> Boolean = { false },
+    /** (server id, display name) of the saved servers, for the per-server hook buttons. Empty hides them. */
+    hookServers: List<Pair<String, String>> = emptyList(),
 ) {
     val c = CRTheme.colors
 
@@ -390,9 +394,10 @@ fun SettingsScreen(
             }
 
             // ── Connection (experimental) ───────────────────────────────────
-            // Communication-redesign switches. In this build they only feed
-            // CommFlags; the services behind them are seams that still run
-            // today's behaviour (see docs/connection.md), hence the labels.
+            // Communication-redesign switches. They feed CommFlags, which the
+            // connection layer reads per server (see docs/connection.md), so
+            // each one has the effect its label says; an implication that turns
+            // one off is shown under it ("Effective: off (...)").
             SectionHeader("Connection (experimental)")
             CRCard {
                 Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
@@ -417,19 +422,19 @@ fun SettingsScreen(
                     }
 
                     SettingsSwitch(
-                        label = "Pooled transports (comm_pool) - no effect in this build",
+                        label = "Pooled transports (comm_pool): tabs of a server share connections; off = one per tab, as before",
                         checked = commPool,
                         onCheckedChange = { commPool = it; settings.commPool = it; settings.publishCommFlags() }
                     )
                     EffectiveNote(CommFlags.POOL, commPool)
                     SettingsSwitch(
-                        label = "Exec channels (comm_exec) - no effect in this build",
+                        label = "Exec channels (comm_exec): background reads run on their own connection per server; off = on a tab's, as before",
                         checked = commExec,
                         onCheckedChange = { commExec = it; settings.commExec = it; settings.publishCommFlags() }
                     )
                     EffectiveNote(CommFlags.EXEC, commExec)
                     SettingsSwitch(
-                        label = "Background hooks (comm_hooks) - no effect in this build",
+                        label = "Background hooks (comm_hooks): read hook events from servers where they are installed; off = Stop marker only",
                         checked = commHooks,
                         onCheckedChange = { commHooks = it; settings.commHooks = it; settings.publishCommFlags() }
                     )
@@ -454,6 +459,7 @@ fun SettingsScreen(
                         // Persist and publish once, when the drag ends.
                         onValueChangeFinished = { settings.commWarmTabs = warmTabs; settings.publishCommFlags() },
                     )
+                    if (hookServers.isNotEmpty()) HookServersBlock(hookServers)
                 }
             }
 
@@ -750,3 +756,84 @@ private fun Modifier.clickableNoRipple(onClick: () -> Unit): Modifier =
         indication = null,
         onClick = onClick,
     )
+
+
+/**
+ * Per-server install / remove of the background-state hooks. Nothing is written to a
+ * server's Claude settings unless the user taps Install here; the dialog says what that
+ * touches. Requests are one-shot events ([CommFlags.requestHooksInstall],
+ * [HookInstallControl.requestRemove]): when the connection layer does not listen for
+ * them, the row says so instead of pretending.
+ */
+@Composable
+private fun HookServersBlock(servers: List<Pair<String, String>>) {
+    val c = CRTheme.colors
+    val statuses by HookInstallControl.shared.status.collectAsState()
+    var confirmInstall by remember { mutableStateOf<Pair<String, String>?>(null) }
+    var notice by remember { mutableStateOf<String?>(null) }
+
+    Text("Background hooks on the server", style = CRType.monoTiny, color = c.textDim)
+    Text(
+        "Installing adds hook entries to the server's Claude settings. Running Claude sessions load " +
+            "them within about a second (measured with Claude Code 2.1.316). Remove undoes it. To stop them instantly without touching settings, " +
+            "create ~/.claude-remote/hookev.off on the server.",
+        style = CRType.monoTiny, color = c.textDim,
+    )
+    servers.forEach { (id, name) ->
+        val st = statuses[id] ?: HookInstallControl.Status()
+        // Hooks that this device or the server switches off would never be read, so the install stays disabled
+        val blocked = HookInstallControl.installBlockedReason(CommFlags.effectiveFlow(id).collectAsState().value)
+        Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            Text(name, style = CRType.monoTiny, color = c.text)
+            Text(hookStatusText(st), style = CRType.monoTiny, color = c.textDim)
+            if (blocked != null) Text("Install disabled: $blocked", style = CRType.monoTiny, color = c.textDim)
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                OutlinedButton(enabled = !st.busy && blocked == null, onClick = { confirmInstall = id to name }) { Text("Install hooks on server") }
+                OutlinedButton(enabled = !st.busy, onClick = {
+                    notice = if (HookInstallControl.shared.requestRemove(id)) null
+                    else "Not available: the connection layer is not running for $name."
+                }) { Text("Remove") }
+            }
+        }
+    }
+    notice?.let { Text(it, style = CRType.monoTiny, color = c.textDim) }
+
+    confirmInstall?.let { (id, name) ->
+        AlertDialog(
+            onDismissRequest = { confirmInstall = null },
+            title = { Text("Install hooks on $name?") },
+            text = {
+                Text(
+                    "This edits the Claude settings on that server (a backup is kept). Every running Claude " +
+                        "session of every account on it picks the hooks up within about a second (measured with Claude Code 2.1.316).",
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    notice = if (CommFlags.requestHooksInstall(id)) null
+                    else "Not available: the connection layer is not running for $name."
+                    confirmInstall = null
+                }) { Text("Install") }
+            },
+            dismissButton = { TextButton(onClick = { confirmInstall = null }) { Text("Cancel", color = c.textDim) } },
+        )
+    }
+}
+
+private fun hookStatusText(st: HookInstallControl.Status): String {
+    val base = when (st.state) {
+        HookCommands.V2State.INSTALLED -> "Installed"
+        HookCommands.V2State.PARTIAL -> "Partly installed (Install completes it)"
+        HookCommands.V2State.ABSENT -> "Not installed"
+        HookCommands.V2State.NEWER -> "A newer version is installed (left alone)"
+        HookCommands.V2State.UNREADABLE -> "Server settings file is unreadable"
+        HookCommands.V2State.UNKNOWN -> "Not checked yet"
+    }
+    val off = if (st.offSwitch) " - paused by hookev.off" else ""
+    val last = when (st.lastResult) {
+        HookCommands.V2Result.FAILED -> " - last attempt failed"
+        HookCommands.V2Result.SKIPPED_OFF -> " - the server switches hooks off (client-flags.json)"
+        else -> ""
+    }
+    return base + off + last + if (st.busy) " - working..." else ""
+}
