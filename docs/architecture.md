@@ -314,7 +314,8 @@ as before and it delegates to the services.
 | `UsageService` | 5h/week usage %, reset mins, usage tokens, ccusage polling. |
 | `TranscriptService` | Transcript streams (+ `transcriptLock`), context-token tracking, the shared streamd daemon. |
 | `StatusService` | Per-session activity state (`updateActivity`) + OMC remote-status pollers. |
-| `NotificationService` | Input-prompt detection, needs-input notifications, the Stop-hook watcher, login flow, offline input queue. |
+| `NotificationService` | Input-prompt detection, needs-input notifications, the Stop-hook watcher (and, with `comm_hooks`, the hook-event and forget.log lines), login flow, offline input queue. |
+| `HookCommands` / `HookEventReducer` | Server-side text of the background hooks (`hook-ev.sh`, settings merge, remove, status) and the pure reducer of their events; see [connection.md](connection.md#per-server-bootstrap-and-background-hooks). |
 | `TerminalIOService` | Per-session output ring buffer + pty size tracking. |
 | `ClaudeControlService` | User input send path + offline queue + Claude slash-control (model/effort/login/escape). |
 | `RemoteOpsService` | tmux copy-mode scroll + SFTP upload/download. |
@@ -327,19 +328,23 @@ today's behaviour so the pieces behind them (transport pool, exec routing,
 reconcile, hooks) can be built in parallel without touching each other's files. They are reached through nullable
 `@Volatile` slots on `ConnectionRegistry` (`execSessions`, `execChannels`,
 `remoteExec`, `reconciler`, `bootstrap`; null = legacy) and the process-wide
-`CommFlags`. They are stubs: nothing in the app calls them yet.
+`CommFlags`. The transport pool (`ServerTransportPool`, `SingleFlight`) is live behind
+`comm_pool`; the exec-side pieces are not constructed by the app yet. The services reach
+exec through the routing helpers of `ConnectionRegistry` (`execRun`, `execRead`,
+`useChannel`) and `SshSessionHelper.withSession` (see connection.md "Exec routing"), which
+only deviate from legacy when the slots are wired and the `exec` group is on for the server.
 
 | Interface (file) | Stub | To be implemented in |
 |------------------|------|----------------|
-| `RemoteExec.run(serverId, cmd, stdin, totalMs, kind, paceStdin): ExecResult` (`RemoteExec.kt`) | `PooledRemoteExec` | transport pool |
-| `ExecChannels.use(serverId, kind, acquireTimeoutMs) { ch -> }` and `withPermit(...) { session -> }` (`RemoteExec.kt`) | `UngatedExecChannels` (no permits) | transport pool |
-| `ExecTransportManager` / `ExecSessionProvider`, `LinkState` (`ExecTransportManager.kt`) | `PooledExecTransportManager` | transport pool |
-| `ServerTransportPool.setKeepAlive(ms)`, `ExecTransportManager.setKeepAlive(ms)` | pool: applies to usable transports; manager stub: records it | transport pool |
-| `ServerBootstrap` (`ServerBootstrap.kt`) | `NoopServerBootstrap` | hooks bootstrap |
-| `ServerReconciler` (`ServerReconciler.kt`) | `LegacyServerReconciler` (executes today's forget rule) | reconcile |
-| `PersistenceClosures.recentlyClosedLocally(serverId, name, withinMs)` | `None` | reconcile |
-| `HookEventSink` | `NoOp` | hook-event reducer, wired in the orchestrator |
-| `HookCapContract` (CAP: per-config-dir `claude-remote-hookev.installed`, parser, verdict) | executable reference | reconcile reads, hooks install writes |
+| `RemoteExec.run(serverId, cmd, stdin, totalMs, kind, paceStdin): ExecResult` (`RemoteExec.kt`) | `PooledRemoteExec` (typed errors, spill retry, never a partial result; works over either channel implementation) | transport pool |
+| `ExecChannels.use(serverId, kind, acquireTimeoutMs) { ch -> }` and `withPermit(...) { session -> }` (`RemoteExec.kt`) | `UngatedExecChannels` (no permits); real: `GatedExecChannels` (permits per kind, void with the transport generation, LONG fallback) | transport pool |
+| `ExecTransportManager` / `ExecSessionProvider`, `LinkState` (`ExecTransportManager.kt`) | `PooledExecTransportManager`; real: `PoolExecTransportManager` (one EXEC transport per server, supervisor, backoff, forwards) | transport pool |
+| `ServerTransportPool.setKeepAlive(ms)`, `ExecTransportManager.setKeepAlive(ms)` | pool: applies to every live transport and to later ones; manager stub: records it | transport pool |
+| `ServerBootstrap` (`ServerBootstrap.kt`) | `NoopServerBootstrap`; implemented by `DefaultServerBootstrap` (not wired yet) | wiring |
+| `ServerReconciler` (`ServerReconciler.kt`) | `LegacyServerReconciler` (executes today's forget rule); real one: `ExecServerReconciler` (one `reconcileAll` exec per server, see connection.md "Reconcile") | reconcile |
+| `PersistenceClosures.recentlyClosedLocally(serverId, name, withinMs)` | `None`; `SessionPersistenceService` implements it | reconcile |
+| `HookEventSink` | `NoOp`; `NotificationService.hookSink` calls it | hook-event reducer, wired in the orchestrator |
+| `HookCapContract` (CAP: marker in the config dir's settings.json, no `disableAllHooks`; `claude-remote-hookev.installed` is audit only) | executable reference | reconcile reads, hooks install writes |
 | `CommLogFormat` (`data/60s` tail, `Attach` line) | final | emitted by the orchestrator / attach path |
 
 Services take their dependencies by constructor injection (the shared

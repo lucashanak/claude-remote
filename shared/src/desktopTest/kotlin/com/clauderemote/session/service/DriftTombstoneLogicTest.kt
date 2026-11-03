@@ -1,5 +1,6 @@
 package com.clauderemote.session.service
 
+import com.clauderemote.testsupport.safeDeleteTree
 import java.io.File
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -190,7 +191,7 @@ class DriftTombstoneLogicTest {
             assertEquals("YES", ask("claude-transient"), "the transient tombstone file must still be honoured")
             assertEquals("NO", ask("claude-unknown"), "an unmarked session must never read as closed")
         } finally {
-            home.deleteRecursively()
+            safeDeleteTree(home)
         }
     }
 
@@ -257,7 +258,7 @@ class DriftTombstoneLogicTest {
                 "with no tombstones the manifest must NEVER be blanked — that lost 23 live sessions once:\n$out",
             )
         } finally {
-            home.deleteRecursively()
+            safeDeleteTree(home)
         }
     }
 }

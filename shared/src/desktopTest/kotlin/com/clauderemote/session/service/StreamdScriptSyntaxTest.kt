@@ -1,5 +1,6 @@
 package com.clauderemote.session.service
 
+import com.clauderemote.testsupport.safeDeleteTree
 import java.io.File
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -152,7 +153,7 @@ class StreamdScriptSyntaxTest {
             pump.join(5_000)
         } finally {
             proc.destroy()
-            home.deleteRecursively()
+            safeDeleteTree(home)
         }
         val seen = events.toList()
         assertTrue(seen.size >= 2, "expected a delta per append round, got ${seen.size}: $seen")
