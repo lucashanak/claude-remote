@@ -164,8 +164,12 @@ canary compares a fingerprint of the live home taken before and after:
   `~/.claude.json` likewise;
 - the token must appear in no walked file content (UTF-8, UTF-16LE/BE, and base64 in each of its three alignments, which is how
   `hook-ev.sh` writes names to `events`) and no path name;
-- the live tmux server, read-only, before and after: the socket FILE must still exist (a recursive delete through a link into `/tmp`
-  once removed it), no session may have vanished and not all clients may be gone;
+- the live tmux server, read-only, before and after: the socket FILE must still be the same file (inode and birth time: a recursive
+  delete through a link into `/tmp` once removed it, and the watchdog that puts it back creates a new file; ext4 reuses inode numbers,
+  hence the birth time), the same holds for the directories `/tmp/tmux-<uid>` and `/tmp/claude-<uid>`, no session may have vanished,
+  no new session may have appeared (a restart of everything after a lost socket looks like that) and not all clients may be gone. Each
+  tmux query has a time limit (its output goes to a file, so a hung server cannot block the canary); a server that does not answer
+  counts as "not up" on that side;
 - every process started through `env.start(...)` and every process that carries the
   guard's `CRIT_CANARY_TAG` environment variable (a detached grandchild inherits it) is
   killed BEFORE the comparison, so nothing writes after the check.
@@ -187,10 +191,13 @@ Trees that were only guessed to be live-written (`paste-cache`, `debug`, `tasks`
 Also existence/type only: `~/.claude-remote/sessions.json*`, `sessions.restore.json*`, `forgotten*` (the app and the drift script
 rewrite them and create new entries beside them), `state/` and `mcp-needs-auth-cache.json` (also in the accounts), and below `skills`
 only `synced`, below `plugins` only `synced` and `oh-my-claudecode`; every other `plugins` file contributes its path name to the token
-search and `hooks*.json` outside `marketplaces` is compared by content (they inject hooks into every live session). User `skills`,
+search, except `hooks*.json` and `SKILL.md` outside `marketplaces` and the files directly in a `scripts` directory of `plugins/cache`,
+which are compared by content (they inject hooks and skills into every live session; a script in a deeper subdirectory of `scripts`
+is not). User `skills`,
 `settings*.json` and the rest of a config dir are compared by content.
 Temp and lock files (`*.tmp.*`, `*.lock`, `.drift.*`) are not recorded because they come and go, and one that vanishes
 while the tree is walked is skipped; they are still searched for the token. Files over 64 MiB are compared by size/mtime/inode.
+A live user who opens or closes a tmux session during a run raises a false alarm (the message says so; rerun).
 Known blind spots: an in-place change of a credentials file that keeps size, mtime and inode;
 anything written below the live-rewritten trees; a test that swallows the canary's
 `AssertionError` itself (`assertFailsWith<AssertionError>` around `guard`).

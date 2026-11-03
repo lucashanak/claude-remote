@@ -76,6 +76,32 @@ class SafeDeleteTreeTest {
         assertTrue(File(fakeTmp, "f").exists())
     }
 
+    @Test fun refusesWhenTheParentOfTheRootIsALinkToTheLiveSocketDirectory() {
+        // the incident pattern: the link is not the thing deleted but a directory on the way to it. All of it lives in a FAKE temp
+        // directory inside the test root; the "live" directory is a tmux-<uid> directory in there.
+        val uid = ProcessBuilder("id", "-u").start().inputStream.bufferedReader().readText().trim()
+        val fakeTmp = File(base, "faketmp").apply { mkdirs() }
+        val liveDir = File(fakeTmp, "tmux-$uid").apply { mkdirs() }
+        File(liveDir, "default").writeText("")
+        File(liveDir, "sub").mkdirs()
+        File(liveDir, "sub/precious").writeText("keep")
+        val work = File(fakeTmp, "work").apply { mkdirs() }
+        Files.createSymbolicLink(File(work, "dirlink").toPath(), liveDir.toPath())
+        assertFailsWith<IllegalArgumentException> { safeDeleteTree(File(work, "dirlink/default"), tmpDir = fakeTmp) }
+        assertFailsWith<IllegalArgumentException> { safeDeleteTree(File(work, "dirlink/sub"), tmpDir = fakeTmp) }
+        assertTrue(File(liveDir, "default").exists() && File(liveDir, "sub/precious").exists(), "nothing behind the link was deleted")
+    }
+
+    @Test fun refusesWhenTheParentOfTheRootIsALinkToALocationOutsideTheTempDirectory() {
+        val outside = File(base, "outside").apply { mkdirs() }
+        File(outside, "child").apply { mkdirs() }
+        File(outside, "child/precious").writeText("keep")
+        val fakeTmp = File(base, "faketmp").apply { mkdirs() }
+        Files.createSymbolicLink(File(fakeTmp, "dirlink").toPath(), outside.toPath())
+        assertFailsWith<IllegalArgumentException> { safeDeleteTree(File(fakeTmp, "dirlink/child"), tmpDir = fakeTmp) }
+        assertEquals("keep", File(outside, "child/precious").readText())
+    }
+
     @Test fun neverDeletesInsideTheLiveSocketDirectoryShape() {
         // a FAKE temp dir inside the test root with a tmux-<uid> directory in it: the helper must refuse that subtree
         val uid = ProcessBuilder("id", "-u").start().inputStream.bufferedReader().readText().trim()
@@ -127,6 +153,23 @@ class NoFollowingDeleteInTestsSyntaxTest {
             File(root, "m/src/main/kotlin").mkdirs()
             File(root, "m/src/main/kotlin/NotATest.kt").writeText("fun h(d: java.io.File) { d." + "deleteRecursively" + "() }")
             assertEquals(listOf("m/src/desktopTest/kotlin/Bad.kt"), offendersIn(root))
+        } finally {
+            safeDeleteTree(root)
+        }
+    }
+
+    @Test fun theScannerExemptsNoFileExceptTheHelperAndItsOwnTest() {
+        // every file that once had an exemption (or could get one) is reported when it carries the call
+        val root = Files.createTempDirectory("syntax-scan-exempt-test").toFile()
+        try {
+            val names = listOf(
+                "desktopIntegrationTest/SshdFixture.kt", "desktopTest/HookMergeTest.kt", "desktopTest/DriftTombstoneLogicTest.kt",
+                "desktopTest/ManifestCommandSyntaxTest.kt", "desktopTest/StreamdScriptSyntaxTest.kt", "desktopTest/LiveFileCanaryTest.kt",
+                "commonTest/Whatever.kt",
+            )
+            for (n in names) File(root, "m/src/$n").apply { parentFile.mkdirs(); writeText("fun f(d: java.io.File) { d." + "deleteRecursively" + "() }") }
+            File(root, "m/src/desktopTest/SafeDelete.kt").writeText("fun f(d: java.io.File) { d." + "deleteRecursively" + "() }")
+            assertEquals(names.map { "m/src/$it" }.sorted(), offendersIn(root).sorted())
         } finally {
             safeDeleteTree(root)
         }

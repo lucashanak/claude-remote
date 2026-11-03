@@ -34,8 +34,9 @@ import java.util.concurrent.TimeUnit
  *     - files and trees that live processes rewrite all the time ([CONFIG_LIVE_TOP], [REMOTE_LIVE_NAMES],
  *       [REMOTE_LIVE_PREFIXES], [CACHE_LIVE_NAMES], measured on the live box) are only checked for existence and
  *       type; their subtrees are not walked (a small file in them is still searched for the token);
- *     - `plugins` is walked but only `hooks*.json` outside `marketplaces` is compared (by content): those files
- *       inject hooks into every live session; every other plugin file contributes just its path name to the token search;
+ *     - `plugins` is walked but only `hooks*.json` and `SKILL.md` outside `marketplaces` and the files directly in a `scripts`
+ *       directory of `plugins/cache` are compared (by content): they inject hooks and skills into every live session; every
+ *       other plugin file contributes just its path name to the token search;
  *     - temp/lock files (`*.tmp.*`, `*.lock`, `.drift.*`, `temp_subdir_*`) are not recorded (they come and go, and
  *       one that vanishes while the tree is walked is simply skipped) but are still searched for the token.
  *     `~/.claude.json` is a live-rewritten file: existence and type only.
@@ -46,8 +47,11 @@ import java.util.concurrent.TimeUnit
  *     appear in none of the walked files' CONTENT (UTF-8, UTF-16LE, UTF-16BE and base64 in each of its three
  *     alignments, which is how `hook-ev.sh` writes names to `events`; `*.credentials.json` excluded) nor in
  *     `~/.claude.json`, and in none of the walked PATH NAMES (including `logs/`).
- *  3. **tmux** — the socket file, and the sessions and clients of the live tmux server ([tmuxSocket]), read-only, before and after: a session
- *     that was there and is gone, or all clients gone, fails (a user closing a session at that moment is a FALSE ALARM).
+ *  3. **tmux** — the INODE of the socket file and of the directories `/tmp/tmux-<uid>` and `/tmp/claude-<uid>` ([watchedDirs]): a socket or directory
+ *     that was deleted and put back is a different file, so it fails although the watchdog restored it. Then the sessions and clients of the live
+ *     tmux server ([tmuxSocket]), read-only, before and after, each query bounded by [tmuxTimeoutMs] also when the server hangs: a session that
+ *     was there and is gone, a session that was not there and is, or all clients gone, fails (a user closing or opening a session at that
+ *     moment is a FALSE ALARM).
  *  4. **Children** — every process started through [GuardEnv.start] and every process that carries the
  *     guard's `CRIT_CANARY_TAG` in its environment (a detached grandchild inherits it) is killed
  *     BEFORE the checks, so nothing can write after the check has passed.
@@ -71,6 +75,15 @@ internal class LiveFileCanary(
     private val liveHome: File = File(System.getProperty("clauderemote.live.home") ?: System.getProperty("user.home")),
     /** Socket of the live tmux server whose sessions and clients are compared (read-only queries); null = not watched. */
     private val tmuxSocket: File? = defaultTmuxSocket(),
+    /**
+     * Directories whose INODE must be the same before and after: a directory that was deleted and created again (by a test or by a
+     * watchdog that restores it) has a new inode, so the replacement is seen even when everything inside looks the same afterwards.
+     */
+    private val watchedDirs: List<File> = defaultWatchedDirs(),
+    /** Test seam: the tmux binary used for the read-only queries; null = the first real `tmux` on PATH. */
+    private val tmuxBinary: File? = null,
+    /** Time limit of one tmux query, also when the live server hangs. */
+    private val tmuxTimeoutMs: Long = 5_000,
     /** Test seam: called for every walked path after its attributes were read and before its content is read. */
     private val visitHook: (Path) -> Unit = {},
 ) {
@@ -136,7 +149,14 @@ internal class LiveFileCanary(
     /** Sessions (`#{session_id} #{session_name}`) and clients of the live tmux server; [up] false = no answer. */
     private class TmuxState(val up: Boolean, val sessions: Set<String>, val clients: Set<String>)
 
-    private class Snapshot(val entries: Map<String, Entry>, val tokenHits: List<String>, val tmux: TmuxState?, val socketPresent: Boolean?)
+    /** [socketKey] / [dirKeys]: inode of the live socket and of each watched directory; null = absent. */
+    private class Snapshot(
+        val entries: Map<String, Entry>,
+        val tokenHits: List<String>,
+        val tmux: TmuxState?,
+        val socketKey: String?,
+        val dirKeys: Map<String, String?>,
+    )
 
     /** Walk roots: path (relative to the live home) and whether it is a directory tree. */
     private val roots get() = listOf(".claude-remote", ".cache/claude-remote", ".claude").map { File(liveHome, it) }
@@ -185,6 +205,9 @@ internal class LiveFileCanary(
                 c.size == 1 -> Tier.STRICT
                 c[1] in PLUGINS_LIVE_NAMES -> Tier.PRESENCE
                 c.last().startsWith("hooks") && c.last().endsWith(".json") && c[1] != "marketplaces" -> Tier.STRICT
+                // hook scripts of an installed plugin (hooks.json points at them) and the skills it offers run in every live session
+                c[1] == "cache" && c.size >= 3 && c[c.size - 2] == "scripts" -> Tier.STRICT
+                c.last() == "SKILL.md" && c[1] != "marketplaces" -> Tier.STRICT
                 else -> Tier.NAMES
             }
             else -> Tier.STRICT
@@ -278,26 +301,44 @@ internal class LiveFileCanary(
                 hits.add("canary: test token found in LIVE file $cj")
             }
         }
-        return Snapshot(entries, hits, tmuxState(), tmuxSocket?.let { Files.exists(it.toPath(), nofollow) })
+        return Snapshot(entries, hits, tmuxState(), tmuxSocket?.let { inodeOf(it) }, watchedDirs.associate { it.path to inodeOf(it) })
     }
 
     /** Read-only `list-sessions` / `list-clients` against the live server's socket, with the REAL tmux (not the PATH shim, which refuses it). */
     private fun tmuxState(): TmuxState? {
         val socket = tmuxSocket ?: return null
-        val tmux = realTmux() ?: return null
-        fun query(vararg args: String): List<String>? = try {
-            val pb = ProcessBuilder(listOf(tmux.path, "-S", socket.path) + args).redirectError(ProcessBuilder.Redirect.DISCARD)
-            pb.environment().remove("TMUX"); pb.environment().remove("TMUX_PANE")
-            val p = pb.start()
-            val out = p.inputStream.bufferedReader().readText()
-            if (!p.waitFor(5, TimeUnit.SECONDS)) { p.destroyForcibly(); null }
-            else if (p.exitValue() != 0) null
-            else out.lines().filter { it.isNotBlank() }
-        } catch (_: Exception) { null }
+        val tmux = tmuxBinary ?: realTmux() ?: return null
+        // The output goes to a file, not a pipe: reading a pipe to its end would block for as long as a hung server keeps it
+        // open, and the time limit below could never fire.
+        fun query(vararg args: String): List<String>? {
+            val out = try { Files.createTempFile("canary-tmux", ".out") } catch (_: Exception) { return null }
+            return try {
+                val pb = ProcessBuilder(listOf(tmux.path, "-S", socket.path) + args)
+                    .redirectError(ProcessBuilder.Redirect.DISCARD).redirectOutput(out.toFile())
+                pb.environment().remove("TMUX"); pb.environment().remove("TMUX_PANE")
+                val p = pb.start()
+                if (!p.waitFor(tmuxTimeoutMs, TimeUnit.MILLISECONDS)) { p.destroyForcibly(); p.waitFor(1, TimeUnit.SECONDS); null }
+                else if (p.exitValue() != 0) null
+                else Files.readAllLines(out).filter { it.isNotBlank() }
+            } catch (_: Exception) { null } finally {
+                try { Files.deleteIfExists(out) } catch (_: Exception) { /* a temp file */ }
+            }
+        }
         val sessions = query("list-sessions", "-F", "#{session_id} #{session_name}") ?: return TmuxState(false, emptySet(), emptySet())
         val clients = query("list-clients", "-F", "#{client_name}") ?: emptyList()
         return TmuxState(true, sessions.toSet(), clients.toSet())
     }
+
+    /**
+     * The inode of [f] itself (a link is not followed) together with its birth time, as text; null when there is nothing at that path.
+     * The birth time is part of it because ext4 hands the number of a just-deleted inode to the next file that is created: a socket
+     * or directory that was deleted and put back at once may well have the same inode number.
+     */
+    private fun inodeOf(f: File): String? = try {
+        val ino = Files.getAttribute(f.toPath(), "unix:ino", LinkOption.NOFOLLOW_LINKS)
+        val born = Files.readAttributes(f.toPath(), BasicFileAttributes::class.java, LinkOption.NOFOLLOW_LINKS).creationTime().to(TimeUnit.NANOSECONDS)
+        "$ino@$born"
+    } catch (_: Exception) { null }
 
     /** The first `tmux` on PATH that is not the test shim directory. */
     private fun realTmux(): File? {
@@ -423,9 +464,19 @@ internal class LiveFileCanary(
             }
         }
         // The socket FILE itself: a test that deleted it (a recursive delete through a link into /tmp did) leaves the live
-        // server running but unreachable, which is worse than a dead one because nothing reports it.
-        if (before.socketPresent == true && after.socketPresent == false) {
+        // server running but unreachable, which is worse than a dead one because nothing reports it. A socket that was put back
+        // (the watchdog does that within a fraction of a second) is a new file with a new inode: the sessions look the same
+        // afterwards, so only the inode shows that the damage happened.
+        if (before.socketKey != null && after.socketKey == null) {
             problems.add("canary: the socket file of the live tmux server ($tmuxSocket) existed before the test and is gone now; $falseAlarm.")
+        } else if (before.socketKey != null && before.socketKey != after.socketKey) {
+            problems.add("canary: the socket file of the live tmux server ($tmuxSocket) was replaced during the test (inode@birth ${before.socketKey} -> ${after.socketKey}), so it was deleted and created again; $falseAlarm.")
+        }
+        for ((dir, b) in before.dirKeys) {
+            val a = after.dirKeys[dir]
+            if (b != null && a != b) {
+                problems.add("canary: the live directory $dir was " + (if (a == null) "deleted" else "replaced (inode@birth $b -> $a), so it was deleted and created again") + " during the test; $falseAlarm.")
+            }
         }
         verifyTmux(before.tmux, after.tmux, problems, falseAlarm)
         problems.addAll(after.tokenHits) // never a false alarm
@@ -440,6 +491,11 @@ internal class LiveFileCanary(
         }
         for (gone in (b.sessions - a.sessions).sorted()) {
             problems.add("canary: live tmux session '$gone' existed before the test and is gone now; $falseAlarm.")
+        }
+        // a session that a test (or a script it ran) started on the live server is damage too, and a restart of everything after a
+        // lost socket shows up exactly like this
+        for (added in (a.sessions - b.sessions).sorted()) {
+            problems.add("canary: live tmux session '$added' did not exist before the test and exists now; $falseAlarm.")
         }
         // clients attach and detach all the time, so only losing every one of them counts
         if (b.clients.isNotEmpty() && a.clients.isEmpty()) {
@@ -540,6 +596,12 @@ internal class LiveFileCanary(
         val CACHE_LIVE_NAMES: Set<String> = setOf("notify")
 
         fun newToken(): String = "crit-canary-" + java.util.UUID.randomUUID()
+
+        /** `/tmp/tmux-<uid>` (the live socket directory) and `/tmp/claude-<uid>` (the scratchpads of every session); empty when the uid cannot be read. */
+        fun defaultWatchedDirs(): List<File> = try {
+            val uid = Files.getAttribute(java.nio.file.Paths.get("/proc/self"), "unix:uid")
+            listOf(File("/tmp/tmux-$uid"), File("/tmp/claude-$uid"))
+        } catch (_: Exception) { emptyList() }
 
         /** `/tmp/tmux-<uid>/default`, the socket of the live server (null when the uid cannot be read). */
         fun defaultTmuxSocket(): File? = try {

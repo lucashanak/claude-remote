@@ -87,7 +87,7 @@ class SshdFixtureSelfTest {
     }
 
     /**
-     * m11 result: SFTP works through the ForceCommand sandbox because wrap.sh
+     * SFTP works through the ForceCommand sandbox because wrap.sh
      * serves `SSH_ORIGINAL_COMMAND=internal-sftp` with the out-of-process
      * sftp-server inside the sandbox HOME.
      */

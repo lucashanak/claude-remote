@@ -533,6 +533,26 @@ class LiveFileCanaryTest {
         assertTrue(added.message!!.contains("hooks.local.json") && added.message!!.contains("created"), added.message)
     }
 
+    @Test fun pluginHookScriptsAndPluginSkillsAreComparedByContent() {
+        val v = ".claude/plugins/cache/vendor/p/1.0"
+        val script = File(live, "$v/scripts/hook.mjs").apply { parentFile.mkdirs(); writeText("console.log(1)") }
+        val skill = File(live, "$v/skills/s/SKILL.md").apply { parentFile.mkdirs(); writeText("# s") }
+        val market = File(live, ".claude/plugins/marketplaces/m/skills/s/SKILL.md").apply { parentFile.mkdirs(); writeText("# m") }
+        val lib = File(live, "$v/lib/util.mjs").apply { parentFile.mkdirs(); writeText("u") }
+        guard { lib.writeText("changed"); market.writeText("# synced") } // not a hook script, and a marketplace sync
+        val s1 = failure { script.writeText("fetch('http://evil')") }
+        assertTrue(s1.message!!.contains("scripts/hook.mjs") && s1.message!!.contains("modified"), s1.message)
+        script.writeText("console.log(1)")
+        val s2 = failure { skill.writeText("# injected") }
+        assertTrue(s2.message!!.contains("skills/s/SKILL.md") && s2.message!!.contains("modified"), s2.message)
+        skill.writeText("# s")
+        val s3 = failure { File(live, "$v/scripts/new.mjs").writeText("x") }
+        assertTrue(s3.message!!.contains("scripts/new.mjs") && s3.message!!.contains("created"), s3.message)
+        File(live, "$v/scripts/new.mjs").delete()
+        val s4 = failure { File(live, "$v/skills/s2/SKILL.md").apply { parentFile.mkdirs() }.writeText("x") }
+        assertTrue(s4.message!!.contains("skills/s2/SKILL.md") && s4.message!!.contains("created"), s4.message)
+    }
+
     @Test fun aTokenInAPluginFileNameIsFound() {
         val e = failure { File(live, ".claude/plugins/cache/vendor/$token").apply { parentFile.mkdirs() }.writeText("x") }
         assertTrue(e.message!!.contains("NAME"), e.message)
@@ -647,10 +667,28 @@ class LiveFileCanaryTest {
     @Test fun aLiveTmuxSessionThatIsGoneAfterTheBlockFails() = withPrivateTmux { sock ->
         val watching = LiveFileCanary(live, tmuxSocket = sock)
         watching.guard(token, testHome, testRoot) { }
-        watching.guard(token, testHome, testRoot) { tmux(sock, "new-session", "-d", "-s", "added") } // a new session is fine
         val e = assertFailsWith<AssertionError> { watching.guard(token, testHome, testRoot) { tmux(sock, "kill-session", "-t", "keep") } }
         assertTrue(e.message!!.contains("live tmux session") && e.message!!.contains("keep"), e.message)
         assertTrue(!e.message!!.contains("other"), e.message)
+    }
+
+    @Test fun aNewSessionOnTheLiveServerFails() = withPrivateTmux { sock ->
+        val e = assertFailsWith<AssertionError> {
+            LiveFileCanary(live, tmuxSocket = sock).guard(token, testHome, testRoot) { tmux(sock, "new-session", "-d", "-s", "added") }
+        }
+        assertTrue(e.message!!.contains("live tmux session") && e.message!!.contains("added") && e.message!!.contains("exists now"), e.message)
+    }
+
+    @Test fun aSocketThatWasRecreatedWithTheSameSessionsFailsAllTheSame() = withPrivateTmux { sock ->
+        // what the watchdog leaves behind after a test deleted the socket: the sessions are all there again, in a NEW socket file
+        val e = assertFailsWith<AssertionError> {
+            LiveFileCanary(live, tmuxSocket = sock, watchedDirs = emptyList()).guard(token, testHome, testRoot) {
+                tmux(sock, "kill-server")
+                tmux(sock, "new-session", "-d", "-s", "keep")
+                tmux(sock, "new-session", "-d", "-s", "other")
+            }
+        }
+        assertTrue(e.message!!.contains("replaced") && e.message!!.contains("inode@birth"), e.message)
     }
 
     @Test fun aKilledLiveTmuxServerFails() = withPrivateTmux { sock ->
@@ -684,6 +722,45 @@ class LiveFileCanaryTest {
         val e = assertFailsWith<AssertionError> { LiveFileCanary(live, tmuxSocket = fake).guard(token, testHome, testRoot) { fake.delete() } }
         assertTrue(e.message!!.contains("socket file of the live tmux server"), e.message)
         LiveFileCanary(live, tmuxSocket = fake.also { it.writeText("") }).guard(token, testHome, testRoot) { } // untouched: fine
+    }
+
+    @Test fun aSocketFileThatIsReplacedByAnotherFileFailsEvenWithoutAnyTmuxBinary() {
+        val fake = File(base, "fake-live.sock").apply { writeText("") }
+        val other = File(base, "other.sock").apply { writeText("") } // exists next to the original, so its inode is certainly another one
+        val watching = LiveFileCanary(live, tmuxSocket = fake, watchedDirs = emptyList())
+        val e = assertFailsWith<AssertionError> {
+            watching.guard(token, testHome, testRoot) {
+                Files.move(other.toPath(), fake.toPath(), java.nio.file.StandardCopyOption.ATOMIC_MOVE, java.nio.file.StandardCopyOption.REPLACE_EXISTING)
+            }
+        }
+        assertTrue(e.message!!.contains("replaced") && e.message!!.contains("socket file of the live tmux server"), e.message)
+        watching.guard(token, testHome, testRoot) { fake.writeText("rewritten in place") } // the same file: fine
+    }
+
+    @Test fun aWatchedDirectoryThatWasDeletedAndCreatedAgainFailsButOneThatOnlyChangedInsideDoesNot() {
+        val dir = File(base, "fake-live-dir").apply { mkdirs() }
+        File(dir, "keep").writeText("x")
+        val watching = LiveFileCanary(live, tmuxSocket = null, watchedDirs = listOf(dir))
+        watching.guard(token, testHome, testRoot) { File(dir, "added").writeText("y"); File(dir, "keep").delete() } // same directory
+        val aside = File(base, "fake-live-dir.aside")
+        val replaced = assertFailsWith<AssertionError> {
+            watching.guard(token, testHome, testRoot) { assertTrue(dir.renameTo(aside)); assertTrue(dir.mkdirs()) } // empty again, other inode
+        }
+        assertTrue(replaced.message!!.contains("fake-live-dir") && replaced.message!!.contains("replaced"), replaced.message)
+        val gone = assertFailsWith<AssertionError> { watching.guard(token, testHome, testRoot) { assertTrue(dir.delete()) } }
+        assertTrue(gone.message!!.contains("fake-live-dir") && gone.message!!.contains("deleted"), gone.message)
+        LiveFileCanary(live, tmuxSocket = null, watchedDirs = listOf(dir)).guard(token, testHome, testRoot) { } // absent before: nothing to compare
+    }
+
+    @Test fun aTmuxServerThatNeverAnswersDoesNotHangTheCanary() {
+        val ran = File(base, "hang-tmux.ran")
+        val hang = File(base, "hang-tmux").apply { writeText("#!/bin/sh\n: > '${ran.path}'\nexec sleep 20\n"); setExecutable(true) }
+        val sock = File(base, "hang.sock").apply { writeText("") }
+        val started = System.nanoTime()
+        LiveFileCanary(live, tmuxSocket = sock, watchedDirs = emptyList(), tmuxBinary = hang, tmuxTimeoutMs = 300).guard(token, testHome, testRoot) { }
+        val seconds = (System.nanoTime() - started) / 1_000_000_000.0
+        assertTrue(ran.exists(), "the fake tmux was never started, so this test proved nothing")
+        assertTrue(seconds < 10, "the canary waited $seconds s for a tmux server that never answers")
     }
 
     @Test fun noTmuxServerBeforeAndAfterIsNotAProblem() {
