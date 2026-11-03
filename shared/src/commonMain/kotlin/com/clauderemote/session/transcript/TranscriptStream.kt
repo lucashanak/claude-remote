@@ -2,6 +2,8 @@ package com.clauderemote.session.transcript
 
 import com.clauderemote.connection.SshSessionHelper
 import com.clauderemote.model.SshServer
+import com.clauderemote.session.service.ExecUnavailable
+import com.clauderemote.session.service.ExecUnavailableReason
 import com.clauderemote.util.FileLogger
 import com.clauderemote.util.isoToEpochMillis
 import kotlinx.coroutines.CoroutineScope
@@ -69,6 +71,14 @@ class TranscriptStream(
      * offset-integrity backstop — instead of doing the transport work itself.
      */
     private val daemonActive: () -> Boolean = { false },
+    /**
+     * True when exec routing is active for this server: polls then go through the
+     * server's exec transport (see [SshSessionHelper.withSession]) and NEVER open a
+     * connection of their own — a tick that finds no live transport is skipped, the
+     * next one retries. False = today's behaviour (tab session, else a fresh
+     * short-lived connection).
+     */
+    private val viaExec: () -> Boolean = { false },
 ) {
     private val _entries = MutableStateFlow<List<TranscriptEntry>>(emptyList())
     val entries: StateFlow<List<TranscriptEntry>> = _entries.asStateFlow()
@@ -251,7 +261,19 @@ class TranscriptStream(
         // batch means the file had at least that many lines and we are NOT
         // looking at the start of the conversation.
         val initialRead = byteOffset <= 0L
-        val (lines, newOffset) = if (shared != null) {
+        val (lines, newOffset) = if (viaExec()) {
+            // Exec routing: exec transport (permit) → pooled transport → the tab's own
+            // session → skip the tick. Never a fresh handshake of our own.
+            try {
+                SshSessionHelper.withSession(server, timeout = 15_000, allowFresh = false) { sess ->
+                    pollOnce(sess, safeFolder, safeUuid, byteOffset)
+                }
+            } catch (e: ExecUnavailable) {
+                if (e.reason != ExecUnavailableReason.NOT_UP) throw e
+                if (shared == null) return@withLock
+                pollOnce(shared, safeFolder, safeUuid, byteOffset)
+            }
+        } else if (shared != null) {
             pollOnce(shared, safeFolder, safeUuid, byteOffset)
         } else {
             SshSessionHelper.withSession(server, timeout = 15_000) { sess ->

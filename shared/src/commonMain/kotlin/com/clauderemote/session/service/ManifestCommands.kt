@@ -155,6 +155,78 @@ internal object ManifestCommands {
     }
 
     /**
+     * Rename tmux session [oldName] to [newName]. `=` forces an EXACT target match: plain
+     * `-t name` prefix-matches, so renaming `x` while only `x-2` existed renamed the
+     * WRONG session (measured on tmux 3.5a).
+     */
+    fun renameSession(oldName: String, newName: String): String =
+        "tmux rename-session -t '=${oldName.replace("'", "'\\''")}' ${sq(newName)}"
+
+    /**
+     * Everything one reconcile round needs, in ONE exec per server. The output is a
+     * sequence of sections, each closed by `__END_<section>__ rc=<status>` — a section
+     * with a missing END line (output cut off) or a non-zero rc is UNKNOWN to the
+     * parser ([ReconcileParse]), and unknown never leads to a forget:
+     *  - `snap`: [serverSnapshot] (tombstones, `---`, manifest) under the shared lock (the
+     *    manifest is written without a trailing newline, so one is added before the END line);
+     *  - `tmux`: `tmux -u list-sessions` (one name per line);
+     *  - `panes`: ONE `tmux -u list-panes -a` (`<session> <pane_pid>`) restricted to
+     *    [names] by exact, whole-line match (a name that is a prefix of another must not
+     *    pull in the longer one);
+     *  - `ps`: ONE `ps -eo pid=,ppid=,comm=` (the process table, which the `claude` section
+     *    reuses instead of running a second `ps`);
+     *  - `claude`: per process whose comm is `claude` or a bare version number:
+     *    `EXE <pid> <exe>`, `CAPF <pid> <marker 1|0|-> <disableAllHooks 1|0|-> <off 1|0>`
+     *    (the facts of [HookCapContract]; `-` = unreadable; `off` = the file
+     *    `~/.claude-remote/hookev.off` exists, which silences every hook) and, when the process has a
+     *    `sessions/<pid>.json` under its own config dir, `SID <pid> <uuid|->` (`-` when
+     *    the transcript does not exist yet — claude forks on --resume and reports the new
+     *    id before writing its jsonl).
+     */
+    fun reconcileAll(names: Collection<String>): String =
+        RECONCILE_ALL.replace("@@TD@@", TOMBSTONE_DAYS.toString())
+            .replace("@@NAMES@@", if (names.isEmpty()) "''" else names.joinToString(" ") { sq(it) })
+
+    private val RECONCILE_ALL = """set +e
+D="${'$'}HOME/.claude-remote"; mkdir -p "${'$'}D"; LOCK="${'$'}D/sessions.lock"; touch "${'$'}LOCK"
+( flock -s 9
+cat "${'$'}D/forgotten" 2>/dev/null
+find "${'$'}D/forgotten.d" -maxdepth 1 -type f -mtime -@@TD@@ -printf '%f\n' 2>/dev/null
+echo ---
+cat "${'$'}D/sessions.json" 2>/dev/null || :
+echo
+) 9<>"${'$'}LOCK"; echo "__END_snap__ rc=${'$'}?"
+tmux -u list-sessions -F '#{session_name}' 2>/dev/null; echo "__END_tmux__ rc=${'$'}?"
+NAMES=${'$'}(printf '%s\n' @@NAMES@@)
+PANES=${'$'}(tmux -u list-panes -a -F '#{session_name} #{pane_pid}' 2>/dev/null); R=${'$'}?
+printf '%s\n' "${'$'}PANES" | while IFS= read -r l; do n="${'$'}{l% *}"; printf '%s\n' "${'$'}NAMES" | grep -qxF -- "${'$'}n" && printf '%s\n' "${'$'}l"; done
+echo "__END_panes__ rc=${'$'}R"
+PS=${'$'}(ps -eo pid=,ppid=,comm= 2>/dev/null); R=${'$'}?; printf '%s\n' "${'$'}PS"; echo "__END_ps__ rc=${'$'}R"
+dis() { f="${'$'}1"; if [ -r "${'$'}f" ]; then if grep -Eq '"disableAllHooks"[[:space:]]*:[[:space:]]*true' "${'$'}f" 2>/dev/null; then echo 1; else echo 0; fi; elif [ -e "${'$'}f" ]; then echo -; else echo 0; fi; }
+if [ -e "${'$'}D/hookev.off" ]; then OFF=1; else OFF=0; fi
+for p in ${'$'}(printf '%s\n' "${'$'}PS" | awk '${'$'}3=="claude" || ${'$'}3 ~ /^[0-9]+(\.[0-9]+)+${'$'}/ {print ${'$'}1}'); do
+E=${'$'}(readlink /proc/${'$'}p/exe 2>/dev/null); echo "EXE ${'$'}p ${'$'}{E:--}"
+CFG=${'$'}(tr '\0' '\n' < /proc/${'$'}p/environ 2>/dev/null | sed -n 's|^CLAUDE_CONFIG_DIR=||p' | head -1); C="${'$'}{CFG:-${'$'}HOME/.claude}"
+if [ -r "${'$'}C/settings.json" ]; then if grep -q 'claude-remote-ev v' "${'$'}C/settings.json" 2>/dev/null; then M=1; else M=0; fi; elif [ -e "${'$'}C/settings.json" ]; then M=-; else M=0; fi
+D1=${'$'}(dis "${'$'}C/settings.json"); D2=${'$'}(dis "${'$'}C/settings.local.json")
+if [ "${'$'}D1" = 1 ] || [ "${'$'}D2" = 1 ]; then X=1; elif [ "${'$'}D1" = - ] || [ "${'$'}D2" = - ]; then X=-; else X=0; fi
+echo "CAPF ${'$'}p ${'$'}M ${'$'}X ${'$'}OFF"
+f="${'$'}C/sessions/${'$'}p.json"
+if [ -f "${'$'}f" ]; then v=${'$'}(jq -r '.sessionId // empty' "${'$'}f" 2>/dev/null); ok=-; [ -n "${'$'}v" ] && { ls "${'$'}HOME"/.claude/projects/*/"${'$'}v".jsonl >/dev/null 2>&1 || ls "${'$'}C"/projects/*/"${'$'}v".jsonl >/dev/null 2>&1; } && ok=${'$'}v; echo "SID ${'$'}p ${'$'}ok"; fi
+done; true; echo "__END_claude__ rc=${'$'}?""""
+
+    /**
+     * The pid-pinned UUID probe of one tmux session (what `readRealSessionId` runs): the
+     * first process of the pane's subtree, shallowest first, that has a
+     * `sessions/<pid>.json` under its own config dir, and only if the transcript of that
+     * id exists. Prints the uuid, or nothing.
+     */
+    fun uuidProbe(tmuxName: String): String =
+        UUID_PROBE.replace("@@N@@", tmuxName.replace("'", "'\\''"))
+
+    private val UUID_PROBE = """PID=${'$'}(tmux list-panes -t '=@@N@@' -F '#{pane_pid}' 2>/dev/null | head -1); [ -n "${'$'}PID" ] || exit 1; PIDS=${'$'}(ps -eo pid=,ppid= 2>/dev/null | awk -v root="${'$'}PID" '{ kids[${'$'}2]=kids[${'$'}2]" "${'$'}1 } END { head=0;tail=0;q[tail++]=root; while(head<tail){p=q[head++];print p;m=split(kids[p],a," ");for(i=1;i<=m;i++)if(a[i]!="")q[tail++]=a[i]} }'); for p in ${'$'}PIDS; do CFG=${'$'}(tr '\0' '\n' < /proc/${'$'}p/environ 2>/dev/null | sed -n 's|^CLAUDE_CONFIG_DIR=||p' | head -1); f="${'$'}{CFG:-${'$'}HOME/.claude}/sessions/${'$'}p.json"; [ -f "${'$'}f" ] || continue; v=${'$'}(jq -r '.sessionId // empty' "${'$'}f" 2>/dev/null); [ -n "${'$'}v" ] && { ls "${'$'}HOME"/.claude/projects/*/"${'$'}v".jsonl >/dev/null 2>&1 || ls "${'$'}{CFG:-${'$'}HOME/.claude}"/projects/*/"${'$'}v".jsonl >/dev/null 2>&1; } && echo "${'$'}v"; break; done"""
+
+    /**
      * MERGE, not overwrite. The previous `cat > tmp && mv` clobbered
      * the shared sessions.json with only THIS client's sessions, so
      * whichever client (Android vs desktop) synced last silently
@@ -238,5 +310,173 @@ internal object ManifestCommands {
             "rm -f \"\$INC\"; " +
             "echo \"[\$(date -u +%FT%TZ)] push(merge): $payloadLength bytes for $safeServerId\" >> \"\$D/push.log\""
         )
+    }
+}
+
+/** What the `claude` section of [ManifestCommands.reconcileAll] says about one process. */
+internal data class ClaudeFact(
+    val exe: String? = null,
+    /** settings.json of the process's config dir carries the hook marker; null = unreadable. */
+    val markerInSettings: Boolean? = null,
+    /** `disableAllHooks` in settings.json / settings.local.json; null = unreadable. */
+    val disableAllHooks: Boolean? = null,
+    /** `~/.claude-remote/hookev.off` exists: the hook script writes nothing. Null = not reported. */
+    val hooksOff: Boolean? = false,
+    /** A `sessions/<pid>.json` exists for this process. */
+    val hasSessionFile: Boolean = false,
+    /** The session id in it, only when its transcript exists. */
+    val uuid: String? = null,
+)
+
+/** The verdict of the forget rule for one tmux name. */
+internal enum class CloseVerdict { FORGET, KEEP, UNKNOWN }
+
+/**
+ * Parsed result of one [ManifestCommands.reconcileAll] round. A field is null when its
+ * section was missing, cut off or failed — i.e. UNKNOWN. Nothing here guesses: every
+ * decision helper answers `UNKNOWN`/null for unknown input, and unknown never forgets.
+ */
+internal class ReconcileSnapshot(
+    val tombstoned: Set<String>?,
+    val manifest: List<com.clauderemote.storage.PersistedSession>?,
+    val tmuxNames: Set<String>?,
+    private val tmuxListing: String?,
+    /** tmux session name → pid of its first pane. */
+    val panePids: Map<String, Int>?,
+    val procs: List<HookCapContract.Proc>?,
+    val claude: Map<Int, ClaudeFact>?,
+) {
+    /**
+     * Forget iff tombstoned ∧ absent from `list-sessions` ∧ at least one OTHER live
+     * `claude-server-*` session exists (a dead tmux server or an empty listing never
+     * counts as proof). Anything unknown is [CloseVerdict.UNKNOWN].
+     */
+    fun closeVerdict(tmuxName: String): CloseVerdict {
+        val tomb = tombstoned ?: return CloseVerdict.UNKNOWN
+        val live = tmuxNames ?: return CloseVerdict.UNKNOWN
+        if (tmuxName !in tomb || tmuxName in live) return CloseVerdict.KEEP
+        return if (com.clauderemote.session.TmuxPeerLiveness.hasOtherLivePeer(tmuxListing.orEmpty(), tmuxName)) {
+            CloseVerdict.FORGET
+        } else {
+            CloseVerdict.KEEP
+        }
+    }
+
+    /** Pids of the pane's subtree, breadth first (the pane's own process first). */
+    private fun subtree(panePid: Int, all: List<HookCapContract.Proc>): List<Int> {
+        val children = all.groupBy { it.ppid }
+        val order = mutableListOf(panePid)
+        val seen = mutableSetOf(panePid)
+        var i = 0
+        while (i < order.size) { for (c in children[order[i]].orEmpty()) if (seen.add(c.pid)) order += c.pid; i++ }
+        return order
+    }
+
+    /**
+     * The REAL claude session id of [tmuxName]: the shallowest process of the pane's
+     * subtree that has a `sessions/<pid>.json` decides (a launcher without one is
+     * skipped); its id counts only when the transcript exists. Null = unknown / none.
+     */
+    fun liveUuid(tmuxName: String): String? {
+        val pane = panePids?.get(tmuxName) ?: return null
+        val all = procs ?: return null
+        val facts = claude ?: return null
+        val pid = subtree(pane, all).firstOrNull { facts[it]?.hasSessionFile == true } ?: return null
+        return facts.getValue(pid).uuid
+    }
+
+    /** The manifest's record of the claude session id of [tmuxName] (a weaker source than [liveUuid]). */
+    fun manifestUuid(tmuxName: String): String? =
+        manifest?.firstOrNull { it.tmuxSessionName == tmuxName }?.claudeSessionId?.takeUnless { it.isBlank() }
+
+    /** CAP verdict of [tmuxName] per [HookCapContract]; null = unknown. */
+    fun capability(tmuxName: String): Boolean? {
+        val pane = panePids?.get(tmuxName) ?: return null
+        val all = procs ?: return null
+        val facts = claude ?: return null
+        val c = HookCapContract.shallowestClaude(pane, all) ?: return null
+        val f = facts[c] ?: return null
+        return HookCapContract.verdict(f.markerInSettings, f.disableAllHooks, f.hooksOff)
+    }
+}
+
+/** Parser for the output of [ManifestCommands.reconcileAll]. Pure. */
+internal object ReconcileParse {
+    private val END = Regex("""__END_([a-z]+)__ rc=(\d+)""")
+
+    /**
+     * The COMPLETE sections (END line present, rc 0) and their payload lines. A section
+     * that never closed — the output was cut off — and one that failed are simply absent.
+     * Payload lines after the last END belong to a section that never closed and are dropped.
+     */
+    fun sections(raw: String): Map<String, List<String>> {
+        val out = HashMap<String, List<String>>()
+        var cur = ArrayList<String>()
+        for (line in raw.lineSequence()) {
+            val m = END.matchEntire(line.trim())
+            if (m != null) {
+                if (m.groupValues[2] == "0") out[m.groupValues[1]] = cur
+                cur = ArrayList()
+            } else {
+                cur.add(line)
+            }
+        }
+        return out
+    }
+
+    fun parse(raw: String, json: kotlinx.serialization.json.Json): ReconcileSnapshot {
+        val sec = sections(raw)
+        val snap = sec["snap"]?.let { SessionPersistenceService.parseServerSnapshot(it.joinToString("\n"), json) }
+        val tmuxLines = sec["tmux"]
+        val tmuxNames = tmuxLines?.map { it.trim() }?.filter { it.isNotEmpty() }?.toSet()
+        val panes = sec["panes"]?.let { lines ->
+            val m = LinkedHashMap<String, Int>()
+            for (l in lines) {
+                val i = l.lastIndexOf(' ')
+                if (i <= 0) continue
+                val pid = l.substring(i + 1).trim().toIntOrNull() ?: continue
+                m.putIfAbsent(l.substring(0, i), pid)
+            }
+            m
+        }
+        val claude = sec["claude"]?.let { parseClaude(it) }
+        val procs = sec["ps"]?.let { lines ->
+            lines.mapNotNull { l ->
+                val t = l.trim().split(Regex("\\s+"), limit = 3)
+                if (t.size < 3) return@mapNotNull null
+                val pid = t[0].toIntOrNull() ?: return@mapNotNull null
+                val ppid = t[1].toIntOrNull() ?: return@mapNotNull null
+                HookCapContract.Proc(pid, ppid, t[2].trim(), claude?.get(pid)?.exe)
+            }
+        }
+        return ReconcileSnapshot(
+            tombstoned = snap?.tombstoned,
+            manifest = snap?.sessions,
+            tmuxNames = tmuxNames,
+            tmuxListing = tmuxLines?.joinToString("\n"),
+            panePids = panes,
+            procs = procs,
+            claude = claude,
+        )
+    }
+
+    private fun parseClaude(lines: List<String>): Map<Int, ClaudeFact> {
+        val m = HashMap<Int, ClaudeFact>()
+        fun tri(s: String): Boolean? = when (s) { "1" -> true; "0" -> false; else -> null }
+        for (l in lines) {
+            val t = l.trim().split(Regex("\\s+"), limit = 3)
+            if (t.size < 3) continue
+            val pid = t[1].toIntOrNull() ?: continue
+            val cur = m[pid] ?: ClaudeFact()
+            when (t[0]) {
+                "EXE" -> m[pid] = cur.copy(exe = t[2].takeUnless { it == "-" })
+                "CAPF" -> {
+                    val rest = t[2].trim().split(Regex("\\s+"))
+                    if (rest.size >= 2) m[pid] = cur.copy(markerInSettings = tri(rest[0]), disableAllHooks = tri(rest[1]), hooksOff = if (rest.size >= 3) tri(rest[2]) else false)
+                }
+                "SID" -> m[pid] = cur.copy(hasSessionFile = true, uuid = t[2].trim().takeIf { Regex("^[0-9a-f-]{36}$").matches(it) })
+            }
+        }
+        return m
     }
 }

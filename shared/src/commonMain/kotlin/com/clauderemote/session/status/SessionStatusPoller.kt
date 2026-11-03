@@ -1,6 +1,8 @@
 package com.clauderemote.session.status
 
 import com.clauderemote.connection.SshSessionHelper
+import com.clauderemote.session.service.ExecUnavailable
+import com.clauderemote.session.service.ExecUnavailableReason
 import com.clauderemote.model.SshServer
 import com.clauderemote.util.FileLogger
 import kotlinx.coroutines.CoroutineScope
@@ -52,6 +54,8 @@ class SessionStatusPoller(
     /** True while the app is backgrounded — polls are skipped entirely
      *  (nothing renders this status when the UI isn't visible). */
     private val isBackground: () -> Boolean = { false },
+    /** True when exec routing is active for this server: poll through the exec transport and never open a connection of our own (a tick without a live transport is skipped). */
+    private val viaExec: () -> Boolean = { false },
 ) {
     private val _status = MutableStateFlow(RemoteSessionStatus())
     val status: StateFlow<RemoteSessionStatus> = _status.asStateFlow()
@@ -109,12 +113,27 @@ class SessionStatusPoller(
                 // handshake); a dedicated short-lived session is the exception,
                 // not the steady state.
                 val shared = liveSession()?.takeIf { it.isConnected }
-                val raw = if (shared != null) {
+                val raw = if (viaExec()) {
+                    try {
+                        SshSessionHelper.withSession(server, timeout = 10_000, allowFresh = false) { sess ->
+                            execStat(sess, statCmd)
+                        }
+                    } catch (e: ExecUnavailable) {
+                        if (e.reason != ExecUnavailableReason.NOT_UP) throw e
+                        if (shared == null) null else execStat(shared, statCmd)
+                    }
+                } else if (shared != null) {
                     execStat(shared, statCmd)
                 } else {
                     SshSessionHelper.withSession(server, timeout = 10_000) { sess ->
                         execStat(sess, statCmd)
                     }
+                }
+                if (raw == null) {
+                    // No live transport and no fresh connection allowed: skip this tick.
+                    attempt = 0
+                    delay(POLL_INTERVAL_MS)
+                    continue
                 }
                 attempt = 0
                 val (skillMtime, skillBody, subMtime, subBody) = parseDualFile(raw)

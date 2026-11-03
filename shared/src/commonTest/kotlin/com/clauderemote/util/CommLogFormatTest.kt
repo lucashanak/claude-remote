@@ -56,7 +56,7 @@ class CommLogFormatTest {
         assertTrue("-gt ${LogShipper.REMOTE_CAP_BYTES} ]" in cmd, cmd)          // the cap decides
         assertTrue("tail -c ${LogShipper.REMOTE_KEEP_BYTES} " in cmd, cmd)      // the keep size is what remains
         assertTrue("tail -c ${LogShipper.REMOTE_CAP_BYTES}" !in cmd, cmd)
-        assertTrue("sed -i 1d" in cmd, "the cut must drop the first (partial) line: $cmd")
+        assertTrue("tail -n +2" in cmd && "sed -i" !in cmd, "the cut must drop the first (partial) line portably: $cmd")
         assertTrue("/app-1.log" in cmd && cmd.endsWith("cat >> \"\$F\""), cmd)
         // the 10 MB / 5 MB numbers of the old command are gone
         assertTrue("10485760" !in cmd && "5242880" !in cmd, cmd)

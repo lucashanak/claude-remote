@@ -1,5 +1,6 @@
 package com.clauderemote.session.service
 
+import com.clauderemote.testsupport.safeDeleteTree
 import java.io.File
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -87,6 +88,10 @@ class ManifestCommandSyntaxTest {
             "clearTombstone" to ManifestCommands.clearTombstone(NAME),
             "pushMerge" to ManifestCommands.pushMerge("server-1", 1234),
             "serverSnapshot" to ManifestCommands.serverSnapshot(),
+            "reconcileAll(tricky names)" to ManifestCommands.reconcileAll(listOf(NAME, "claude-server-čeština", "claude-server-a", "claude-server-ab")),
+            "reconcileAll(no names)" to ManifestCommands.reconcileAll(emptyList()),
+            "uuidProbe" to ManifestCommands.uuidProbe(NAME),
+            "renameSession" to ManifestCommands.renameSession(NAME, "new name's"),
         )
         for ((label, command) in commands) assertBashSyntaxValid(command, label)
     }
@@ -108,6 +113,28 @@ class ManifestCommandSyntaxTest {
         )) {
             assertTrue(command.contains("N=$quoted"), "name not passed single-quoted in: $command")
         }
+    }
+
+    /** Every name of a reconcile round travels single-quoted, one argument each; prefix collisions are the shell's `grep -x` job. */
+    @Test
+    fun reconcileAllCarriesEveryNameSingleQuotedAndMatchesWholeNames() {
+        val names = listOf(NAME, "claude-server-čeština", "claude-server-a", "claude-server-ab")
+        val cmd = ManifestCommands.reconcileAll(names)
+        assertTrue(cmd.contains("NAMES=\$(printf '%s\\n' ${names.joinToString(" ") { ManifestCommands.sq(it) }})"), cmd)
+        assertTrue(cmd.contains("grep -qxF -- \"\$n\""), "names must match whole lines, fixed strings")
+        assertTrue(ManifestCommands.reconcileAll(emptyList()).contains("printf '%s\\n' ''"))
+        // every section announces its own completion and status
+        for (section in listOf("snap", "tmux", "panes", "ps", "claude")) {
+            assertTrue(cmd.contains("__END_${section}__ rc="), "section $section lacks its END line")
+        }
+        // ONE process table and ONE pane listing per round
+        assertEquals(1, Regex("list-panes -a").findAll(cmd).count())
+        assertEquals(1, Regex("ps -eo").findAll(cmd).count(), "ONE ps; the claude section reads its output")
+    }
+
+    @Test
+    fun renameSessionTargetsTheExactNameAndQuotesTheNewOne() {
+        assertEquals("tmux rename-session -t '=a'\\''b' 'c d'", ManifestCommands.renameSession("a'b", "c d"))
     }
 
     /** A name that would escape `forgotten.d/` never becomes a marker file. */
@@ -145,7 +172,7 @@ class ManifestCommandSyntaxTest {
             run(ManifestCommands.clearTombstone(NAME), home)
             assertTrue(!tombstoned(run(ManifestCommands.closeState(NAME), home)), "relaunching the name must un-poison it")
         } finally {
-            home.deleteRecursively()
+            safeDeleteTree(home)
         }
     }
 
@@ -183,7 +210,7 @@ class ManifestCommandSyntaxTest {
                 "a transient tombstone must not outlive drift's self-clean:\n$out",
             )
         } finally {
-            home.deleteRecursively()
+            safeDeleteTree(home)
         }
     }
 
@@ -219,7 +246,7 @@ class ManifestCommandSyntaxTest {
             assertEquals(setOf("claude-transient", "claude-durable"), state.tombstoned)
             assertEquals(listOf(NAME), state.sessions.map { it.tmuxSessionName })
         } finally {
-            home.deleteRecursively()
+            safeDeleteTree(home)
         }
     }
 
@@ -247,7 +274,7 @@ class ManifestCommandSyntaxTest {
             ) ?: fail("no verdict line")
             assertTrue(!gone.tracked, "a session absent from the manifest must read as untracked")
         } finally {
-            home.deleteRecursively()
+            safeDeleteTree(home)
         }
     }
 }

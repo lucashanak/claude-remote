@@ -55,11 +55,20 @@ internal class ConnectionRegistry(
     fun sshEntries(): Set<Map.Entry<String, SshManager>> = connections.entries
     fun clearSsh() { connections.clear() }
 
-    /** Any CONNECTED session's live jsch Session (used for account-wide probes). */
-    fun anyLiveSession(): Session? = connections.values.firstOrNull { it.isConnected }?.getSession()
+    /**
+     * Any CONNECTED tab session, for account-wide use. It never returns the exec session: that one
+     * is only handed out under a permit ([execRun], [useChannel]). Log shipping goes through
+     * [execRun] with the short kind.
+     */
+    fun anyLiveSession(): Session? {
+        return connections.values.firstOrNull { it.isConnected }?.getSession()
+    }
 
+    /** Keepalive (milliseconds) for every shell session, pooled transport and exec transport. */
     fun setKeepAliveIntervalAll(keepAlive: Int) {
         connections.values.forEach { it.setKeepAliveInterval(keepAlive) }
+        transportPools.values.forEach { it.setKeepAlive(keepAlive) }
+        (execSessions as? ExecTransportManager)?.setKeepAlive(keepAlive)
     }
 
     // --- Mosh transports ---
@@ -97,16 +106,109 @@ internal class ConnectionRegistry(
         tabManager.tabs.value.filter { it.server.id == serverId }.map { it.id }
 
     /**
-     * Any CONNECTED session's live jsch Session on [serverId] — used by the
-     * per-server loops (usage, latency, notify watcher) so they survive any
-     * single tab's reconnect by simply picking another live connection.
+     * Any CONNECTED tab's live jsch Session on [serverId], for per-server loops that survive
+     * any single tab's reconnect by picking another live connection. It never returns the exec
+     * session: that one is only handed out under a permit. A long-lived stream (notify watcher,
+     * stream daemon) opens its channel with [useChannel] and the long kind instead.
      */
-    fun liveServerSession(serverId: String): Session? {
+    fun liveServerSession(serverId: String): Session? = tabServerSession(serverId)
+
+    /** The legacy answer: a CONNECTED tab's session on [serverId], ignoring the exec transport. */
+    private fun tabServerSession(serverId: String): Session? {
         for ((sid, mgr) in connections) {
             if (tabManager.getTab(sid)?.server?.id == serverId && mgr.isConnected) {
                 mgr.getSession()?.let { return it }
             }
         }
         return null
+    }
+
+    // --- exec routing (the services call these instead of opening channels themselves) ---
+
+    /**
+     * True when exec routing is in effect for [serverId]: the seam slots are wired
+     * (null = legacy) AND the `exec` group is on for this server (per-server force-off,
+     * legacy set and implications included, see [CommFlags.effectiveFor]).
+     */
+    fun execActive(serverId: String): Boolean =
+        execSessions != null && remoteExec != null && CommFlags.effectiveFor(serverId).exec
+
+    /** The gated channel provider for [serverId] when exec routing is active, else null (legacy). */
+    fun activeExecChannels(serverId: String): ExecChannels? =
+        if (execActive(serverId)) execChannels else null
+
+    /**
+     * One command on [serverId], complete or an exception. Exec transport first; when it
+     * is not UP ([ExecUnavailableReason.NOT_UP]) the command runs on a live tab session
+     * of the server instead. Returns null only when there is no usable transport at all.
+     * Any other [ExecUnavailable] (timeout, refused channel, io, gate timeout) is thrown:
+     * retrying it on another transport would double the work.
+     */
+    suspend fun execRun(
+        serverId: String,
+        cmd: String,
+        stdin: ByteArray? = null,
+        totalMs: Long = 15_000,
+        kind: ExecKind = ExecKind.SHORT,
+        paceStdin: Pace = Pace(),
+    ): ExecResult? {
+        val routed = remoteExec
+        if (routed != null && execActive(serverId)) {
+            try {
+                return routed.run(serverId, cmd, stdin, totalMs, kind, paceStdin)
+            } catch (e: ExecUnavailable) {
+                if (e.reason != ExecUnavailableReason.NOT_UP) throw e
+            }
+        }
+        val tab = tabServerSession(serverId) ?: return null
+        return PooledRemoteExec(UngatedExecChannels { tab }).run(serverId, cmd, stdin, totalMs, kind, paceStdin)
+    }
+
+    /**
+     * Read-only form of [execRun] for the polling services. With exec routing off the
+     * behaviour is today's: [execReadWithWatchdog] on a live tab session. Null = no
+     * usable transport (callers skip the round).
+     */
+    suspend fun execRead(
+        serverId: String,
+        cmd: String,
+        totalMs: Long = 15_000,
+        kind: ExecKind = ExecKind.SHORT,
+    ): String? {
+        val routed = remoteExec
+        if (routed != null && execActive(serverId)) {
+            try {
+                return routed.run(serverId, cmd, null, totalMs, kind).stdout
+            } catch (e: ExecUnavailable) {
+                if (e.reason != ExecUnavailableReason.NOT_UP) throw e
+            }
+        }
+        val tab = tabServerSession(serverId) ?: return null
+        return execReadWithWatchdog(tab, cmd, totalMs = totalMs)
+    }
+
+    /**
+     * Scoped channel on [serverId] through the gate (SFTP, long-lived streams). Falls
+     * back to an ungated channel on a live tab session when the exec transport is not
+     * UP. Throws [ExecUnavailable] (NOT_UP) when neither exists. An [ExecUnavailable]
+     * thrown by [block] itself is never mistaken for "not up" (the block runs once).
+     */
+    suspend fun <T> useChannel(
+        serverId: String,
+        kind: ExecKind,
+        acquireTimeoutMs: Long = 5_000,
+        block: suspend (com.jcraft.jsch.Channel) -> T,
+    ): T {
+        val gated = execChannels
+        if (gated != null && execActive(serverId)) {
+            var entered = false
+            try {
+                return gated.use(serverId, kind, acquireTimeoutMs) { ch -> entered = true; block(ch) }
+            } catch (e: ExecUnavailable) {
+                if (entered || e.reason != ExecUnavailableReason.NOT_UP) throw e
+            }
+        }
+        val tab = tabServerSession(serverId) ?: throw ExecUnavailable(ExecUnavailableReason.NOT_UP)
+        return UngatedExecChannels { tab }.use(serverId, kind, acquireTimeoutMs, block)
     }
 }

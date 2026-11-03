@@ -197,7 +197,7 @@ internal class TranscriptService(
         val tab = tabManager.getTab(sessionId) ?: return
         val stream = synchronized(transcriptLock) {
             val s = transcriptStreams.getOrPut(sessionId) {
-                TranscriptStream(tab.server, tab.folder, scope, liveSession = { registry.ssh(sessionId)?.getSession() }, isBackground = { isBackground() }, isActiveTab = { tabManager.activeTabId.value == sessionId }, daemonActive = { serverStreamDaemons[tab.server.id]?.live == true })
+                TranscriptStream(tab.server, tab.folder, scope, liveSession = { registry.ssh(sessionId)?.getSession() }, isBackground = { isBackground() }, isActiveTab = { tabManager.activeTabId.value == sessionId }, daemonActive = { serverStreamDaemons[tab.server.id]?.live == true }, viaExec = { registry.execActive(tab.server.id) })
             }
             startContextTokenCollector(sessionId, s)
             s
@@ -210,7 +210,7 @@ internal class TranscriptService(
             ?: return kotlinx.coroutines.flow.MutableStateFlow(emptyList())
         val stream = synchronized(transcriptLock) {
             val s = transcriptStreams.getOrPut(sessionId) {
-                TranscriptStream(tab.server, tab.folder, scope, liveSession = { registry.ssh(sessionId)?.getSession() }, isBackground = { isBackground() }, isActiveTab = { tabManager.activeTabId.value == sessionId }, daemonActive = { serverStreamDaemons[tab.server.id]?.live == true })
+                TranscriptStream(tab.server, tab.folder, scope, liveSession = { registry.ssh(sessionId)?.getSession() }, isBackground = { isBackground() }, isActiveTab = { tabManager.activeTabId.value == sessionId }, daemonActive = { serverStreamDaemons[tab.server.id]?.live == true }, viaExec = { registry.execActive(tab.server.id) })
             }
             // Derive the ctx-window % from this stream's token usage. Inside the
             // lock so it binds to the exact stream instance and stays atomic with
@@ -234,7 +234,18 @@ internal class TranscriptService(
         // the transcript for several seconds while the new SSH tail reconnected.
         val alreadyConfirmed = uuid != null && confirmedUuids[sessionId] == uuid
         val sshMan = registry.ssh(sessionId)
-        if (!alreadyConfirmed && sshMan != null && sshMan.isConnected) {
+        val reconciler = registry.reconciler
+        if (!alreadyConfirmed && reconciler != null && registry.execActive(tab.server.id)) {
+            // Exec routing: the reconciler probes over the exec transport, so a parked tab
+            // (no shell of its own) gets its uuid corrected too.
+            scope.launch {
+                try {
+                    reconciler.checkUuid(sessionId)
+                } catch (e: kotlinx.coroutines.CancellationException) {
+                    throw e
+                } catch (_: Exception) {}
+            }
+        } else if (!alreadyConfirmed && sshMan != null && sshMan.isConnected) {
             scope.launch {
                 try {
                     val real = readRealSessionId(sshMan, tab.tmuxSessionName)
@@ -272,7 +283,7 @@ internal class TranscriptService(
             ?: return kotlinx.coroutines.flow.MutableStateFlow(null)
         val stream = synchronized(transcriptLock) {
             transcriptStreams.getOrPut(sessionId) {
-                TranscriptStream(tab.server, tab.folder, scope, liveSession = { registry.ssh(sessionId)?.getSession() }, isBackground = { isBackground() }, isActiveTab = { tabManager.activeTabId.value == sessionId }, daemonActive = { serverStreamDaemons[tab.server.id]?.live == true })
+                TranscriptStream(tab.server, tab.folder, scope, liveSession = { registry.ssh(sessionId)?.getSession() }, isBackground = { isBackground() }, isActiveTab = { tabManager.activeTabId.value == sessionId }, daemonActive = { serverStreamDaemons[tab.server.id]?.live == true }, viaExec = { registry.execActive(tab.server.id) })
             }
         }
         return stream.status
@@ -289,7 +300,7 @@ internal class TranscriptService(
             ?: return kotlinx.coroutines.flow.MutableStateFlow(false)
         val stream = synchronized(transcriptLock) {
             transcriptStreams.getOrPut(sessionId) {
-                TranscriptStream(tab.server, tab.folder, scope, liveSession = { registry.ssh(sessionId)?.getSession() }, isBackground = { isBackground() }, isActiveTab = { tabManager.activeTabId.value == sessionId }, daemonActive = { serverStreamDaemons[tab.server.id]?.live == true })
+                TranscriptStream(tab.server, tab.folder, scope, liveSession = { registry.ssh(sessionId)?.getSession() }, isBackground = { isBackground() }, isActiveTab = { tabManager.activeTabId.value == sessionId }, daemonActive = { serverStreamDaemons[tab.server.id]?.live == true }, viaExec = { registry.execActive(tab.server.id) })
             }
         }
         return stream.historyTruncated
@@ -544,15 +555,17 @@ internal class TranscriptService(
     private suspend fun runServerStreamDaemon(d: ServerStreamDaemon) = kotlinx.coroutines.coroutineScope {
         var attempt = 0
         while (isActive && d.specs.isNotEmpty()) {
-            var ch: com.jcraft.jsch.ChannelExec? = null
             var watchdog: kotlinx.coroutines.Job? = null
             try {
-                val sshSession = registry.liveServerSession(d.serverId)
-                if (sshSession == null) {
+                // Routing off: no live tab session yet (mid-reconnect) is a quiet wait, as it always was.
+                if (!registry.execActive(d.serverId) && registry.liveServerSession(d.serverId) == null) {
                     kotlinx.coroutines.delay(5_000)
                     continue
                 }
-                ch = sshSession.openChannel("exec") as com.jcraft.jsch.ChannelExec
+                // One LONG permit for the life of the daemon channel (exec transport, else a live tab session).
+                registry.useChannel(d.serverId, ExecKind.LONG) { raw ->
+                val ch = raw as com.jcraft.jsch.ChannelExec
+                var sawHello = false
                 ch.setCommand("python3 \"${'$'}HOME/.claude-remote/streamd.py\" 2>/dev/null")
                 val stdin = ch.outputStream
                 val reader = ch.inputStream.bufferedReader()
@@ -584,13 +597,20 @@ internal class TranscriptService(
                 while (isActive && ch.isConnected) {
                     val line = kotlinx.coroutines.withContext(Dispatchers.IO) {
                         reader.readLine()
-                    } ?: break
+                    }
+                    if (line == null) {
+                        // EOF before any `hello`: the daemon never started (python3 missing,
+                        // streamd.py gone or broken) — the bootstrap memo is stale.
+                        if (!sawHello) registry.bootstrap?.invalidate(d.serverId)
+                        break
+                    }
                     d.lastEventAt = System.currentTimeMillis()
                     val obj = try {
                         fetchJson.parseToJsonElement(line) as? kotlinx.serialization.json.JsonObject
                     } catch (_: Exception) { null } ?: continue
                     when (obj["t"]?.jsonPrimitive?.contentOrNull) {
                         "hello" -> {
+                            sawHello = true
                             d.live = true
                             attempt = 0
                             FileLogger.log(TAG, "streamd live for server ${d.serverId} (${d.specs.size} watches)")
@@ -635,13 +655,21 @@ internal class TranscriptService(
                         else -> {}
                     }
                 }
+                }
+            } catch (e: ExecUnavailable) {
+                if (e.reason == ExecUnavailableReason.NOT_UP && registry.execActive(d.serverId)) {
+                    // The exec transport is not up and no tab session can stand in: wait and look again.
+                    kotlinx.coroutines.delay(5_000)
+                    continue
+                }
+                // Routing off, a channel that could not be opened, or any other failure: log it and back off.
+                FileLogger.error(TAG, "streamd failed for server ${d.serverId}: ${e.message}", e)
             } catch (e: Exception) {
                 FileLogger.error(TAG, "streamd failed for server ${d.serverId}: ${e.message}", e)
             } finally {
                 watchdog?.cancel()
                 d.live = false
                 d.stdin = null
-                try { ch?.disconnect() } catch (_: Exception) {}
             }
             if (!isActive || d.specs.isEmpty()) break
             attempt++

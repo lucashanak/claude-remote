@@ -65,8 +65,10 @@ internal class GitStatusService(
         lastGitProbeAt[sessionId] = System.currentTimeMillis()
         try {
             val folder = tabManager.getTab(sessionId)?.folder ?: "~"
-            val conn = registry.ssh(sessionId) ?: return
-            val sshSession = conn.getSession() ?: return
+            val serverId = tabManager.getTab(sessionId)?.server?.id ?: return
+            val viaExec = registry.execActive(serverId)
+            // Legacy (no exec routing): the tab's OWN live connection probes, as before.
+            val ownSession = if (viaExec) null else registry.ssh(sessionId)?.getSession() ?: return
             val escapedFolder = folder.replace("'", "'\\''")
             val cmd = """
                 F='$escapedFolder'
@@ -77,7 +79,12 @@ internal class GitStatusService(
                 git status --porcelain 2>/dev/null | head -1
                 git rev-list --left-right --count @{u}...HEAD 2>/dev/null
             """.trimIndent()
-            val output = execReadWithWatchdog(sshSession, cmd, totalMs = 20_000)
+            // Exec transport (a parked tab has no shell of its own), else a live tab session.
+            val output = if (ownSession != null) {
+                execReadWithWatchdog(ownSession, cmd, totalMs = 20_000)
+            } else {
+                registry.execRead(serverId, cmd, totalMs = 20_000) ?: return
+            }
             parseGitStatus(sessionId, output)
         } catch (_: Exception) {
             _gitStatuses.update { it - sessionId }

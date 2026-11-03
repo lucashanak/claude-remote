@@ -73,7 +73,22 @@ internal class SessionPersistenceService(
     private val onActivityUpdate: (sessionId: String, activity: SessionActivity) -> Unit,
     private val disconnectSession: suspend (sessionId: String) -> Unit,
     private val onForgotten: (serverId: String, tmuxSessionName: String) -> Unit,
-) {
+) : PersistenceClosures {
+    // (serverId, tmux name) -> when THIS device closed it (forgetSession). Feeds
+    // recentlyClosedLocally; bounded by pruning on every write.
+    private val closedLocally = java.util.concurrent.ConcurrentHashMap<Pair<String, String>, Long>()
+
+    override fun recentlyClosedLocally(serverId: String, name: String, withinMs: Long): Boolean {
+        val at = closedLocally[serverId to name] ?: return false
+        return System.currentTimeMillis() - at <= withinMs
+    }
+
+    private fun noteClosedLocally(serverId: String, name: String) {
+        val now = System.currentTimeMillis()
+        closedLocally.entries.removeAll { now - it.value > CLOSED_LOCALLY_RETAIN_MS }
+        closedLocally[serverId to name] = now
+    }
+
     // sessions.json is one file per SERVER; with N sessions each running the
     // 15 s reconcile loop, N−1 of the flock+cat fetches were redundant. Cache
     // the parsed snapshot per server with a TTL just under the loop period so
@@ -106,6 +121,9 @@ internal class SessionPersistenceService(
     // RESTORE_EOF/DRIFT_EOF heredocs it writes — without instantiating
     // SessionPersistenceService, whose constructor takes many live collaborators.
     internal companion object {
+        /** How long a local close is remembered (the reducer asks within minutes at most). */
+        private const val CLOSED_LOCALLY_RETAIN_MS = 30 * 60_000L
+
         /**
          * Idempotent installer for the user-level systemd service that restores
          * tmux + claude sessions after a server reboot. Writes:
@@ -950,6 +968,8 @@ DTIMER_EOF
      */
     fun startSessionIdRefresh(sessionId: String, tmuxName: String, sshManager: SshManager) {
         if (sessionStorage == null) return
+        // The per-server reconciler (one exec per server per round) replaces this per-tab loop.
+        if (registry.reconciler != null && registry.serverIdOf(sessionId)?.let { registry.execActive(it) } == true) return
         sessionIdRefreshJobs[sessionId]?.cancel()
         sessionIdRefreshJobs[sessionId] = scope.launch {
             kotlinx.coroutines.delay(1000)
@@ -975,10 +995,7 @@ DTIMER_EOF
                         // fails OPEN (alive), so a flaky link keeps the tab.
                         if (!probeTmuxAlive(sshManager, tmuxName)) {
                             FileLogger.log(TAG, "Tmux '$tmuxName' tombstoned and gone — closed on another device, forgetting locally")
-                            sessionStorage.remove(sessionId)
-                            val serverId = tabManager.getTab(sessionId)?.server?.id
-                            disconnectSession(sessionId)
-                            if (serverId != null) onForgotten(serverId, tmuxName)
+                            forgetClosedElsewhere(sessionId, tmuxName)
                             return@launch
                         }
                     }
@@ -995,36 +1012,74 @@ DTIMER_EOF
                     // can't be resolved.
                     val realUuid = readRealSessionId(sshManager, tmuxName)
                         ?: entry?.claudeSessionId.takeUnless { it.isNullOrBlank() }
-                    val tab = tabManager.getTab(sessionId)
-                    if (tab != null && !realUuid.isNullOrBlank() && tab.claudeSessionId != realUuid) {
-                        // Refuse to adopt a UUID already owned by another
-                        // tab — two transcript streams pointing at the
-                        // same jsonl would mirror identical content
-                        // across both sessions, which is exactly the
-                        // "občas se chat historie zobrazuje stejně" bug.
-                        // Happens when the user picks the same /resume
-                        // conversation in two tabs, or when a tmux name
-                        // collision lets the drift daemon attribute one
-                        // claude pid to two tab rows.
-                        val claimedByOther = tabManager.tabs.value.any {
-                            it.id != sessionId && it.claudeSessionId == realUuid
-                        }
-                        if (claimedByOther) {
-                            FileLogger.log(TAG, "Skip UUID drift $realUuid for $sessionId — already owned by another tab")
-                        } else {
-                            val source = if (entry?.claudeSessionId == realUuid) "server" else "pid-probe"
-                            FileLogger.log(TAG, "Session $sessionId UUID synced from $source: ${tab.claudeSessionId} -> $realUuid")
-                            tabManager.updateClaudeSessionId(sessionId, realUuid)
-                            sessionStorage.upsert(SessionStorage.fromClaudeSession(tab.copy(claudeSessionId = realUuid)))
-                            transcript.notifyClaudeSessionIdChanged(sessionId, realUuid)
-                            transcript.setConfirmedUuid(sessionId, realUuid)
-                        }
+                    if (!realUuid.isNullOrBlank()) {
+                        adoptUuid(sessionId, realUuid, if (entry?.claudeSessionId == realUuid) "server" else "pid-probe")
                     }
                 } catch (_: Exception) {}
                 kotlinx.coroutines.delay(15_000)
             }
         }
     }
+
+    /**
+     * A session another device closed: drop the local record and the tab, and prune the
+     * UI's remote-tmux snapshot. Shared by the legacy per-tab loop and the reconciler.
+     */
+    suspend fun forgetClosedElsewhere(sessionId: String, tmuxName: String) {
+        sessionStorage?.remove(sessionId)
+        val serverId = tabManager.getTab(sessionId)?.server?.id
+        disconnectSession(sessionId)
+        if (serverId != null) onForgotten(serverId, tmuxName)
+    }
+
+    /**
+     * Adopt [realUuid] as the claude session id of [sessionId] when it differs from the
+     * tab's. Refuses a UUID already owned by another tab — two transcript streams
+     * pointing at the same jsonl would mirror identical content across both sessions
+     * ("občas se chat historie zobrazuje stejně"); that happens when the user picks the
+     * same /resume conversation in two tabs, or when a tmux name collision lets the
+     * drift daemon attribute one claude pid to two tab rows. Shared by the legacy
+     * per-tab loop and the reconciler.
+     */
+    suspend fun adoptUuid(sessionId: String, realUuid: String, source: String, confirmWhenEqual: Boolean = false) {
+        val storage = sessionStorage ?: return
+        val tab = tabManager.getTab(sessionId) ?: return
+        if (tab.claudeSessionId == realUuid) {
+            // Already the tab's id: a live probe agreeing with it confirms it (transcriptFlow's kick-sync then skips).
+            if (confirmWhenEqual) transcript.setConfirmedUuid(sessionId, realUuid)
+            return
+        }
+        val claimedByOther = tabManager.tabs.value.any {
+            it.id != sessionId && it.claudeSessionId == realUuid
+        }
+        if (claimedByOther) {
+            FileLogger.log(TAG, "Skip UUID drift $realUuid for $sessionId — already owned by another tab")
+            return
+        }
+        FileLogger.log(TAG, "Session $sessionId UUID synced from $source: ${tab.claudeSessionId} -> $realUuid")
+        tabManager.updateClaudeSessionId(sessionId, realUuid)
+        storage.upsert(SessionStorage.fromClaudeSession(tab.copy(claudeSessionId = realUuid)))
+        transcript.notifyClaudeSessionIdChanged(sessionId, realUuid)
+        transcript.setConfirmedUuid(sessionId, realUuid)
+    }
+
+    /**
+     * The exec-routed reconciler, bound to this service and the tab/transcript state.
+     * The wiring step installs it into `ConnectionRegistry.reconciler`.
+     */
+    fun newExecReconciler(): ServerReconciler = ExecServerReconciler(
+        scope = scope,
+        run = { serverId, cmd, totalMs -> registry.execRead(serverId, cmd, totalMs) },
+        serverIdOf = { registry.serverIdOf(it) },
+        tmuxNameOf = { tabManager.getTab(it)?.tmuxSessionName },
+        tabUuidOf = { tabManager.getTab(it)?.claudeSessionId },
+        adoptUuid = { sid, uuid, source -> adoptUuid(sid, uuid, source, confirmWhenEqual = source == "pid-probe") },
+        forget = { sid ->
+            val name = tabManager.getTab(sid)?.tmuxSessionName
+            if (name != null) forgetClosedElsewhere(sid, name)
+        },
+        isBackground = isBackground,
+    )
 
     /**
      * Read the server's shared state — the manifest AND the tombstone set —
@@ -1196,16 +1251,35 @@ DTIMER_EOF
                 ch.disconnect()
                 text
             }
-            FileLogger.log(TAG, "Restore service install: $out")
-            if (out.contains("LINGER=no") || out.contains("LINGER=unknown")) {
-                FileLogger.log(TAG,
-                    "WARNING: linger is not enabled on the server — the restore service " +
-                    "will only fire after a manual login. Run `sudo loginctl enable-linger \$USER` " +
-                    "on the server to make session persistence work after reboot."
-                )
-            }
+            logRestoreInstall(out)
         } catch (e: Exception) {
             FileLogger.error(TAG, "Restore service install failed: ${e.message}", e)
+        }
+    }
+
+    /** [ensureRestoreService] by server id, over the exec transport (no tab shell needed). Once per server per app run. */
+    suspend fun ensureRestoreService(serverId: String) {
+        synchronized(installedRestoreServers) {
+            if (!installedRestoreServers.add(serverId)) return
+        }
+        try {
+            val out = registry.execRead(serverId, INSTALL_RESTORE_COMMAND, totalMs = 15_000)?.trim() ?: "NO_SESSION"
+            logRestoreInstall(out)
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            FileLogger.error(TAG, "Restore service install failed: ${e.message}", e)
+        }
+    }
+
+    private fun logRestoreInstall(out: String) {
+        FileLogger.log(TAG, "Restore service install: $out")
+        if (out.contains("LINGER=no") || out.contains("LINGER=unknown")) {
+            FileLogger.log(TAG,
+                "WARNING: linger is not enabled on the server — the restore service " +
+                "will only fire after a manual login. Run `sudo loginctl enable-linger \$USER` " +
+                "on the server to make session persistence work after reboot."
+            )
         }
     }
 
@@ -1253,6 +1327,65 @@ DTIMER_EOF
     }
 
     /**
+     * [pushSessionsToServer] by server id, over the exec transport (falling back to a live
+     * tab session): the merge payload goes to stdin, paced like every upload. A parked tab
+     * can therefore still re-sync the manifest (rename, close).
+     */
+    suspend fun pushSessionsToServer(serverId: String) {
+        val storage = sessionStorage ?: return
+        try {
+            val payload = storage.serializeForServer(serverId)
+            val res = registry.execRun(
+                serverId,
+                ManifestCommands.pushMerge(serverId, payload.length),
+                stdin = payload.toByteArray(Charsets.UTF_8),
+                totalMs = 15_000,
+            )
+            when {
+                res == null -> FileLogger.log(TAG, "sessions.json sync skipped for $serverId: no usable transport")
+                res.exitStatus != 0 -> FileLogger.error(
+                    TAG,
+                    "sessions.json sync exec exited with ${res.exitStatus} for $serverId — restore service may use stale data",
+                    null
+                )
+                else -> FileLogger.log(TAG, "Synced sessions.json to server $serverId (${payload.length} bytes)")
+            }
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            FileLogger.error(TAG, "sessions.json sync failed for $serverId: ${e.message}", e)
+        }
+    }
+
+    /**
+     * Server-side half of [forgetSession] over the exec transport: tombstone FIRST, then
+     * kill the pane, then re-sync the manifest. False = the exec path is not usable (no
+     * transport), the caller then uses a fresh connection. A failure after the tombstone
+     * is logged like the legacy path logs it; the tombstone is idempotent, so a fallback
+     * that repeats it is harmless.
+     */
+    private suspend fun cleanupViaExec(session: ClaudeSession, userInitiated: Boolean): Boolean {
+        val serverId = session.server.id
+        val name = session.tmuxSessionName
+        try {
+            val tomb = registry.execRun(serverId, ManifestCommands.tombstone(name, durable = userInitiated), totalMs = 8_000)
+                ?: return false
+            if (tomb.exitStatus != 0) FileLogger.error(TAG, "tombstone($name) exited with ${tomb.exitStatus}", null)
+            val kill = registry.execRun(serverId, "tmux kill-session -t '=${name.replace("'", "'\\''")}'", totalMs = 8_000)
+            if (kill == null || kill.exitStatus != 0) {
+                FileLogger.error(TAG, "Tmux kill returned failure for ${session.id} ($name) — pane may still be alive", null)
+            }
+            pushSessionsToServer(serverId)
+            return true
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
+        } catch (e: ExecUnavailable) {
+            FileLogger.log(TAG, "Exec cleanup for ${session.id} unavailable (${e.reason}) — using a fresh connection")
+            return false
+        }
+    }
+
+    /**
      * Forget a session permanently (used when user explicitly closes a tab,
      * not just disconnects). Removes the persisted record so it won't be
      * resurrected on next app start, and re-syncs the server-side
@@ -1286,7 +1419,9 @@ DTIMER_EOF
         //    already torn down above, and reusing it would keep its read loop
         //    (and onConnectionLost → autoReconnect) alive for a dead tab.
         if (session != null) {
+            noteClosedLocally(session.server.id, session.tmuxSessionName)
             scope.launch {
+                if (registry.execActive(session.server.id) && cleanupViaExec(session, userInitiated)) return@launch
                 val cleanupConn: SshManager? = try {
                     val tmp = SshManager(serverStorage)
                     tmp.connectForCleanup(session.server)
@@ -1337,6 +1472,22 @@ DTIMER_EOF
     suspend fun renameTmuxSession(sessionId: String, oldName: String, newName: String) {
         withContext(Dispatchers.IO) {
             try {
+                val serverId = registry.serverIdOf(sessionId)
+                if (serverId != null && registry.execActive(serverId)) {
+                    // Exec transport: a parked tab (no shell of its own) can be renamed too.
+                    val res = registry.execRun(serverId, ManifestCommands.renameSession(oldName, newName), totalMs = 5_000)
+                    if (res == null || res.exitStatus != 0) {
+                        FileLogger.error(TAG, "Tmux rename $oldName → $newName failed (${res?.exitStatus ?: "no transport"})", null)
+                        return@withContext
+                    }
+                    FileLogger.log(TAG, "Tmux renamed: $oldName → $newName")
+                    val tab = tabManager.getTab(sessionId)
+                    if (tab != null && sessionStorage != null) {
+                        sessionStorage.upsert(SessionStorage.fromClaudeSession(tab.copy(tmuxSessionName = newName)))
+                        pushSessionsToServer(serverId)
+                    }
+                    return@withContext
+                }
                 val sshSession = registry.ssh(sessionId)?.getSession() ?: return@withContext
                 com.clauderemote.connection.TmuxManager.renameSession(sshSession, oldName, newName)
                 FileLogger.log(TAG, "Tmux renamed: $oldName → $newName")

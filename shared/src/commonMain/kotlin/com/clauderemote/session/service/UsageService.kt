@@ -193,16 +193,14 @@ internal class UsageService(
                     // chips dead until app restart.
                     if (!isBackground()) {
                         try {
-                            val sshSession = registry.liveServerSession(serverId)
-                            if (sshSession != null) {
-                                // 60s budget: the first run may npm-install ccusage.
-                                val output = execReadWithWatchdog(
-                                    sshSession,
-                                    "which ccusage >/dev/null 2>&1 || npm install -g ccusage >/dev/null 2>&1; ccusage blocks --active --json --offline --no-color 2>/dev/null || echo '{}'",
-                                    totalMs = 60_000,
-                                )
-                                parseUsageJson(output)
-                            }
+                            // 60s budget: the first run may npm-install ccusage.
+                            val output = registry.execRead(
+                                serverId,
+                                "which ccusage >/dev/null 2>&1 || npm install -g ccusage >/dev/null 2>&1; ccusage blocks --active --json --offline --no-color 2>/dev/null || echo '{}'",
+                                totalMs = 60_000,
+                                kind = ExecKind.SHORT,
+                            )
+                            if (output != null) parseUsageJson(output)
                         } catch (_: Exception) {}
                     }
                     kotlinx.coroutines.delay(120_000) // poll every 2 min (was 30s)
@@ -244,13 +242,8 @@ internal class UsageService(
                             // command names the account's credentials path
                             // explicitly, so it does not matter which session's
                             // transport carries it.
-                            val sshSession = registry.liveServerSession(serverId)
-                            if (sshSession != null) {
-                                val output = execReadWithWatchdog(
-                                    sshSession,
-                                    cmd,
-                                    totalMs = 10_000,
-                                )
+                            val output = registry.execRead(serverId, cmd, totalMs = 10_000)
+                            if (output != null) {
                                 if (isRateLimited(output)) {
                                     // Back off instead of retrying into the wall.
                                     // This endpoint's quota is per ACCOUNT and is
@@ -370,13 +363,9 @@ internal class UsageService(
      *   the endpoint answered 429 — the caller shows the last known numbers.
      */
     suspend fun fetchRateLimitsOnce(serverId: String, accountSlug: String?): Boolean {
-        val sshSession = registry.liveServerSession(serverId) ?: return false
         return try {
-            val output = execReadWithWatchdog(
-                sshSession,
-                rateLimitCmd(serverConfigDir(accountSlug)),
-                totalMs = 10_000,
-            )
+            val output = registry.execRead(serverId, rateLimitCmd(serverConfigDir(accountSlug)), totalMs = 10_000)
+                ?: return false
             if (isRateLimited(output)) {
                 FileLogger.log(TAG, "one-shot usage fetch 429 for ${usageKey(serverId, accountSlug)}")
                 false

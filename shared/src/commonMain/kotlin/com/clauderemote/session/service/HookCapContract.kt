@@ -4,43 +4,43 @@ package com.clauderemote.session.service
  * CAP contract shared by the reader (reconcile) and the writer (hooks install).
  * Executable reference semantics; the shell side must agree with these functions.
  *
- * **Marker file, per config dir:** `<CLAUDE_CONFIG_DIR>/claude-remote-hookev.installed`
- * ([MARKER_FILE_NAME]; `~/.claude` when the variable is unset) = `<epoch_s>\n`,
- * ten digits ([parseInstalled]). One marker per config dir, because a box has several
- * (`~/.claude` and one per account) and an install into one must not make claudes of
- * another look capable.
+ * Claude Code reloads `settings.json` while it runs (an added or removed hook is live in
+ * every running session within about a second), so capability does not depend on when a
+ * process started.
  *
- * **Write order (writer):** write the settings.json entries first and `os.replace`
- * them into place, and only THEN write the marker. A crash in between leaves the new
- * hooks without a (new) marker, which reads as "not capable" (the safe answer), never
- * the other way round.
- *
- * CAP(pane) = 1 iff ALL of:
- *  1. start time of C  >  the installed epoch of C's config dir (strictly greater);
- *  2. the settings.json of C's config dir (`CLAUDE_CONFIG_DIR` from `/proc/C/environ`,
+ * CAP(pane) = 1 iff BOTH:
+ *  1. the `settings.json` of C's config dir (`CLAUDE_CONFIG_DIR` from `/proc/C/environ`,
  *     default `~/.claude`) carries the marker [HOOKEV_MARKER];
- *  3. neither that `settings.json` nor the `settings.local.json` next to it sets
- *     `disableAllHooks` ([combineDisableAllHooks]).
- * where C is the SHALLOWEST process with comm exactly `claude` in the process subtree
- * of the pane's `pane_pid`, the pane's own process included ([shallowestClaude]).
- * 0 = known not capable, null = unknown (unknown must never be treated as 0 by
- * anything that forgets or parks).
+ *  2. neither that `settings.json` nor the `settings.local.json` next to it sets
+ *     `disableAllHooks` ([combineDisableAllHooks]);
+ *  3. the file `~/.claude-remote/hookev.off` does not exist (the owner's switch that makes
+ *     the hook script write nothing).
+ * CAP is a fact about the host. A consumer that trusts the hook stream must also multiply
+ * it by `CommFlags.effectiveFor(serverId).hooks`: with hooks off for the server the watcher
+ * does not read the events, whatever CAP says.
+ * where C is the SHALLOWEST claude process in the process subtree of the pane's
+ * `pane_pid`, the pane's own process included ([shallowestClaude]). A claude process has
+ * comm exactly `claude`, or a bare version number (`2.1.316`, the name of the versioned
+ * binary) whose `/proc/<pid>/exe` lies under `…/claude/versions/` ([Proc.isClaude]) — the
+ * bundled `rg` carries the same comm but another exe. 0 = known not capable, null =
+ * unknown (unknown must never be treated as 0 by anything that forgets or parks).
+ *
+ * **Marker file (audit only):** `<CLAUDE_CONFIG_DIR>/claude-remote-hookev.installed`
+ * ([MARKER_FILE_NAME]) = `<epoch_s>\n`, ten digits ([parseInstalled]), written by the
+ * installer AFTER the settings.json `os.replace`. It records when the hooks were
+ * installed; it is NOT a condition of CAP (a claude started before the install is capable
+ * as soon as settings.json carries the entries).
  *
  * Limits: project-level `.claude/settings*.json` in the working directory and managed
  * settings (`/etc/claude-code/`, which does not exist today) are not examined; a
- * `disableAllHooks` set there is not seen. Start times come from `/proc` in whole
- * seconds, so a claude started in the same second as the install is judged "not
- * capable" — the strict `>` errs on the safe side by up to one second.
- * Hot-reload branch ("CAP=1 whenever hooks are installed") is [HOT_RELOAD_BRANCH]
- * = off; enable it only if hot reload of settings is proven.
+ * `disableAllHooks` set there is not seen.
  */
 object HookCapContract {
     const val MARKER_FILE_NAME = "claude-remote-hookev.installed"
     const val HOOKEV_MARKER = "claude-remote-ev v"
-    const val HOT_RELOAD_BRANCH = false
 
     sealed interface Installed {
-        /** File does not exist: hooks never installed ⇒ CAP 0. */
+        /** File does not exist: hooks never installed through this client. */
         data object Absent : Installed
         /** Exists but is not exactly ten digits (+ one newline) ⇒ unknown. */
         data object Corrupt : Installed
@@ -51,7 +51,7 @@ object HookCapContract {
      * [text] = file content, null = file absent. Accepts exactly ten digits (an epoch
      * in seconds, 2001-09 to 2286-11) with a non-zero first digit, plus at most one
      * trailing newline. `0`, milliseconds (13 digits), empty, signs, spaces and
-     * `\r\n` are [Installed.Corrupt] — unknown, never a verdict.
+     * `\r\n` are [Installed.Corrupt]. Audit only, see the class doc.
      */
     fun parseInstalled(text: String?): Installed {
         if (text == null) return Installed.Absent
@@ -60,25 +60,30 @@ object HookCapContract {
         return Installed.Epoch(body.toLong())
     }
 
-    data class Proc(val pid: Int, val ppid: Int, val comm: String)
+    /** [exe] = target of `/proc/<pid>/exe`, null when unknown / not read. */
+    data class Proc(val pid: Int, val ppid: Int, val comm: String, val exe: String? = null) {
+        val isClaude: Boolean
+            get() = comm == CLAUDE_COMM ||
+                (VERSION_COMM.matches(comm) && exe != null && "/claude/versions/" in exe)
+    }
 
     /**
-     * Pid of the shallowest `claude` in the subtree of [panePid]: the pane's own
+     * Pid of the shallowest claude in the subtree of [panePid]: the pane's own
      * process counts as depth 0 (a pane that `exec`s claude), so `bash -l → bash -lc →
-     * claude` yields the claude and so does a bare `claude` pane. comm must equal
-     * `claude` exactly (a helper called `claude-…` is not selected). Null when there is
-     * none, or when several share the minimum depth (ambiguous).
+     * claude` yields the claude and so does a bare `claude` pane. See [Proc.isClaude]
+     * (a helper called `claude-…` is not selected). Null when there is none, or when
+     * several share the minimum depth (ambiguous).
      */
     fun shallowestClaude(panePid: Int, procs: List<Proc>): Int? {
         val byPid = procs.associateBy { it.pid }
-        if (byPid[panePid]?.comm == CLAUDE_COMM) return panePid
+        if (byPid[panePid]?.isClaude == true) return panePid
         val children = procs.groupBy { it.ppid }
         var level = listOf(panePid)
         val seen = mutableSetOf(panePid)
         while (level.isNotEmpty()) {
             val next = mutableListOf<Int>()
             for (pid in level) for (c in children[pid].orEmpty()) if (seen.add(c.pid)) next += c.pid
-            val claudes = next.filter { byPid.getValue(it).comm == CLAUDE_COMM }
+            val claudes = next.filter { byPid.getValue(it).isClaude }
             if (claudes.isNotEmpty()) return claudes.singleOrNull()
             level = next
         }
@@ -86,6 +91,7 @@ object HookCapContract {
     }
 
     private const val CLAUDE_COMM = "claude"
+    private val VERSION_COMM = Regex("^[0-9]+(\\.[0-9]+)+$")
 
     /**
      * `disableAllHooks` of a config dir from its two settings files (each: true/false,
@@ -98,18 +104,10 @@ object HookCapContract {
         else -> false
     }
 
-    /** Null inputs mean "could not determine". Any definite failure yields false even if another input is unknown. */
-    fun verdict(
-        claudeStartEpochS: Long?,
-        installed: Installed,
-        settingsHasMarker: Boolean?,
-        disableAllHooks: Boolean?,
-    ): Boolean? {
-        if (installed is Installed.Absent) return false
-        if (settingsHasMarker == false || disableAllHooks == true) return false
-        val inst = (installed as? Installed.Epoch)?.seconds
-        if (inst != null && claudeStartEpochS != null && claudeStartEpochS <= inst) return false
-        if (inst == null || claudeStartEpochS == null || settingsHasMarker == null || disableAllHooks == null) return null
+    /** Null inputs mean "could not determine". A definite failure yields false even if the other input is unknown. */
+    fun verdict(settingsHasMarker: Boolean?, disableAllHooks: Boolean?, hooksOff: Boolean? = false): Boolean? {
+        if (settingsHasMarker == false || disableAllHooks == true || hooksOff == true) return false
+        if (settingsHasMarker == null || disableAllHooks == null || hooksOff == null) return null
         return true
     }
 }

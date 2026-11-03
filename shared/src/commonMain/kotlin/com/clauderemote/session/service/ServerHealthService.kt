@@ -71,9 +71,11 @@ internal class ServerHealthService(
             lastServerProbeAt[server.id] = now
             scope.launch {
                 // 1) Reuse a live connection → ONLINE without a socket probe.
+                // A server whose tabs are all parked (no shell attached) is still reachable
+                // when its exec transport is UP.
                 val hasLiveConnection = registry.sshEntries().any { (sessionId, mgr) ->
                     mgr.isConnected && tabManager.getTab(sessionId)?.server?.id == server.id
-                }
+                } || (registry.execActive(server.id) && registry.execSessions?.session(server.id) != null)
                 if (hasLiveConnection) {
                     _serverHealth.update { it + (server.id to ServerHealth.ONLINE) }
                     return@launch
@@ -120,16 +122,12 @@ internal class ServerHealthService(
                         try {
                             // Missing connection (mid-reconnect) skips the round;
                             // the old `?: break` killed the loop permanently.
-                            val sshSession = registry.liveServerSession(serverId)
-                            if (sshSession == null) {
+                            val start = System.currentTimeMillis()
+                            if (registry.execRead(serverId, "echo pong", totalMs = 10_000) == null) {
                                 kotlinx.coroutines.delay(15_000)
                                 continue
                             }
-                            val latency = kotlin.run {
-                                val start = System.currentTimeMillis()
-                                execReadWithWatchdog(sshSession, "echo pong", totalMs = 10_000)
-                                System.currentTimeMillis() - start
-                            }
+                            val latency = System.currentTimeMillis() - start
                             recentLatencies.add(latency)
                             if (recentLatencies.size > 5) recentLatencies.removeAt(0)
                             val avg = recentLatencies.average().toLong()

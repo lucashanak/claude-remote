@@ -323,6 +323,18 @@ internal class AccountService(
      * server is connected, so "no live tab" must not mean "no accounts".
      */
     private suspend fun <T> withServerSession(serverId: String, block: suspend (Session) -> T): T? {
+        // Exec routing: the server's exec transport under one SHORT permit (the helper
+        // holds it for the block). Not UP → the legacy order below, so the accounts
+        // screen still works while the exec transport is coming up.
+        if (registry.execActive(serverId)) {
+            serverStorage.getServer(serverId)?.let { server ->
+                try {
+                    return SshSessionHelper.withSession(server, timeout = 10_000, allowFresh = false) { block(it) }
+                } catch (e: ExecUnavailable) {
+                    if (e.reason != ExecUnavailableReason.NOT_UP) throw e
+                }
+            }
+        }
         registry.liveServerSession(serverId)?.let { return block(it) }
         val server = serverStorage.getServer(serverId) ?: run {
             FileLogger.error(TAG, "AccountService: no server $serverId in storage", null)

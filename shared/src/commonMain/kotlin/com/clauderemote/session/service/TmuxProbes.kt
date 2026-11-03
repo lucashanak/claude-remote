@@ -69,7 +69,7 @@ internal class TmuxProbes(
             // can only steal the size at the instant the active client drops
             // (tmux promotes a survivor), and the next attach's SIGWINCH self-
             // heals it — no manual pinning needed.
-            val refreshed = tmuxName != null && refreshTmuxClient(conn, tmuxName)
+            val refreshed = tmuxName != null && refreshTmuxClient(conn, tmuxName, registry.serverIdOf(sessionId))
             if (!refreshed) {
                 // Fallback: SIGWINCH toggle. Shrink COLS, not ROWS — row
                 // shrink pushes the tmux status line up a cell during the
@@ -145,16 +145,20 @@ internal class TmuxProbes(
      * short-lived exec channel. Returns true only if at least one client was
      * actually refreshed (the command echoes OK per successful refresh).
      */
-    private suspend fun refreshTmuxClient(conn: SshManager, tmuxName: String): Boolean =
+    private suspend fun refreshTmuxClient(conn: SshManager, tmuxName: String, serverId: String? = null): Boolean =
         kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
             try {
-                val sshSession = conn.getSession() ?: return@withContext false
                 val escaped = tmuxName.replace("'", "'\\''")
+                val refreshCmd = "tmux list-clients -t '=$escaped' -F '#{client_name}' 2>/dev/null" +
+                    " | while IFS= read -r c; do tmux refresh-client -t \"\$c\" 2>/dev/null && echo OK; done"
+                if (serverId != null && registry.execActive(serverId)) {
+                    // Exec transport: a refresh must not cost the attached shell's own channel budget.
+                    val out = registry.execRead(serverId, refreshCmd, totalMs = 1_500)
+                    if (out != null) return@withContext out.contains("OK")
+                }
+                val sshSession = conn.getSession() ?: return@withContext false
                 val ch = sshSession.openChannel("exec") as com.jcraft.jsch.ChannelExec
-                ch.setCommand(
-                    "tmux list-clients -t '=$escaped' -F '#{client_name}' 2>/dev/null" +
-                        " | while IFS= read -r c; do tmux refresh-client -t \"\$c\" 2>/dev/null && echo OK; done"
-                )
+                ch.setCommand(refreshCmd)
                 ch.inputStream = null
                 val input = ch.inputStream
                 ch.connect(1500) // keep snappy on cell links; fallback toggle covers failure
@@ -191,9 +195,8 @@ internal class TmuxProbes(
     fun probeTmuxSession(sshManager: SshManager, sessionName: String): Boolean {
         return try {
             val sshSession = sshManager.getSession() ?: return true
-            val escaped = sessionName.replace("'", "'\\''")
             val ch = sshSession.openChannel("exec") as com.jcraft.jsch.ChannelExec
-            ch.setCommand("tmux has-session -t '=$escaped' 2>/dev/null && echo YES || echo NO")
+            ch.setCommand(hasSessionCmd(sessionName))
             ch.inputStream = null
             val input = ch.inputStream
             ch.connect(1500) // fail-open probe — keep snappy on cell links
@@ -207,6 +210,58 @@ internal class TmuxProbes(
             FileLogger.error(TAG, "Tmux probe failed for $sessionName: ${e.message}", e)
             true // fail-open
         }
+    }
+
+    /**
+     * [probeTmuxSession] by server: runs on the exec transport (falling back to a live
+     * tab session), so it works with zero attached shells. Same fail-open contract:
+     * anything but an explicit NO reads as alive.
+     */
+    suspend fun probeTmuxSession(serverId: String, sessionName: String): Boolean = try {
+        val out = registry.execRead(serverId, hasSessionCmd(sessionName), totalMs = 2_000)?.trim()
+        out == null || !out.endsWith("NO")
+    } catch (e: kotlinx.coroutines.CancellationException) {
+        throw e
+    } catch (e: Exception) {
+        FileLogger.error(TAG, "Tmux probe failed for $sessionName: ${e.message}", e)
+        true // fail-open
+    }
+
+    private fun hasSessionCmd(sessionName: String): String =
+        "tmux has-session -t '=${sessionName.replace("'", "'\\''")}' 2>/dev/null && echo YES || echo NO"
+
+    /** The shell probe behind [probeTranscriptExists]: prints YES or NO. */
+    private fun transcriptProbeCmd(folder: String, rawUuid: String): String {
+        val escapedFolder = folder.replace("'", "'\\''")
+        // Interpolated into the shell command: keep it to a uuid's charset.
+        val uuid = rawUuid.filter { it.isLetterOrDigit() || it == '-' }
+        return """
+            F='$escapedFolder'
+            E="${'$'}{F/#~/${'$'}HOME}"
+            case "${'$'}E" in /*) ;; *) E="${'$'}HOME/${'$'}E";; esac
+            # UUID is globally unique — a transcript matching it anywhere means
+            # it exists, immune to the lossy cwd->dir encoding. Fall back to the
+            # corrected encoding (every non-alphanumeric -> '-') for a not-yet-
+            # globbable path.
+            ENC=${'$'}(echo "${'$'}E" | sed 's|[^a-zA-Z0-9]|-|g')
+            if ls "${'$'}HOME/.claude/projects/"*/"$uuid.jsonl" >/dev/null 2>&1 || [ -f "${'$'}HOME/.claude/projects/${'$'}ENC/$uuid.jsonl" ]; then echo YES; else echo NO; fi
+        """.trimIndent()
+    }
+
+    /** [probeTranscriptExists] by server (exec transport, no attached shell needed). Null = could not answer. */
+    suspend fun probeTranscriptExists(serverId: String, folder: String, uuid: String): Boolean? = try {
+        val out = registry.execRead(serverId, transcriptProbeCmd(folder, uuid), totalMs = 3_000)?.trim()
+        when {
+            out == null -> null
+            out.endsWith("YES") -> true
+            out.endsWith("NO") -> false
+            else -> null // closed before answering: unknown, not "no"
+        }
+    } catch (e: kotlinx.coroutines.CancellationException) {
+        throw e
+    } catch (e: Exception) {
+        FileLogger.error(TAG, "Transcript probe failed for $uuid in $folder: ${e.message}", e)
+        null
     }
 
     /**
@@ -230,20 +285,7 @@ internal class TmuxProbes(
     fun probeTranscriptExists(sshManager: SshManager, folder: String, uuid: String): Boolean? {
         return try {
             val sshSession = sshManager.getSession() ?: return null
-            val escapedFolder = folder.replace("'", "'\\''")
-            // Interpolated into the shell command: keep it to a uuid's charset.
-            val uuid = uuid.filter { it.isLetterOrDigit() || it == '-' }
-            val cmd = """
-                F='$escapedFolder'
-                E="${'$'}{F/#~/${'$'}HOME}"
-                case "${'$'}E" in /*) ;; *) E="${'$'}HOME/${'$'}E";; esac
-                # UUID is globally unique — a transcript matching it anywhere means
-                # it exists, immune to the lossy cwd->dir encoding. Fall back to the
-                # corrected encoding (every non-alphanumeric -> '-') for a not-yet-
-                # globbable path.
-                ENC=${'$'}(echo "${'$'}E" | sed 's|[^a-zA-Z0-9]|-|g')
-                if ls "${'$'}HOME/.claude/projects/"*/"$uuid.jsonl" >/dev/null 2>&1 || [ -f "${'$'}HOME/.claude/projects/${'$'}ENC/$uuid.jsonl" ]; then echo YES; else echo NO; fi
-            """.trimIndent()
+            val cmd = transcriptProbeCmd(folder, uuid)
             val ch = sshSession.openChannel("exec") as com.jcraft.jsch.ChannelExec
             ch.setCommand(cmd)
             ch.inputStream = null

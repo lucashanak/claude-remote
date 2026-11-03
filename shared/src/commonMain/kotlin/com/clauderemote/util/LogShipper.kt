@@ -27,6 +27,13 @@ class LogShipper(
     private val scope: CoroutineScope,
     /** Any live jsch session to the target server, or null when offline. */
     private val liveSession: () -> com.jcraft.jsch.Session?,
+    /**
+     * Sends one flush through the gated exec transport: runs [remoteAppendCommand] with
+     * the payload as stdin, true = delivered, false = no transport / failed (the batch is
+     * requeued). When set it replaces [liveSession], so the shipper never opens a channel
+     * outside the per-server channel budget.
+     */
+    private val execFlush: (suspend (cmd: String, stdin: ByteArray) -> Boolean)? = null,
 ) {
     private val buffer = ArrayDeque<String>()
     private var dropped = 0
@@ -69,6 +76,24 @@ class LogShipper(
             buffer.clear()
             droppedNow = dropped
             dropped = 0
+        }
+        if (execFlush != null) {
+            val stamp = java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss Z", java.util.Locale.US).format(java.util.Date())
+            val payload = buildString {
+                append("--- flush $stamp ---\n")
+                if (droppedNow > 0) append("[shipper dropped $droppedNow lines]\n")
+                for (line in batch) append(line)
+            }
+            val sent = try {
+                execFlush.invoke(remoteAppendCommand(appId), payload.toByteArray(Charsets.UTF_8))
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                requeue(batch, droppedNow)
+                throw e
+            } catch (_: Exception) {
+                false
+            }
+            if (!sent) requeue(batch, droppedNow)
+            return
         }
         val sess = liveSession()
         if (sess == null || !sess.isConnected) {
@@ -149,12 +174,13 @@ class LogShipper(
         /**
          * Shell command run on the server for each flush: cap the log, then append
          * stdin. The trim keeps the last [REMOTE_KEEP_BYTES] and drops the first
-         * (partial) line so the file starts on a line boundary.
+         * (partial) line so the file starts on a line boundary (`tail -n +2`, which
+         * unlike `sed -i` behaves the same on GNU and BSD/macOS).
          */
         internal fun remoteAppendCommand(appId: String): String =
             "D=\"${'$'}HOME/.claude-remote/logs\"; mkdir -p \"${'$'}D\"; F=\"${'$'}D/$appId.log\"; " +
                 "if [ -f \"${'$'}F\" ] && [ \"${'$'}(wc -c < \"${'$'}F\")\" -gt $REMOTE_CAP_BYTES ]; then " +
-                "tail -c $REMOTE_KEEP_BYTES \"${'$'}F\" > \"${'$'}F.tmp\" && sed -i 1d \"${'$'}F.tmp\" && " +
+                "tail -c $REMOTE_KEEP_BYTES \"${'$'}F\" | tail -n +2 > \"${'$'}F.tmp\" && " +
                 "mv \"${'$'}F.tmp\" \"${'$'}F\"; fi; " +
                 "cat >> \"${'$'}F\""
     }

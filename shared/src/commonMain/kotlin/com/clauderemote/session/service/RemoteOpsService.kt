@@ -45,13 +45,18 @@ internal class RemoteOpsService(
             scrollMutex(sessionId).withLock {
                 try {
                     kotlinx.coroutines.withContext(Dispatchers.IO) {
-                        val sshSession = registry.ssh(sessionId)?.getSession() ?: return@withContext
+                        val serverId = registry.serverIdOf(sessionId)
                         val escaped = tmuxName.replace("'", "'\\''")
                         val key = if (up) "page-up" else "page-down"
                         // `=name:` — exact-match PANE target. `=` alone is rejected for a
                         // pane target ("can't find pane"), and plain `-t name` prefix-matches,
                         // which would scroll a DIFFERENT session's pane. Measured on tmux 3.5a.
                         val cmd = "tmux copy-mode -e -t '=$escaped:'; tmux send-keys -t '=$escaped:' -X $key"
+                        if (serverId != null && registry.execActive(serverId)) {
+                            registry.execRun(serverId, cmd, totalMs = 3_000)
+                            return@withContext
+                        }
+                        val sshSession = registry.ssh(sessionId)?.getSession() ?: return@withContext
                         val ch = sshSession.openChannel("exec") as com.jcraft.jsch.ChannelExec
                         ch.setCommand(cmd)
                         ch.inputStream = null
@@ -138,9 +143,34 @@ internal class RemoteOpsService(
         val deadline = System.currentTimeMillis() + 20_000L
         var lastException: Exception? = null
 
+        val serverId = registry.serverIdOf(sessionId)
+        val viaExec = serverId != null && registry.execActive(serverId)
         while (System.currentTimeMillis() < deadline) {
             val c = registry.ssh(sessionId)
-            if (c != null && c.isConnected) {
+            if (viaExec) {
+                // Exec transport: the upload needs no shell of this tab (a parked tab can upload).
+                try {
+                    val remoteDir = "/tmp/claude-uploads"
+                    val remotePath = "$remoteDir/${fileName.replace("'", "'\\''")}"
+                    val res = registry.execRun(
+                        serverId!!,
+                        "mkdir -p '$remoteDir' && cat > '$remotePath'",
+                        stdin = bytes,
+                        totalMs = 20_000L + bytes.size / 150,
+                        kind = ExecKind.SHORT,
+                    )
+                    if (res != null) {
+                        if (res.exitStatus != 0) throw java.io.IOException("Upload failed (exit ${res.exitStatus})")
+                        FileLogger.log(TAG, "File uploaded: $remotePath (${bytes.size} bytes)")
+                        return remotePath
+                    }
+                } catch (e: kotlinx.coroutines.CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    lastException = e
+                    FileLogger.error(TAG, "Upload exec failed for $sessionId: ${e.message}", e)
+                }
+            } else if (c != null && c.isConnected) {
                 try {
                     val remoteDir = "/tmp/claude-uploads"
                     val remotePath = c.uploadFile(bytes, remoteDir, fileName)
@@ -177,62 +207,21 @@ internal class RemoteOpsService(
         timeoutMs: Long = 0,
     ): ByteArray? = withContext(Dispatchers.IO) {
         try {
+            val serverId = registry.serverIdOf(sessionId)
+            if (serverId != null && registry.execActive(serverId)) {
+                // Exec transport: SFTP through the gate, no tab shell needed.
+                return@withContext registry.useChannel(serverId, ExecKind.SFTP) { ch ->
+                    val sftp = ch as com.jcraft.jsch.ChannelSftp
+                    sftp.connect(5000)
+                    try { sftpDownload(sftp, remotePath, maxBytes, timeoutMs) } finally { sftp.disconnect() }
+                }
+            }
             val conn = registry.ssh(sessionId) ?: return@withContext null
             val sshSession = conn.getSession() ?: return@withContext null
             val sftp = sshSession.openChannel("sftp") as com.jcraft.jsch.ChannelSftp
             sftp.connect(5000)
             try {
-                val home = sftp.home ?: "~"
-                val resolved = when {
-                    remotePath == "~"              -> home
-                    remotePath.startsWith("~/")    -> home + remotePath.substring(1)
-                    remotePath.startsWith("/")     -> remotePath
-                    else                           -> "$home/$remotePath"
-                }
-                // stat, NOT lstat: lstat reports the symlink's own size (a few
-                // bytes) while get() follows it, which let a link to a huge file
-                // slip past this guard and then blow up the heap.
-                val attrs = sftp.stat(resolved)
-                // Regular files only. A FIFO or a link into /dev or /proc stats
-                // at size 0, passes any size guard, and then get() blocks
-                // forever or streams without end — and with inline images a
-                // path in Claude's text starts a fetch without anyone tapping.
-                if (!attrs.isReg) {
-                    FileLogger.log(TAG, "Download refused: $resolved is not a regular file")
-                    return@withContext null
-                }
-                if (attrs.size > maxBytes) {
-                    FileLogger.log(TAG, "Download refused: $resolved is ${attrs.size} bytes (limit $maxBytes)")
-                    return@withContext SessionOrchestrator.DOWNLOAD_TOO_LARGE
-                }
-                val out = java.io.ByteArrayOutputStream(attrs.size.coerceIn(0, maxBytes).toInt())
-                // The stat is a promise, not a guarantee: the file can grow
-                // while it is read. The monitor enforces the cap (and the time
-                // limit) on the bytes actually arriving, by aborting the get.
-                val started = System.currentTimeMillis()
-                var received = 0L
-                var aborted: Any? = null
-                val monitor = object : com.jcraft.jsch.SftpProgressMonitor {
-                    override fun init(op: Int, src: String?, dest: String?, max: Long) {}
-                    override fun count(bytes: Long): Boolean {
-                        received += bytes
-                        if (received > maxBytes) { aborted = SessionOrchestrator.DOWNLOAD_TOO_LARGE; return false }
-                        if (timeoutMs > 0 && System.currentTimeMillis() - started > timeoutMs) {
-                            aborted = "timeout"; return false
-                        }
-                        return true
-                    }
-                    override fun end() {}
-                }
-                sftp.get(resolved, out, monitor)
-                when (aborted) {
-                    null -> out.toByteArray()
-                    SessionOrchestrator.DOWNLOAD_TOO_LARGE -> SessionOrchestrator.DOWNLOAD_TOO_LARGE
-                    else -> {
-                        FileLogger.log(TAG, "Download aborted after ${timeoutMs}ms: $resolved")
-                        null
-                    }
-                }
+                sftpDownload(sftp, remotePath, maxBytes, timeoutMs)
             } finally {
                 sftp.disconnect()
             }
@@ -245,6 +234,61 @@ internal class RemoteOpsService(
         } catch (e: Exception) {
             FileLogger.error(TAG, "Download file failed: $remotePath", e)
             null
+        }
+    }
+
+    /** The download body on an already connected SFTP channel (the caller disconnects it). Null = failure/aborted. */
+    private fun sftpDownload(sftp: com.jcraft.jsch.ChannelSftp, remotePath: String, maxBytes: Long, timeoutMs: Long): ByteArray? {
+        val home = sftp.home ?: "~"
+        val resolved = when {
+            remotePath == "~"              -> home
+            remotePath.startsWith("~/")    -> home + remotePath.substring(1)
+            remotePath.startsWith("/")     -> remotePath
+            else                           -> "$home/$remotePath"
+        }
+        // stat, NOT lstat: lstat reports the symlink's own size (a few
+        // bytes) while get() follows it, which let a link to a huge file
+        // slip past this guard and then blow up the heap.
+        val attrs = sftp.stat(resolved)
+        // Regular files only. A FIFO or a link into /dev or /proc stats
+        // at size 0, passes any size guard, and then get() blocks
+        // forever or streams without end — and with inline images a
+        // path in Claude's text starts a fetch without anyone tapping.
+        if (!attrs.isReg) {
+            FileLogger.log(TAG, "Download refused: $resolved is not a regular file")
+            return null
+        }
+        if (attrs.size > maxBytes) {
+            FileLogger.log(TAG, "Download refused: $resolved is ${attrs.size} bytes (limit $maxBytes)")
+            return SessionOrchestrator.DOWNLOAD_TOO_LARGE
+        }
+        val out = java.io.ByteArrayOutputStream(attrs.size.coerceIn(0, maxBytes).toInt())
+        // The stat is a promise, not a guarantee: the file can grow
+        // while it is read. The monitor enforces the cap (and the time
+        // limit) on the bytes actually arriving, by aborting the get.
+        val started = System.currentTimeMillis()
+        var received = 0L
+        var aborted: Any? = null
+        val monitor = object : com.jcraft.jsch.SftpProgressMonitor {
+            override fun init(op: Int, src: String?, dest: String?, max: Long) {}
+            override fun count(bytes: Long): Boolean {
+                received += bytes
+                if (received > maxBytes) { aborted = SessionOrchestrator.DOWNLOAD_TOO_LARGE; return false }
+                if (timeoutMs > 0 && System.currentTimeMillis() - started > timeoutMs) {
+                    aborted = "timeout"; return false
+                }
+                return true
+            }
+            override fun end() {}
+        }
+        sftp.get(resolved, out, monitor)
+        return when (aborted) {
+            null -> out.toByteArray()
+            SessionOrchestrator.DOWNLOAD_TOO_LARGE -> SessionOrchestrator.DOWNLOAD_TOO_LARGE
+            else -> {
+                FileLogger.log(TAG, "Download aborted after ${timeoutMs}ms: $resolved")
+                null
+            }
         }
     }
 
@@ -261,26 +305,20 @@ internal class RemoteOpsService(
         withContext(Dispatchers.IO) {
             if (remotePaths.isEmpty()) return@withContext emptySet()
             try {
+                val serverId = registry.serverIdOf(sessionId)
+                if (serverId != null && registry.execActive(serverId)) {
+                    return@withContext registry.useChannel(serverId, ExecKind.SFTP) { ch ->
+                        val sftp = ch as com.jcraft.jsch.ChannelSftp
+                        sftp.connect(5000)
+                        try { sftpRegularFiles(sftp, remotePaths) } finally { sftp.disconnect() }
+                    }
+                }
                 val conn = registry.ssh(sessionId) ?: return@withContext emptySet()
                 val sshSession = conn.getSession() ?: return@withContext emptySet()
                 val sftp = sshSession.openChannel("sftp") as com.jcraft.jsch.ChannelSftp
                 sftp.connect(5000)
                 try {
-                    val home = sftp.home ?: "~"
-                    remotePaths.filterTo(mutableSetOf()) { path ->
-                        val resolved = when {
-                            path == "~" -> home
-                            path.startsWith("~/") -> home + path.substring(1)
-                            path.startsWith("/") -> path
-                            else -> "$home/$path"
-                        }
-                        try {
-                            // stat() follows symlinks, so a link to a real file counts.
-                            !sftp.stat(resolved).isDir
-                        } catch (_: Exception) {
-                            false // no such file — the common case for prose
-                        }
-                    }
+                    sftpRegularFiles(sftp, remotePaths)
                 } finally {
                     sftp.disconnect()
                 }
@@ -289,6 +327,25 @@ internal class RemoteOpsService(
                 emptySet()
             }
         }
+
+    /** [remotePaths] that stat as non-directories on an already connected SFTP channel. */
+    private fun sftpRegularFiles(sftp: com.jcraft.jsch.ChannelSftp, remotePaths: List<String>): Set<String> {
+        val home = sftp.home ?: "~"
+        return remotePaths.filterTo(mutableSetOf()) { path ->
+            val resolved = when {
+                path == "~" -> home
+                path.startsWith("~/") -> home + path.substring(1)
+                path.startsWith("/") -> path
+                else -> "$home/$path"
+            }
+            try {
+                // stat() follows symlinks, so a link to a real file counts.
+                !sftp.stat(resolved).isDir
+            } catch (_: Exception) {
+                false // no such file — the common case for prose
+            }
+        }
+    }
 
     companion object {
         // Raised from 50 MB on request. The download is buffered whole in memory,

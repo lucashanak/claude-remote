@@ -2,6 +2,10 @@ package com.clauderemote.connection
 
 import com.clauderemote.model.AuthMethod
 import com.clauderemote.model.SshServer
+import com.clauderemote.session.service.ExecChannels
+import com.clauderemote.session.service.ExecKind
+import com.clauderemote.session.service.ExecUnavailable
+import com.clauderemote.session.service.ExecUnavailableReason
 import com.jcraft.jsch.JSch
 import com.jcraft.jsch.Session
 
@@ -20,6 +24,15 @@ object SshSessionHelper {
      * every time, which dominated idle data usage.
      */
     @Volatile var liveSessionProvider: ((SshServer) -> Session?)? = null
+
+    /**
+     * Gated exec channels of a server when exec routing is active for it, null =
+     * legacy (→ `ConnectionRegistry.activeExecChannels`). Set once at startup. When it
+     * returns channels, [withSession] runs the block on the exec transport's session
+     * and holds one SHORT permit for the duration of the block, so every one-off user
+     * of this helper is inside the per-server channel budget without being edited.
+     */
+    @Volatile internal var execChannelsProvider: ((serverId: String) -> ExecChannels?)? = null
 
     fun createSession(server: SshServer, timeout: Int = 10000): Session {
         val jsch = JSch()
@@ -48,16 +61,40 @@ object SshSessionHelper {
 
     /**
      * Create, connect, execute block, disconnect. Returns block result.
+     *
+     * Order of transports: the server's exec transport (holding one SHORT permit while
+     * [block] runs; skipped when it is not UP) → a pooled transport the server already
+     * has → a fresh connection, unless [allowFresh] is false, in which case
+     * [ExecUnavailable] ([ExecUnavailableReason.NOT_UP]) is thrown instead of paying a
+     * handshake. Only NOT_UP falls through to those transports; a permit wait that timed out
+     * ([ExecUnavailableReason.GATE_TIMEOUT]) is thrown to the caller. A caller that can skip a tick (a poller) passes `allowFresh = false`.
      */
     suspend fun <T> withSession(
         server: SshServer,
         timeout: Int = 10000,
+        allowFresh: Boolean = true,
         block: suspend (Session) -> T
     ): T {
+        val gated = execChannelsProvider?.invoke(server.id)
+        if (gated != null) {
+            var entered = false
+            try {
+                return gated.withPermit(server.id, ExecKind.SHORT) { sess -> entered = true; block(sess) }
+            } catch (e: ExecUnavailable) {
+                // An ExecUnavailable raised by the block itself is the block's business.
+                if (entered) throw e
+                // A saturated gate (permit wait timed out) must not be walked around: the caller waits or fails.
+                if (e.reason != ExecUnavailableReason.NOT_UP) throw e
+                // Exec transport not UP: fall through to the legacy transports.
+            }
+        }
+
         // Reuse an existing pooled transport when the server already has one —
         // no fresh handshake, and we must NOT disconnect it (it's shared).
         val reuse = liveSessionProvider?.invoke(server)?.takeIf { it.isConnected }
         if (reuse != null) return block(reuse)
+
+        if (!allowFresh) throw ExecUnavailable(ExecUnavailableReason.NOT_UP, "no live transport and a fresh connection is not allowed")
 
         val sess = createSession(server, timeout)
         return try {

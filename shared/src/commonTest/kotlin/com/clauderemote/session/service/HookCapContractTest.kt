@@ -4,7 +4,6 @@ import com.clauderemote.session.service.HookCapContract.Installed
 import com.clauderemote.session.service.HookCapContract.Proc
 import kotlin.test.Test
 import kotlin.test.assertEquals
-import kotlin.test.assertFalse
 import kotlin.test.assertNull
 
 class HookCapContractTest {
@@ -23,27 +22,23 @@ class HookCapContractTest {
         assertEquals(Installed.Epoch(9999999999), HookCapContract.parseInstalled("9999999999"))
     }
 
-    @Test fun capRequiresStartStrictlyAfterInstalled() {
-        val inst = Installed.Epoch(100)
-        assertEquals(true, HookCapContract.verdict(101, inst, true, false))
-        assertEquals(false, HookCapContract.verdict(100, inst, true, false)) // equal is NOT capable
-        assertEquals(false, HookCapContract.verdict(99, inst, true, false))
+    @Test fun capIsMarkerInSettingsAndNoDisableAllHooks_startTimeAndInstalledEpochDoNotMatter() {
+        assertEquals(true, HookCapContract.verdict(true, false))
+        assertEquals(false, HookCapContract.verdict(false, false))
+        assertEquals(false, HookCapContract.verdict(true, true))
     }
 
-    @Test fun capNeedsMarkerAndNoDisableAllHooks() {
-        val inst = Installed.Epoch(100)
-        assertEquals(false, HookCapContract.verdict(200, inst, false, false))
-        assertEquals(false, HookCapContract.verdict(200, inst, true, true))
-    }
-
-    @Test fun absentInstalledMeansZeroCorruptOrUnknownInputMeansUnknown() {
-        assertEquals(false, HookCapContract.verdict(200, Installed.Absent, true, false))
-        assertNull(HookCapContract.verdict(200, Installed.Corrupt, true, false))
-        assertNull(HookCapContract.verdict(null, Installed.Epoch(100), true, false))
-        assertNull(HookCapContract.verdict(200, Installed.Epoch(100), null, false))
-        assertNull(HookCapContract.verdict(200, Installed.Epoch(100), true, null))
-        // a definite failure wins over an unknown input
-        assertEquals(false, HookCapContract.verdict(50, Installed.Epoch(100), null, null))
+    @Test fun unknownInputMeansUnknownButADefiniteFailureWins() {
+        assertNull(HookCapContract.verdict(null, false))
+        assertNull(HookCapContract.verdict(true, null))
+        assertNull(HookCapContract.verdict(null, null))
+        assertEquals(false, HookCapContract.verdict(false, null))
+        assertEquals(false, HookCapContract.verdict(null, true))
+        // the owner's hook switch file
+        assertEquals(false, HookCapContract.verdict(true, false, hooksOff = true))
+        assertEquals(false, HookCapContract.verdict(false, null, hooksOff = true))
+        assertNull(HookCapContract.verdict(true, false, hooksOff = null))
+        assertEquals(true, HookCapContract.verdict(true, false, hooksOff = false))
     }
 
     @Test fun markerIsPerConfigDirFile() {
@@ -57,11 +52,29 @@ class HookCapContractTest {
         assertEquals(false, HookCapContract.combineDisableAllHooks(false, false))
         assertNull(HookCapContract.combineDisableAllHooks(false, null))
         assertNull(HookCapContract.combineDisableAllHooks(null, false))
-        val inst = Installed.Epoch(100)
-        assertEquals(false, HookCapContract.verdict(200, inst, true, HookCapContract.combineDisableAllHooks(false, true)))
+        assertEquals(false, HookCapContract.verdict(true, HookCapContract.combineDisableAllHooks(false, true)))
     }
 
-    @Test fun hotReloadBranchIsOff() = assertFalse(HookCapContract.HOT_RELOAD_BRANCH)
+    @Test fun versionCommCountsAsClaudeOnlyWhenTheExeIsUnderClaudeVersions() {
+        val exe = "/home/u/.local/share/claude/versions/2.1.316"
+        // bash(2) -> 2.1.316 (3, real claude) -> 2.1.316 (4, the bundled rg: same comm, other exe)
+        val procs = listOf(
+            Proc(2, 1, "bash"), Proc(3, 2, "2.1.316", exe), Proc(4, 3, "2.1.316", "/home/u/.local/share/claude/vendor/rg"),
+        )
+        assertEquals(3, HookCapContract.shallowestClaude(1, procs))
+        // the rg alone is not a claude, and an unknown exe is not trusted
+        assertNull(HookCapContract.shallowestClaude(1, listOf(Proc(4, 1, "2.1.316", "/x/rg"))))
+        assertNull(HookCapContract.shallowestClaude(1, listOf(Proc(4, 1, "2.1.316", null))))
+        // only dotted numbers are version comms
+        assertNull(HookCapContract.shallowestClaude(1, listOf(Proc(4, 1, "2", exe), Proc(5, 1, "2.x", exe))))
+        // the pane's own process may be the versioned binary
+        assertEquals(1, HookCapContract.shallowestClaude(1, listOf(Proc(1, 0, "2.1.316", exe))))
+    }
+
+    @Test fun paneProcessThatIsAClaudeHelperIsNoClaude() {
+        assertNull(HookCapContract.shallowestClaude(1, listOf(Proc(1, 0, "claude-helper"))))
+        assertNull(HookCapContract.shallowestClaude(1, listOf(Proc(1, 0, "claude-helper"), Proc(2, 1, "node"))))
+    }
 
     @Test fun shallowestClaudeHandlesRestartChains() {
         // pane bash(1) -> bash -lc(2) -> claude(3) -> claude helper(4)

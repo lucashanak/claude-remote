@@ -77,6 +77,7 @@ internal class StatusService(
                     scope = scope,
                     liveSession = { registry.ssh(sessionId)?.getSession() },
                     isBackground = { isBackground() },
+                    viaExec = { registry.execActive(tab.server.id) },
                 )
             }
         }
