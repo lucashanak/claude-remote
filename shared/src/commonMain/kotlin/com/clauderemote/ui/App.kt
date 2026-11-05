@@ -733,6 +733,9 @@ fun App(
                 onDismiss = { updateState = UpdateState() }
             )
 
+            // Read-aloud transport (only visible while something is read).
+            TtsPlayerBar()
+
             // Main content
             when (currentScreen) {
                 Screen.LAUNCHER -> {

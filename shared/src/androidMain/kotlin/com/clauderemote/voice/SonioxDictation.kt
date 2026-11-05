@@ -11,7 +11,6 @@ import android.os.Looper
 import androidx.core.content.ContextCompat
 import com.clauderemote.util.FileLogger
 import okhttp3.OkHttpClient
-import okhttp3.Request
 import okhttp3.Response
 import okhttp3.WebSocket
 import okhttp3.WebSocketListener
@@ -123,7 +122,9 @@ internal class SonioxDictation(
             postOnMain { onError("Chybí oprávnění mikrofonu.") }
             return
         }
-        val request = Request.Builder().url(WS_URL).build()
+        // Key travels with the upgrade request — the config-message `api_key`
+        // is deprecated and refused from 2027-01-15.
+        val request = sonioxWsRequest(WS_URL, apiKey)
         ws = http.newWebSocket(request, Listener())
     }
 
@@ -146,7 +147,6 @@ internal class SonioxDictation(
         override fun onOpen(webSocket: WebSocket, response: Response) {
             FileLogger.log(TAG, "WS open (continuous=$continuous)")
             val config = JSONObject().apply {
-                put("api_key", apiKey)
                 put("model", MODEL)
                 // "mulaw" is a raw (headerless) codec, so unlike a self-
                 // describing container we must state the sample rate + channel
@@ -393,7 +393,7 @@ internal class SonioxDictation(
     companion object {
         private const val TAG = "SonioxStt"
         private const val WS_URL = "wss://stt-rt.soniox.com/transcribe-websocket"
-        private const val MODEL = "stt-rt-v5"
+        private const val MODEL = "stt-rt-v6"
         private const val SAMPLE_RATE = 16000
         private const val FRAME_BYTES = 3200 // 100 ms @ 16 kHz mono 16-bit
         // Silence timer: the pause-between-words tolerance is now the user-set

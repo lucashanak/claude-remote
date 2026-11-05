@@ -3,6 +3,7 @@ package com.clauderemote.voice
 import org.json.JSONObject
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
 /**
@@ -68,8 +69,10 @@ class DesktopDictationTest {
 
     @Test
     fun `soniox config states the raw format explicitly`() {
-        val cfg = JSONObject(sonioxDictationConfig("key-123"))
-        assertEquals("key-123", cfg.getString("api_key"))
+        val cfg = JSONObject(sonioxDictationConfig())
+        // The key travels in the upgrade header, never in the config frame.
+        assertFalse(cfg.has("api_key"))
+        assertEquals("stt-rt-v6", cfg.getString("model"))
         // mulaw is headerless, so rate and channels cannot be inferred.
         assertEquals("mulaw", cfg.getString("audio_format"))
         assertEquals(16000, cfg.getInt("sample_rate"))

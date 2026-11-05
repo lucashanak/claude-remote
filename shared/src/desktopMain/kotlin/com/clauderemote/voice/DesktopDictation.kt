@@ -72,7 +72,12 @@ internal class DesktopDictation(
             onError("Missing Soniox API key.")
             return
         }
-        ws = http.newWebSocket(Request.Builder().url(WS_URL).build(), Listener())
+        // Key in the upgrade header — config `api_key` is deprecated (refused
+        // from 2027-01-15).
+        ws = http.newWebSocket(
+            Request.Builder().url(WS_URL).header("Authorization", "Bearer $apiKey").build(),
+            Listener(),
+        )
     }
 
     /** Stops capture and asks the server to finalize what it already has. */
@@ -123,7 +128,7 @@ internal class DesktopDictation(
                 return
             }
             FileLogger.log(TAG, "WS open")
-            webSocket.send(sonioxDictationConfig(apiKey))
+            webSocket.send(sonioxDictationConfig())
             startCapture(webSocket)
             // Armed immediately with the long guard so a session that never
             // produces a token — a muted mic, a false start — still ends
@@ -273,9 +278,10 @@ internal class DesktopDictation(
  * have to be stated; the Czech+English hints are what let a sentence mix Czech
  * with English identifiers in one pass.
  */
-internal fun sonioxDictationConfig(apiKey: String): String = JSONObject().apply {
-    put("api_key", apiKey)
-    put("model", "stt-rt-v5")
+internal fun sonioxDictationConfig(): String = JSONObject().apply {
+    // No `api_key` here: the key rides in the Authorization header of the
+    // upgrade request (the config field is refused from 2027-01-15).
+    put("model", "stt-rt-v6")
     put("audio_format", "mulaw")
     put("sample_rate", 16000)
     put("num_channels", 1)

@@ -33,11 +33,17 @@ import java.util.concurrent.atomic.AtomicReference
  * drain-before-release avoid clipping the first/last word. Requires a Soniox
  * key synced from the phone ([SonioxKeyStore]); [WatchTts] remains the
  * fallback when there's no key.
+ *
+ * Long messages: Soniox caps one stream at 5000 bytes of text and 2 minutes of
+ * audio, so the text is cut into segments ([ttsSegments]) read one after the
+ * other as separate streams on the same socket, all into the same AudioTrack
+ * (the short gap while the next segment starts reads as a paragraph pause).
+ * The phone has a full player with seek and reconnect; the watch keeps it simple.
  */
 object SonioxWatchTts {
     private const val TAG = "SonioxWatchTts"
     private const val WS_URL = "wss://tts-rt.soniox.com/tts-websocket"
-    private const val MODEL = "tts-rt-v1"
+    private const val MODEL = "tts-rt-v2"
     private const val SAMPLE_RATE = 8000 // μ-law is only allowed at 8000 Hz
     private const val DRAIN_TICK_MS = 20L
     private const val DRAIN_MAX_TICKS = 400
@@ -61,10 +67,14 @@ object SonioxWatchTts {
         stop()
         completion.set(onDone)
         val gen = generation.incrementAndGet()
-        val req = Request.Builder().url(WS_URL).build()
+        val segments = ttsSegments(text)
+        if (segments.isEmpty()) { fireDone(); return }
+        // Key in the upgrade header — the config `api_key` is deprecated
+        // (refused from 2027-01-15).
+        val req = Request.Builder().url(WS_URL).header("Authorization", "Bearer $apiKey").build()
         ws.set(http.newWebSocket(req, Listener(
-            context.applicationContext, gen, apiKey,
-            SonioxKeyStore.ttsVoice, SonioxKeyStore.ttsSpeedPct, text,
+            context.applicationContext, gen,
+            SonioxKeyStore.ttsVoice, SonioxKeyStore.ttsSpeedPct, segments,
         )))
     }
 
@@ -86,12 +96,13 @@ object SonioxWatchTts {
     private class Listener(
         private val ctx: Context,
         private val gen: Int,
-        private val apiKey: String,
         private val voice: String,
         private val speedPct: Int,
-        private val text: String,
+        private val segments: List<String>,
     ) : WebSocketListener() {
-        private val streamId = "cr-$gen"
+        // Segment being read and its stream id (a fresh id per segment).
+        @Volatile private var idx = 0
+        private fun streamId(i: Int) = "cr-$gen-$i"
         @Volatile private var writtenFrames = 0
         // Pre-play jitter buffer. Accumulate ~0.75 s of decoded audio before
         // the first play() so an uneven downlink can't underrun AudioTrack and
@@ -107,10 +118,15 @@ object SonioxWatchTts {
         private fun framesOf(bytes: Int) = bytes / 2
 
         override fun onOpen(webSocket: WebSocket, response: Response) {
-            WearLog.i(ctx, TAG, "WS open")
+            WearLog.i(ctx, TAG, "WS open (${segments.size} segments)")
+            startSegment(webSocket, 0)
+        }
+
+        private fun startSegment(webSocket: WebSocket, i: Int) {
+            idx = i
+            val id = streamId(i)
             val cfg = JSONObject().apply {
-                put("api_key", apiKey)
-                put("stream_id", streamId)
+                put("stream_id", id)
                 put("model", MODEL)
                 put("language", "cs")
                 put("voice", voice.ifBlank { "Adrian" })
@@ -121,15 +137,28 @@ object SonioxWatchTts {
                 put("sample_rate", SAMPLE_RATE)
             }
             webSocket.send(cfg.toString())
-            webSocket.send(JSONObject().put("stream_id", streamId).put("text", text).put("text_end", true).toString())
+            webSocket.send(JSONObject().put("stream_id", id).put("text", segments[i]).put("text_end", true).toString())
+        }
+
+        /** Current segment is fully received: start the next one, or finish. */
+        private fun segmentDone(webSocket: WebSocket) {
+            if (idx + 1 < segments.size) startSegment(webSocket, idx + 1) else finishPlayback(webSocket)
         }
 
         override fun onMessage(webSocket: WebSocket, textMsg: String) {
             if (gen != generation.get()) return
             val obj = runCatching { JSONObject(textMsg) }.getOrNull() ?: return
+            // Late frames (e.g. `terminated`) of a stream we already moved past.
+            val sid = obj.optString("stream_id")
+            if (sid.isNotEmpty() && sid != streamId(idx)) return
             val err = obj.optString("error_code").takeIf { it.isNotBlank() && it != "null" }
             if (err != null) {
-                WearLog.w(ctx, TAG, "server error: $err — ${obj.optString("error_message")}")
+                WearLog.w(ctx, TAG, "server error: $err (segment ${idx + 1}/${segments.size}) — ${obj.optString("error_message")}")
+                if (err == "413" && sid.isNotEmpty()) {
+                    // Segment ran past 2 min of audio: keep what played, go on.
+                    segmentDone(webSocket)
+                    return
+                }
                 fireDone()
                 stop()
                 return
@@ -142,7 +171,7 @@ object SonioxWatchTts {
                 if (mulaw != null && mulaw.isNotEmpty()) writePcm(mulawToPcm16(mulaw))
             }
             if (obj.optBoolean("audio_end") || obj.optBoolean("terminated")) {
-                finishPlayback(webSocket)
+                segmentDone(webSocket)
             }
         }
 

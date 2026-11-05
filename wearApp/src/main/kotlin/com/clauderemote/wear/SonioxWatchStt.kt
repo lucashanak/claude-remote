@@ -114,7 +114,12 @@ internal class SonioxWatchStt(
         // Capture BEFORE the socket handshake — see class kdoc. μ-law frames
         // buffer into [backlog] until onOpen flips [liveSocket] on.
         startCapture()
-        ws = http.newWebSocket(Request.Builder().url(WS_URL).build(), Listener(apiKey))
+        // Key in the upgrade header — config `api_key` is deprecated (refused
+        // from 2027-01-15).
+        ws = http.newWebSocket(
+            Request.Builder().url(WS_URL).header("Authorization", "Bearer $apiKey").build(),
+            Listener(),
+        )
     }
 
     fun stop() {
@@ -131,12 +136,11 @@ internal class SonioxWatchStt(
         runCatching { ws?.send("") }
     }
 
-    private inner class Listener(private val apiKey: String) : WebSocketListener() {
+    private inner class Listener : WebSocketListener() {
         override fun onOpen(webSocket: WebSocket, response: Response) {
             connectMs = (System.nanoTime() - startNanos) / 1_000_000
             WearLog.i(context, TAG, "WS open (connect $connectMs ms)")
             val config = JSONObject().apply {
-                put("api_key", apiKey)
                 put("model", MODEL)
                 // "mulaw" is a raw (headerless) codec, so unlike a self-
                 // describing container we must state the sample rate + channel
@@ -392,7 +396,7 @@ internal class SonioxWatchStt(
     companion object {
         private const val TAG = "SonioxWatchStt"
         private const val WS_URL = "wss://stt-rt.soniox.com/transcribe-websocket"
-        private const val MODEL = "stt-rt-v5"
+        private const val MODEL = "stt-rt-v6"
         private const val SAMPLE_RATE = 16000
         private const val FRAME_BYTES = 3200 // 100 ms @ 16 kHz mono 16-bit
         // Silence timer: the pause-between-words tolerance is now the phone-
