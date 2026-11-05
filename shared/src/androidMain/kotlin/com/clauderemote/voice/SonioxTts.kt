@@ -158,6 +158,8 @@ private class SegBuf {
     var pending: SegBuf? = null
     /** Server errors in a row for this segment (connection drops don't count). */
     var serverErrors = 0
+    /** 429s in a row (account stream cap) — a separate, larger budget (~1 min). */
+    var rateLimited = 0
     /** Not before this time (ms) — backoff after a server error. */
     var retryAt = 0L
 
@@ -249,7 +251,7 @@ internal class Session(
             haltNote = null
             failingSince = 0L
             backoffMs = 0L
-            for (b in bufs) { b.serverErrors = 0; b.retryAt = 0L }
+            for (b in bufs) { b.serverErrors = 0; b.rateLimited = 0; b.retryAt = 0L }
         }
         paused = false
         track?.let { runCatching { it.play() } }
@@ -332,6 +334,7 @@ internal class Session(
             t.write(lead, 0, lead.size)
             FileLogger.log(tag, "playback started (speed=$rate, ${segments.size} segments)")
             val chunk = ByteArray(SonioxTts.CHUNK_SAMPLES)
+            val tail = ByteArray(maxOf(t.bufferSizeInFrames * 2, SonioxTts.SAMPLE_RATE))
             while (true) {
                 var n = 0
                 var epoch: Int
@@ -376,7 +379,15 @@ internal class Session(
                     }
                     epoch = seekEpoch
                 }
-                if (finished) break
+                if (finished) {
+                    // Drain: push a buffer's worth of silence so every real sample
+                    // has played before stop — releasing right after the last
+                    // write cut the final word off. A seek (⏮, −10 s) during the
+                    // drain goes back to playing instead of ending.
+                    if (!writeFully(t, tail, epoch)) return
+                    if (lock.withLock { epoch == seekEpoch }) break
+                    continue
+                }
                 if (!writeFully(t, mulawToPcm16(chunk, n), epoch)) return
                 lock.withLock {
                     // A seek during the blocking write let up to one stale chunk in.
@@ -385,11 +396,6 @@ internal class Session(
                     }
                 }
             }
-            // Drain: push a buffer's worth of silence so every real sample has
-            // played before stop — releasing right after the last write cut the
-            // final word off.
-            val tail = ByteArray(maxOf(t.bufferSizeInFrames * 2, SonioxTts.SAMPLE_RATE))
-            if (!writeFully(t, tail, lock.withLock { seekEpoch })) return
             Thread.sleep(150)
             FileLogger.log(tag, "finished all ${segments.size} segments")
             stop()
@@ -623,6 +629,7 @@ internal class Session(
                 if (obj.optBoolean("audio_end") || obj.optBoolean("terminated")) {
                     target.done = true
                     b.serverErrors = 0
+                    b.rateLimited = 0
                     streams.remove(id)
                     pumpLocked()
                 }
@@ -643,7 +650,7 @@ internal class Session(
 
         private fun closedLocked(webSocket: WebSocket, why: String) = lock.withLock {
             if (!mine(webSocket)) return@withLock
-            if (streams.isEmpty()) {
+            if (wsOpen && streams.isEmpty()) {
                 // Idle socket closed: not a failure, reconnect on demand.
                 ws = null
                 wsOpen = false
@@ -658,8 +665,10 @@ internal class Session(
             when {
                 response?.code == 401 || response?.code == 403 ->
                     fatalLocked("Soniox odmítl API klíč (${response.code})")
-                streams.isEmpty() -> {
-                    // Idle socket died (network switch): nothing was lost.
+                // Streams start only in onOpen, so a socket still handshaking always
+                // has none — that case must back off, or it reconnects in a hot loop.
+                wsOpen && streams.isEmpty() -> {
+                    // Idle open socket died (network switch): nothing was lost.
                     ws = null
                     wsOpen = false
                     pumpLocked()
@@ -703,8 +712,8 @@ internal class Session(
                 // 408 / 429 / 5xx: retry this segment after a growing pause.
                 // 429 is often the account's stream cap still counting a dead
                 // socket's streams, so it does not use up the attempts.
-                if (code != "429") b.serverErrors++
-                if (b.serverErrors >= SonioxTts.MAX_STREAM_ATTEMPTS) {
+                if (code == "429") b.rateLimited++ else b.serverErrors++
+                if (b.serverErrors >= SonioxTts.MAX_STREAM_ATTEMPTS || b.rateLimited >= 20) {
                     haltLocked("chyba serveru ($code)")
                 } else {
                     val delay = if (code == "429") 3000L else 1000L * b.serverErrors
@@ -938,8 +947,6 @@ internal class Session(
             runCatching { ctx.getSystemService(ConnectivityManager::class.java)?.unregisterNetworkCallback(cb) }
         }
         netCallback = null
-        // A newer session may already own the bar and the notification id.
-        val ownsUi = TtsPlayback.controller === this || TtsPlayback.controller == null
         TtsPlayback.detach(this)
         SonioxTts.ended(this)
         postOnMain {
@@ -947,7 +954,9 @@ internal class Session(
             receiver = null
             media?.let { runCatching { it.isActive = false; it.release() } }
             media = null
-            if (ownsUi) runCatching { ctx.getSystemService(NotificationManager::class.java)?.cancel(NOTIFICATION_ID) }
+            // A newer session may already own the notification id; it attaches
+            // before posting, so checking here on main is race-free.
+            if (TtsPlayback.controller == null) runCatching { ctx.getSystemService(NotificationManager::class.java)?.cancel(NOTIFICATION_ID) }
             onFinish()
         }
     }

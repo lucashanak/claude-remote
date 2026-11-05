@@ -180,7 +180,8 @@ object SonioxWatchTts {
 
         // Server closed the socket mid-reading: end cleanly instead of hanging.
         override fun onClosing(webSocket: WebSocket, code: Int, reason: String) {
-            if (gen != generation.get()) return
+            // After a normal finish ws is already cleared; don't stop a newer reading.
+            if (gen != generation.get() || ws.get() !== webSocket) return
             WearLog.w(ctx, TAG, "server closed: $code $reason")
             runCatching { webSocket.close(1000, null) }
             fireDone()
