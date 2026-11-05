@@ -48,7 +48,10 @@ object SonioxWatchTts {
     private const val DRAIN_TICK_MS = 20L
     private const val DRAIN_MAX_TICKS = 400
 
-    private val http = OkHttpClient.Builder().build()
+    private val http = OkHttpClient.Builder()
+        // Notice a dead tunnel in seconds instead of hanging on it.
+        .pingInterval(10, java.util.concurrent.TimeUnit.SECONDS)
+        .build()
     private val main = Handler(Looper.getMainLooper())
     private val generation = AtomicInteger(0)
     private val ws = AtomicReference<WebSocket?>(null)
@@ -175,9 +178,19 @@ object SonioxWatchTts {
             }
         }
 
+        // Server closed the socket mid-reading: end cleanly instead of hanging.
+        override fun onClosing(webSocket: WebSocket, code: Int, reason: String) {
+            if (gen != generation.get()) return
+            WearLog.w(ctx, TAG, "server closed: $code $reason")
+            runCatching { webSocket.close(1000, null) }
+            fireDone()
+            stop()
+        }
+
         override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
             if (gen != generation.get()) return
             WearLog.w(ctx, TAG, "WS failure: ${t.message}")
+            fireDone() // before stop(), which drops the completion
             stop() // releases the track
         }
 

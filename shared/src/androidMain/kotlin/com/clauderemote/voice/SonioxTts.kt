@@ -156,7 +156,10 @@ private class SegBuf {
     var done = false
     /** A re-download running while the player still reads the old copy. */
     var pending: SegBuf? = null
-    var attempts = 0
+    /** Server errors in a row for this segment (connection drops don't count). */
+    var serverErrors = 0
+    /** Not before this time (ms) — backoff after a server error. */
+    var retryAt = 0L
 
     fun append(b: ByteArray) {
         if (size + b.size > data.size) data = data.copyOf(maxOf(data.size * 2, size + b.size, 16_000))
@@ -186,7 +189,10 @@ internal class Session(
     private var stopped = false
     private var paused = false
     private var resumeOnFocusGain = false
+    /** Set by the player when it ran out of audio while downloads are halted. */
     private var interrupted: String? = null
+    /** Downloads gave up (no signal for [GIVE_UP_MS], or a segment kept failing). */
+    private var haltNote: String? = null
     private var cur = 0
     private var pos = 0
     private var seekEpoch = 0
@@ -198,6 +204,7 @@ internal class Session(
     private var backoffMs = 0L
     private var reconnectTask: ScheduledFuture<*>? = null
     private var idleTask: ScheduledFuture<*>? = null
+    private var retryTask: ScheduledFuture<*>? = null
     private var lastPublished: TtsPlayerState? = null
 
     @Volatile private var track: AudioTrack? = null
@@ -209,9 +216,15 @@ internal class Session(
     private val audioManager = ctx.getSystemService(AudioManager::class.java)
 
     fun start() {
-        TtsPlayback.attach(this, stateLocked())
+        lock.withLock { if (stopped) return }
+        // Focus refused (a phone call is on): start paused instead of talking over it.
+        val granted = requestFocus()
+        lock.withLock {
+            if (stopped) return
+            if (!granted) paused = true
+            TtsPlayback.attach(this, stateLocked())
+        }
         postOnMain { setUpMediaControls() }
-        requestFocus()
         watchNetwork()
         lock.withLock { pumpLocked() }
         player = Thread({ playLoop() }, "soniox-tts-play").apply { start() }
@@ -230,12 +243,13 @@ internal class Session(
     private fun resumeLocked() {
         if (stopped) return
         resumeOnFocusGain = false
-        if (interrupted != null) {
+        if (interrupted != null || haltNote != null) {
+            // ▶ after giving up: start downloading again from a clean slate.
             interrupted = null
+            haltNote = null
             failingSince = 0L
             backoffMs = 0L
-            bufs[cur].attempts = 0
-            if (cur + 1 < bufs.size) bufs[cur + 1].attempts = 0
+            for (b in bufs) { b.serverErrors = 0; b.retryAt = 0L }
         }
         paused = false
         track?.let { runCatching { it.play() } }
@@ -272,9 +286,13 @@ internal class Session(
     override fun rewind(seconds: Int) = lock.withLock {
         if (stopped) return@withLock
         var p = pos - seconds * SonioxTts.SAMPLE_RATE
-        if (p < 0 && cur > 0 && bufs[cur - 1].done) {
-            cur--
-            p += bufs[cur].size
+        if (p < 0 && cur > 0) {
+            val prev = bufs[cur - 1]
+            prev.pending?.takeIf { it.done }?.let { bufs[cur - 1] = it } // finished re-download
+            if (bufs[cur - 1].done) {
+                cur--
+                p += bufs[cur].size
+            }
         }
         pos = p.coerceAtLeast(0)
         seekLocked()
@@ -340,8 +358,14 @@ internal class Session(
                                 publishLocked()
                                 continue
                             }
+                            // Starved. If downloads gave up, stop here so ▶ resumes
+                            // from this point; otherwise wait for the download.
+                            haltNote?.let { note ->
+                                interrupted = note
+                                FileLogger.log(tag, "interrupted at segment ${cur + 1}/${bufs.size}: $note")
+                            }
                             publishLocked()
-                            changed.await(250, TimeUnit.MILLISECONDS)
+                            if (interrupted == null) changed.await(250, TimeUnit.MILLISECONDS)
                             continue
                         }
                         n = minOf(chunk.size, b.size - pos)
@@ -353,8 +377,7 @@ internal class Session(
                     epoch = seekEpoch
                 }
                 if (finished) break
-                val pcm = mulawToPcm16(chunk, n)
-                t.write(pcm, 0, pcm.size) // blocks: paces the loop to real time
+                if (!writeFully(t, mulawToPcm16(chunk, n), epoch)) return
                 lock.withLock {
                     // A seek during the blocking write let up to one stale chunk in.
                     if (epoch != seekEpoch && !stopped) {
@@ -366,7 +389,7 @@ internal class Session(
             // played before stop — releasing right after the last write cut the
             // final word off.
             val tail = ByteArray(maxOf(t.bufferSizeInFrames * 2, SonioxTts.SAMPLE_RATE))
-            t.write(tail, 0, tail.size)
+            if (!writeFully(t, tail, lock.withLock { seekEpoch })) return
             Thread.sleep(150)
             FileLogger.log(tag, "finished all ${segments.size} segments")
             stop()
@@ -385,6 +408,29 @@ internal class Session(
             }
             track = null
         }
+    }
+
+    /**
+     * Blocking write of the whole buffer. A pause makes AudioTrack return a
+     * short count; the remainder is written after resume instead of being
+     * dropped (that clipped a syllable on every pause). A seek discards it.
+     * Returns false once the session is stopped.
+     */
+    private fun writeFully(t: AudioTrack, pcm: ByteArray, epoch: Int): Boolean {
+        var off = 0
+        while (off < pcm.size) {
+            val w = t.write(pcm, off, pcm.size - off)
+            if (w < 0) throw IllegalStateException("AudioTrack.write failed ($w)")
+            off += w
+            if (off >= pcm.size) break
+            lock.withLock {
+                while (!stopped && paused && epoch == seekEpoch) changed.await()
+                if (stopped) return false
+                if (epoch != seekEpoch) return true
+            }
+            if (w == 0) Thread.sleep(10)
+        }
+        return !lock.withLock { stopped }
     }
 
     private fun buildTrack(): AudioTrack {
@@ -413,13 +459,29 @@ internal class Session(
 
     /** Start streams for the next segments that still need audio. */
     private fun pumpLocked() {
-        if (stopped || interrupted != null) return
-        val want = (cur until bufs.size).filter { i ->
+        if (stopped || haltNote != null) return
+        val now = System.currentTimeMillis()
+        val missing = (cur until bufs.size).filter { i ->
             val b = bufs[i]
             !b.done && !(b.pending?.done ?: false) && i !in streams.values
         }
+        if (missing.isEmpty()) {
+            if (streams.isEmpty()) {
+                // Nothing left to download: an old connection failure must not
+                // count toward giving up on a later one.
+                failingSince = 0L
+                backoffMs = 0L
+                scheduleIdleCloseLocked()
+            }
+            return
+        }
+        val want = missing.filter { bufs[it].retryAt <= now }
         if (want.isEmpty()) {
-            if (streams.isEmpty()) scheduleIdleCloseLocked()
+            // All waiting out a server-error backoff: come back when the first is due.
+            if (retryTask?.isDone != false) {
+                val due = missing.minOf { bufs[it].retryAt } - now
+                retryTask = sched.schedule({ lock.withLock { pumpLocked() } }, due.coerceAtLeast(50), TimeUnit.MILLISECONDS)
+            }
             return
         }
         idleTask?.cancel(false); idleTask = null
@@ -440,10 +502,15 @@ internal class Session(
         // Partial audio left by a broken stream: if the player is inside this
         // segment, keep it playing and collect the new copy on the side; else
         // just start over.
-        if (b.size > 0 && !b.done) {
-            if (i == cur && pos > 0) b.pending = SegBuf() else { b.data = ByteArray(0); b.size = 0 }
+        if (!b.done) {
+            if (i == cur && pos > 0 && b.size > 0) {
+                b.pending = SegBuf()
+            } else {
+                // Also drop a half-filled earlier re-download, or the new copy
+                // would be appended after it and the paragraph start repeat.
+                b.data = ByteArray(0); b.size = 0; b.pending = null
+            }
         }
-        b.attempts++
         val id = "s$i-${++streamSeq}"
         streams[id] = i
         val cfg = JSONObject().apply {
@@ -486,7 +553,7 @@ internal class Session(
         val now = System.currentTimeMillis()
         if (failingSince == 0L) failingSince = now
         if (now - failingSince > SonioxTts.GIVE_UP_MS) {
-            interruptLocked("přerušeno (bez signálu)")
+            haltLocked("přerušeno (bez signálu)")
             return
         }
         backoffMs = if (backoffMs == 0L) 1000L else minOf(backoffMs * 2, 15_000L)
@@ -505,9 +572,13 @@ internal class Session(
         }, delayMs, TimeUnit.MILLISECONDS)
     }
 
-    private fun interruptLocked(note: String) {
-        FileLogger.log(tag, "interrupted at segment ${cur + 1}/${bufs.size}: $note")
-        interrupted = note
+    /**
+     * Stop downloading. Playback goes on through what is already in memory;
+     * the player marks itself interrupted only when it actually runs out.
+     */
+    private fun haltLocked(note: String) {
+        FileLogger.log(tag, "downloads halted at segment ${cur + 1}/${bufs.size}: $note")
+        haltNote = note
         reconnectTask?.cancel(false); reconnectTask = null
         ws?.close(1000, null); ws = null; wsOpen = false
         streams.clear()
@@ -521,8 +592,8 @@ internal class Session(
         override fun onOpen(webSocket: WebSocket, response: Response) = lock.withLock {
             if (!mine(webSocket)) return@withLock
             wsOpen = true
-            failingSince = 0L
-            backoffMs = 0L
+            // failingSince/backoff reset only on real audio: a socket that opens
+            // and then errors must not loop at a 1 s cadence forever.
             pumpLocked()
             publishLocked()
         }
@@ -544,10 +615,14 @@ internal class Session(
                 if (seg == null) return@withLock // a stream we already gave up on
                 val b = bufs[seg]
                 val target = b.pending ?: b
-                if (audio != null && audio.isNotEmpty()) target.append(audio)
+                if (audio != null && audio.isNotEmpty()) {
+                    target.append(audio)
+                    failingSince = 0L
+                    backoffMs = 0L
+                }
                 if (obj.optBoolean("audio_end") || obj.optBoolean("terminated")) {
                     target.done = true
-                    target.attempts = 0
+                    b.serverErrors = 0
                     streams.remove(id)
                     pumpLocked()
                 }
@@ -555,24 +630,41 @@ internal class Session(
             }
         }
 
-        override fun onClosed(webSocket: WebSocket, code: Int, reason: String) = lock.withLock {
+        // Server-initiated close arrives here first; onClosed only follows our
+        // own close, so without this the session sat on a dead socket until
+        // the next ping failed.
+        override fun onClosing(webSocket: WebSocket, code: Int, reason: String) {
+            runCatching { webSocket.close(1000, null) }
+            closedLocked(webSocket, "closing $code $reason")
+        }
+
+        override fun onClosed(webSocket: WebSocket, code: Int, reason: String) =
+            closedLocked(webSocket, "closed $code $reason")
+
+        private fun closedLocked(webSocket: WebSocket, why: String) = lock.withLock {
             if (!mine(webSocket)) return@withLock
             if (streams.isEmpty()) {
-                // Idle socket closed by the server: not a failure, reconnect on demand.
+                // Idle socket closed: not a failure, reconnect on demand.
                 ws = null
                 wsOpen = false
                 pumpLocked()
             } else {
-                connectionLostLocked("closed $code $reason")
+                connectionLostLocked(why)
             }
         }
 
         override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) = lock.withLock {
             if (!mine(webSocket)) return@withLock
-            if (response?.code == 401 || response?.code == 403) {
-                fatalLocked("Soniox odmítl API klíč (${response.code})")
-            } else {
-                connectionLostLocked(t.message ?: t.javaClass.simpleName)
+            when {
+                response?.code == 401 || response?.code == 403 ->
+                    fatalLocked("Soniox odmítl API klíč (${response.code})")
+                streams.isEmpty() -> {
+                    // Idle socket died (network switch): nothing was lost.
+                    ws = null
+                    wsOpen = false
+                    pumpLocked()
+                }
+                else -> connectionLostLocked(t.message ?: t.javaClass.simpleName)
             }
         }
     }
@@ -583,8 +675,17 @@ internal class Session(
         FileLogger.log(tag, "server error $code/$type on '$id' (segment ${seg?.plus(1)}): $msg")
         if (seg == null) {
             // Connection-level (no / unknown stream_id).
-            if (code == "401" || code == "403") fatalLocked("Soniox odmítl API klíč ($code)")
-            else if (id.isEmpty()) { ws?.close(1000, null); connectionLostLocked("server $code") }
+            when {
+                code == "401" || code == "403" -> fatalLocked("Soniox odmítl API klíč ($code)")
+                code == "400" || code == "402" -> fatalLocked("Soniox TTS: $msg")
+                id.isEmpty() -> {
+                    // Counts toward giving up like a dropped socket: onOpen no
+                    // longer resets the failure clock, only real audio does.
+                    val sock = ws
+                    connectionLostLocked("server $code")
+                    sock?.close(1000, null)
+                }
+            }
             return
         }
         streams.remove(id)
@@ -598,12 +699,18 @@ internal class Session(
             }
             code == "400" || code == "401" || code == "402" || code == "403" ->
                 fatalLocked("Soniox TTS: $msg")
-            b.attempts >= SonioxTts.MAX_STREAM_ATTEMPTS ->
-                interruptLocked("chyba serveru ($code)")
             else -> {
-                // 408 / 429 / 5xx: try the segment again after a pause.
-                val delay = 1000L * b.attempts
-                sched.schedule({ lock.withLock { pumpLocked() } }, delay, TimeUnit.MILLISECONDS)
+                // 408 / 429 / 5xx: retry this segment after a growing pause.
+                // 429 is often the account's stream cap still counting a dead
+                // socket's streams, so it does not use up the attempts.
+                if (code != "429") b.serverErrors++
+                if (b.serverErrors >= SonioxTts.MAX_STREAM_ATTEMPTS) {
+                    haltLocked("chyba serveru ($code)")
+                } else {
+                    val delay = if (code == "429") 3000L else 1000L * b.serverErrors
+                    b.retryAt = System.currentTimeMillis() + delay
+                    pumpLocked() // schedules itself for the retry time
+                }
             }
         }
         changed.signalAll()
@@ -658,14 +765,17 @@ internal class Session(
         }
     }
 
-    private fun requestFocus() {
-        val req = AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN_TRANSIENT)
+    /** @return false when the system refused focus (e.g. during a call). */
+    private fun requestFocus(): Boolean {
+        val req = focusRequest ?: AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN_TRANSIENT)
             .setAudioAttributes(ttsAttributes)
             .setOnAudioFocusChangeListener(focusListener)
             .setWillPauseWhenDucked(false)
             .build()
-        runCatching { audioManager?.requestAudioFocus(req) }
         focusRequest = req
+        val res = runCatching { audioManager?.requestAudioFocus(req) }.getOrNull()
+        if (res == AudioManager.AUDIOFOCUS_REQUEST_FAILED) FileLogger.log(tag, "audio focus refused")
+        return res != AudioManager.AUDIOFOCUS_REQUEST_FAILED
     }
 
     private fun watchNetwork() {
@@ -694,6 +804,12 @@ internal class Session(
             override fun onRewind() = rewind(10)
             override fun onFastForward() = next()
             override fun onStop() = stop()
+            override fun onCustomAction(action: String, extras: android.os.Bundle?) {
+                when (action) {
+                    CUSTOM_REWIND -> rewind(10)
+                    CUSTOM_STOP -> stop()
+                }
+            }
         })
         ms.isActive = true
         media = ms
@@ -735,6 +851,14 @@ internal class Session(
                         PlaybackState.ACTION_FAST_FORWARD or PlaybackState.ACTION_STOP,
                 )
                 .setState(pbState, PlaybackState.PLAYBACK_POSITION_UNKNOWN, rate)
+                // Android 13+ builds its media controls from these, not from
+                // the notification's buttons — so −10 s and Konec go here too.
+                .addCustomAction(
+                    PlaybackState.CustomAction.Builder(CUSTOM_REWIND, "Zpět o 10 s", android.R.drawable.ic_media_rew).build(),
+                )
+                .addCustomAction(
+                    PlaybackState.CustomAction.Builder(CUSTOM_STOP, "Konec", android.R.drawable.ic_menu_close_clear_cancel).build(),
+                )
                 .build(),
         )
         val title = "Claude · odstavec ${s.segment + 1}/${s.segmentCount}"
@@ -814,6 +938,8 @@ internal class Session(
             runCatching { ctx.getSystemService(ConnectivityManager::class.java)?.unregisterNetworkCallback(cb) }
         }
         netCallback = null
+        // A newer session may already own the bar and the notification id.
+        val ownsUi = TtsPlayback.controller === this || TtsPlayback.controller == null
         TtsPlayback.detach(this)
         SonioxTts.ended(this)
         postOnMain {
@@ -821,7 +947,7 @@ internal class Session(
             receiver = null
             media?.let { runCatching { it.isActive = false; it.release() } }
             media = null
-            runCatching { ctx.getSystemService(NotificationManager::class.java)?.cancel(NOTIFICATION_ID) }
+            if (ownsUi) runCatching { ctx.getSystemService(NotificationManager::class.java)?.cancel(NOTIFICATION_ID) }
             onFinish()
         }
     }
@@ -834,6 +960,8 @@ internal class Session(
         const val ACTION_TOGGLE = "com.clauderemote.tts.TOGGLE"
         const val ACTION_NEXT = "com.clauderemote.tts.NEXT"
         const val ACTION_STOP = "com.clauderemote.tts.STOP"
+        const val CUSTOM_REWIND = "rewind10"
+        const val CUSTOM_STOP = "stop"
 
         val ttsAttributes: AudioAttributes = AudioAttributes.Builder()
             .setUsage(AudioAttributes.USAGE_MEDIA)
