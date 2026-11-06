@@ -71,9 +71,16 @@ internal class TransportResolver(
     // to run the TS probe independently per session, straddling the cooldown
     // window — half the tabs landed on 100.x, half on CF (split-brain, two
     // transport pools to one box, extra KEX churn). One decision per wave.
-    private class ResolvedTransport(val at: Long, val eff: com.clauderemote.model.SshServer)
+    //
+    // [probeFailed]: the decision is Cloudflare because the probe failed (not a cooldown, not a missing Tailscale host).
+    // The exec transport does not take such an entry from the cache (dávka B, F2): the probe ran on a network edge
+    // (1-2 ms after onAvailable) and a second look is cheap, while a wrong "Cloudflare" there used to stick for the
+    // transport's whole life. The tabs keep the one-decision-per-wave rule.
+    private class ResolvedTransport(val at: Long, val eff: com.clauderemote.model.SshServer, val probeFailed: Boolean)
     private val resolvedTransportCache = java.util.concurrent.ConcurrentHashMap<String, ResolvedTransport>()
-    private val resolveMutex = Mutex()
+    // Per SERVER: a probe can take up to 14.5 s (two attempts of 3.5 s connect + 3 s banner read, 1.5 s apart), and it
+    // must not hold up the resolve of another server (it used to be one mutex for all of them).
+    private val resolveMutexes = java.util.concurrent.ConcurrentHashMap<String, Mutex>()
     private val RESOLVE_TTL_MS = 10_000L
 
     private fun isTailscaleEffective(
@@ -103,6 +110,28 @@ internal class TransportResolver(
         if (!ok) recordTailscaleFailure(server)
     }
 
+    // V8 (dávka B): the tabs of ONE shared transport report its death within milliseconds, one onConnectionLost each;
+    // every one used to be a strike, so a single death armed the 20 s cooldown at once (11:00:28: "failed 2×, 3×, 4×,
+    // 5×" within 10 ms). Now one transport's death is at most one strike: a tab whose transport struck in the last
+    // TS_STRIKE_DEBOUNCE_MS adds nothing. Two DIFFERENT transports dying together are still two strikes (a strike also
+    // for a LAN death stays: the strike rule itself is unchanged, F3 waits for F4's causes).
+    private val TS_STRIKE_DEBOUNCE_MS = 1_000L
+    /** server id -> (transport identity -> time of its strike). Identity hash codes: no dead jsch session is kept alive. */
+    private val lastTsStrikeByTransport = java.util.concurrent.ConcurrentHashMap<String, MutableMap<Int, Long>>()
+
+    /** True when [transport] (null = unknown: one key per server) struck within the debounce window; else records it. */
+    private fun tsStrikeDebounced(serverId: String, transport: Any?): Boolean {
+        val now = System.currentTimeMillis()
+        val key = transport?.let { System.identityHashCode(it) } ?: 0
+        val seen = lastTsStrikeByTransport.getOrPut(serverId) { java.util.HashMap() }
+        synchronized(seen) {
+            seen.values.removeAll { now - it >= TS_STRIKE_DEBOUNCE_MS }
+            if (seen.containsKey(key)) return true
+            seen[key] = now
+            return false
+        }
+    }
+
     /** One TS strike; two consecutive strikes arm the cooldown. Fed by both
      *  CONNECT failures and post-connect EARLY DEATHS (see below). */
     private fun recordTailscaleFailure(server: com.clauderemote.model.SshServer) {
@@ -130,6 +159,11 @@ internal class TransportResolver(
     private val lastConnectAt = java.util.concurrent.ConcurrentHashMap<String, Long>()
     private val lastConnectTsEffective = java.util.concurrent.ConcurrentHashMap<String, Boolean>()
     private val lastConnectCfEffective = java.util.concurrent.ConcurrentHashMap<String, Boolean>()
+    /**
+     * When the first tab connected on each shared transport (its jsch session), keyed by identity, weakly: the transport's
+     * age for metric M7 (review B-3 kod L4), which counts a TS transport that died YOUNG, not a young tab on an old one.
+     */
+    private val transportFirstConnectAt = java.util.Collections.synchronizedMap(java.util.WeakHashMap<Any, Long>())
     @Volatile private var lastNetworkTeardownAt = 0L
 
     // ── Cloudflare early-death brake ────────────────────────────────────
@@ -159,9 +193,16 @@ internal class TransportResolver(
     private val lastCfStrikeAt = java.util.concurrent.ConcurrentHashMap<String, Long>()
 
     /** Record a successful connect for early-death attribution. */
-    fun recordConnectSuccess(sessionId: String, server: com.clauderemote.model.SshServer, eff: com.clauderemote.model.SshServer) {
+    fun recordConnectSuccess(
+        sessionId: String,
+        server: com.clauderemote.model.SshServer,
+        eff: com.clauderemote.model.SshServer,
+        /** The shared transport the tab connected on (default: looked up in the registry), null when unknown. */
+        transport: Any? = transportOf(sessionId),
+    ) {
         val connectEpoch = System.currentTimeMillis()
         lastConnectAt[sessionId] = connectEpoch
+        if (transport != null) transportFirstConnectAt.putIfAbsent(transport, connectEpoch)
         val tsEffective = isTailscaleEffective(server, eff)
         lastConnectTsEffective[sessionId] = tsEffective
         lastConnectCfEffective[sessionId] = isCloudflareEffective(eff)
@@ -207,16 +248,28 @@ internal class TransportResolver(
     }
 
     /** From onConnectionLost: count a fresh-connection death on the TS path
-     *  as a TS strike — unless WE tore the transport down (network change). */
-    fun maybeCountTsEarlyDeath(session: ClaudeSession) {
+     *  as a TS strike — unless WE tore the transport down (network change).
+     *  [transport] = the shared transport the tab rode (its jsch session), so all tabs of one dying transport are one
+     *  strike (see [tsStrikeDebounced]); the default looks it up, null when unknown. */
+    fun maybeCountTsEarlyDeath(session: ClaudeSession, transport: Any? = transportOf(session.id)) {
         val at = lastConnectAt[session.id] ?: return
         if (lastConnectTsEffective[session.id] != true) return
         val now = System.currentTimeMillis()
         if (now - at > TS_EARLY_DEATH_MS) return
         if (now - lastNetworkTeardownAt < 5_000) return
-        FileLogger.log(TAG, "Tailscale transport died ${now - at}ms after connect for ${session.id}")
+        // " on <server> transport=<id>": metric M7 counts TS transports that died young, so it tells the per-tab lines of one
+        // transport from those of another by this id (V13, dávka B kolo 3); the id is the debounce key below, left out when unknown.
+        // " transport_age=<ms>": how long the transport itself lived (from its first tab's connect, review B-3 kod L4): M7's
+        // "young" is the transport's age; the strike rule stays on the tab's age, as before
+        val id = transport?.let { " transport=" + Integer.toHexString(System.identityHashCode(it)) } ?: ""
+        val age = transport?.let { transportFirstConnectAt[it] }?.let { " transport_age=${now - it}ms" } ?: ""
+        FileLogger.log(TAG, "Tailscale transport died ${now - at}ms after connect for ${session.id} on ${session.server.name}$id$age")
+        if (tsStrikeDebounced(session.server.id, transport)) return
         recordTailscaleFailure(session.server)
     }
+
+    /** The shared transport (jsch session) [sessionId]'s tab rides; still set while its onConnectionLost runs. */
+    private fun transportOf(sessionId: String): Any? = try { registry.ssh(sessionId)?.getSession() } catch (_: Throwable) { null }
 
     /**
      * A SERVER-level early death: the exec transport (not a tab) died [lifetimeMs] after it came
@@ -325,20 +378,26 @@ internal class TransportResolver(
         // AUTO: one probe + one decision per server per RESOLVE_TTL_MS window,
         // shared by every session reconnecting in the same wave. The mutex
         // collapses concurrent resolvers onto a single probe.
-        resolvedTransportCache[server.id]?.let {
-            if (System.currentTimeMillis() - it.at < RESOLVE_TTL_MS) return it.eff
-        }
-        return resolveMutex.withLock {
-            resolvedTransportCache[server.id]?.let {
-                if (System.currentTimeMillis() - it.at < RESOLVE_TTL_MS) return@withLock it.eff
-            }
+        // The exec transport (ResolveForExec in its context) does not take a cached FAILED probe, see ResolvedTransport.
+        val forExec = kotlinx.coroutines.currentCoroutineContext()[ResolveForExec] != null
+        fun cached(): com.clauderemote.model.SshServer? = resolvedTransportCache[server.id]
+            ?.takeIf { System.currentTimeMillis() - it.at < RESOLVE_TTL_MS && !(forExec && it.probeFailed) }?.eff
+        cached()?.let { return it }
+        return resolveMutexes.getOrPut(server.id) { Mutex() }.withLock {
+            cached()?.let { return@withLock it }
             // Skip Tailscale entirely while cooling down from recent failures
             // — no probe, straight to Cloudflare.
             val cooling = System.currentTimeMillis() < (tailscaleCooldownUntil[server.id] ?: 0L)
-            val chosen = if (!cooling && server.hasTailscale && tailscaleReachable(server))
-                com.clauderemote.model.ServerTransport.TAILSCALE
+            val probed = !cooling && server.hasTailscale
+            val reachable = probed && tailscaleReachable(server)
+            val chosen = if (reachable) com.clauderemote.model.ServerTransport.TAILSCALE
             else com.clauderemote.model.ServerTransport.CLOUDFLARE
             val eff = server.forTransport(chosen)
+            if (!reachable) {
+                // F2: a Cloudflare decision used to leave no line at all (only a TS one logs below)
+                val why = when { cooling -> "cooling down"; !server.hasTailscale -> "no tailscale host"; else -> "probe failed" }
+                FileLogger.log(TAG, "Transport for ${server.name}: CLOUDFLARE ($why)" + if (forExec) " [exec]" else "")
+            }
             if (eff.host != server.host || eff.useCloudflareProxy != server.useCloudflareProxy) {
                 // route=: which kind of path a NEW connection takes (a Tailscale endpoint reached over the
                 // LAN with the VPN off is not a tunnel); read from the routing table, nothing is sent.
@@ -351,7 +410,7 @@ internal class TransportResolver(
                 val route = kotlinx.coroutines.withTimeoutOrNull(1_500) { probe.await() } ?: "unknown"
                 FileLogger.log(TAG, "Transport for ${server.name}: $chosen -> ${eff.host} (cf=${eff.useCloudflareProxy}) route=$route")
             }
-            resolvedTransportCache[server.id] = ResolvedTransport(System.currentTimeMillis(), eff)
+            resolvedTransportCache[server.id] = ResolvedTransport(System.currentTimeMillis(), eff, probeFailed = probed && !reachable)
             eff
         }
     }
@@ -368,15 +427,24 @@ internal class TransportResolver(
     private suspend fun tailscaleReachable(server: com.clauderemote.model.SshServer): Boolean =
         withContext(Dispatchers.IO) {
             repeat(2) { attempt ->
-                try {
+                // F2 (sonda A traceru): every attempt is logged — how long, and how it ended. The network type is not
+                // logged: shared has no seam for it (MainActivity's callback owns NetworkCapabilities, B1).
+                val t0 = System.nanoTime()
+                val outcome = try {
                     java.net.Socket().use { s ->
                         s.connect(java.net.InetSocketAddress(server.tailscaleHost, server.port), 3_500)
                         s.soTimeout = 3_000
                         // sshd sends "SSH-2.0-…" immediately; any byte proves a
                         // live, responsive daemon behind the route.
-                        if (s.getInputStream().read() > 0) return@withContext true
+                        if (s.getInputStream().read() > 0) null else "no banner"
                     }
-                } catch (_: Exception) {}
+                } catch (e: Exception) {
+                    "${e.javaClass.simpleName}: ${e.message}"
+                }
+                val ms = (System.nanoTime() - t0) / 1_000_000
+                FileLogger.log(TAG, "Transport probe ${server.name} ${server.tailscaleHost}:${server.port} attempt ${attempt + 1}/2 " +
+                    if (outcome == null) "ok after ${ms}ms" else "failed after ${ms}ms: $outcome")
+                if (outcome == null) return@withContext true
                 if (attempt == 0) kotlinx.coroutines.delay(1_500) // let WG finish its handshake
             }
             false
@@ -398,4 +466,14 @@ internal class TransportResolver(
 
     /** Drop a disconnected session's connection label. */
     fun clearConnectionLabel(sessionId: String) { _connectionLabels.update { it - sessionId } }
+}
+
+/**
+ * Marks a resolve made for the EXEC transport (its supervisor runs [TransportResolver.resolveTransport] inside
+ * `withContext(ResolveForExec)`). The resolver's signature is the orchestrator's `resolve` lambda and B2 does not touch
+ * the orchestrator (dávka B, contract K-B2), so the purpose travels in the coroutine context. Effect: a cached decision
+ * that came from a FAILED probe is not served to the exec transport; it probes again.
+ */
+internal object ResolveForExec : kotlin.coroutines.CoroutineContext.Element, kotlin.coroutines.CoroutineContext.Key<ResolveForExec> {
+    override val key: kotlin.coroutines.CoroutineContext.Key<*> get() = this
 }

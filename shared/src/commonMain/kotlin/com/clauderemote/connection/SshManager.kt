@@ -160,6 +160,8 @@ class SshManager(
 
         // Read loop — delivers SSH data immediately to onOutput
         readJob = ioScope.launch {
+            // Why the loop ended (dávka B, F4 — log only): the channel's own end, refined below by the transport's.
+            var ended = "channel closed"
             try {
                 val buf = ByteArray(16384)
                 val decoder = java.nio.charset.StandardCharsets.UTF_8.newDecoder()
@@ -168,7 +170,7 @@ class SshManager(
                 val charBuf = java.nio.CharBuffer.allocate(16384 + 4)
                 while (isActive && ch.isConnected) {
                     val n = inputStream.read(buf)
-                    if (n < 0) break
+                    if (n < 0) { ended = "EOF"; break }
                     if (n == 0) { delay(10); if (ch.isClosed) break; continue }
                     val byteBuf = java.nio.ByteBuffer.wrap(buf, 0, n)
                     charBuf.clear()
@@ -176,11 +178,12 @@ class SshManager(
                     charBuf.flip()
                     if (charBuf.hasRemaining()) onOutput(charBuf.toString())
                 }
-            } catch (_: Exception) {
+            } catch (e: Exception) {
+                ended = "${e.javaClass.simpleName}: ${e.message}"
             } finally {
                 if (!disconnected) {
                     disconnected = true
-                    FileLogger.log(TAG, "Connection lost")
+                    FileLogger.log(TAG, "Connection lost " + lostCause(sess, ch, ended))
                     onConnectionLost()
                 }
             }
@@ -222,6 +225,20 @@ class SshManager(
         }
         own.connect(connectTimeout)
         return own
+    }
+
+    /**
+     * `cause=…` of the "Connection lost" line: `local: <why>` when WE closed the shared transport (network teardown, …),
+     * `transport: <jsch's reason>` when the transport ended under us, else the channel's own end (`EOF`, an exception
+     * `<Class>: <message>`, `channel closed`) with whether the transport is still up and the channel's exit status.
+     */
+    private fun lostCause(sess: Session, ch: ChannelShell, channelEnd: String): String {
+        val transportEnd = TransportEnd.of(sess)?.cause
+        return when {
+            transportEnd == null -> "cause=$channelEnd transport=${if (sess.isConnected) "up" else "down"} exitStatus=${ch.exitStatus}"
+            transportEnd.startsWith("local") -> "cause=$transportEnd"
+            else -> "cause=transport: $transportEnd (channel: $channelEnd)"
+        }
     }
 
     /** `channel is not opened.` with an exit status of 1 or 2 is jsch's report of a channel the server refused (MaxSessions). */

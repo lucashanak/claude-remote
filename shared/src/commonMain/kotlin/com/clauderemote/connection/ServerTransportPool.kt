@@ -14,9 +14,11 @@ import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.isActive
+import kotlinx.coroutines.selects.select
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 
 /** What a pooled transport is for. The two roles never share a transport. */
 internal enum class TransportRole(val label: String) { SHELL("shell"), EXEC("exec") }
@@ -135,6 +137,8 @@ class ServerTransportPool(
      * plus their execs overflow sshd's default `MaxSessions` 10. Default `false`, so cap 3.
      */
     private val execWired: (SshServer) -> Boolean = { false },
+    /** Runs at the start of every handshake (before the TCP connect). A seam for tests: a controlled handshake latency. */
+    private val beforeHandshake: suspend () -> Unit = {},
 ) {
 
     private class Transport(
@@ -144,6 +148,8 @@ class ServerTransportPool(
         val viaProxy: Boolean,
         val role: TransportRole,
         val route: String,
+        /** Why it ended (log only, see [TransportEnd]). */
+        val end: TransportEnd,
     ) {
         /** Holders of a channel (shell tabs) or of the exec role (the manager) on this transport. */
         val lessees = mutableSetOf<Any>()
@@ -226,32 +232,41 @@ class ServerTransportPool(
      * Whether one more TRANSIENT channel (a fallback exec while the exec transport is down) fits on
      * [session]'s shell transport and still leaves [FALLBACK_RESERVE] channels of sshd's
      * [SSHD_MAX_SESSIONS] free for the tabs' own short channels: shells + reserved slots + channels already
-     * borrowed + 1 + reserve <= 10. A transport packed with 8 shells (cap 8) has none, so the fallback is
-     * refused instead of running into sshd's refusal. A session this pool does not know says nothing: true.
+     * borrowed + 1 + reserve <= 10. A transport packed with 8 shells (cap 8) has none for a LONG channel, so the
+     * fallback is refused instead of running into sshd's refusal. A [short] channel (a poll, a one-off command) may
+     * take [SHORT_RESERVE_SLOTS] slot of that reserve (V9): with 8 shells one short channel at a time still runs, so
+     * the tabs' polls serialize instead of all being skipped, and 8 + 1 + 1 stays within 10. A session this pool
+     * does not know says nothing: true.
      */
-    internal fun fallbackHeadroom(session: Session): Boolean {
+    internal fun fallbackHeadroom(session: Session, short: Boolean = false): Boolean {
         val t = transports.firstOrNull { it.session === session && it.role == TransportRole.SHELL } ?: return true
-        return t.usable && !t.full && t.hasFallbackHeadroom()
+        return t.usable && !t.full && t.hasFallbackHeadroom(short)
     }
 
     /** A usable shell transport that has [fallbackHeadroom], or null. Look-only: nothing is counted (see [reserveFallbackChannel]). */
-    internal fun fallbackSessionWithHeadroom(): Session? =
-        transports.firstOrNull { it.usable && it.role == TransportRole.SHELL && !it.full && it.hasFallbackHeadroom() }?.session
+    internal fun fallbackSessionWithHeadroom(short: Boolean = false): Session? =
+        transports.firstOrNull { it.usable && it.role == TransportRole.SHELL && !it.full && it.hasFallbackHeadroom(short) }?.session
 
     /**
      * Take one transient channel on [session]'s shell transport if it has [fallbackHeadroom] (counted against
      * the cap like [reserveChannel], decided under the mutex so two callers cannot both take the last slot).
+     * [short]: a poll or one-off command, which may take one slot of the reserve; a long stream may not.
      * Pair with [releaseChannel]. True for a session this pool does not know (nothing to count).
      */
-    internal suspend fun reserveFallbackChannel(session: Session): Boolean = mutex.withLock {
+    internal suspend fun reserveFallbackChannel(session: Session, short: Boolean = false): Boolean = mutex.withLock {
         val t = transports.firstOrNull { it.session === session && it.role == TransportRole.SHELL } ?: return@withLock true
-        if (!t.usable || t.full || !t.hasFallbackHeadroom()) return@withLock false
+        if (!t.usable || t.full || !t.hasFallbackHeadroom(short)) return@withLock false
         t.extraChannels++
         true
     }
 
-    private fun Transport.hasFallbackHeadroom(): Boolean =
-        lessees.size + reserved + extraChannels + 1 + FALLBACK_RESERVE <= SSHD_MAX_SESSIONS
+    /**
+     * Counted by occupancy, not by kind: a short channel fits while at most [SHORT_RESERVE_SLOTS] of the reserve would
+     * be in use afterwards, so two short channels can never both sit in the reserve (they serialize), and a long one
+     * never fits once a short one sits there.
+     */
+    private fun Transport.hasFallbackHeadroom(short: Boolean): Boolean =
+        lessees.size + reserved + extraChannels + 1 + FALLBACK_RESERVE - (if (short) SHORT_RESERVE_SLOTS else 0) <= SSHD_MAX_SESSIONS
 
     /** The route (`lan|tunnel|cf|unknown`) the pooled [session] took; `unknown` if it is not ours. */
     internal fun routeOf(session: Session): String = transports.firstOrNull { it.session === session }?.route ?: "unknown"
@@ -281,15 +296,19 @@ class ServerTransportPool(
      * [lessee] identifies the holder for [release].
      */
     suspend fun lease(server: SshServer, connectTimeout: Int, lessee: Any): Session {
-        val eff = flagsOf(server)
-        val cap = if (execWired(server)) eff.shellCap else SHELLS_PER_TRANSPORT
-        return if (eff.pool) leaseV2(server, connectTimeout, lessee, TransportRole.SHELL, cap)
+        return if (flagsOf(server).pool) leaseV2(server, connectTimeout, lessee, TransportRole.SHELL) { shellCapOf(server) }
         else leaseLegacy(server, connectTimeout, lessee)
     }
 
+    /**
+     * The shell cap of [server] NOW. Read on every pass of the lease loop, not once per lease: an exec transport that comes
+     * up during a reconnect wave lets the tabs still waiting pack by 8 instead of 3 (49 tabs: 7-8 transports, not 17).
+     */
+    private fun shellCapOf(server: SshServer): Int = if (execWired(server)) flagsOf(server).shellCap else SHELLS_PER_TRANSPORT
+
     /** Lease the EXEC transport of [server] (one per key, no shell cap). Caller: the exec transport manager. */
     internal suspend fun leaseExec(server: SshServer, connectTimeout: Int, lessee: Any): Session =
-        leaseV2(server, connectTimeout, lessee, TransportRole.EXEC, Int.MAX_VALUE)
+        leaseV2(server, connectTimeout, lessee, TransportRole.EXEC) { Int.MAX_VALUE }
 
     /** The pre-pool-v2 lease, unchanged: handshake under the mutex, 3 shells per transport. */
     private suspend fun leaseLegacy(server: SshServer, connectTimeout: Int, lessee: Any): Session = mutex.withLock {
@@ -314,8 +333,8 @@ class ServerTransportPool(
     private sealed interface Step {
         class Ready(val session: Session) : Step
         class Wait(val flight: SingleFlight.Flight<Key, Transport>) : Step
-        /** [MAX_PARALLEL_HANDSHAKES] connects of the key already run: wait for one to end, then ask again. */
-        class Throttled(val flight: SingleFlight.Flight<Key, Transport>) : Step
+        /** [MAX_PARALLEL_HANDSHAKES] connects of the key already run: wait for ANY of them to end, then ask again. */
+        class Throttled(val flights: List<SingleFlight.Flight<Key, Transport>>) : Step
     }
 
     /**
@@ -323,18 +342,20 @@ class ServerTransportPool(
      * (counting the slots promised to waiters), else a slot of a pending handshake
      * (joining one, or starting one when all are full and fewer than
      * [MAX_PARALLEL_HANDSHAKES] of the key run). The wait for the handshake
-     * is OUTSIDE the mutex.
+     * is OUTSIDE the mutex. [capNow] is read on every pass (see [shellCapOf]).
      */
     private suspend fun leaseV2(
         server: SshServer,
         connectTimeout: Int,
         lessee: Any,
         role: TransportRole,
-        cap: Int,
+        capNow: () -> Int,
     ): Session {
         val key = server.key(role)
         var attempts = 0
+        var throttleDeadlineNs = System.nanoTime() + connectTimeout * 1_000_000L
         while (true) {
+            val cap = capNow()
             val step = mutex.withLock {
                 prune()
                 val t = transports.firstOrNull {
@@ -346,21 +367,31 @@ class ServerTransportPool(
                     Step.Ready(t.session)
                 } else {
                     val joined = flights.tryJoin(key, cap, MAX_PARALLEL_HANDSHAKES) { newTransport(server, connectTimeout, role) }
-                    if (joined != null) Step.Wait(joined) else Step.Throttled(flights.pending(key)!!)
+                    // the snapshot of the key's running connects is taken under the mutex, with the refusal
+                    if (joined != null) Step.Wait(joined) else Step.Throttled(flights.pendingAll(key))
                 }
             }
             when (step) {
                 is Step.Ready -> return step.session
                 is Step.Throttled -> {
-                    // Not a claimant of that connect: just wait until it has ended (a success publishes a
-                    // transport with room for the next ones or leaves the slot to a new connect, a failure
-                    // lets the next claimant start afresh) and look again.
-                    try {
-                        step.flight.result.await()
-                    } catch (e: CancellationException) {
-                        if (!currentCoroutineContext().isActive) throw e
-                    } catch (_: Throwable) {
+                    // Not a claimant of any of those connects: wait until the FIRST of them has ended (a success
+                    // publishes a transport with room for the next ones or leaves the slot to a new connect, a
+                    // failure lets the next claimant start afresh) and look again. `onJoin`, not `onAwait`: a
+                    // failed connect must wake us, not throw its failure at us. Waiting for the OLDEST one held a
+                    // throttled tab behind a slow handshake although a fast one had long freed a slot.
+                    // N-D: bounded by connectTimeout counted from the last handshake of the key that SUCCEEDED while we
+                    // waited (from the lease's start before that). A blackhole fails the throttled tabs after one
+                    // connectTimeout instead of round after round (49 tabs: ~12 s for 2 s handshakes); a slow wave that
+                    // keeps connecting is never cut.
+                    val left = throttleDeadlineNs - System.nanoTime()
+                    val woke = if (left <= 0) null else withTimeoutOrNull((left + 999_999) / 1_000_000) {
+                        select<SingleFlight.Flight<Key, Transport>> { step.flights.forEach { f -> f.result.onJoin { f } } }
                     }
+                    if (woke == null) {
+                        throw java.io.IOException("no handshake slot to ${server.host} within ${connectTimeout}ms " +
+                            "($MAX_PARALLEL_HANDSHAKES handshakes of the key run, none succeeded)")
+                    }
+                    if (!woke.result.isCancelled) throttleDeadlineNs = System.nanoTime() + connectTimeout * 1_000_000L
                 }
                 is Step.Wait -> {
                     val t0 = System.currentTimeMillis()
@@ -421,6 +452,7 @@ class ServerTransportPool(
         t.lessees.remove(lessee)
         if (t.lessees.isEmpty() && t.reserved == 0) {
             transports.remove(t)
+            t.end.closingLocally("drained")
             try { t.session.disconnect() } catch (_: Exception) {}
             FileLogger.log(TAG, "Disconnected drained transport to ${t.host} (${transports.size} left)")
         }
@@ -430,6 +462,7 @@ class ServerTransportPool(
     private fun dropIfIdle(t: Transport) {
         if (t.lessees.isEmpty() && t.reserved <= 0) {
             transports.remove(t)
+            t.end.closingLocally("idle")
             try { t.session.disconnect() } catch (_: Exception) {}
         }
     }
@@ -465,6 +498,8 @@ class ServerTransportPool(
     fun teardownAll() {
         transports.forEach {
             it.reportedDead = true
+            // F4: the read loops that EOF now must say it was us (a network change), not the network
+            if (it.end.closingLocally("network teardown")) FileLogger.log(TAG, it.end.endedLine())
             try { it.session.disconnect() } catch (_: Exception) {}
         }
     }
@@ -474,6 +509,8 @@ class ServerTransportPool(
         val dead = transports.filter { !it.usable }
         for (t in dead) {
             transports.remove(t)
+            // a write-timeout zombie (reportDead) is still connected: closing it is our decision
+            if (t.session.isConnected && t.end.closingLocally("reported dead")) FileLogger.log(TAG, t.end.endedLine())
             try { t.session.disconnect() } catch (_: Exception) {}
             if (t.lessees.isNotEmpty()) {
                 FileLogger.log(TAG, "Pruned dead transport to ${t.host} (${t.lessees.size} lessees will re-lease)")
@@ -490,6 +527,7 @@ class ServerTransportPool(
 
     /** A connected transport nobody wants any more (every claimant gave up while it connected). Under the mutex. */
     private fun disposeTransport(t: Transport) {
+        t.end.closingLocally("no claimant left")
         try { t.session.disconnect() } catch (_: Exception) {}
         FileLogger.log(TAG, "Disposed transport to ${t.host}:${t.port} role=${t.role.label} (no claimant left)")
     }
@@ -498,14 +536,17 @@ class ServerTransportPool(
         "New transport to ${t.host}:${t.port} role=${t.role.label} route=${t.route} (${transports.size} in pool)"
 
     private suspend fun newTransport(server: SshServer, connectTimeout: Int, role: TransportRole): Transport {
-        val session = connectTransport(server, connectTimeout)
-        return Transport(session, server.host, server.port, server.useCloudflareProxy, role,
-            RouteKind.ofSession(session, server.useCloudflareProxy))
+        val end = TransportEnd("${server.host}:${server.port} role=${role.label}")
+        val session = connectTransport(server, connectTimeout, end)
+        val route = RouteKind.ofSession(session, server.useCloudflareProxy)
+        end.connected(route)
+        return Transport(session, server.host, server.port, server.useCloudflareProxy, role, route, end)
     }
 
     /** Full SSH handshake — mirrors what SshManager.connect used to do per tab. */
-    private suspend fun connectTransport(server: SshServer, connectTimeout: Int): Session =
+    private suspend fun connectTransport(server: SshServer, connectTimeout: Int, end: TransportEnd): Session =
         withContext(Dispatchers.IO) {
+            beforeHandshake()
             FileLogger.log(TAG, "Connecting transport to ${server.host}:${server.port} as ${server.username}")
             val jsch = JSch()
             if (server.authMethod == AuthMethod.KEY && server.privateKey != null) {
@@ -530,6 +571,8 @@ class ServerTransportPool(
             sess.setServerAliveCountMax(2)
             sess.userInfo = TofuUserInfo(server.host, serverStorage)
             sess.timeout = connectTimeout
+            // F4: jsch reports the end of its main loop (and why) only to a logger; this one keeps that reason
+            sess.setLogger(end)
             if (server.useCloudflareProxy) {
                 FileLogger.log(TAG, "Using Cloudflare tunnel proxy for ${server.host}")
                 sess.setProxy(CloudflareProxy(server.host, server.cloudflareToken))
@@ -562,9 +605,70 @@ class ServerTransportPool(
         /** OpenSSH's default `MaxSessions`: channels one connection may carry. */
         internal const val SSHD_MAX_SESSIONS = 10
         /**
-         * Channels of a shell transport that a fallback exec leaves free: the tabs' own transient channels
-         * (the redraw kick, the probes that stay attach-only) still need room when the exec transport is down.
+         * Channels of a shell transport that a fallback exec leaves free: the channels that are still uncounted (the
+         * close-state and peer probes of a tab's connect, the UI's one-offs on a tab session, the script install and
+         * the sessions.json push) still need room when the exec transport is down. A short counted channel may take
+         * one of them ([SHORT_RESERVE_SLOTS]).
          */
         internal const val FALLBACK_RESERVE = 2
+        /**
+         * Slots of [FALLBACK_RESERVE] a SHORT counted channel may take (V9, dávka B round 2): one, so the polls of 8
+         * packed shells run one at a time instead of not at all, while a long stream (the watcher) still keeps off it.
+         */
+        internal const val SHORT_RESERVE_SLOTS = 1
+    }
+}
+
+/**
+ * Why a pooled transport ended, for the log only: it changes nothing (dávka B, F4). jsch tells why its main loop stopped
+ * ("Caught an exception, leaving main loop due to <message>", the message only, no exception class) to nobody but a
+ * logger; this one is installed on every pooled session and keeps that reason. When WE close the transport
+ * ([closingLocally]: network teardown, drained, write-timeout zombie, …) the reason is ours, `local: <why>`.
+ * The tab's read loop ([SshManager]) reads it through `Session.getLogger()` for its `Connection lost cause=…` line.
+ */
+internal class TransportEnd(private val label: String) : com.jcraft.jsch.Logger {
+    @Volatile private var route = "unknown"
+    @Volatile private var connectedAtNs = 0L
+
+    /** The reason once the transport has ended (jsch's message, or `local: <why>`); null while it lives. */
+    @Volatile var cause: String? = null
+        private set
+
+    /** The handshake is done: the transport lives from now on. */
+    fun connected(route: String) {
+        this.route = route
+        connectedAtNs = System.nanoTime()
+    }
+
+    /** We are about to close the transport for [reason]. True when this is the first word on its end (then log it). */
+    @Synchronized fun closingLocally(reason: String): Boolean {
+        if (cause != null) return false
+        cause = "local: $reason"
+        return true
+    }
+
+    fun endedLine(): String = "Transport to $label route=$route ended after ${ageMs()}ms: cause=$cause"
+
+    private fun ageMs(): Long = if (connectedAtNs == 0L) -1 else (System.nanoTime() - connectedAtNs) / 1_000_000
+
+    override fun isEnabled(level: Int): Boolean = level == com.jcraft.jsch.Logger.INFO
+
+    override fun log(level: Int, message: String?) {
+        if (message == null || !message.startsWith(MAIN_LOOP_END)) return
+        val first = synchronized(this) {
+            if (cause != null) false else {
+                cause = message.removePrefix(MAIN_LOOP_END).ifBlank { "unknown" }
+                true
+            }
+        }
+        if (first) FileLogger.log("ServerTransportPool", endedLine())
+    }
+
+    companion object {
+        /** jsch's own words (com.jcraft.jsch.Session.run, mwiede 0.2.x), logged at INFO before it disconnects. */
+        private const val MAIN_LOOP_END = "Caught an exception, leaving main loop due to "
+
+        /** The end recorder of a pooled [session], or null (a standalone session). */
+        fun of(session: Session?): TransportEnd? = try { session?.logger as? TransportEnd } catch (_: Throwable) { null }
     }
 }

@@ -71,7 +71,7 @@ internal class SingleFlight<K : Any, T : Any>(
     /**
      * [join] with a bound on the connects of one [key] running at the same time: when every pending
      * connect is full and [maxParallel] of them already run, nothing is started and the result is null.
-     * The caller then waits for one of them ([pending]) and asks again. This is what keeps a reconnect
+     * The caller then waits for the first of them to end ([pendingAll]) and asks again. This is what keeps a reconnect
      * wave from opening ceil(N / capacity) handshakes at once against a server whose sshd throttles new
      * connections (`MaxStartups`), whatever gate stands in front of the pool.
      */
@@ -96,6 +96,12 @@ internal class SingleFlight<K : Any, T : Any>(
     fun pending(key: K): Flight<K, T>? {
         check(mutex.isLocked) { "SingleFlight.pending needs the owner's mutex" }
         return flights[key]?.firstOrNull()
+    }
+
+    /** Every connect of [key] still running, oldest first (a snapshot: what a refused claimant waits on, the first to end wins). Under the lock. */
+    fun pendingAll(key: K): List<Flight<K, T>> {
+        check(mutex.isLocked) { "SingleFlight.pendingAll needs the owner's mutex" }
+        return flights[key]?.toList().orEmpty()
     }
 
     /** A claimant gave up before the connect finished. A no-op once it has finished. */

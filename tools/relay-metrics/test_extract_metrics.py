@@ -324,7 +324,134 @@ class MetricsTest(unittest.TestCase):
                      "07:20:50.634 D/SessionOrchestrator: Transport for server: TAILSCALE -> 192.168.1.7 (cf=false)",
                      "07:30:00.000 D/SessionOrchestrator: Tailscale transport died 91000ms after connect for " + SID[0])
         d = metrics(text)[0]["2026-11-01"]["M7"]
-        self.assertEqual((d["deaths"], d["deaths_le_30s"], d["ts_connects"], d["death_rate"]), (2, 1, 3, 0.333))
+        # dávka B: the old per-tab-line ratio keeps its value under its new name; death_rate is TS transport deaths /
+        # TS transports and there is no "New transport" line here, so it is n/a
+        self.assertEqual((d["deaths"], d["deaths_le_30s"], d["ts_connects"], d["death_rate_per_tab_line"], d["death_rate"]),
+                         (2, 1, 3, 0.333, "n/a"))
+
+    def test_m7_one_transport_death_is_one_death_not_one_per_tab(self):
+        # B2 (dávka B): one shared transport dying 650 ms after connect is logged once PER TAB (8 lines in the
+        # same ms, cf. 11:00:28 in android-706cbd7b.log); the rate must count that as one death of one transport.
+        # Derived fixture: the real lines with the 8 session ids anonymised and one "New transport" line added.
+        conn = "07:00:00.000 D/SessionOrchestrator: Transport for server: TAILSCALE -> 192.168.1.7 (cf=false) route=lan"
+        new = "07:00:00.050 D/ServerTransportPool: New transport to 192.168.1.7:22 role=shell route=lan (1 in pool)"
+        died = lambda sid: "07:00:00.700 D/SessionOrchestrator: Tailscale transport died 650ms after connect for " + sid
+        d = metrics(batch("--- flush 2026-11-01 08:00:00 +0100 ---", conn, new, *[died(SID[i]) for i in range(8)]))[0]["2026-11-01"]["M7"]
+        # review B-1: exact values, not "<= 1.0" (that held for any wave window and any denominator)
+        self.assertEqual((d["deaths_le_30s"], d["ts_transport_deaths"], d["ts_transports"], d["death_rate"]), (8, 1, 1, 1.0), d)
+
+    M7_HDR = "--- flush 2026-11-01 08:00:00 +0100 ---"
+    # V13 (dávka B, kolo 3): the denominator is the transports to a TAILSCALE endpoint, known from the resolver's decision line
+    M7_TS = "07:00:00.000 D/SessionOrchestrator: Transport for box: TAILSCALE -> 192.168.1.7 (cf=false) route=lan"
+    M7_NEW = "07:00:00.050 D/ServerTransportPool: New transport to 192.168.1.7:22 role=%s route=lan (1 in pool)"
+
+    @staticmethod
+    def m7_died(t, sid, server=None, transport=None):
+        line = "07:00:%s D/SessionOrchestrator: Tailscale transport died 650ms after connect for %s" % (t, sid)
+        return line + (" on " + server if server else "") + (" transport=" + transport if transport else "")
+
+    def test_m7_wave_window_is_two_seconds(self):
+        # lines WITHOUT a transport id (logs before V13): 1.5 s apart are one wave (one transport's tabs report it over a
+        # moment), 2.5 s apart are two
+        new = self.M7_NEW % "shell"
+        one = metrics(batch(self.M7_HDR, self.M7_TS, new, new, self.m7_died("01.000", SID[0], "box"), self.m7_died("02.500", SID[1], "box")))[0]["2026-11-01"]["M7"]
+        self.assertEqual((one["ts_transport_deaths"], one["ts_transports"], one["death_rate"]), (1, 2, 0.5), one)
+        two = metrics(batch(self.M7_HDR, self.M7_TS, new, new, self.m7_died("01.000", SID[0], "box"), self.m7_died("03.500", SID[1], "box")))[0]["2026-11-01"]["M7"]
+        self.assertEqual((two["ts_transport_deaths"], two["ts_transports"], two["death_rate"]), (2, 2, 1.0), two)
+
+    def test_m7_exec_transports_count_in_the_denominator(self):
+        text = batch(self.M7_HDR, self.M7_TS, self.M7_NEW % "shell", self.M7_NEW % "exec", self.m7_died("01.000", SID[0], "box"))
+        d = metrics(text)[0]["2026-11-01"]["M7"]
+        self.assertEqual((d["ts_transport_deaths"], d["ts_transports"], d["death_rate"]), (1, 2, 0.5), d)
+
+    def test_m7_waves_merge_only_within_one_server(self):
+        # review B-1 (adv #6): two servers' transports dying in the same second are two deaths, not one wave; the tab
+        # line names its server (" on <name>"), the exec line has it after "Exec transport"
+        new = self.M7_NEW % "shell"
+        exec_down = "07:00:01.200 D/ExecTransport: Exec transport other down after 900ms via TS"
+        text = batch(self.M7_HDR, self.M7_TS, new, new, new, self.m7_died("01.000", SID[0], "box"), self.m7_died("01.100", SID[1], "box"),
+                     self.m7_died("01.100", SID[2], "lab"), exec_down)
+        d = metrics(text)[0]["2026-11-01"]["M7"]
+        self.assertEqual((d["deaths_le_30s"], d["ts_transport_deaths"], d["ts_transports"], d["death_rate"]), (4, 3, 3, 1.0), d)
+
+    def test_m7_a_link_outage_of_a_server_with_three_transports_is_rate_one(self):
+        # V13 (adv-spojeni N4 A): the TS link of a server goes and takes its 3 transports with it in the same moment (2 shell
+        # transports with 3 and 2 tabs, and the exec transport). Each tab line names its transport, so that is 3 deaths
+        # of 3 TS transports = 1.0 (round 2 merged them into one wave: 0.333).
+        text = batch(self.M7_HDR, self.M7_TS, self.M7_NEW % "shell", self.M7_NEW % "shell", self.M7_NEW % "exec",
+                     *[self.m7_died("01.000", SID[i], "box", "1a2b3c") for i in range(3)],
+                     *[self.m7_died("01.000", SID[i], "box", "4d5e6f") for i in range(3, 5)],
+                     "07:00:01.000 D/ExecTransport: Exec transport box down after 650ms via TS")
+        d = metrics(text)[0]["2026-11-01"]["M7"]
+        self.assertEqual((d["deaths_le_30s"], d["ts_transport_deaths"], d["ts_transports"], d["death_rate"]), (6, 3, 3, 1.0), d)
+
+    def test_m7_an_exec_transport_lost_with_the_network_is_no_early_death(self):
+        # V13 (adv-spojeni N4 B): the tab lines leave out a death by network loss; the exec line says "(network lost)" and
+        # must be left out too
+        text = batch(self.M7_HDR, self.M7_TS, self.M7_NEW % "exec",
+                     "07:00:01.000 D/ExecTransport: Exec transport box down after 650ms via TS (network lost)")
+        d = metrics(text)[0]["2026-11-01"]["M7"]
+        self.assertEqual((d["deaths"], d["ts_transport_deaths"], d["ts_transports"], d["death_rate"]), (0, 0, 1, 0.0), d)
+
+    def test_m7_a_lan_only_server_does_not_dilute_the_denominator(self):
+        # V13 (adv-spojeni N4 C): transports of a server without Tailscale (no TAILSCALE decision names their host) and
+        # Cloudflare transports are not "transports over TS"
+        lan_only = "07:00:00.060 D/ServerTransportPool: New transport to 10.0.0.5:22 role=%s route=lan (1 in pool)"
+        cf = "07:00:00.070 D/ServerTransportPool: New transport to ssh.example.org:22 role=shell route=cf (1 in pool)"
+        text = batch(self.M7_HDR, self.M7_TS, self.M7_NEW % "shell", lan_only % "shell", lan_only % "shell", lan_only % "exec", cf,
+                     self.m7_died("01.000", SID[0], "box", "1a2b3c"))
+        d = metrics(text)[0]["2026-11-01"]["M7"]
+        self.assertEqual((d["ts_transport_deaths"], d["ts_transports"], d["death_rate"]), (1, 1, 1.0), d)
+
+    def test_m7_deaths_are_told_apart_by_transport_not_by_time(self):
+        # review B-2 T3, in its V13 form: a tab on transport A at 01.000 and the exec transport of the same server at
+        # 01.500 are two transports, so two deaths (round 2: one wave); two tabs of ONE transport whose lines are 5 s apart
+        # are still one death (the identity says so, the 2 s window does not apply to it)
+        text = batch(self.M7_HDR, self.M7_TS, self.M7_NEW % "shell", self.M7_NEW % "exec",
+                     self.m7_died("01.000", SID[0], "box", "1a2b3c"),
+                     "07:00:01.500 D/ExecTransport: Exec transport box down after 650ms via TS",
+                     self.m7_died("06.000", SID[1], "box", "1a2b3c"))
+        d = metrics(text)[0]["2026-11-01"]["M7"]
+        self.assertEqual((d["deaths_le_30s"], d["ts_transport_deaths"], d["ts_transports"], d["death_rate"]), (3, 2, 2, 1.0), d)
+        # the same id on ANOTHER server is another transport
+        text = batch(self.M7_HDR, self.M7_TS, self.M7_NEW % "shell", self.M7_NEW % "shell",
+                     self.m7_died("01.000", SID[0], "box", "1a2b3c"), self.m7_died("01.000", SID[1], "lab", "1a2b3c"))
+        d = metrics(text)[0]["2026-11-01"]["M7"]
+        self.assertEqual((d["ts_transport_deaths"], d["ts_transports"]), (2, 2), d)
+        # an exec transport is never a tab's transport, so its line is not merged into a wave of id-less (older) tab lines
+        text = batch(self.M7_HDR, self.M7_TS, self.M7_NEW % "shell", self.M7_NEW % "exec",
+                     self.m7_died("01.000", SID[0], "box"), "07:00:01.500 D/ExecTransport: Exec transport box down after 650ms via TS")
+        d = metrics(text)[0]["2026-11-01"]["M7"]
+        self.assertEqual((d["ts_transport_deaths"], d["ts_transports"], d["death_rate"]), (2, 2, 1.0), d)
+
+    def test_m7_a_day_of_an_app_update_counts_only_the_transports_of_the_new_generation(self):
+        # review B-3 adv-spojeni R3-3 (dávka B, kolo 4): the morning runs a build whose pool logs "New transport ... (n in
+        # pool)" without role=, so its transports are not in the denominator, while its id-less death lines were still
+        # counted as waves: the real phone log gives 2026-11-03 = 218/18 = 12.1.  The numerator now counts only deaths
+        # that come after a "New transport ... role=" line (the same log generation as the denominator).  Derived
+        # fixture: the line shapes of android-706cbd7b.log, numbers made small.
+        ts = "09:00:00.000 D/SessionOrchestrator: Transport for box: TAILSCALE -> 192.168.1.7 (cf=false)"
+        old_new = "09:00:00.%03d D/ServerTransportPool: New transport to 192.168.1.7:22 (%d in pool)"
+        old_died = "09:%02d:00.000 D/SessionOrchestrator: Tailscale transport died 650ms after connect for %s"
+        morning = batch("--- flush 2026-11-03 10:00:00 +0100 ---", ts, old_new % (50, 1), old_new % (60, 2),
+                        *[old_died % (i + 1, SID[i]) for i in range(6)])
+        new_new = "15:00:00.%03d D/ServerTransportPool: New transport to 192.168.1.7:22 role=shell route=lan (%d in pool)"
+        afternoon = batch("--- flush 2026-11-03 16:00:00 +0100 ---", ts.replace("09:", "15:", 1), new_new % (50, 1), new_new % (60, 2),
+                          "15:00:01.000 D/SessionOrchestrator: Tailscale transport died 650ms after connect for %s on box transport=1a2b3c" % SID[7])
+        d = metrics(morning + afternoon)[0]["2026-11-03"]["M7"]
+        self.assertEqual((d["deaths_le_30s"], d["ts_transport_deaths"], d["ts_transports"], d["death_rate"]), (7, 1, 2, 0.5), d)
+        # a day of the old build alone has no denominator: n/a, and no death of a transport it cannot count
+        d = metrics(morning)[0]["2026-11-03"]["M7"]
+        self.assertEqual((d["deaths_le_30s"], d["ts_transport_deaths"], d["ts_transports"], d["death_rate"]), (6, 0, 0, "n/a"), d)
+
+    def test_m7_early_is_the_transports_age_not_the_tabs(self):
+        # review B-3 kod L4 (dávka B, kolo 4): a tab that joined a transport up for minutes and died with it 650 ms later is
+        # no early death of a TS transport; the line says the transport's age ("transport_age=") and M7 reads that
+        old = self.m7_died("01.000", SID[0], "box", "1a2b3c") + " transport_age=45000ms"
+        young = self.m7_died("02.000", SID[1], "box", "4d5e6f") + " transport_age=900ms"
+        text = batch(self.M7_HDR, self.M7_TS, self.M7_NEW % "shell", self.M7_NEW % "shell", old, young)
+        d = metrics(text)[0]["2026-11-01"]["M7"]
+        self.assertEqual((d["deaths_le_30s"], d["ts_transport_deaths"], d["ts_transports"], d["death_rate"]), (2, 1, 2, 0.5), d)
 
     def test_m8_m10_m17_counters(self):
         text = batch("--- flush 2026-11-01 08:00:00 +0100 ---",

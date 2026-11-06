@@ -44,6 +44,8 @@ SILENT_GAP_S = 60
 BURST_LINES = 5
 BURST_SPAN_S = 2.0
 TS_DEATH_MAX_MS = 30000
+DEATH_WAVE_S = 2.0  # M7, lines WITHOUT a transport id (logs before V13): one server's lines this close are one transport death
+TRANSPORT_DEATH_SPAN_S = 30.0  # M7: lines of ONE transport id (and server) this close are its one death (the id may be reused later)
 IDLE_TERM_KB = 20
 USER_CLOSE_PAIR_S = 5
 FORGET_AFTER_S = 60  # a client forget may precede the server user close by this much (clock skew)
@@ -248,11 +250,22 @@ DATA_RE = re.compile(r"^data/60s: (bg|fg) ")
 SWEEP_RE = re.compile(r"^Reconnect sweep \(([^)]*)\): (\d+) dead tab")
 SUCCESS_RE = re.compile(r"^(?:Auto-reconnect succeeded for|Reconnected:) (\S+)")
 ATTEMPT_RE = re.compile(r"^Auto-reconnect attempt \d+/\d+ for ")
-TS_DEATH_RE = re.compile(r"^(?:Tailscale transport died (\d+)ms after connect|Exec transport .* down after (\d+)ms via TS)")
+# M7 (V13): a tab's line names its server and its transport (the id of the shared jsch session; older lines lack one or
+# both) and, since round 4, the transport's own age ("transport_age=", review B-3 L4; the "died Xms" is the TAB's age);
+# an exec line is one transport, and one lost with the network ("... via TS (network lost)") is no early death.
+# The Kotlin side checks its line against this regex (TransportResolverDeathLineTest): keep it in the Java/Python subset.
+TS_DEATH_RE = re.compile(r"^(?:Tailscale transport died (\d+)ms after connect for \S+(?: on (.+?))?(?: transport=([0-9a-f]+))?(?: transport_age=(\d+)ms)?|Exec transport (.*) down after (\d+)ms via TS)$")
 TS_CONNECT_RE = re.compile(r"^(?:Transport for .* -> .* \(cf=false\)|Exec transport .* up via TS)")
 # LAN vs tunnel: today's lines do not say which (the 126 "TS deaths" of the baseline went over LAN).  The
 # parser is ready for a future "route=lan|tunnel" field on the connect line; until then tunnel metrics are n/a.
 ROUTE_RE = re.compile(r"\broute=(lan|tunnel)\b")
+# M7 denominator (V13): the transports the pool opened (shell or exec) to a Tailscale endpoint, i.e. to a host some
+# resolver decision chose as TAILSCALE ("Transport for <server>: TAILSCALE -> <host> (cf=false)").  Not the transports of
+# servers without Tailscale, not Cloudflare ones, not every resolver decision.
+TS_DECISION_RE = re.compile(r"^Transport for .*: TAILSCALE -> (\S+) \(cf=false\)")
+NEW_TRANSPORT_RE = re.compile(r"^New transport to (\S+):\d+ role=\w+ ")
+# Any "New transport" line: one without role= comes from a build before the denominator existed (its log generation).
+ANY_NEW_TRANSPORT_RE = re.compile(r"^New transport to \S+:\d+ ")
 SPILL_RE = re.compile(r"channel is not opened\.|administratively prohibited")
 FIRED_RE = re.compile(r"^Stop hook fired for (\S+?):")
 ALERT_RE = re.compile(r"^Alert posted for (\S+?):")
@@ -437,6 +450,17 @@ def device_metrics(events, platform, days):
     storms = [s for s in build_storms(events, platform) if s["day"] in days]
     silent = [s for s in silent_deaths(events) if s["day"] in days]
     alerts = [(e.ts, ALERT_RE.match(e.msg).group(1)) for e in events if ALERT_RE.match(e.msg)]
+    # M7: the Tailscale endpoints are configuration, so they are collected over the whole log, not per day
+    ts_hosts = {m.group(1) for m in (TS_DECISION_RE.match(e.msg) for e in events) if m}
+    # M7 (review B-3 R3-3): the numerator counts only deaths of the log generation the denominator counts, i.e. after a
+    # "New transport ... role=" line; a build before that logged its transports without role= (so they are in no
+    # denominator) while its deaths still matched, and the day of the update came out at 218/18 = 12.1
+    m7_counted, new_gen = set(), False
+    for e in events:
+        if ANY_NEW_TRANSPORT_RE.match(e.msg):
+            new_gen = NEW_TRANSPORT_RE.match(e.msg) is not None
+        elif new_gen and TS_DEATH_RE.match(e.msg):
+            m7_counted.add(id(e))
     res = {}
     for day in sorted(by_day):
         ev = by_day[day]
@@ -496,16 +520,37 @@ def device_metrics(events, platform, days):
         # M6
         sweeps = [int(m.group(2)) for m in (SWEEP_RE.match(e.msg) for e in ev) if m]
         d["M6"] = {"sweeps": len(sweeps), "dead_tabs": dist(sweeps), "max": max(sweeps) if sweeps else None}
-        # M7
-        deaths = [(m.group(1) or m.group(2)) for m in (TS_DEATH_RE.match(e.msg) for e in ev) if m]
-        deaths = [int(x) for x in deaths]
+        # M7 (dávka B, V13 of round 3): numerator and denominator are both TRANSPORTS over Tailscale.  A transport's
+        # death is logged once PER TAB, each line naming the server and the transport; the lines of one (server, transport)
+        # within TRANSPORT_DEATH_SPAN_S are its one death.  Older lines without an id fall back to round 2: one server's
+        # lines within DEATH_WAVE_S are one wave.  An exec line is one transport.  The denominator is the "New transport"
+        # lines to a TS host (see TS_DECISION_RE).  The old ratio stays as death_rate_per_tab_line; it is not comparable
+        # with death_rate (w1-20261104's 1.7 was that one).
+        # (time, tab or exec ms, server, transport id, exec?, the transport's age where the line says it, counted by M7?)
+        death_ev = [(e.ts, int(m.group(1) or m.group(6)), m.group(2) or m.group(5) or "", m.group(3), m.group(5) is not None,
+                     int(m.group(4)) if m.group(4) else None, id(e) in m7_counted)
+                    for e, m in ((e, TS_DEATH_RE.match(e.msg)) for e in ev) if m]
+        deaths = [t[1] for t in death_ev]
         connects = sum(1 for e in ev if TS_CONNECT_RE.match(e.msg))
         early = sum(1 for x in deaths if x <= TS_DEATH_MAX_MS)
+        ts_deaths, last = 0, {}
+        young = (t for t in death_ev if t[6] and (t[5] if t[5] is not None else t[1]) <= TS_DEATH_MAX_MS)
+        for ts, ms, server, tid, is_exec, _, _ in sorted(young, key=lambda t: t[0]):
+            if is_exec:
+                ts_deaths += 1
+                continue
+            key, span = ((server, tid), TRANSPORT_DEATH_SPAN_S) if tid else ((server, None), DEATH_WAVE_S)
+            if key not in last or (ts - last[key]).total_seconds() > span:
+                ts_deaths += 1
+            last[key] = ts
+        ts_transports = sum(1 for m in (NEW_TRANSPORT_RE.match(e.msg) for e in ev) if m and m.group(1) in ts_hosts)
         routes = [ROUTE_RE.search(e.msg) for e in ev if TS_CONNECT_RE.match(e.msg)]
         tunnel = sum(1 for r in routes if r and r.group(1) == "tunnel")
         lan = sum(1 for r in routes if r and r.group(1) == "lan")
-        d["M7"] = {"deaths": len(deaths), "deaths_le_30s": early, "ts_connects": connects,
-                   "death_rate": round(early / connects, 3) if connects else "n/a",
+        d["M7"] = {"deaths": len(deaths), "deaths_le_30s": early, "ts_transport_deaths": ts_deaths, "ts_transports": ts_transports,
+                   "death_rate": round(ts_deaths / ts_transports, 3) if ts_transports else "n/a",
+                   "ts_connects": connects,
+                   "death_rate_per_tab_line": round(early / connects, 3) if connects else "n/a",
                    "ts_connects_tunnel": tunnel, "ts_connects_lan": lan,
                    "death_rate_tunnel": round(early / tunnel, 3) if tunnel else "n/a"}
         # M8
@@ -821,7 +866,7 @@ def render_md(res):
               "Last event: %s. Undated lines dropped: %d (cf-open-by %d). Batches: %d (duplicates skipped %d, bad lines %d)."
               % (dv["last_event"], dv["parse"]["undated_lines"], dv["parse"]["undated_cf_open_by"],
                  dv["parse"]["batches"], dv["parse"]["duplicate_batches"], dv["parse"]["bad_lines"]), "",
-              "| day | data/60s n | low-conf | ambiguous | M3 doPoll | M3 total | M4 mean rx+tx | M4 p90 | M1 storms | M1 p50 s | M2 p50 | M6 max | M7 rate | M8 | M9 | M10 lost | M17 |",
+              "| day | data/60s n | low-conf | ambiguous | M3 doPoll | M3 total | M4 mean rx+tx | M4 p90 | M1 storms | M1 p50 s | M2 p50 | M6 max | M7 rate (TS transport deaths/TS transports) | M8 | M9 | M10 lost | M17 |",
               "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|"]
         for day, d in dv["days"].items():
             L.append("| %s | %d | %s | %s | %d | %d | %s | %s | %d | %s | %s | %s | %s (%d/%d) | %d | %d | %d | %d |" % (
@@ -830,7 +875,7 @@ def render_md(res):
                 d["M3"].get("TranscriptStream.doPoll", 0), d["M3_total"],
                 na(d["M4"]["rxtx_kb_min"]["mean"]), na(d["M4"]["rxtx_kb_min"]["p90"]),
                 d["M1"]["storms"], na(d["M1"]["duration_s"]["p50"]), na(d["M2"]["per_trigger"]["p50"]),
-                na(d["M6"]["max"]), d["M7"]["death_rate"], d["M7"]["deaths_le_30s"], d["M7"]["ts_connects"],
+                na(d["M6"]["max"]), d["M7"]["death_rate"], d["M7"]["ts_transport_deaths"], d["M7"]["ts_transports"],
                 d["M8"]["total"], d["M9"], d["M10"]["connection_lost"], d["M17"]))
         L.append("")
         L += ["Other (n/a until the corresponding logs land): M11 / M13 / M14 / M15 / M16 per day:", "",
