@@ -1,10 +1,13 @@
 package com.clauderemote.connection
 
 import com.clauderemote.model.SshServer
+import com.clauderemote.session.service.TabChannel
+import com.clauderemote.session.service.TabChannels
 import com.clauderemote.session.status.SessionStatusPoller
 import com.clauderemote.session.transcript.TranscriptStream
 import com.jcraft.jsch.FakeSession
 import com.jcraft.jsch.JSchException
+import com.jcraft.jsch.Session
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -28,6 +31,13 @@ class PollerFallbackRoomTest {
     private val released = AtomicInteger()
     private val session = FakeSession { _ -> opened.incrementAndGet(); throw JSchException("channel is not opened.") }
 
+    private fun budget(room: Boolean) = object : TabChannels {
+        override suspend fun reserve(session: Session): TabChannel? {
+            reserved.incrementAndGet()
+            return if (room) TabChannel(session) { released.incrementAndGet() } else null
+        }
+    }
+
     @AfterTest fun reset() {
         SshSessionHelper.execChannelsProvider = null
         SshSessionHelper.liveSessionProvider = null
@@ -40,7 +50,7 @@ class PollerFallbackRoomTest {
         try {
             val s = TranscriptStream(
                 server, "/work", scope, liveSession = { session }, viaExec = { true },
-                reserveTabChannel = { reserved.incrementAndGet(); false }, releaseTabChannel = { released.incrementAndGet() },
+                tabChannels = budget(room = false),
             )
             s.start("11111111-1111-1111-1111-111111111111")
             s.pollNow()
@@ -57,7 +67,7 @@ class PollerFallbackRoomTest {
         try {
             val s = TranscriptStream(
                 server, "/work", scope, liveSession = { session }, viaExec = { true },
-                reserveTabChannel = { reserved.incrementAndGet(); true }, releaseTabChannel = { released.incrementAndGet() },
+                tabChannels = budget(room = true),
             )
             s.start("11111111-1111-1111-1111-111111111111")
             s.pollNow()
@@ -73,7 +83,7 @@ class PollerFallbackRoomTest {
         try {
             val refused = SessionStatusPoller(
                 server, "/work", { null }, scope, liveSession = { session }, viaExec = { true },
-                reserveTabChannel = { reserved.incrementAndGet(); false }, releaseTabChannel = { released.incrementAndGet() },
+                tabChannels = budget(room = false),
             )
             refused.start()
             settle()
@@ -85,7 +95,7 @@ class PollerFallbackRoomTest {
             reserved.set(0)
             val allowed = SessionStatusPoller(
                 server, "/work", { null }, scope, liveSession = { session }, viaExec = { true },
-                reserveTabChannel = { reserved.incrementAndGet(); true }, releaseTabChannel = { released.incrementAndGet() },
+                tabChannels = budget(room = true),
             )
             allowed.start()
             settle()

@@ -115,8 +115,9 @@ fun App(
     var selectedServer by remember { mutableStateOf<SshServer?>(null) }
     var showServerDialog by remember { mutableStateOf(false) }
     var editingServer by remember { mutableStateOf<SshServer?>(null) }
-    var tmuxSessions by remember { mutableStateOf<List<TmuxSession>>(emptyList()) }
-    var tmuxLoading by remember { mutableStateOf(false) }
+    // The Connect screen's listing of the selected server: its sessions, whether it still runs, and the names a new
+    // session must not take beyond the listed ones (see onConnectServer, ConnectListing)
+    val connectListing = remember { ConnectListing() }
     var connectionError by remember { mutableStateOf<String?>(null) }
     var tabCloseConfirmId by remember { mutableStateOf<String?>(null) }
     // Long-press session context menu (mobile): which session it's open for.
@@ -334,6 +335,17 @@ fun App(
     // its server that did NOT contain its tmux session. A tab is forgotten only
     // at 2 strikes (see scanRemoteSessions) so one flaky scan can't delete it.
     val stalePruneStrikes = remember { mutableMapOf<String, Int>() }
+
+    // V14/V16: quick connect starts a FRESH claude in the default folder under a name no session holds — see
+    // pickQuickConnectName. The listing never pays a handshake of its own (`allowFresh = false`): the exec transport
+    // or a counted channel of a transport the server already has; without one, or when it fails or hangs, the
+    // launcher's last scan of the server stands in.
+    suspend fun quickConnectName(server: SshServer): String = pickQuickConnectName(
+        server,
+        // R6-1: the names launches are creating right now count as own: a second quick connect joins that launch
+        ownTabs = sessionOrchestrator.ownTmuxNames(server.id),
+        lastScan = remoteSessions.filter { it.server.id == server.id }.map { it.tmuxSession.name },
+    ) { com.clauderemote.connection.SshSessionHelper.withSession(server, allowFresh = false) { sess -> TmuxManager.listForFreshName(sess) } }
 
     // Past Claude conversations discovered from server transcripts (history browser)
     var historySessions by remember { mutableStateOf<List<ClaudeHistorySession>>(emptyList()) }
@@ -830,7 +842,7 @@ fun App(
                                         // still falls back to SSH if mosh can't run.
                                         connectionType = if (server.preferMosh && (!server.useCloudflareProxy || server.hasTailscale))
                                             ConnectionType.MOSH else ConnectionType.SSH,
-                                        tmuxSessionName = TmuxNameParser.build(server.name, server.defaultFolder, server.defaultClaudeMode == ClaudeMode.YOLO),
+                                        tmuxSessionName = quickConnectName(server),
                                         isNewTmuxSession = true
                                     )
                                     currentScreen = Screen.TERMINAL
@@ -841,18 +853,17 @@ fun App(
                         },
                         onConnectServer = { server ->
                             selectedServer = server
-                            tmuxSessions = emptyList()
                             currentScreen = Screen.CONNECT
+                            // V15: a NEW session's name must skip every name in use, not just the listed ones: the
+                            // launcher's last scan and this device's tabs always, the manifest when the listing ran.
+                            // A failed listing leaves those, never "nothing is taken" (M2).
+                            val fallbackTaken = remoteSessions.filter { it.server.id == server.id }.map { it.tmuxSession.name }.toSet() +
+                                tabManager.tabs.value.filter { it.server.id == server.id }.map { it.tmuxSessionName }
+                            val opening = connectListing.open(fallbackTaken)
                             scope.launch {
-                                tmuxLoading = true
-                                try {
-                                    tmuxSessions = com.clauderemote.connection.SshSessionHelper.withSession(server) { sess ->
-                                        TmuxManager.listSessions(sess)
-                                    }
-                                } catch (_: Exception) {
-                                    tmuxSessions = emptyList()
+                                connectListing.load(opening, fallbackTaken) {
+                                    com.clauderemote.connection.SshSessionHelper.withSession(server) { sess -> TmuxManager.listForFreshName(sess) }
                                 }
-                                tmuxLoading = false
                             }
                         },
                         onAddServer = {
@@ -908,7 +919,9 @@ fun App(
                     selectedServer?.let { server ->
                         ConnectScreen(
                             server = server,
-                            tmuxSessions = tmuxSessions,
+                            tmuxSessions = connectListing.sessions,
+                            tmuxListing = connectListing.loading,
+                            takenNames = connectListing.taken,
                             appSettings = appSettings,
                             onBack = { currentScreen = Screen.LAUNCHER },
                             // ONE exec brings back the whole subtree with the
@@ -1029,7 +1042,7 @@ fun App(
                             onKillTmux = { sessionName ->
                                 scope.launch {
                                     try {
-                                        tmuxSessions = com.clauderemote.connection.SshSessionHelper.withSession(server) { sess ->
+                                        connectListing.sessions = com.clauderemote.connection.SshSessionHelper.withSession(server) { sess ->
                                             TmuxManager.killSession(sess, sessionName)
                                             TmuxManager.listSessions(sess)
                                         }
@@ -1785,7 +1798,7 @@ fun App(
                                 model = srv.defaultClaudeModel,
                                 connectionType = if (srv.preferMosh && (!srv.useCloudflareProxy || srv.hasTailscale))
                                     ConnectionType.MOSH else ConnectionType.SSH,
-                                tmuxSessionName = TmuxNameParser.build(srv.name, srv.defaultFolder, srv.defaultClaudeMode == ClaudeMode.YOLO),
+                                tmuxSessionName = quickConnectName(srv),
                                 isNewTmuxSession = true
                             )
                             currentScreen = Screen.TERMINAL
@@ -1865,3 +1878,85 @@ fun App(
 /** Retries for the account probe — a restored session has no transport yet. */
 private const val ACCOUNTS_LOAD_TRIES = 6
 private const val ACCOUNTS_LOAD_RETRY_MS = 2000L
+
+/** How long quick connect waits for its listing before the launcher's last scan stands in (K4-2). */
+internal const val QUICK_CONNECT_LIST_MS = 3_000L
+
+/** How long the Connect screen waits for its listing before Launch of a new session opens on the other taken names (K5-4). */
+internal const val CONNECT_LIST_MS = 6_000L
+
+/**
+ * K5-4 / V15-7: the Connect screen's listing of a server, for the sessions it shows and the name of a NEW session.
+ * [open] starts an opening of the screen (its taken names = the [open]'s fallback until the listing answers); [load]
+ * runs that opening's listing for at most [timeoutMs] — a hung transport or tmux leaves the fallback and opens Launch
+ * again instead of holding it on "Listing sessions…" until a keepalive drops the link. Only the LAST opening writes:
+ * the late answer of an earlier one (another server, or the same one opened again) is dropped.
+ */
+internal class ConnectListing(private val timeoutMs: Long = CONNECT_LIST_MS) {
+    var sessions by mutableStateOf<List<TmuxSession>>(emptyList())
+    /** The listing of the current opening still runs: a NEW session waits for it (its name is picked from it). */
+    var loading by mutableStateOf(false)
+        private set
+    var taken by mutableStateOf<Set<String>>(emptySet())
+        private set
+    private val openings = java.util.concurrent.atomic.AtomicInteger()
+
+    /** A new opening of the Connect screen; returns the token its [load] carries. */
+    fun open(fallbackTaken: Set<String>): Int {
+        val opening = openings.incrementAndGet()
+        sessions = emptyList()
+        taken = fallbackTaken
+        loading = true
+        return opening
+    }
+
+    suspend fun load(opening: Int, fallbackTaken: Set<String>, list: suspend () -> TmuxManager.FreshNameListing) {
+        try {
+            val listing = kotlinx.coroutines.withTimeoutOrNull(timeoutMs) { list() }
+            if (openings.get() != opening) return
+            if (listing == null) {
+                FileLogger.log("App", "Connect screen: no listing within $timeoutMs ms — new session named from the other taken names")
+                return
+            }
+            sessions = listing.sessions
+            taken = fallbackTaken + listing.manifestNames
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
+        } catch (_: Exception) {
+            if (openings.get() == opening) sessions = emptyList()
+        } finally {
+            if (openings.get() == opening) loading = false
+        }
+    }
+}
+
+/**
+ * V14/V15: the tmux name of a quick connect — a FRESH claude in [server]'s default folder. A name another session holds
+ * gets `-2`, `-3`, … (never an attach to a session this tab did not start); a tab this device already has open under
+ * the name, or a launch creating it right now ([ownTabs], `SessionOrchestrator.ownTmuxNames`), is switched to or joined
+ * by `launchSession` (R6-1). Taken = the live listing [list] (tmux sessions and
+ * the restore manifest's names) ∪ the launcher's [lastScan] of the server. A listing that fails or does not answer
+ * within [listTimeoutMs] leaves the last scan, never "nothing is taken"; a name taken since is found taken when the
+ * launch creates its session and the next free one is used (V16).
+ * Cancellation is passed on, never taken for a failed listing (L5).
+ */
+internal suspend fun pickQuickConnectName(
+    server: SshServer,
+    ownTabs: Set<String>,
+    lastScan: Collection<String>,
+    listTimeoutMs: Long = QUICK_CONNECT_LIST_MS,
+    list: suspend () -> TmuxManager.FreshNameListing,
+): String {
+    val listed = try {
+        kotlinx.coroutines.withTimeoutOrNull(listTimeoutMs) { list() }?.names
+    } catch (e: kotlinx.coroutines.CancellationException) {
+        throw e
+    } catch (_: Exception) {
+        null
+    }
+    if (listed == null) FileLogger.log("App", "quick connect: no listing of ${server.name} — naming from the last scan")
+    return com.clauderemote.session.ClaudeConfig.freshTmuxSessionName(
+        server.name, server.defaultFolder, server.defaultClaudeMode == ClaudeMode.YOLO,
+        taken = (listed.orEmpty() + lastScan) - ownTabs,
+    )
+}

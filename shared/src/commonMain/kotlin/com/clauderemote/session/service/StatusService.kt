@@ -78,8 +78,7 @@ internal class StatusService(
                     liveSession = { registry.ssh(sessionId)?.getSession() },
                     isBackground = { isBackground() },
                     viaExec = { registry.execActive(tab.server.id) },
-                    reserveTabChannel = { registry.reserveTabChannel(tab.server.id, it) },
-                    releaseTabChannel = { registry.releaseTabChannel(tab.server.id, it) },
+                    tabChannels = registry.tabChannels(tab.server.id),
                 )
             }
         }

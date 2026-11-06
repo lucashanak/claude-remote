@@ -1,6 +1,7 @@
 package com.clauderemote.session.status
 
 import com.clauderemote.connection.SshSessionHelper
+import com.clauderemote.session.service.CommFlags
 import com.clauderemote.session.service.ExecUnavailable
 import com.clauderemote.session.service.ExecUnavailableReason
 import com.clauderemote.model.SshServer
@@ -56,9 +57,8 @@ class SessionStatusPoller(
     private val isBackground: () -> Boolean = { false },
     /** True when exec routing is active for this server: poll through the exec transport and never open a connection of our own (a tick without a live transport is skipped). */
     private val viaExec: () -> Boolean = { false },
-    /** The fallback to the tab's own session (exec routing on, exec transport not up) is counted and refused without room: see [com.clauderemote.session.transcript.TranscriptStream]. */
-    private val reserveTabChannel: suspend (com.jcraft.jsch.Session) -> Boolean = { true },
-    private val releaseTabChannel: suspend (com.jcraft.jsch.Session) -> Unit = {},
+    /** A poll on the tab's own session (exec transport not up, or exec routing off) is counted and skipped without room: see [com.clauderemote.session.transcript.TranscriptStream]. */
+    private val tabChannels: com.clauderemote.session.service.TabChannels = com.clauderemote.session.service.TabChannels.UNCOUNTED,
 ) {
     private val _status = MutableStateFlow(RemoteSessionStatus())
     val status: StateFlow<RemoteSessionStatus> = _status.asStateFlow()
@@ -123,18 +123,21 @@ class SessionStatusPoller(
                         }
                     } catch (e: ExecUnavailable) {
                         if (e.reason != ExecUnavailableReason.NOT_UP) throw e
-                        if (shared == null || !reserveTabChannel(shared)) null
-                        else try {
-                            execStat(shared, statCmd)
-                        } finally {
-                            withContext(kotlinx.coroutines.NonCancellable) { releaseTabChannel(shared) }
-                        }
+                        if (shared == null) null else onOwnSession(shared, statCmd)
                     }
                 } else if (shared != null) {
-                    execStat(shared, statCmd)
+                    // Exec routing off (kill switch, legacy server): counted where the shells are packed.
+                    onOwnSession(shared, statCmd)
                 } else {
-                    SshSessionHelper.withSession(server, timeout = 10_000) { sess ->
-                        execStat(sess, statCmd)
+                    // No live session: with the pool on, no fresh handshake per tick outside the pool's limits (skip it).
+                    try {
+                        SshSessionHelper.withSession(server, timeout = 10_000, allowFresh = !CommFlags.effectiveFor(server.id).pool) { sess ->
+                            execStat(sess, statCmd)
+                        }
+                    } catch (e: ExecUnavailable) {
+                        if (e.reason != ExecUnavailableReason.NOT_UP) throw e
+                        tabChannels.skipped(SKIP_SOURCE)
+                        null
                     }
                 }
                 if (raw == null) {
@@ -165,6 +168,16 @@ class SessionStatusPoller(
         }
     }
 
+    /** [execStat] on the tab's own session holding one channel of its budget; null = no room (the tick is skipped). */
+    private suspend fun onOwnSession(shared: com.jcraft.jsch.Session, cmd: String): String? {
+        val ch = tabChannels.reserve(shared) ?: run { tabChannels.skipped(SKIP_SOURCE); return null }
+        return try {
+            execStat(shared, cmd)
+        } finally {
+            withContext(kotlinx.coroutines.NonCancellable) { ch.release() }
+        }
+    }
+
     /** One stat+cat exec on [sess]; the channel is always disconnected. */
     private suspend fun execStat(sess: com.jcraft.jsch.Session, cmd: String): String {
         val ch = sess.openChannel("exec") as com.jcraft.jsch.ChannelExec
@@ -177,7 +190,12 @@ class SessionStatusPoller(
         // poller rework is meant to avoid).
         return try {
             withContext(Dispatchers.IO) {
-                ch.connect(8_000)
+                try {
+                    ch.connect(8_000)
+                } catch (e: com.jcraft.jsch.JSchException) {
+                    tabChannels.channelOpenFailed(SKIP_SOURCE, sess, ch.exitStatus, e)
+                    throw e
+                }
                 input.bufferedReader().readText()
             }
         } finally {
@@ -268,6 +286,8 @@ class SessionStatusPoller(
     }
 
     companion object {
+        /** The `src=` of this poller in the channel-budget log lines. */
+        private const val SKIP_SOURCE = "status"
         private const val TAG = "SessionStatusPoller"
         private const val POLL_INTERVAL_MS = 5_000L
         private val json = Json { ignoreUnknownKeys = true; isLenient = true }

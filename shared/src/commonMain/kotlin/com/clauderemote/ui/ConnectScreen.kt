@@ -42,6 +42,10 @@ import kotlinx.coroutines.launch
 fun ConnectScreen(
     server: SshServer,
     tmuxSessions: List<TmuxSession>,
+    /** V15: the listing of [tmuxSessions] is still running: a NEW session cannot be launched yet (its name may be taken). */
+    tmuxListing: Boolean,
+    /** V15: names a new session must not take beyond [tmuxSessions] (last scan, this device's tabs, the manifest). */
+    takenNames: Set<String>,
     appSettings: AppSettings,
     onBack: () -> Unit,
     onKillTmux: ((String) -> Unit)? = null,
@@ -162,11 +166,13 @@ fun ConnectScreen(
         }
     }
 
-    LaunchedEffect(folder, selectedMode, sessionAlias) {
+    // V14: a NEW session gets a name no session on the server holds (`-2`, `-3`, … when the folder's basename is
+    // taken); a name taken meanwhile is found taken when the launch creates its session (V16), which then takes the
+    // next free one — the session there is never killed or adopted. Keyed on useExistingTmux
+    // too (M1): back from an existing session to "New session", the name is a free one again, not that session's.
+    LaunchedEffect(folder, selectedMode, sessionAlias, tmuxSessions, takenNames, useExistingTmux) {
         if (!useExistingTmux) {
-            tmuxSessionName = TmuxNameParser.build(
-                server.name, folder, selectedMode == ClaudeMode.YOLO, sessionAlias
-            )
+            tmuxSessionName = newSessionName(server, folder, selectedMode == ClaudeMode.YOLO, sessionAlias, tmuxSessions, takenNames)
         }
     }
 
@@ -185,7 +191,7 @@ fun ConnectScreen(
         }
     }
     val launch: () -> Unit = {
-        if (!launching) {
+        if (canLaunch(launching, newSession = !useExistingTmux, listing = tmuxListing)) {
             launching = true
             onLaunch(folder, selectedMode, selectedModel, connectionType, tmuxSessionName, !useExistingTmux, selectedAccountSlug)
         }
@@ -545,7 +551,7 @@ fun ConnectScreen(
             // ── Launch ──────────────────────────────────────────────────────
             Button(
                 onClick = launch,
-                enabled = !launching,
+                enabled = canLaunch(launching, newSession = !useExistingTmux, listing = tmuxListing),
                 modifier = Modifier
                     .fillMaxWidth()
                     .height(m.rowHeight),
@@ -555,7 +561,14 @@ fun ConnectScreen(
                 ),
                 shape = RoundedCornerShape(m.cardRadius),
             ) {
-                Text(if (launching) "Connecting…" else "▶  Launch Claude", style = CRType.cardTitle)
+                Text(
+                    when {
+                        launching -> "Connecting…"
+                        tmuxListing && !useExistingTmux -> "Listing sessions…"
+                        else -> "▶  Launch Claude"
+                    },
+                    style = CRType.cardTitle,
+                )
             }
 
             Spacer(Modifier.height(16.dp))
@@ -730,3 +743,22 @@ internal fun crTextFieldColors() = OutlinedTextFieldDefaults.colors(
     unfocusedContainerColor = CRTheme.colors.surface,
     focusedContainerColor = CRTheme.colors.surface,
 )
+
+/**
+ * V15: the Connect screen's NEW session name — free of every listed session and of [takenNames] (the launcher's last
+ * scan, this device's tabs and, when the listing ran, the restore manifest). A failed listing leaves [takenNames].
+ */
+internal fun newSessionName(
+    server: SshServer,
+    folder: String,
+    isYolo: Boolean,
+    alias: String,
+    listed: List<TmuxSession>,
+    takenNames: Set<String>,
+): String = com.clauderemote.session.ClaudeConfig.freshTmuxSessionName(
+    server.name, folder, isYolo, alias, taken = listed.map { it.name }.toSet() + takenNames,
+)
+
+/** V15: Launch is open unless one is under way; a NEW session also waits for the listing (its name is picked from it). */
+internal fun canLaunch(launching: Boolean, newSession: Boolean, listing: Boolean): Boolean =
+    !launching && !(newSession && listing)

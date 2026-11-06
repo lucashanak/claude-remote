@@ -1,11 +1,15 @@
 package com.clauderemote.session.service
 
 import com.clauderemote.connection.EtManager
+import com.clauderemote.connection.Fallback
+import com.clauderemote.connection.FallbackRunner
 import com.clauderemote.connection.MoshManager
 import com.clauderemote.connection.ServerTransportPool
 import com.clauderemote.connection.SshManager
+import com.clauderemote.model.SshServer
 import com.clauderemote.session.TabManager
 import com.clauderemote.storage.ServerStorage
+import com.clauderemote.util.FileLogger
 import com.jcraft.jsch.Session
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.sync.Semaphore
@@ -24,7 +28,7 @@ import kotlinx.coroutines.withContext
 internal class ConnectionRegistry(
     private val serverStorage: ServerStorage,
     private val tabManager: TabManager,
-) {
+) : FallbackRunner {
     private val connections = java.util.concurrent.ConcurrentHashMap<String, SshManager>()
     private val moshConnections = mutableMapOf<String, MoshManager>()
     // ET runs alongside an SSH carrier (bootstrap + local forward), so a
@@ -44,6 +48,10 @@ internal class ConnectionRegistry(
     private companion object {
         /** More tabs than any user runs on one server: the gate of a pooled server never holds anyone back. */
         const val POOLED_GATE_PERMITS = 256
+        /** How often [run] looks again when the slot it saw went to someone else before its claim. */
+        const val FALLBACK_CLAIM_TRIES = 3
+        /** At most one `poll skipped (no room)` line per source and server in this window (the count rides along). */
+        const val SKIP_LOG_WINDOW_MS = 60_000L
     }
 
     // --- Seam slots: null = legacy. The wiring step fills them, so no service constructor has to change. ---
@@ -88,6 +96,13 @@ internal class ConnectionRegistry(
     fun et(sessionId: String): EtManager? = etConnections[sessionId]
     fun putEt(sessionId: String, mgr: EtManager) { etConnections[sessionId] = mgr }
     fun removeEt(sessionId: String): EtManager? = etConnections.remove(sessionId)
+
+    /** Takes every mosh and ET client out of the registry and returns how to stop each (`disconnect`), for `shutdown()`. */
+    fun takeMoshAndEt(): List<suspend () -> Unit> {
+        val mosh = moshConnections.values.toList().also { moshConnections.clear() }
+        val et = etConnections.values.toList().also { etConnections.clear() }
+        return mosh.map { m -> suspend { m.disconnect() } } + et.map { e -> suspend { e.disconnect() } }
+    }
 
     // --- per-server pools / gates ---
     /**
@@ -165,29 +180,83 @@ internal class ConnectionRegistry(
         return null
     }
 
-    private class Fallback<T>(val value: T)
-
     /**
      * Runs [block] on a tab session of [serverId] that has channel headroom, holding one counted channel on
      * its transport for the whole block ([ServerTransportPool.reserveFallbackChannel]). Null = no tab
      * transport has room (a value of null from [block] is wrapped, so the two never mix up). This is what
      * every fallback of the exec layer uses while exec routing is on: when the exec transport is down and
-     * the tabs sit 8 to a transport, a fallback must not run into sshd's `MaxSessions`.
+     * the tabs sit 8 to a transport, a fallback must not run into sshd's `MaxSessions`. A [kind] other than
+     * [ExecKind.LONG] is a short channel and may take the one slot of the reserve ([ServerTransportPool.SHORT_RESERVE_SLOTS]),
+     * unless it is a [transfer] (V12: an upload or SFTP download would hold that one slot for the whole transfer and
+     * starve the polls of every tab on the transport).
      */
-    private suspend fun <T> onFallbackTab(serverId: String, block: suspend (Session) -> T): Fallback<T>? {
+    private suspend fun <T> onFallbackTab(serverId: String, kind: ExecKind, transfer: Boolean = false, block: suspend (Session) -> T): Fallback<T>? {
         val pool = transportPools[serverId]
+        val short = kind != ExecKind.LONG && !transfer
         for ((sid, mgr) in connections) {
             if (tabManager.getTab(sid)?.server?.id != serverId || !mgr.isConnected) continue
             val s = mgr.getSession() ?: continue
-            if (pool != null && !pool.reserveFallbackChannel(s)) continue
+            if (pool != null && !pool.reserveFallbackChannel(s, short = short)) continue
+            // K4-3: a LONG channel (the notify watcher's tail) holds its slot for good; transferMayFindRoom counts it
+            val held = if (pool != null && kind == ExecKind.LONG && !transfer) longChannels.computeIfAbsent(s) { java.util.concurrent.atomic.AtomicInteger() } else null
+            held?.incrementAndGet()
             try {
                 return Fallback(block(s))
+            } catch (e: Exception) {
+                if (isChannelOpenFailure(e)) logChannelOpenFailed("fallback", serverId, s, null, e)
+                throw e
             } finally {
+                held?.decrementAndGet()
                 if (pool != null) withContext(NonCancellable) { pool.releaseChannel(s) }
             }
         }
         return null
     }
+
+    /**
+     * [FallbackRunner] of [com.clauderemote.connection.SshSessionHelper.withSession] (NN1): with a room check
+     * ([needsRoom]) the block runs on a pooled shell transport with headroom and holds one counted (short) channel there
+     * until it ends (given back in `finally` under `NonCancellable`, nothing suspends between the claim and the `try`); no room =
+     * null, the caller skips or opens a fresh connection if it may. A legacy server: today's [pooledSession], nothing
+     * counted.
+     */
+    override suspend fun <T> run(server: SshServer, block: suspend (Session) -> T): Fallback<T>? {
+        val serverId = server.id
+        if (!needsRoom(serverId)) {
+            val s = pooledSession(serverId)?.takeIf { it.isConnected } ?: return null
+            return Fallback(block(s))
+        }
+        val pool = transportPools[serverId] ?: return null
+        // The look and the claim are a moment apart: a slot taken meanwhile is refused by the claim, look again.
+        repeat(FALLBACK_CLAIM_TRIES) {
+            val s = pool.fallbackSessionWithHeadroom(short = true) ?: return null
+            claimSeam?.invoke(s)
+            if (pool.reserveFallbackChannel(s, short = true)) {
+                try {
+                    return Fallback(block(s))
+                } catch (e: Exception) {
+                    if (isChannelOpenFailure(e)) logChannelOpenFailed("withSession", serverId, s, null, e)
+                    throw e
+                } finally {
+                    withContext(NonCancellable) { pool.releaseChannel(s) }
+                }
+            }
+        }
+        return null
+    }
+
+    /** Test seam of [run]: between the look at a transport with room and the claim of its slot. */
+    @Volatile internal var claimSeam: (suspend (Session) -> Unit)? = null
+
+    /**
+     * [block] on a CONNECTED tab session of [serverId], for a long or one-off channel a service opens itself (the notify
+     * watcher's LONG tail, the accounts screen with [ExecKind.SHORT]). With a room check it is one counted channel on a
+     * tab transport with headroom for the whole block; a legacy server: the first connected tab session, nothing
+     * counted. Null = none.
+     */
+    suspend fun <T> onServerTabChannel(serverId: String, kind: ExecKind = ExecKind.LONG, block: suspend (Session) -> T): Fallback<T>? =
+        if (needsRoom(serverId)) onFallbackTab(serverId, kind, block = block)
+        else tabServerSession(serverId)?.let { Fallback(block(it)) }
 
     /** Exec routing is in effect for [serverId] (slots wired and the `exec` group on for it). */
     private fun routedFor(serverId: String): Boolean = remoteExec != null && execActive(serverId)
@@ -202,29 +271,134 @@ internal class ConnectionRegistry(
         routedFor(serverId) || transportPools[serverId]?.hasPackedTransport() == true
 
     /**
-     * Take one counted fallback channel on [session] of [serverId] (an exec routed to a tab transport by a
-     * service that holds the session itself: the pollers of a tab). False = no room: skip the tick. Pair with
-     * [releaseTabChannel]. A server that needs no room check always answers true and counts nothing.
+     * Take one channel on [session] (a tab's own transport) of [serverId], for a service that holds the session itself
+     * (the pollers of a tab, the git probe, the per-tab session-id loop, ...). With a room check ([needsRoom]) it is
+     * counted against the transport and null when there is no room: skip the tick. Every such channel is short (a poll,
+     * a one-off command), so it may take the one slot of the reserve: 8 packed shells still poll, one at a time. A
+     * transfer (upload, SFTP download) passes `short = false` and keeps off the reserve (V12). A server that needs no
+     * room check gets an uncounted token. Release the token (idempotent) in `finally` under `NonCancellable`.
      */
-    suspend fun reserveTabChannel(serverId: String, session: Session): Boolean {
-        if (!needsRoom(serverId)) return true
-        val pool = transportPools[serverId] ?: return true
-        if (!pool.reserveFallbackChannel(session)) return false
-        tabChannelsCounted.computeIfAbsent(session) { java.util.concurrent.atomic.AtomicInteger() }.incrementAndGet()
-        return true
+    suspend fun reserveTabChannel(serverId: String, session: Session, short: Boolean = true): TabChannel? {
+        val pool = if (needsRoom(serverId)) transportPools[serverId] else null
+        if (pool != null && !pool.reserveFallbackChannel(session, short = short)) return null
+        val token = if (pool == null) TabChannel(session) else TabChannel(session) { pool.releaseChannel(it) }
+        // only now that the token exists: a logger that throws must not leak the slot just claimed
+        runCatching { flushSkipped(serverId) }
+        return token
     }
 
-    /** Give back the channel taken by [reserveTabChannel] (only if that call really counted one). */
-    suspend fun releaseTabChannel(serverId: String, session: Session) {
-        val n = tabChannelsCounted[session] ?: return
-        if (n.get() <= 0) return
-        n.decrementAndGet()
-        if (n.get() == 0) tabChannelsCounted.remove(session, n)
-        transportPools[serverId]?.releaseChannel(session)
+    /**
+     * [block] on [session] holding a [reserveTabChannel] token for its whole run. Null = no room ([source]'s tick is
+     * reported skipped); a channel that failed to open is logged with the transport's state before it is rethrown.
+     */
+    suspend fun <T> withTabChannel(serverId: String, session: Session, source: String, block: suspend (Session) -> T): Fallback<T>? =
+        onTabChannel(serverId, session, source, short = true, block)
+
+    /**
+     * [withTabChannel] for a transfer (upload, SFTP download): counted like it, but it never takes the reserve slot of a
+     * packed transport (V12), so with 8 shells there is no room and the transfer fails instead of starving the polls.
+     */
+    suspend fun <T> withTransferChannel(serverId: String, session: Session, source: String, block: suspend (Session) -> T): Fallback<T>? =
+        onTabChannel(serverId, session, source, short = false, block)
+
+    /**
+     * Whether a transfer that found no room may still get it before its deadline (R3-1, dávka B round 4). It holds no
+     * reserve slot while it waits, so waiting blocks nobody. Yes when the exec transport can still come up (routing on
+     * and the transport not [LinkState.Closed]), or when a tab transport of [serverId] (only [own], for a transfer on
+     * the tab's own session) carries few enough shells that a transfer fits beside the reserve once the short channels
+     * in flight end: 7 shells yes, between the polls; 8 never, until the tabs re-lease (shells + 1 + reserve > 10).
+     * The shells of a transport are the tabs whose session it is; a LONG channel held there (the notify watcher's tail,
+     * K4-3) counts like a shell, so 7 shells and a watcher tail never leave room either.
+     */
+    /** LONG channels held per tab session through [onFallbackTab] (they do not end between polls). */
+    private val longChannels = java.util.WeakHashMap<Session, java.util.concurrent.atomic.AtomicInteger>().let { java.util.Collections.synchronizedMap(it) }
+
+    internal fun transferMayFindRoom(serverId: String, own: Session? = null): Boolean {
+        if (execActive(serverId) && (execSessions as? ExecTransportManager)?.state(serverId)?.value !is LinkState.Closed) return true
+        val candidates = own?.let { listOf(it) } ?: connections.entries
+            .filter { (sid, m) -> tabManager.getTab(sid)?.server?.id == serverId && m.isConnected }
+            .mapNotNull { it.value.getSession() }
+        return candidates.any { s ->
+            connections.values.count { it.getSession() === s } + (longChannels[s]?.get() ?: 0) + 1 +
+                ServerTransportPool.FALLBACK_RESERVE <= ServerTransportPool.SSHD_MAX_SESSIONS
+        }
     }
 
-    /** Channels counted by [reserveTabChannel] per tab session, so a release gives back only what a reserve took. */
-    private val tabChannelsCounted = java.util.concurrent.ConcurrentHashMap<Session, java.util.concurrent.atomic.AtomicInteger>()
+    private suspend fun <T> onTabChannel(serverId: String, session: Session, source: String, short: Boolean, block: suspend (Session) -> T): Fallback<T>? {
+        val ch = reserveTabChannel(serverId, session, short) ?: run { noteSkipped(source, serverId); return null }
+        try {
+            return Fallback(block(session))
+        } catch (e: Exception) {
+            if (isChannelOpenFailure(e)) logChannelOpenFailed(source, serverId, session, null, e)
+            throw e
+        } finally {
+            withContext(NonCancellable) { ch.release() }
+        }
+    }
+
+    /** The channel budget of [serverId]'s tab transports for the pollers of a tab. */
+    fun tabChannels(serverId: String): TabChannels = object : TabChannels {
+        override suspend fun reserve(session: Session): TabChannel? = reserveTabChannel(serverId, session)
+        override fun skipped(source: String) = noteSkipped(source, serverId)
+        override fun describe(session: Session): String = describeTransport(serverId, session)
+    }
+
+    /** Skipped ticks per source of a server since the last line, and when that line was written. */
+    private class SkipCount { var since = 0L; var count = 0 }
+    private val skipCounts = java.util.concurrent.ConcurrentHashMap<String, java.util.concurrent.ConcurrentHashMap<String, SkipCount>>()
+
+    /** Clock of the `poll skipped` rate limit (a seam for tests). */
+    @Volatile internal var skipClock: () -> Long = { System.currentTimeMillis() }
+
+    /**
+     * `poll skipped (no room)`: the first skip of a source on a server at once, then at most one line a minute with the
+     * count. Skips counted after the last line are written by the next skip, or at the next tab channel the server grants
+     * ([reserveTabChannel] → [flushSkipped]) once the minute is over. A streak that neither follows (the last tab closed,
+     * the app in the background) keeps its count unwritten.
+     */
+    fun noteSkipped(source: String, serverId: String) {
+        val c = skipCounts.computeIfAbsent(serverId) { java.util.concurrent.ConcurrentHashMap() }.computeIfAbsent(source) { SkipCount() }
+        val line = synchronized(c) {
+            c.count++
+            val now = skipClock()
+            if (c.since != 0L && now - c.since < SKIP_LOG_WINDOW_MS) return
+            val n = c.count
+            c.count = 0
+            c.since = now
+            "poll skipped (no room) src=$source server=$serverId n=$n"
+        }
+        FileLogger.log(CHANNEL_TAG, line)
+    }
+
+    /** A channel of [serverId] was granted: write the skips still counted since a line older than the window (the end of a streak). */
+    private fun flushSkipped(serverId: String) {
+        val sources = skipCounts[serverId] ?: return
+        for ((source, c) in sources) {
+            val line = synchronized(c) {
+                val now = skipClock()
+                if (c.count == 0 || now - c.since < SKIP_LOG_WINDOW_MS) null
+                else "poll skipped (no room) src=$source server=$serverId n=${c.count}".also { c.count = 0; c.since = now }
+            } ?: continue
+            FileLogger.log(CHANNEL_TAG, line)
+        }
+    }
+
+    /** route, usability and occupancy of [session]'s transport (shells = this registry's tabs on it; headroom = room for one more counted channel). */
+    fun describeTransport(serverId: String, session: Session): String {
+        val pool = transportPools[serverId]
+        val shells = connections.values.count { it.getSession() === session }
+        return "route=${pool?.routeOf(session) ?: "unknown"} usable=${pool?.isUsable(session) ?: session.isConnected} " +
+            "shells=$shells headroom=${pool?.fallbackHeadroom(session) ?: "n/a"}"
+    }
+
+    /** One `channel open failed` line (exit status, route, usability, occupancy): the acceptance metric of the channel budget. */
+    fun logChannelOpenFailed(source: String, serverId: String, session: Session, exitStatus: Int?, e: Throwable) {
+        FileLogger.log(CHANNEL_TAG, channelOpenFailedLine(source, exitStatus, describeTransport(serverId, session), e))
+    }
+
+    /** The server of the tab whose manager is [mgr], or null. */
+    fun serverIdOfManager(mgr: SshManager): String? =
+        connections.entries.firstOrNull { it.value === mgr }?.key?.let { serverIdOf(it) }
 
     /**
      * One command on a tab transport of [serverId] with channel headroom (no exec transport involved), for
@@ -232,7 +406,7 @@ internal class ConnectionRegistry(
      * transport has room. With routing off it is the legacy tab session, as before.
      */
     internal suspend fun execOnTab(serverId: String, cmd: String, totalMs: Long): String? =
-        if (needsRoom(serverId)) onFallbackTab(serverId) { execReadWithWatchdog(it, cmd, totalMs = totalMs) }?.value
+        if (needsRoom(serverId)) onFallbackTab(serverId, ExecKind.SHORT) { execReadWithWatchdog(it, cmd, totalMs = totalMs) }?.value
         else tabServerSession(serverId)?.let { execReadWithWatchdog(it, cmd, totalMs = totalMs) }
 
     /** Reconcile execs issued so far, over every server (the load figure of `data/60s exec=`). */
@@ -266,6 +440,8 @@ internal class ConnectionRegistry(
         totalMs: Long = 15_000,
         kind: ExecKind = ExecKind.SHORT,
         paceStdin: Pace = Pace(),
+        /** An upload: its fallback keeps off the reserve slot of a packed tab transport (V12), null = no room. */
+        transfer: Boolean = false,
     ): ExecResult? {
         val routed = remoteExec
         if (routed != null && execActive(serverId)) {
@@ -275,13 +451,13 @@ internal class ConnectionRegistry(
                 if (e.reason != ExecUnavailableReason.NOT_UP) throw e
             }
             // exec transport not up: only a tab transport that has room for one more channel
-            return onFallbackTab(serverId) { tab ->
+            return onFallbackTab(serverId, kind, transfer) { tab ->
                 PooledRemoteExec(UngatedExecChannels { tab }).run(serverId, cmd, stdin, totalMs, kind, paceStdin)
             }?.value
         }
         if (needsRoom(serverId)) {
             // routing switched off while shells are still packed 8 to a transport: the same counted fallback
-            return onFallbackTab(serverId) { tab ->
+            return onFallbackTab(serverId, kind, transfer) { tab ->
                 PooledRemoteExec(UngatedExecChannels { tab }).run(serverId, cmd, stdin, totalMs, kind, paceStdin)
             }?.value
         }
@@ -307,9 +483,9 @@ internal class ConnectionRegistry(
             } catch (e: ExecUnavailable) {
                 if (e.reason != ExecUnavailableReason.NOT_UP) throw e
             }
-            return onFallbackTab(serverId) { tab -> execReadWithWatchdog(tab, cmd, totalMs = totalMs) }?.value
+            return onFallbackTab(serverId, kind) { tab -> execReadWithWatchdog(tab, cmd, totalMs = totalMs) }?.value
         }
-        if (needsRoom(serverId)) return onFallbackTab(serverId) { tab -> execReadWithWatchdog(tab, cmd, totalMs = totalMs) }?.value
+        if (needsRoom(serverId)) return onFallbackTab(serverId, kind) { tab -> execReadWithWatchdog(tab, cmd, totalMs = totalMs) }?.value
         val tab = tabServerSession(serverId) ?: return null
         return execReadWithWatchdog(tab, cmd, totalMs = totalMs)
     }
@@ -318,12 +494,14 @@ internal class ConnectionRegistry(
      * Scoped channel on [serverId] through the gate (SFTP, long-lived streams). Falls
      * back to an ungated channel on a live tab session when the exec transport is not
      * UP. Throws [ExecUnavailable] (NOT_UP) when neither exists. An [ExecUnavailable]
-     * thrown by [block] itself is never mistaken for "not up" (the block runs once).
+     * thrown by [block] itself is never mistaken for "not up" (the block runs once). A [transfer] (SFTP download) keeps
+     * its fallback off the reserve slot of a packed tab transport (V12): NOT_UP there, the user tries again.
      */
     suspend fun <T> useChannel(
         serverId: String,
         kind: ExecKind,
         acquireTimeoutMs: Long = 5_000,
+        transfer: Boolean = false,
         block: suspend (com.jcraft.jsch.Channel) -> T,
     ): T {
         val gated = execChannels
@@ -334,11 +512,11 @@ internal class ConnectionRegistry(
             } catch (e: ExecUnavailable) {
                 if (entered || e.reason != ExecUnavailableReason.NOT_UP) throw e
             }
-            return onFallbackTab(serverId) { tab -> UngatedExecChannels { tab }.use(serverId, kind, acquireTimeoutMs, block) }
+            return onFallbackTab(serverId, kind, transfer) { tab -> UngatedExecChannels { tab }.use(serverId, kind, acquireTimeoutMs, block) }
                 ?.value ?: throw ExecUnavailable(ExecUnavailableReason.NOT_UP)
         }
         if (needsRoom(serverId)) {
-            return onFallbackTab(serverId) { tab -> UngatedExecChannels { tab }.use(serverId, kind, acquireTimeoutMs, block) }
+            return onFallbackTab(serverId, kind, transfer) { tab -> UngatedExecChannels { tab }.use(serverId, kind, acquireTimeoutMs, block) }
                 ?.value ?: throw ExecUnavailable(ExecUnavailableReason.NOT_UP)
         }
         val tab = tabServerSession(serverId) ?: throw ExecUnavailable(ExecUnavailableReason.NOT_UP)

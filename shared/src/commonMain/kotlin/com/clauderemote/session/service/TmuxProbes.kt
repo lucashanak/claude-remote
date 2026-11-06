@@ -160,14 +160,20 @@ internal class TmuxProbes(
                     return@withContext out?.contains("OK") ?: false
                 }
                 val sshSession = conn.getSession() ?: return@withContext false
-                val ch = sshSession.openChannel("exec") as com.jcraft.jsch.ChannelExec
-                ch.setCommand(refreshCmd)
-                ch.inputStream = null
-                val input = ch.inputStream
-                ch.connect(1500) // keep snappy on cell links; fallback toggle covers failure
-                val out = input.bufferedReader().readText()
-                ch.disconnect()
-                out.contains("OK")
+                // Legacy: the attached shell's own session, one channel counted where the shells are packed. No room =
+                // no kick here (the SIGWINCH toggle of the caller needs no channel).
+                val run: suspend (com.jcraft.jsch.Session) -> Boolean = { sess ->
+                    val ch = sess.openChannel("exec") as com.jcraft.jsch.ChannelExec
+                    ch.setCommand(refreshCmd)
+                    ch.inputStream = null
+                    val input = ch.inputStream
+                    ch.connect(1500) // keep snappy on cell links; fallback toggle covers failure
+                    val out = input.bufferedReader().readText()
+                    ch.disconnect()
+                    out.contains("OK")
+                }
+                if (serverId == null) run(sshSession)
+                else registry.withTabChannel(serverId, sshSession, "refresh-client", run)?.value ?: false
             } catch (e: Exception) {
                 FileLogger.log(TAG, "refresh-client failed for $tmuxName: ${e.message}")
                 false

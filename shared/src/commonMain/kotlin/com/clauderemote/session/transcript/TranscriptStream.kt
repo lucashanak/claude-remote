@@ -2,6 +2,7 @@ package com.clauderemote.session.transcript
 
 import com.clauderemote.connection.SshSessionHelper
 import com.clauderemote.model.SshServer
+import com.clauderemote.session.service.CommFlags
 import com.clauderemote.session.service.ExecUnavailable
 import com.clauderemote.session.service.ExecUnavailableReason
 import com.clauderemote.util.FileLogger
@@ -80,12 +81,12 @@ class TranscriptStream(
      */
     private val viaExec: () -> Boolean = { false },
     /**
-     * With exec routing on and the exec transport not up, a poll falls back to the tab's own session. The channel
-     * it opens there must be counted against the transport and refused when the tabs sit 8 to a transport
-     * (`MaxSessions`): [reserveTabChannel] false = skip the tick, [releaseTabChannel] gives the count back.
+     * The channel budget of the tab's own transport. A poll on the tab's own session (exec routing on and the exec
+     * transport not up, or exec routing off: the kill switch, a legacy server) takes one channel there, counted against
+     * the transport and refused when the shells leave no room (`MaxSessions`): null = skip the tick. The token is given
+     * back however the poll ends.
      */
-    private val reserveTabChannel: suspend (com.jcraft.jsch.Session) -> Boolean = { true },
-    private val releaseTabChannel: suspend (com.jcraft.jsch.Session) -> Unit = {},
+    private val tabChannels: com.clauderemote.session.service.TabChannels = com.clauderemote.session.service.TabChannels.UNCOUNTED,
 ) {
     private val _entries = MutableStateFlow<List<TranscriptEntry>>(emptyList())
     val entries: StateFlow<List<TranscriptEntry>> = _entries.asStateFlow()
@@ -277,18 +278,33 @@ class TranscriptStream(
                 }
             } catch (e: ExecUnavailable) {
                 if (e.reason != ExecUnavailableReason.NOT_UP) throw e
-                if (shared == null || !reserveTabChannel(shared)) return@withLock
+                if (shared == null) return@withLock
+                val ch = tabChannels.reserve(shared) ?: run { tabChannels.skipped(SKIP_SOURCE); return@withLock }
                 try {
                     pollOnce(shared, safeFolder, safeUuid, byteOffset)
                 } finally {
-                    kotlinx.coroutines.withContext(kotlinx.coroutines.NonCancellable) { releaseTabChannel(shared) }
+                    kotlinx.coroutines.withContext(kotlinx.coroutines.NonCancellable) { ch.release() }
                 }
             }
         } else if (shared != null) {
-            pollOnce(shared, safeFolder, safeUuid, byteOffset)
+            // Exec routing off (kill switch, legacy server): the tab's own session, counted where the shells are packed.
+            val ch = tabChannels.reserve(shared) ?: run { tabChannels.skipped(SKIP_SOURCE); return@withLock }
+            try {
+                pollOnce(shared, safeFolder, safeUuid, byteOffset)
+            } finally {
+                kotlinx.coroutines.withContext(kotlinx.coroutines.NonCancellable) { ch.release() }
+            }
         } else {
-            SshSessionHelper.withSession(server, timeout = 15_000) { sess ->
-                pollOnce(sess, safeFolder, safeUuid, byteOffset)
+            // No live session of the tab. With the pool on, a fresh connection per poll would be a handshake outside the
+            // pool's limits (50 tabs x one poll after a network loss): skip the tick instead. Pool off: as before.
+            try {
+                SshSessionHelper.withSession(server, timeout = 15_000, allowFresh = !CommFlags.effectiveFor(server.id).pool) { sess ->
+                    pollOnce(sess, safeFolder, safeUuid, byteOffset)
+                }
+            } catch (e: ExecUnavailable) {
+                if (e.reason != ExecUnavailableReason.NOT_UP) throw e
+                tabChannels.skipped(SKIP_SOURCE)
+                return@withLock
             }
         }
         // The poll asks for INITIAL_LINES + 1: getting more than we keep is
@@ -481,7 +497,13 @@ class TranscriptStream(
         ch.inputStream = null
         val inStream = ch.inputStream
         val out = withContext(Dispatchers.IO) {
-            ch.connect(10_000)
+            try {
+                ch.connect(10_000)
+            } catch (e: com.jcraft.jsch.JSchException) {
+                tabChannels.channelOpenFailed(SKIP_SOURCE, sess, ch.exitStatus, e)
+                try { ch.disconnect() } catch (_: Throwable) {}
+                throw e
+            }
             inStream.bufferedReader(Charsets.UTF_8).readText()
         }
         try { ch.disconnect() } catch (_: Throwable) {}
@@ -591,6 +613,8 @@ class TranscriptStream(
     }
 
     companion object {
+        /** The `src=` of this poller in the channel-budget log lines. */
+        private const val SKIP_SOURCE = "transcript"
         private const val TAG = "TranscriptStream"
         // Cap initial backlog from tail to bound startup time + RAM.
         private const val INITIAL_LINES = 2000

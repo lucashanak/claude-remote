@@ -182,7 +182,7 @@ class ExecWiringIntegrationTest {
         }.awaitAll()
     }
 
-    @Test fun withEightShellsOnATransportAndNoExecTransportTheFallbacksAreRefusedNotOverflowing() {
+    @Test fun withEightShellsOnATransportAndNoExecTransportShortFallbacksTakeTheReserveSlotAndLongOnesAreRefused() {
         val f = boot()
         addTabs(f, 8)
         orchestrator.ensureExecTransport(serverId)
@@ -192,14 +192,26 @@ class ExecWiringIntegrationTest {
         orchestrator.execManager.close(serverId)   // the exec transport is gone for good
 
         runBlocking {
-            assertNull(registry.execRun(serverId, "echo x"), "a short exec has nowhere to go: no transport has room")
-            assertNull(registry.execRead(serverId, "echo x"))
+            // V9 (dávka B round 2): a short exec may take ONE slot of the reserve, so it runs (8 + 1); a long one may not
+            assertEquals("x", registry.execRun(serverId, "echo x")!!.stdout.trim(), "a short exec runs in the one slot of the reserve")
+            assertEquals("x", registry.execRead(serverId, "echo x")!!.trim())
             val e = assertFailsWith<ExecUnavailable> { registry.useChannel(serverId, ExecKind.LONG) { } }
             assertEquals(ExecUnavailableReason.NOT_UP, e.reason)
             assertNull(registry.liveServerSession(serverId), "the watcher's fallback lookup finds nothing either")
             assertNull(registry.fallbackPooledSession(serverId))
-            assertNull(SshSessionHelper.liveSessionProvider!!.invoke(f.server), "withSession's pooled step gets no transport without room")
-            assertNull(registry.execOnTab(serverId, "echo x", 5_000), "nor does the bootstrap's fallback")
+            assertNull(SshSessionHelper.liveSessionProvider!!.invoke(f.server), "the look-only view (long rule) gets no transport without room")
+            assertEquals("x", registry.execOnTab(serverId, "echo x", 5_000)!!.trim(), "the bootstrap's short fallback runs in the slot")
+            // T1 (review round 2) with V12: the SFTP stat of a chat's paths is short and runs in the slot; a transfer
+            // (SFTP download, upload) keeps off the reserve and gets NOT_UP
+            val homeIsDir = registry.useChannel(serverId, ExecKind.SFTP) { ch ->
+                val sftp = ch as com.jcraft.jsch.ChannelSftp
+                sftp.connect(5_000)
+                try { sftp.stat(sftp.home).isDir } finally { sftp.disconnect() }
+            }
+            assertTrue(homeIsDir, "an SFTP stat runs in the one slot of the reserve")
+            val t = assertFailsWith<ExecUnavailable> { registry.useChannel(serverId, ExecKind.SFTP, transfer = true) { } }
+            assertEquals(ExecUnavailableReason.NOT_UP, t.reason, "a transfer takes no reserve slot")
+            assertNull(registry.execRun(serverId, "cat > /dev/null", stdin = ByteArray(16), transfer = true), "nor does an upload")
         }
         assertEquals(0, f.refusedChannelOpens(), "sshd was never asked for a channel it would refuse")
 
@@ -216,7 +228,7 @@ class ExecWiringIntegrationTest {
         assertTrue(f.refusedChannelOpens() >= 1)
     }
 
-    @Test fun withSevenShellsExactlyOneFallbackChannelRunsAtATimeAndTheCountComesBack() {
+    @Test fun withSevenShellsALongStreamAndOneShortChannelInTheReserveRunTogetherAndTheCountComesBack() {
         val f = boot()
         addTabs(f, 7)
         orchestrator.ensureExecTransport(serverId)
@@ -236,7 +248,11 @@ class ExecWiringIntegrationTest {
                 registry.useChannel(serverId, ExecKind.LONG) { _ -> inside.complete(Unit); release.await() }
             }
             withTimeout(10_000) { inside.await() }
-            assertNull(registry.execRead(serverId, "echo b"), "the stream holds the one slot: a second fallback is refused locally")
+            // V9: the stream holds the one ordinary slot; a short read still runs in the one slot of the reserve, a
+            // second long stream does not fit (7 + 1 + 2 > 10)
+            assertEquals("b", registry.execRead(serverId, "echo b")!!.trim(), "a short read runs in the reserve slot")
+            val e = assertFailsWith<ExecUnavailable> { registry.useChannel(serverId, ExecKind.LONG) { } }
+            assertEquals(ExecUnavailableReason.NOT_UP, e.reason, "a second long stream is refused locally")
             release.complete(Unit)
             stream.join()
             assertEquals("c", registry.execRead(serverId, "echo c")!!.trim(), "the slot came back")
@@ -254,7 +270,10 @@ class ExecWiringIntegrationTest {
         runBlocking {
             val slow = async(Dispatchers.IO) { registry.execRun(serverId, "sleep 2; echo slow", totalMs = 10_000) }
             Thread.sleep(700)
-            assertNull(registry.execRead(serverId, "echo second"), "the running short exec holds the slot")
+            // V9: the running short exec holds the ordinary slot; a long stream finds none, a short one the reserve slot
+            val e = assertFailsWith<ExecUnavailable> { registry.useChannel(serverId, ExecKind.LONG) { } }
+            assertEquals(ExecUnavailableReason.NOT_UP, e.reason, "the running short exec holds the slot")
+            assertEquals("second", registry.execRead(serverId, "echo second")!!.trim(), "a short one runs in the reserve slot")
             assertEquals("slow", slow.await()!!.stdout.trim())
             assertEquals("third", registry.execRead(serverId, "echo third")!!.trim(), "and gives it back")
         }
@@ -410,11 +429,14 @@ class ExecWiringIntegrationTest {
         waitUntil(20_000, "the exec transport to be closed by the kill switch") { execClosed() }
         waitUntil(20_000, "its TCP connection to be gone") { established(f) == 1 }
         val results = runBlocking { (1..4).map { async(Dispatchers.IO) { registry.execRead(serverId, "echo x") } }.awaitAll() }
-        assertTrue(results.all { it == null }, "8 shells + 1 + the reserve of 2 do not fit in 10: nothing runs, nothing is refused by sshd: $results")
+        // V9: 8 shells + 1 short channel in the reserve fit in 10; one read finds the reserve slot, the others are
+        // skipped (null, they do not wait for it); nothing is refused by sshd
+        assertTrue(results.any { it != null }, "8 shells + one short read in the reserve fit: $results")
+        assertTrue(results.filterNotNull().all { it.trim() == "x" }, "every read that ran got its answer: $results")
         assertEquals(0, f.refusedChannelOpens(), "sshd was never asked for a channel it would refuse")
     }
 
-    @Test fun theKillSwitchWithSixShellsLetsTheReadsThroughOneOrTwoAtATime() {
+    @Test fun theKillSwitchWithSixShellsLetsTheReadsThroughUpToThreeAtATime() {
         val f = boot()
         addTabs(f, 6)
         orchestrator.ensureExecTransport(serverId)
@@ -500,14 +522,14 @@ class ExecWiringIntegrationTest {
         println("MEASURED disconnect of a quiet shell: ${System.currentTimeMillis() - t0} ms")
     }
 
-    @Test fun withEightShellsAndNoExecTransportThePollsOfTheTabsAreSkippedNotRefused() {
+    @Test fun withEightShellsAndNoExecTransportThePollsOfTheTabsShareTheReserveSlotAndAreNeverRefused() {
         val f = boot()
         val ts = (1..8).map { i -> tab(f, "t$i").copy(claudeSessionId = "00000000-0000-4000-8000-00000000000$i").also { tabs.addTab(it) } }
         orchestrator.ensureExecTransport(serverId)
         execUp()
         connectShells(f, ts.map { it.id })
         orchestrator.execManager.close(serverId)
-        ts.forEach { orchestrator.transcriptFlow(it.id) }     // eight streams poll at once, each on its own session
+        ts.forEach { orchestrator.transcriptFlow(it.id) }     // eight streams, each on its own session; their polls share the one reserve slot
         Thread.sleep(8_000)
         assertEquals(0, f.refusedChannelOpens(), "no poll opened a channel on a transport with no room")
     }
@@ -519,7 +541,7 @@ class ExecWiringIntegrationTest {
         execUp()
         connectShells(f, ts.map { it.id })
         orchestrator.execManager.close(serverId)
-        ts.forEach { orchestrator.kickRedraw(it.id, 100, 30) }   // eight refresh-client execs at once; no room for any of them
+        ts.forEach { orchestrator.kickRedraw(it.id, 100, 30) }   // eight refresh-client execs at once; at most one finds the reserve slot
         Thread.sleep(3_000)
         assertEquals(0, f.refusedChannelOpens(), "a kick without room uses the geometry fallback, not a channel of the attached shell's session")
     }

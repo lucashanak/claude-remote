@@ -648,14 +648,19 @@ internal class NotificationService(
         try {
             val result = kotlinx.coroutines.withContext(Dispatchers.IO) {
                 val sshSession = sshManager.getSession() ?: return@withContext "NO_SESSION"
-                val ch = sshSession.openChannel("exec") as com.jcraft.jsch.ChannelExec
-                ch.setCommand(ENSURE_HOOK_COMMAND)
-                ch.inputStream = null
-                val input = ch.inputStream
-                ch.connect(10_000)
-                val out = input.bufferedReader().readText().trim()
-                ch.disconnect()
-                out
+                val run: suspend (com.jcraft.jsch.Session) -> String = { sess ->
+                    val ch = sess.openChannel("exec") as com.jcraft.jsch.ChannelExec
+                    ch.setCommand(ENSURE_HOOK_COMMAND)
+                    ch.inputStream = null
+                    val input = ch.inputStream
+                    ch.connect(10_000)
+                    val out = input.bufferedReader().readText().trim()
+                    ch.disconnect()
+                    out
+                }
+                // The tab's own session: one channel counted where the shells are packed (no room: try with the next connect).
+                val serverId = registry.serverIdOfManager(sshManager) ?: return@withContext run(sshSession)
+                registry.withTabChannel(serverId, sshSession, "stop-hook", run)?.value ?: "NO_ROOM"
             }
             FileLogger.log(TAG, "Stop hook setup: $result")
         } catch (e: Exception) {
@@ -733,14 +738,16 @@ internal class NotificationService(
                 if (entered || e.reason != ExecUnavailableReason.NOT_UP) throw e
             }
         }
-        val session = registry.liveServerSession(serverId) ?: return false
-        val ch = session.openChannel("exec")
-        try {
-            block(ch)
-        } finally {
-            try { ch.disconnect() } catch (_: Exception) {}
-        }
-        return true
+        // A tab session: the LONG channel is counted against its transport for as long as the tail runs where the shells
+        // are packed (exec routing off with 8 shells per transport, or the exec transport down); no room = no watcher now.
+        return registry.onServerTabChannel(serverId) { session ->
+            val ch = session.openChannel("exec")
+            try {
+                block(ch)
+            } finally {
+                try { ch.disconnect() } catch (_: Exception) {}
+            }
+        } != null
     }
 
     private suspend fun runServerNotifyWatcher(w: ServerNotifyWatcher) = kotlinx.coroutines.coroutineScope {

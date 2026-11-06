@@ -79,9 +79,10 @@ internal class GitStatusService(
                 git status --porcelain 2>/dev/null | head -1
                 git rev-list --left-right --count @{u}...HEAD 2>/dev/null
             """.trimIndent()
-            // Exec transport (a parked tab has no shell of its own), else a live tab session.
+            // Exec transport (a parked tab has no shell of its own), else a live tab session. Legacy: the tab's own
+            // session, one channel counted against its transport where the shells are packed (no room = skip the round).
             val output = if (ownSession != null) {
-                execReadWithWatchdog(ownSession, cmd, totalMs = 20_000)
+                registry.withTabChannel(serverId, ownSession, "git") { execReadWithWatchdog(it, cmd, totalMs = 20_000) }?.value ?: return
             } else {
                 registry.execRead(serverId, cmd, totalMs = 20_000) ?: return
             }

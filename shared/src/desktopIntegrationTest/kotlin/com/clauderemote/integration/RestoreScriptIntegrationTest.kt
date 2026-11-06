@@ -12,7 +12,18 @@ import kotlinx.coroutines.runBlocking
 import org.junit.After
 import org.junit.Before
 import org.junit.Test
+import com.clauderemote.session.ClaudeConfig
+import com.clauderemote.session.TabManager
+import com.clauderemote.session.service.ConnectionRegistry
+import com.clauderemote.session.service.TerminalIOService
+import com.clauderemote.session.service.TmuxProbes
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.cancel
 import java.io.File
+import java.nio.file.Files
+import java.nio.file.LinkOption
+import java.util.concurrent.TimeUnit
 import kotlin.test.assertContains
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
@@ -253,6 +264,748 @@ class RestoreScriptIntegrationTest {
         assertRestoreLogIsClean(fixture.restoreLog())
     }
 
+
+    // ------------------------------------------------------- socket guard (B3)
+
+    /**
+     * (i) Only the socket FILE is gone; the server lives on. The old drift saw LIVE=[] and relaunched every
+     * session into a second server. Now: SIGUSR1 brings the socket back, the same server answers, nothing is
+     * relaunched and the manifest is not written. Two bystander servers — `-L other` in the same directory and one
+     * in another TMUX_TMPDIR — must not be touched (their socket inodes stay).
+     */
+    @Test
+    fun driftHealsADeletedSocketWithoutRelaunching() {
+        val w = guardWorld()
+        assertTrue(fixture.tmuxSocket.delete(), "could not delete the private socket")
+        assertEquals(0, runDrift().exit, "drift should exit 0. log:\n${fixture.driftLog()}")
+        w.assertHealedInPlace()
+        assertEquals(w.otherKey, socketKey(w.otherSock), "the -L other server's socket was touched")
+    }
+
+    /** (ii) The whole `tmux-<uid>` directory is gone — the 2026-11-02 shape, where SIGUSR1 alone cannot bind. */
+    @Test
+    fun driftHealsADeletedSocketDirectoryWithoutRelaunching() {
+        val w = guardWorld()
+        val dir = fixture.tmuxSocket.parentFile
+        assertTrue(fixture.tmuxSocket.delete() && w.otherSock.delete() && dir.delete(), "could not delete ${dir.absolutePath}")
+        assertEquals(0, runDrift().exit, "drift should exit 0. log:\n${fixture.driftLog()}")
+        w.assertHealedInPlace()
+        assertEquals("700", modeOf(dir), "the recreated socket directory must be private")
+        assertFalse(w.otherSock.exists(), "the -L other server was signalled too: its socket came back")
+    }
+
+    /**
+     * (iii) Split brain: the socket is gone and a SECOND server already took the path, holding part of the
+     * sessions (the 23:38:14 pattern: LIVE was not empty). Nobody may be signalled (the signalled one would
+     * unlink the other's socket) and nothing relaunched — by drift, by restore.sh or by the app's anchor.
+     */
+    @Test
+    fun splitBrainIsNeverSignalledNorRelaunched() {
+        val w = guardWorld()
+        assertTrue(fixture.tmuxSocket.delete(), "could not delete the private socket")
+        fixture.tmux("new-session", "-d", "-s", ALPHA, "sleep", "86400")
+        waitUntil(10_000, "a second server on the path") { listeners(fixture.tmuxSocket).size == 2 }
+        val second = assertNotNull(serverPid(), "the second server must answer on the path")
+        fixture.trackPid(second)
+        assertTrue(second != w.serverPid, "precondition: a different server")
+
+        assertEquals(0, runDrift().exit, "drift should exit 0. log:\n${fixture.driftLog()}")
+        assertContains(fixture.driftLog(), "SPLIT BRAIN", message = "drift.log:\n${fixture.driftLog()}")
+        val logAfterFirst = fixture.driftLog()
+        // a lasting fault is rate-limited: the next tick adds nothing
+        assertEquals(0, runDrift().exit)
+        assertEquals(logAfterFirst, fixture.driftLog(), "a lasting split brain must not log every tick")
+
+        runRestore()
+        assertContains(fixture.restoreLog().substring(w.restoreLogLen), "NOT creating a second server")
+        val app = session.execCapture(ClaudeConfig.buildTmuxLoginCommand(LOGIN, "acct"), timeoutMs = 30_000)
+        assertContains(app.out, "not starting a tmux server", message = "the app anchor must refuse:\n${app.out}")
+        // ...and say so to its caller: a non-zero exit and the real cause, not "lost its socket"
+        assertTrue(app.exit != 0, "the refusal must exit non-zero: ${app.exit} ${app.out}")
+        assertContains(app.out, "split brain", message = "the refusal must name the cause:\n${app.out}")
+        // L4 (kolo 3): each caller rate-limits with its own stamp — drift having logged the fault must not silence it in
+        // restore.log and sockheal.log, where whoever looks at that caller reads.
+        assertContains(fixture.restoreLog().substring(w.restoreLogLen), "SPLIT BRAIN", message = "restore.log:\n${fixture.restoreLog()}")
+        assertContains(sockhealLog(), "SPLIT BRAIN", message = "sockheal.log:\n${sockhealLog()}")
+
+        assertEquals(second, serverPid(), "the path must still belong to the second server (nobody was signalled)")
+        assertEquals(listOf(ALPHA), fixture.tmuxSessions(), "nothing may be relaunched into the second server")
+        assertTrue(ProcessHandle.of(w.serverPid).map { it.isAlive }.orElse(false), "the original server must live on")
+        assertEquals(setOf(w.serverPid, second), listeners(fixture.tmuxSocket).toSet(), "no third server")
+        w.assertNothingRelaunchedOrWritten()
+        assertEquals(w.otherKey, socketKey(w.otherSock), "the -L other server's socket was touched")
+    }
+
+    /** restore.sh's create branch and the app's tmux anchor heal too: the session lands in the SAME server. */
+    @Test
+    fun restoreAndTheAppAnchorHealInsteadOfStartingASecondServer() {
+        val w = guardWorld()
+        assertTrue(fixture.tmuxSocket.delete())
+        assertEquals(0, runRestore().exit)
+        assertEquals(w.serverPid, serverPid(), "restore.sh must have healed the original server")
+        assertTrue(fixture.tmuxSocket.delete())
+        val app = session.execCapture(ClaudeConfig.buildTmuxLoginCommand(LOGIN, "acct"), timeoutMs = 30_000)
+        assertEquals(0, app.exit, "app anchor: ${app.out}")
+        waitUntil(10_000, "$LOGIN in the healed server") { fixture.tmuxSessions().contains(LOGIN) }
+        assertEquals(w.serverPid, serverPid(), "the app must have healed the original server, not created one")
+        assertEquals(listOf(w.serverPid), listeners(fixture.tmuxSocket), "exactly one server on the path")
+        assertEquals(w.created, w.created.keys.associateWith { fixture.sessionCreatedAt(it) }, "a session was recreated")
+    }
+
+    /**
+     * R5 (kolo 2): a tab reconnects while the socket is gone, by either of the app's two forms:
+     *  - `tmux attach … || { relaunch ; }` (SessionOrchestrator's reconnect). The failed attach STARTS a short-lived
+     *    server of its own and leaves a stale socket file on the path (measured, tmux 3.5a) — the guard took that for
+     *    a hung server and refused, and drift did the same every tick;
+     *  - the relaunch alone, after the has-session probe said NO (TmuxLaunchDecider's Rebuild).
+     * The relaunch's anchor heals the socket and then used to `kill-session` the LIVE session and start it again (new
+     * pane pid, running work lost) while sockheal.log said "nothing relaunched". After a heal it must attach the
+     * session that is still there. Run on a PTY, as the app's terminal is.
+     */
+    @Test
+    fun aReconnectAfterTheSocketHealAttachesTheLiveSessionInsteadOfRestartingIt() {
+        val w = guardWorld()
+        val panePid = panePidOf(ALPHA)
+        assertNotNull(panePid, "precondition: $ALPHA has a pane")
+        val relaunch = ClaudeConfig.buildTmuxLaunchCommand(
+            tmuxSessionName = ALPHA, folder = File(fixture.home, "projA").absolutePath,
+            mode = ClaudeMode.YOLO, model = ClaudeModel.DEFAULT, claudeSessionId = "11111111-2222-3333-4444-555555555555", resume = true,
+            onExisting = ClaudeConfig.OnExisting.Attach(),
+        )
+        for ((form, cmd) in listOf(
+            "attach || relaunch" to "tmux attach-session -t '=$ALPHA' 2>/dev/null || { $relaunch ; }",
+            "relaunch after has-session said NO" to relaunch,
+        )) {
+            assertTrue(fixture.tmuxSocket.delete(), "$form: could not delete the private socket")
+            var reconnect: ExecResult? = null
+            val tab = Thread { reconnect = session.execCapture(cmd, timeoutMs = 40_000, pty = true) }.apply { isDaemon = true; start() }
+            try {
+                waitUntil(30_000, "$form: a client attached to $ALPHA. sockheal.log:\n${sockhealLog()}") {
+                    fixture.tmux("list-clients", "-t", "=$ALPHA", "-F", "#{client_tty}").let { it.exit == 0 && it.out.isNotBlank() }
+                }
+            } finally {
+                fixture.tmux("detach-client", "-s", "=$ALPHA")
+                tab.join(20_000)
+            }
+            val originalAlive = ProcessHandle.of(w.serverPid).map { it.isAlive }.orElse(false)
+            assertEquals(
+                panePid, panePidOf(ALPHA),
+                "$form: the live session was restarted (pane pid changed; original server alive=$originalAlive, sessions=${fixture.tmuxSessions()}). " +
+                    "out: ${reconnect?.out}\nsockheal.log:\n${sockhealLog()}",
+            )
+            assertEquals(w.serverPid, serverPid(), "$form: the ORIGINAL server must have been healed")
+            assertEquals(listOf(w.serverPid), listeners(fixture.tmuxSocket), "$form: exactly one server on the path")
+            assertEquals(w.created, w.created.keys.associateWith { fixture.sessionCreatedAt(it) }, "$form: a session was recreated")
+        }
+        assertEquals(2, Regex("recreated").findAll(sockhealLog()).count(), "sockheal.log must record both heals:\n${sockhealLog()}")
+        w.assertNothingRelaunchedOrWritten()
+    }
+
+    /**
+     * The stale socket file a failed `tmux attach` leaves (it starts a short-lived server of its own when the path is
+     * empty) is not a hung server: drift heals it in place like a missing socket.
+     */
+    @Test
+    fun driftHealsAStaleSocketFileLeftByAFailedAttach() {
+        val w = guardWorld()
+        assertTrue(fixture.tmuxSocket.delete(), "could not delete the private socket")
+        val attach = session.execCapture("tmux attach-session -t '=$ALPHA'")
+        assertTrue(attach.exit != 0, "precondition: the attach must fail: ${attach.out}")
+        assertTrue(fixture.tmuxSocket.exists(), "precondition: a stale socket file on the path")
+        assertContains(fixture.tmux("list-sessions").out, "no server running", message = "precondition: nobody accepts on it")
+        assertEquals(0, runDrift().exit, "drift should exit 0. log:\n${fixture.driftLog()}")
+        w.assertHealedInPlace()
+    }
+
+    /**
+     * N1 (kolo 3), the R-d shape of the round-2 review: the socket is gone, every tab's `has-session` probe said NO,
+     * and the tabs send their relaunch one after another. The first one heals (sockheal exit 3) and attaches; the
+     * next one's guard finds a socket that answers (exit 0) — and used to `kill-session` + `new-session` the session
+     * that had been alive all along (3 of 4 tabs restarted, measured). Whoever healed the socket, a session that is
+     * there is attached. Run on a PTY, as the app's terminal is.
+     */
+    @Test
+    fun reconnectsAfterAnotherTabHealedTheSocketAttachTheirLiveSessions() {
+        val w = guardWorld()
+        val panes = listOf(ALPHA, BETA).associateWith { assertNotNull(panePidOf(it), "precondition: $it has a pane") }
+        assertTrue(fixture.tmuxSocket.delete(), "could not delete the private socket")
+        reconnectOnPty(ALPHA, relaunchOf(ALPHA, "projA"), "tab 1 (heals)")
+        assertEquals(1, Regex("recreated").findAll(sockhealLog()).count(), "tab 1 must have healed:\n${sockhealLog()}")
+        val tab2 = reconnectOnPty(BETA, relaunchOf(BETA, "projB"), "tab 2 (after the heal)")
+        val tab3 = reconnectOnPty(ALPHA, relaunchOf(ALPHA, "projA"), "tab 3 (another device, same session)")
+        assertEquals(
+            panes, panes.keys.associateWith { panePidOf(it) },
+            "a live session was restarted (pane pid changed). tab 2: ${tab2?.out}\ntab 3: ${tab3?.out}\nsockheal.log:\n${sockhealLog()}",
+        )
+        assertEquals(w.created, w.created.keys.associateWith { fixture.sessionCreatedAt(it) }, "a session was recreated")
+        assertEquals(w.serverPid, serverPid(), "the ORIGINAL server must have been healed")
+        assertEquals(listOf(w.serverPid), listeners(fixture.tmuxSocket), "exactly one server on the path")
+        assertEquals(1, Regex("recreated").findAll(sockhealLog()).count(), "only tab 1 had anything to heal:\n${sockhealLog()}")
+        w.assertNothingRelaunchedOrWritten()
+    }
+
+    /** N1 (kolo 3), drift variant: a drift tick healed the socket a moment before the tab's relaunch arrives. */
+    @Test
+    fun aReconnectAfterADriftTickHealedTheSocketAttachesTheLiveSession() {
+        val w = guardWorld()
+        val pane = assertNotNull(panePidOf(ALPHA), "precondition: $ALPHA has a pane")
+        assertTrue(fixture.tmuxSocket.delete(), "could not delete the private socket")
+        assertEquals(0, runDrift().exit, "drift should exit 0. log:\n${fixture.driftLog()}")
+        w.assertHealedInPlace()
+        val tab = reconnectOnPty(ALPHA, relaunchOf(ALPHA, "projA"), "tab after the drift heal")
+        assertEquals(pane, panePidOf(ALPHA), "the live session was restarted (pane pid changed). tab: ${tab?.out}\nsockheal.log:\n${sockhealLog()}")
+        assertEquals(w.created, w.created.keys.associateWith { fixture.sessionCreatedAt(it) }, "a session was recreated")
+        assertEquals(listOf(w.serverPid), listeners(fixture.tmuxSocket), "exactly one server on the path")
+        assertFalse(sockhealLog().contains("recreated"), "the tab had nothing left to heal:\n${sockhealLog()}")
+        w.assertNothingRelaunchedOrWritten()
+    }
+
+    /**
+     * V14 (kolo 4), the S1 shape of the round-3 review: a FRESH launch (another folder, same name: two folders with one
+     * basename, quick connect from a second device) finds the name taken. Kolo 2 killed the session there, kolo 3 adopted
+     * it (the tab showed someone else's work, no claude started). The anchor refuses (non-zero, says why) and touches
+     * nothing; the app's free name starts a fresh claude in the chosen folder next to it. Run on a PTY, as a tab is.
+     */
+    @Test
+    fun aFreshLaunchOfATakenNameLeavesThatSessionAloneAndRunsUnderAFreeName() {
+        val w = guardWorld()
+        val pane = assertNotNull(panePidOf(ALPHA), "precondition: $ALPHA has a pane")
+        val folder = File(fixture.home, "projB").canonicalPath
+        fun fresh(name: String) = ClaudeConfig.buildTmuxLaunchCommand(
+            tmuxSessionName = name, folder = folder, mode = ClaudeMode.NORMAL, model = ClaudeModel.DEFAULT,
+            claudeSessionId = "22222222-3333-4444-5555-666666666666", resume = false, onExisting = ClaudeConfig.OnExisting.Refuse,
+        )
+        val refused = try {
+            session.execCapture(fresh(ALPHA), timeoutMs = 20_000, pty = true)
+        } finally {
+            fixture.tmux("detach-client", "-s", "=$ALPHA")
+        }
+        assertEquals(1, refused.exit, "the fresh launch of a taken name must be refused with a non-zero exit: ${refused.out}")
+        assertContains(refused.out, "already exists", message = "the refusal must say why")
+        assertEquals(pane, panePidOf(ALPHA), "the session there was restarted (pane pid changed)")
+        assertEquals(w.created, w.created.keys.associateWith { fixture.sessionCreatedAt(it) }, "a session was recreated")
+
+        // a pane runs a login shell, whose /etc/profile drops the fixture's PATH: give it the claude stand-in back
+        File(fixture.home, ".bash_profile").writeText("export PATH='${fixture.shims.absolutePath}':\"\$PATH\"\n")
+        val free = ClaudeConfig.freshTmuxSessionName(
+            "server", File(fixture.home, "int").absolutePath, isYolo = false, alias = "alpha", taken = fixture.tmuxSessions(),
+        )
+        assertEquals("claude-server-int-2--alpha", free)
+        val tab = reconnectOnPty(free, fresh(free), "the fresh launch under the free name")
+        val freshPane = assertNotNull(panePidOf(free), "no session under the free name. tab: ${tab?.out}")
+        try {
+            waitUntil(15_000, "a fresh claude in the new pane") {
+                ProcessHandle.of(freshPane).map { p ->
+                    p.descendants().anyMatch { File("/proc/${it.pid()}/cmdline").readTextOrEmpty().startsWith(SshdFixture.CLAUDE_SHIM_ARGV0) }
+                }.orElse(false)
+            }
+        } catch (e: AssertionError) {
+            throw AssertionError("${e.message}. pane:\n${fixture.tmux("capture-pane", "-p", "-t", "=$free:").out}", e)
+        }
+        assertEquals(folder, fixture.tmux("display-message", "-p", "-t", "=$free:", "#{pane_current_path}").out.trim(), "the chosen folder")
+        assertEquals(pane, panePidOf(ALPHA), "the session there was restarted (pane pid changed)")
+        assertEquals(w.created, w.created.keys.associateWith { fixture.sessionCreatedAt(it) }, "a session was recreated")
+        assertEquals(listOf(w.serverPid), listeners(fixture.tmuxSocket), "exactly one server on the path")
+        w.assertNothingRelaunchedOrWritten()
+    }
+
+    /**
+     * S2 (kolo 4), F4 of the round-3 review: this device's old client (a shell mosh/ET keeps alive) is attached; the socket
+     * is lost and the tab's relaunch heals it and attaches. The anchor's attach is the caller's single-client attach: the
+     * old client is detached and the device marker names the new one (a bare attach left two clients, and the next
+     * ordinary attach then detached the old one and left the anchor's client hanging, unknown to every marker).
+     */
+    @Test
+    fun aRelaunchAfterAHealAttachesWithThisDevicesSingleClientPreamble() {
+        val w = guardWorld()
+        val pane = assertNotNull(panePidOf(ALPHA), "precondition: $ALPHA has a pane")
+        val attach = singleClientPreamble(ALPHA, "devK") + "tmux attach-session -t '=$ALPHA'"
+        val marker = File(fixture.home, ".claude-remote/clients/devK-$ALPHA")
+        fun clients() = fixture.tmux("list-clients", "-t", "=$ALPHA", "-F", "#{client_tty}")
+            .let { r -> if (r.exit != 0) listOf("<no answer: ${r.out.trim()}>", "") else r.out.lines().map { it.trim() }.filter { it.isNotEmpty() } }
+        val tabs = mutableListOf<Thread>()
+        fun tab(cmd: String) = Thread { session.execCapture(cmd, timeoutMs = 60_000, pty = true) }.apply { isDaemon = true; start(); tabs += this }
+        try {
+            tab(attach)
+            waitUntil(30_000, "the old client attached") { clients().size == 1 }
+            val old = clients().single()
+            waitUntil(5_000, "the marker names the old client") { marker.readTextOrEmpty() == old }
+            assertTrue(fixture.tmuxSocket.delete(), "could not delete the private socket")
+            tab(
+                ClaudeConfig.buildTmuxLaunchCommand(
+                    tmuxSessionName = ALPHA, folder = File(fixture.home, "projA").absolutePath, mode = ClaudeMode.YOLO,
+                    model = ClaudeModel.DEFAULT, claudeSessionId = "11111111-2222-3333-4444-555555555555", resume = true,
+                    onExisting = ClaudeConfig.OnExisting.Attach(attach),
+                ),
+            )
+            try {
+                waitUntil(30_000, "the relaunch attached and the old client detached") { clients().let { it.size == 1 && it.single() != old } }
+            } catch (e: AssertionError) {
+                throw AssertionError("${e.message}: clients ${clients()} (old $old), marker ${marker.readTextOrEmpty()}. sockheal.log:\n${sockhealLog()}", e)
+            }
+            assertEquals(clients().single(), marker.readTextOrEmpty(), "the marker must name the relaunch's client")
+        } finally {
+            fixture.tmux("detach-client", "-s", "=$ALPHA")
+            tabs.forEach { it.join(20_000) }
+        }
+        assertEquals(pane, panePidOf(ALPHA), "the live session was restarted (pane pid changed)")
+        assertEquals(w.serverPid, serverPid(), "the ORIGINAL server must have been healed")
+        assertEquals(listOf(w.serverPid), listeners(fixture.tmuxSocket), "exactly one server on the path")
+        w.assertNothingRelaunchedOrWritten()
+    }
+
+    /**
+     * S3 (kolo 4): a socket file that vanishes between the guard's `[ -S ]` and its probe (another tab's plain attach
+     * left a stale file, the heal removed it) answers "No such file or directory" — stale, healed under the lock, not a
+     * hung server that refuses the tab.
+     */
+    @Test
+    fun aSocketFileGoneBeforeTheProbeIsStaleNotHung() {
+        install()
+        val script = guardFuncs() + "\nSG_WHO=test\nSG_SOCK=\"\$HOME/no-such-dir/default\"\nsg_probe; echo \"probe=\$SG_PROBE\"\n"
+        val r = session.execCapture("bash -s", timeoutMs = 30_000, stdin = script.toByteArray())
+        assertContains(r.out, "probe=stale", message = "ENOENT must read as stale:\n${r.out}")
+    }
+
+    /**
+     * S3 (kolo 4): the app's guard whose heal lost a race (here: the heal lock held by someone else for the guard's 2 s)
+     * looks once more after 0.5 s before it refuses the tab — measured, 6 of 89 two-tab races refused a tab.
+     */
+    @Test
+    fun theAppGuardLooksOnceMoreWhenItsHealLostTheLock() {
+        val w = guardWorld()
+        assertTrue(fixture.tmuxSocket.delete(), "could not delete the private socket")
+        val stamp = File(fixture.home, ".claude-remote/.drift.sockguard.app.lock")
+        val release = File(fixture.root, "release-heal-lock")
+        withHealLockHeld(release) {
+            val watcher = Thread {
+                val end = System.currentTimeMillis() + 20_000
+                while (!stamp.exists() && System.currentTimeMillis() < end) Thread.sleep(10)
+                release.createNewFile()
+            }.apply { isDaemon = true; start() }
+            val r = session.execCapture("\"\$HOME/.claude-remote/tmux-sockheal.sh\"; echo \"rc=\$?\"", timeoutMs = 30_000)
+            watcher.join(5_000)
+            assertContains(r.out, "rc=3", message = "the second look must heal:\n${r.out}\nsockheal.log:\n${sockhealLog()}")
+        }
+        assertContains(sockhealLog(), "could not take", message = "the first look lost the lock")
+        assertContains(sockhealLog(), "recreated", message = "the second one healed")
+        assertEquals(w.serverPid, serverPid(), "the ORIGINAL server must have been healed")
+        assertEquals(listOf(w.serverPid), listeners(fixture.tmuxSocket), "exactly one server on the path")
+        assertEquals(w.created, w.created.keys.associateWith { fixture.sessionCreatedAt(it) }, "a session was recreated")
+    }
+
+    /**
+     * S3 (kolo 4): the rate-limit stamp keeps a lasting fault to one line per 15 minutes in sockheal.log, but a refused
+     * tab is pointed at its cause every time: on stderr, whether the log got the line or not.
+     */
+    @Test
+    fun aRefusedTabGetsItsCauseEveryTimeWhileTheLogGetsItOnce() {
+        guardWorld()
+        assertTrue(fixture.tmuxSocket.delete(), "could not delete the private socket")
+        val runs = withHealLockHeld(File(fixture.root, "release-heal-lock")) {
+            (1..2).map { session.execCapture("\"\$HOME/.claude-remote/tmux-sockheal.sh\"; echo \"rc=\$?\"", timeoutMs = 30_000) }
+        }
+        runs.forEachIndexed { i, r ->
+            assertContains(r.out, "rc=1", message = "run ${i + 1} must be refused:\n${r.out}")
+            assertContains(r.out, "could not take", message = "run ${i + 1}: the tab must get the cause:\n${r.out}")
+            assertFalse(r.out.contains("#quiet#"), "run ${i + 1}: the quiet tag leaked:\n${r.out}")
+        }
+        assertEquals(1, Regex("could not take").findAll(sockhealLog()).count(), "the log must get the line once:\n${sockhealLog()}")
+        assertFalse(sockhealLog().contains("#quiet#"), "a held-back line reached the log:\n${sockhealLog()}")
+    }
+
+    /** S4 (kolo 4): an unknown listener pid ("?") is printed as such, never expanded as a glob in the caller's cwd. */
+    @Test
+    fun theSplitBrainLineNeverGlobsAnUnknownPid() {
+        install()
+        val cwd = File(fixture.root, "globcwd").apply { mkdirs() }
+        File(cwd, "t").writeText("")
+        val script = guardFuncs() + "\nSG_WHO=test\nsg_listeners() { printf '%s\\n' 4242 '?'; }\ncd '${cwd.absolutePath}'\n" +
+            "sg_guard; echo \"rc=\$?\"\n"
+        val r = session.execCapture("bash -s", timeoutMs = 30_000, stdin = script.toByteArray())
+        assertContains(r.out, "rc=1", message = r.out)
+        assertContains(r.out, "SPLIT BRAIN: 2 tmux servers listen on", message = r.out)
+        assertContains(r.out, "(pids 4242 ?)", message = "the unknown pid must stay '?':\n${r.out}")
+    }
+
+    /**
+     * F3 (kolo 3): `sg_heal` re-checks under the lock, right before SIGUSR1, that the server it was given is still the
+     * ONLY listener on the path. Deterministic, no race: the heal is called for the original server while a second
+     * server listens there too (both socket files gone, so neither answers). It must give up ("moved", rc 1) and
+     * signal nobody — a signalled server would take the path from the other one, the split brain the guard prevents.
+     */
+    @Test
+    fun theHealReChecksTheListenersUnderTheLockAndSignalsNoneOfTwo() {
+        val w = guardWorld()
+        assertTrue(fixture.tmuxSocket.delete(), "could not delete the private socket")
+        fixture.tmux("new-session", "-d", "-s", ALPHA, "sleep", "86400")
+        waitUntil(10_000, "a second server on the path") { listeners(fixture.tmuxSocket).size == 2 }
+        val second = assertNotNull(serverPid(), "the second server must answer on the path")
+        fixture.trackPid(second)
+        assertTrue(second != w.serverPid && fixture.tmuxSocket.delete(), "precondition: a different server, its socket file deleted")
+        val script = guardFuncs() + "\nSG_WHO=test\nsg_heal ${w.serverPid}; echo \"rc=\$?\"\n"
+        val r = session.execCapture("bash -s", timeoutMs = 30_000, stdin = script.toByteArray())
+        assertContains(r.out, "rc=1", message = "the heal must give up:\n${r.out}")
+        assertContains(r.out, "changed while healing", message = "and say why (moved):\n${r.out}")
+        Thread.sleep(500)
+        assertFalse(fixture.tmuxSocket.exists(), "a server was signalled: it recreated its socket")
+        assertEquals(setOf(w.serverPid, second), listeners(fixture.tmuxSocket).toSet(), "both servers listen on, nobody took the path")
+        assertTrue(ProcessHandle.of(w.serverPid).map { it.isAlive }.orElse(false), "the original server must live on")
+        assertTrue(ProcessHandle.of(second).map { it.isAlive }.orElse(false), "the second server must live on")
+    }
+
+    /**
+     * A HUNG server (here SIGSTOP of the PRIVATE server only, SIGCONT in `finally`): the socket exists but nothing
+     * answers. Drift must not relaunch next to it, and the app's anchor must refuse with a non-zero exit and say why.
+     * (Adopted from the round-1 review probe `probeHungServerIsNeverRelaunched`.)
+     */
+    @Test
+    fun aHungServerIsNeverRelaunchedNorGetsASecondServer() {
+        val w = guardWorld()
+        val pid = w.serverPid
+        assertTrue(fixture.tmuxSocket.absolutePath.startsWith(fixture.root.absolutePath), "private socket only: ${fixture.tmuxSocket}")
+        assertEquals(listOf(pid), listeners(fixture.tmuxSocket), "pid must be the private server")
+        assertEquals(0, ProcessBuilder("kill", "-STOP", pid.toString()).start().waitFor())
+        fun <T> timed(block: () -> T): Pair<T, Long> = System.nanoTime().let { t0 -> block() to (System.nanoTime() - t0) / 1_000_000 }
+        val (timedDrift, timedApp) = try {
+            timed { runDrift() } to timed { session.execCapture(ClaudeConfig.buildTmuxLoginCommand(LOGIN, "acct"), timeoutMs = 40_000) }
+        } finally {
+            ProcessBuilder("kill", "-CONT", pid.toString()).start().waitFor()
+        }
+        val (drift, driftMs) = timedDrift
+        val (app, appMs) = timedApp
+        // N2 (kolo 3): ONE 5 s wait for an answer, not two in a row (that was 10.1 s per tick and per reconnecting tab)
+        assertTrue(driftMs < 8_000, "drift took $driftMs ms to give up on a hung server")
+        assertTrue(appMs < 8_000, "the app anchor took $appMs ms to refuse a hung server")
+        assertEquals(0, drift.exit, "drift exit. log:\n${fixture.driftLog()}")
+        assertContains(fixture.driftLog(), "does not answer", message = "drift.log:\n${fixture.driftLog()}")
+        assertTrue(app.exit != 0, "the app anchor must report its refusal with a non-zero exit: ${app.exit} ${app.out}")
+        assertContains(app.out, "does not answer", message = "the refusal must name the cause:\n${app.out}")
+        Thread.sleep(500)
+        assertEquals(pid, serverPid(), "the original server answers again")
+        assertEquals(listOf(pid), listeners(fixture.tmuxSocket), "no second server")
+        assertFalse(fixture.tmuxSessions().contains(LOGIN), "the refused anchor created a session")
+        assertEquals(w.created, w.created.keys.associateWith { fixture.sessionCreatedAt(it) }, "a session was recreated")
+        w.assertNothingRelaunchedOrWritten()
+    }
+
+    /**
+     * The socket directory exists but is not private (re-created 755 by someone else). tmux's own clients refuse it
+     * ("unsafe permissions") while `tmux -S` still answers, so a check through `-S` alone called it healthy and drift
+     * went on with LIVE=[]. The guard makes it 700 again — whether the socket file is gone (heal) or still there.
+     */
+    @Test
+    fun aSocketDirectoryThatIsNotPrivateIsMadePrivateAgain() {
+        val w = guardWorld()
+        val dir = fixture.tmuxSocket.parentFile
+        for (socketGone in listOf(true, false)) {
+            if (socketGone) assertTrue(fixture.tmuxSocket.delete(), "could not delete the private socket")
+            assertEquals(0, fixture.run("chmod", "755", dir.absolutePath).exit)
+            assertEquals(0, runDrift().exit, "drift should exit 0. log:\n${fixture.driftLog()}")
+            assertEquals("700", modeOf(dir), "socketGone=$socketGone: the socket directory must be private again")
+            val plain = fixture.run("tmux", "list-sessions", "-F", "#{session_name}")
+            assertEquals(0, plain.exit, "socketGone=$socketGone: a plain tmux client must reach the server: ${plain.out}")
+            w.assertHealedInPlace()
+        }
+    }
+
+    /** tmux binds `realpath(TMUX_TMPDIR)/tmux-<uid>/default`; a trailing slash (or `/./`) must not hide our server. */
+    @Test
+    fun aNonCanonicalTmuxTmpdirStillFindsTheServer() {
+        val w = guardWorld()
+        assertTrue(fixture.tmuxSocket.delete(), "could not delete the private socket")
+        val run = session.execCapture("TMUX_TMPDIR=\"\$TMUX_TMPDIR/./\" bash \"\$HOME/.claude-remote/drift.sh\"", timeoutMs = 60_000)
+        assertEquals(0, run.exit, "drift should exit 0. log:\n${fixture.driftLog()}")
+        w.assertHealedInPlace()
+    }
+
+    /** An install interrupted between writing a script's temp file and renaming it must not leave the temp file behind. */
+    @Test
+    fun anInterruptedInstallLeavesNoTempFile() {
+        File(fixture.shims, "chmod").apply { writeText("#!/usr/bin/env bash\nexit 1\n") }.setExecutable(true)
+        val r = session.execCapture("bash -s", timeoutMs = 60_000, stdin = SessionPersistenceService.INSTALL_RESTORE_COMMAND.toByteArray())
+        assertTrue(r.exit != 0, "precondition: the install must fail when chmod fails: ${r.out}")
+        val dir = File(fixture.home, ".claude-remote")
+        assertTrue(dir.list()!!.none { it.contains(".tmp.") }, "temp files left: ${dir.list()!!.toList()}")
+        assertFalse(File(dir, "restore.sh").exists(), "a half-installed restore.sh must not appear")
+    }
+
+    /**
+     * Tests run inside a live Claude session whose `CLAUDE_CONFIG_DIR` names a live account dir. Nothing the fixture
+     * starts — local commands, the private tmux server and everything in it, ssh commands — may see it.
+     */
+    @Test
+    fun theFixtureNeverPassesTheLiveClaudeConfigDir() {
+        println("CLAUDE_CONFIG_DIR in the test JVM: ${if (System.getenv("CLAUDE_CONFIG_DIR") != null) "set" else "unset"}")
+        assertEquals("unset", fixture.run("sh", "-c", "echo \${CLAUDE_CONFIG_DIR-unset}").out.trim(), "fixture.run")
+        fixture.startTmuxServer()
+        val inTmux = fixture.tmux("show-environment", "-g", "CLAUDE_CONFIG_DIR").out.trim()
+        assertFalse(inTmux.startsWith("CLAUDE_CONFIG_DIR="), "the private tmux server inherited it: $inTmux")
+        assertEquals("unset", session.execCapture("echo \${CLAUDE_CONFIG_DIR-unset}").out.trim(), "ssh command")
+    }
+
+    /**
+     * Without `ss` the guard falls back to /proc/net/unix (listening rows only) and still heals. A client stays
+     * connected meanwhile (`wait-for`), so the path also has an ACCEPTED-connection row there — as on the live box,
+     * where 82 of 83 rows with the path are clients: counted as listeners they would look like a split brain.
+     */
+    @Test
+    fun theProcNetUnixFallbackHealsToo() {
+        File(fixture.shims, "ss").apply { writeText("#!/usr/bin/env bash\nexit 1\n") }.setExecutable(true)
+        val w = guardWorld()
+        val sock = fixture.tmuxSocket.absolutePath
+        val holder = fixture.run("sh", "-c", "tmux -S '$sock' wait-for b3-hold >/dev/null 2>&1 & echo \$!").out.trim().toLong()
+        fixture.trackPid(holder)
+        fun rowsOnPath() = File("/proc/net/unix").readLines().count { it.trim().split(Regex("\\s+")).getOrNull(7) == sock }
+        waitUntil(10_000, "the client's accepted connection on the path") { rowsOnPath() >= 2 }
+        assertTrue(fixture.tmuxSocket.delete())
+        assertEquals(0, runDrift().exit, "drift should exit 0. log:\n${fixture.driftLog()}")
+        w.assertHealedInPlace()
+        fixture.tmux("wait-for", "-S", "b3-hold")
+    }
+
+    /** `drift-heal.off` is the rollback: the old behaviour, a relaunch of everything into a new server. */
+    @Test
+    fun theOffSwitchRestoresTheOldBehaviour() {
+        val w = guardWorld()
+        File(fixture.home, ".claude-remote/drift-heal.off").writeText("")
+        assertTrue(fixture.tmuxSocket.delete())
+        assertEquals(0, runDrift().exit)
+        waitUntil(25_000, "the old relaunch into a new server. log:\n${fixture.driftLog()}") {
+            fixture.tmuxSessions().containsAll(listOf(ALPHA, BETA))
+        }
+        serverPid()?.let { fixture.trackPid(it) }
+        assertTrue(serverPid() != w.serverPid, "with the switch on, drift must not heal")
+        assertFalse(fixture.driftLog().contains("sockguard"), "the guard must be off:\n${fixture.driftLog()}")
+    }
+
+    /**
+     * Something that is NOT our tmux server listens on the path (here a python stand-in) and the socket file is
+     * gone: it must not get SIGUSR1 (which would kill it), and nothing may be relaunched next to it.
+     */
+    @Test
+    fun aListenerThatIsNotOurTmuxServerIsNeverSignalled() {
+        install()
+        val folder = File(fixture.home, "projA").apply { mkdirs() }
+        val manifest = serializeWithApp(persisted(id = "s1", tmux = ALPHA, folder = folder))
+        uploadManifest("sessions.restore.json", manifest)
+        val impostor = ProcessBuilder(
+            "python3", "-c",
+            "import socket,sys,time; s=socket.socket(socket.AF_UNIX); s.bind(sys.argv[1]); s.listen(); time.sleep(600)",
+            fixture.tmuxSocket.absolutePath,
+        ).redirectErrorStream(true).redirectOutput(ProcessBuilder.Redirect.DISCARD).start()
+        fixture.trackPid(impostor.pid())
+        try {
+            waitUntil(10_000, "the stand-in listener") { listeners(fixture.tmuxSocket) == listOf(impostor.pid()) }
+            assertTrue(fixture.tmuxSocket.delete(), "could not delete the stand-in's socket file")
+            assertEquals(0, runDrift().exit)
+            assertContains(fixture.driftLog(), "not our tmux server", message = "drift.log:\n${fixture.driftLog()}")
+            Thread.sleep(300)
+            assertTrue(impostor.isAlive, "the stand-in was signalled")
+            assertEquals(listOf(impostor.pid()), listeners(fixture.tmuxSocket), "a tmux server was started next to it")
+            assertFalse(fixture.restoreLog().contains("Restored"), "relaunched:\n${fixture.restoreLog()}")
+        } finally {
+            impostor.destroyForcibly()
+        }
+    }
+
+    /** A normal tick (nothing changed) writes nothing at all: no drift.log line, no guard stamp. */
+    @Test
+    fun aNormalDriftTickWritesNothing() {
+        guardWorld()
+        val log = File(fixture.home, ".claude-remote/drift.log")
+        val before = if (log.isFile) log.readText() else ""
+        repeat(2) { assertEquals(0, runDrift().exit) }
+        assertEquals(before, if (log.isFile) log.readText() else "", "a no-op tick wrote to drift.log")
+        val stamps = File(fixture.home, ".claude-remote").list()!!.filter { it.startsWith(".drift.sockguard") }
+        assertTrue(stamps.isEmpty(), "a no-op tick left guard stamps: $stamps")
+    }
+
+    /**
+     * Upgrade over a box that already runs v17 (the live box today): all three scripts are rewritten to v18 by a
+     * rename (new inode — never `cat >` over a file a running bash may be reading), and install.log says so.
+     */
+    @Test
+    fun upgradeFromV17RewritesEveryScriptAtomically() {
+        val dir = File(fixture.home, ".claude-remote").apply { mkdirs() }
+        val v17 = "#!/usr/bin/env bash\n# marker-compat (do NOT remove): " +
+            (6..17).joinToString(" ") { "claude-remote-restore-v$it" } + "\nexit 0\n"
+        val restore = File(dir, "restore.sh").apply { writeText(v17) }
+        val drift = File(dir, "drift.sh").apply { writeText(v17) }
+        val inodes = listOf(restore, drift).map { socketKey(it) }
+
+        val out = install()
+        for (tag in listOf("RESTORE_SCRIPT_INSTALLED", "DRIFT_SCRIPT_INSTALLED", "SOCKHEAL_SCRIPT_INSTALLED")) {
+            assertContains(out, tag, message = "upgrade from v17 must rewrite: $out")
+        }
+        assertTrue(inodes[0] != socketKey(restore) && inodes[1] != socketKey(drift), "rewritten in place (same inode)")
+        for (f in listOf(restore, drift, File(dir, "tmux-sockheal.sh"))) {
+            assertContains(f.readText(), "claude-remote-restore-v18", message = f.name)
+            assertContains(f.readText(), "kill -USR1", message = f.name)
+            assertTrue(f.canExecute(), "${f.name} must be executable")
+        }
+        assertContains(File(dir, "install.log").readText(), "drift.sh missing claude-remote-restore-v18 — rewriting; prior marker line: # marker-compat")
+        assertTrue(dir.list()!!.none { it.contains(".tmp.") }, "temp files left: ${dir.list()!!.toList()}")
+    }
+
+    /**
+     * Common setup: alpha+beta restored into the private server and seeded into the manifest by a first drift
+     * tick, plus the two bystander servers. Everything the variants compare is captured here.
+     */
+    private inner class GuardWorld(
+        val serverPid: Long,
+        val created: Map<String, String?>,
+        val manifest: String,
+        val restoreLogLen: Int,
+        val otherSock: File,
+        val otherKey: String?,
+        val foreignSock: File,
+        val foreignKey: String?,
+    ) {
+        fun assertHealedInPlace() {
+            assertContains(fixture.driftLog(), "recreated", message = "drift.log must record the heal:\n${fixture.driftLog()}")
+            assertEquals(serverPid, serverPid(), "the ORIGINAL server must answer on the socket again")
+            assertEquals(listOf(serverPid), listeners(fixture.tmuxSocket), "exactly one server on the path")
+            assertEquals(created, created.keys.associateWith { fixture.sessionCreatedAt(it) }, "a session was recreated")
+            assertEquals(created.keys.sorted(), fixture.tmuxSessions().sorted(), "the session set changed")
+            assertNothingRelaunchedOrWritten()
+        }
+
+        fun assertNothingRelaunchedOrWritten() {
+            assertEquals(manifest, File(fixture.home, ".claude-remote/sessions.restore.json").readText(), "the manifest was written")
+            assertFalse(fixture.restoreLog().substring(restoreLogLen).contains("Restored"), "relaunched:\n${fixture.restoreLog()}")
+            assertFalse(fixture.driftLog().contains("self-heal"), "drift self-healed:\n${fixture.driftLog()}")
+            assertEquals(foreignKey, socketKey(foreignSock), "the server in another TMUX_TMPDIR was touched")
+        }
+    }
+
+    private fun guardWorld(): GuardWorld {
+        install()
+        val folderA = File(fixture.home, "projA").apply { mkdirs() }
+        val folderB = File(fixture.home, "projB").apply { mkdirs() }
+        uploadManifest(
+            "sessions.json",
+            serializeWithApp(persisted(id = "s1", tmux = ALPHA, folder = folderA), persisted(id = "s2", tmux = BETA, folder = folderB)),
+        )
+        fixture.startTmuxServer()
+        runRestore()
+        waitUntil(20_000, "both sessions restored. log:\n${fixture.restoreLog()}") {
+            fixture.tmuxSessions().containsAll(listOf(ALPHA, BETA))
+        }
+        assertEquals(0, runDrift().exit)
+        val sf = File(fixture.home, ".claude-remote/sessions.restore.json")
+        waitUntil(10_000, "drift to seed the manifest") { sf.isFile && sf.readText().contains(BETA) }
+        val pid = assertNotNull(serverPid(), "private server pid")
+
+        // bystanders: `-L other` next to the default socket, and a server in another TMUX_TMPDIR
+        fixture.run("tmux", "-L", "other", "new-session", "-d", "-s", "other", "sleep", "86400")
+        val otherSock = File(fixture.tmuxSocket.parentFile, "other")
+        val foreignDir = File(fixture.root, "sk2").apply { mkdirs() }
+        fixture.run("env", "TMUX_TMPDIR=${foreignDir.absolutePath}", "tmux", "new-session", "-d", "-s", "foreign", "sleep", "86400")
+        val foreignSock = File(foreignDir, "tmux-${SshdFixture.posixUid()}/default")
+        waitUntil(10_000, "bystander servers") { listeners(otherSock).size == 1 && listeners(foreignSock).size == 1 }
+        (listeners(otherSock) + listeners(foreignSock) + pid).forEach { fixture.trackPid(it) }
+
+        val created = listOf(SshdFixture.KEEPALIVE_SESSION, ALPHA, BETA).associateWith { fixture.sessionCreatedAt(it) }
+        assertTrue(created.values.all { it != null }, "precondition: every session has a creation time: $created")
+        return GuardWorld(
+            serverPid = pid,
+            created = created,
+            manifest = sf.readText(),
+            restoreLogLen = fixture.restoreLog().length,
+            otherSock = otherSock,
+            otherKey = socketKey(otherSock),
+            foreignSock = foreignSock,
+            foreignKey = socketKey(foreignSock),
+        )
+    }
+
+    /** PID of the server answering on the private socket path, or null. */
+    private fun serverPid(): Long? =
+        fixture.tmux("display-message", "-p", "#{pid}").takeIf { it.exit == 0 }?.out?.trim()?.toLongOrNull()
+
+    private fun panePidOf(name: String): Long? =
+        fixture.tmux("list-panes", "-t", "=$name:", "-F", "#{pane_pid}").takeIf { it.exit == 0 }?.out?.trim()?.lines()?.firstOrNull()?.toLongOrNull()
+
+    /** The app's relaunch of [name] (claude --resume), as the orchestrator sends it after `has-session` said NO. */
+    private fun relaunchOf(name: String, folder: String): String = ClaudeConfig.buildTmuxLaunchCommand(
+        tmuxSessionName = name, folder = File(fixture.home, folder).absolutePath,
+        mode = ClaudeMode.YOLO, model = ClaudeModel.DEFAULT, claudeSessionId = "11111111-2222-3333-4444-555555555555", resume = true,
+        onExisting = ClaudeConfig.OnExisting.Attach(),
+    )
+
+    /** A tab sends [cmd] on a PTY until a client is attached to [name]; then that client is detached and the tab ends. */
+    private fun reconnectOnPty(name: String, cmd: String, what: String): ExecResult? {
+        val result = java.util.concurrent.atomic.AtomicReference<ExecResult?>()
+        val tab = Thread { result.set(session.execCapture(cmd, timeoutMs = 40_000, pty = true)) }.apply { isDaemon = true; start() }
+        try {
+            waitUntil(30_000, "$what: a client attached to $name. sockheal.log:\n${sockhealLog()}") {
+                fixture.tmux("list-clients", "-t", "=$name", "-F", "#{client_tty}").let { it.exit == 0 && it.out.isNotBlank() }
+            }
+        } finally {
+            fixture.tmux("detach-client", "-s", "=$name")
+            tab.join(20_000)
+        }
+        return result.get()
+    }
+
+    /** Hold the guard's heal lock (`tmux-server.lock`) in a local process until [release] exists, around [block]. */
+    private fun <T> withHealLockHeld(release: File, block: () -> T): T {
+        val lock = File(fixture.home, ".claude-remote/tmux-server.lock")
+        val holder = ProcessBuilder("flock", lock.absolutePath, "sh", "-c", "while [ ! -e \"$1\" ]; do sleep 0.02; done", "holder", release.absolutePath)
+            .redirectErrorStream(true).redirectOutput(ProcessBuilder.Redirect.DISCARD).start()
+        fixture.trackPid(holder.pid())
+        try {
+            waitUntil(10_000, "the heal lock held") { ProcessBuilder("flock", "-n", lock.absolutePath, "true").start().waitFor() != 0 }
+            return block()
+        } finally {
+            release.createNewFile()
+            if (!holder.waitFor(5, TimeUnit.SECONDS)) holder.destroyForcibly()
+        }
+    }
+
+    /** The app's real single-client preamble (TmuxProbes), as `SessionOrchestrator.buildAttachCommand` puts it before an attach. */
+    private fun singleClientPreamble(name: String, deviceKey: String): String {
+        val tabs = TabManager()
+        val registry = ConnectionRegistry(ServerStorage(InMemoryKeyValueStore()), tabs)
+        val scope = CoroutineScope(Dispatchers.Unconfined)
+        return try {
+            TmuxProbes(scope, registry, tabs, TerminalIOService(registry)).singleClientPreamble(name, deviceKey)
+        } finally {
+            scope.cancel()
+        }
+    }
+
+    /** The socket guard's bash functions, cut out of the installed `tmux-sockheal.sh`. */
+    private fun guardFuncs(): String {
+        val text = File(fixture.home, ".claude-remote/tmux-sockheal.sh").readText()
+        val from = text.indexOf("# ---- tmux socket guard")
+        val to = text.indexOf("# ---- end of tmux socket guard ----")
+        assertTrue(from >= 0 && to > from, "no socket guard in the installed tmux-sockheal.sh")
+        return text.substring(from, to)
+    }
+
+    private fun sockhealLog(): String = File(fixture.home, ".claude-remote/sockheal.log").let { if (it.isFile) it.readText() else "" }
+
+    /** PIDs of the unix sockets LISTENING on exactly [sock] (read-only `ss`). */
+    private fun listeners(sock: File): List<Long> {
+        val out = fixture.run("ss", "-xlpH").out
+        return out.lines().map { it.trim().split(Regex("\\s+")) }
+            .filter { it.size > 4 && it[1] == "LISTEN" && it[4] == sock.absolutePath }
+            .map { f -> Regex("pid=(\\d+)").find(f.joinToString(" "))?.groupValues?.get(1)?.toLong() ?: -1L }
+    }
+
+    /** inode@birth of [f] itself (a deleted-and-recreated file differs), null when absent. */
+    private fun socketKey(f: File): String? = try {
+        val ino = Files.getAttribute(f.toPath(), "unix:ino", LinkOption.NOFOLLOW_LINKS)
+        val born = Files.readAttributes(f.toPath(), java.nio.file.attribute.BasicFileAttributes::class.java, LinkOption.NOFOLLOW_LINKS)
+            .creationTime().to(TimeUnit.NANOSECONDS)
+        "$ino@$born"
+    } catch (_: Exception) { null }
+
+    private fun modeOf(f: File): String =
+        Integer.toOctalString((Files.getAttribute(f.toPath(), "unix:mode") as Int) and 0x1ff)
+
     // ------------------------------------------------------------------ helpers
 
     /**
@@ -339,6 +1092,9 @@ class RestoreScriptIntegrationTest {
 
     companion object {
         private const val SERVER_ID = "integration-server"
+        private const val ALPHA = "claude-server-int--alpha"
+        private const val BETA = "claude-server-int--beta"
+        private const val LOGIN = "claude-login-int"
 
         /** The marker the CURRENT build installs, read from the production constant. */
         private val currentMarker: String by lazy {

@@ -57,15 +57,18 @@ internal class RemoteOpsService(
                             return@withContext
                         }
                         val sshSession = registry.ssh(sessionId)?.getSession() ?: return@withContext
-                        val ch = sshSession.openChannel("exec") as com.jcraft.jsch.ChannelExec
-                        ch.setCommand(cmd)
-                        ch.inputStream = null
-                        val input = ch.inputStream
-                        try {
-                            ch.connect(1500)
-                            input.bufferedReader().readText()
-                        } finally {
-                            ch.disconnect()
+                        // The tab's own session: one channel counted where the shells are packed; no room = no scroll.
+                        registry.withTabChannel(serverId ?: return@withContext, sshSession, "scroll") { sess ->
+                            val ch = sess.openChannel("exec") as com.jcraft.jsch.ChannelExec
+                            ch.setCommand(cmd)
+                            ch.inputStream = null
+                            val input = ch.inputStream
+                            try {
+                                ch.connect(1500)
+                                input.bufferedReader().readText()
+                            } finally {
+                                ch.disconnect()
+                            }
                         }
                     }
                 } catch (e: Exception) {
@@ -138,10 +141,20 @@ internal class RemoteOpsService(
      * If autoReconnect is already running (SAF picker killed the socket),
      * waits for it to finish.  Never kills the connection itself — that
      * was causing a cascade of 3 failed reconnects.
+     *
+     * A transfer never takes the one reserve slot of a packed tab transport (V12). Without room it waits (holding
+     * nothing, R3-1) and looks again every [ROOM_RETRY_MIN_MS]-[ROOM_RETRY_MAX_MS] ms until its deadline: a poll in
+     * flight on 7 shells, another transfer, or an exec transport that is briefly down. It fails at once with
+     * "No free SSH channel" only when no room can come ([ConnectionRegistry.transferMayFindRoom]: the exec transport
+     * switched off or closed and 8 shells on the tab transports).
      */
     suspend fun uploadFile(sessionId: String, bytes: ByteArray, fileName: String): String {
-        val deadline = System.currentTimeMillis() + 20_000L
+        val deadline = System.currentTimeMillis() + TRANSFER_DEADLINE_MS
         var lastException: Exception? = null
+        // The last try found the tab's transport without room for a channel (not a broken SSH): said so at the end.
+        var lastNoRoom = false
+        // ... and no room can come before the deadline: given up at once
+        var noRoomCanCome = false
 
         val serverId = registry.serverIdOf(sessionId)
         val viaExec = serverId != null && registry.execActive(serverId)
@@ -158,11 +171,19 @@ internal class RemoteOpsService(
                         stdin = bytes,
                         totalMs = 20_000L + bytes.size / 150,
                         kind = ExecKind.SHORT,
+                        transfer = true,
                     )
                     if (res != null) {
                         if (res.exitStatus != 0) throw java.io.IOException("Upload failed (exit ${res.exitStatus})")
                         FileLogger.log(TAG, "File uploaded: $remotePath (${bytes.size} bytes)")
                         return remotePath
+                    }
+                    // the tab is connected, so null = its server's tab transports have no room for a transfer
+                    lastNoRoom = c != null && c.isConnected
+                    if (lastNoRoom) {
+                        if (!registry.transferMayFindRoom(serverId)) { noRoomCanCome = true; break }
+                        kotlinx.coroutines.delay(roomRetryMs())
+                        continue
                     }
                 } catch (e: kotlinx.coroutines.CancellationException) {
                     throw e
@@ -173,11 +194,29 @@ internal class RemoteOpsService(
             } else if (c != null && c.isConnected) {
                 try {
                     val remoteDir = "/tmp/claude-uploads"
-                    val remotePath = c.uploadFile(bytes, remoteDir, fileName)
-                    FileLogger.log(TAG, "File uploaded: $remotePath (${bytes.size} bytes)")
-                    return remotePath
+                    // The tab's own session: its channel counted where the shells are packed, off the reserve (a transfer);
+                    // no room = look again, or fail at once with a readable error when none can come.
+                    val sess = c.getSession()
+                    val remotePath = if (serverId != null && sess != null) {
+                        registry.withTransferChannel(serverId, sess, "upload") { c.uploadFile(bytes, remoteDir, fileName) }?.value
+                            .also { lastNoRoom = it == null }
+                    } else {
+                        c.uploadFile(bytes, remoteDir, fileName)
+                    }
+                    if (remotePath != null) {
+                        FileLogger.log(TAG, "File uploaded: $remotePath (${bytes.size} bytes)")
+                        return remotePath
+                    }
+                    if (lastNoRoom) {
+                        if (!registry.transferMayFindRoom(serverId!!, sess)) { noRoomCanCome = true; break }
+                        kotlinx.coroutines.delay(roomRetryMs())
+                        continue
+                    }
+                } catch (e: kotlinx.coroutines.CancellationException) {
+                    throw e
                 } catch (e: Exception) {
                     lastException = e
+                    lastNoRoom = false
                     FileLogger.error(TAG, "Upload exec failed for $sessionId: ${e.message}", e)
                     // Don't kill the connection — if transport is truly dead,
                     // the read loop will detect it via ServerAliveInterval and
@@ -186,6 +225,10 @@ internal class RemoteOpsService(
             }
             kotlinx.coroutines.delay(1000)
         }
+        if (noRoomCanCome) throw IllegalStateException(
+            "No free SSH channel for $sessionId: the connection is full and the exec transport is off, reconnect the tab to upload")
+        if (lastNoRoom) throw IllegalStateException(
+            "No free SSH channel for $sessionId: the connection stayed full for ${TRANSFER_DEADLINE_MS / 1000} s, try again")
         throw lastException ?: IllegalStateException("SSH not ready for $sessionId (upload timeout)")
     }
 
@@ -206,36 +249,64 @@ internal class RemoteOpsService(
         /** Abort a transfer that runs longer than this (a FIFO, a dead link). */
         timeoutMs: Long = 0,
     ): ByteArray? = withContext(Dispatchers.IO) {
+        // Without room the download looks again until this deadline, holding nothing meanwhile (R3-1), unless no room can
+        // come ([ConnectionRegistry.transferMayFindRoom]); the transfer itself gets what is left of [timeoutMs].
+        val deadline = System.currentTimeMillis() + if (timeoutMs > 0) timeoutMs else TRANSFER_DEADLINE_MS
+        fun timeLeft() = if (timeoutMs > 0) (deadline - System.currentTimeMillis()).coerceAtLeast(1) else 0
         try {
             val serverId = registry.serverIdOf(sessionId)
-            if (serverId != null && registry.execActive(serverId)) {
-                // Exec transport: SFTP through the gate, no tab shell needed.
-                return@withContext registry.useChannel(serverId, ExecKind.SFTP) { ch ->
-                    val sftp = ch as com.jcraft.jsch.ChannelSftp
-                    sftp.connect(5000)
-                    try { sftpDownload(sftp, remotePath, maxBytes, timeoutMs) } finally { sftp.disconnect() }
+            while (true) {
+                if (serverId != null && registry.execActive(serverId)) {
+                    // Exec transport: SFTP through the gate, no tab shell needed. A transfer: its fallback keeps off the
+                    // reserve slot of a packed tab transport (V12), NOT_UP there = no room now.
+                    try {
+                        return@withContext registry.useChannel(serverId, ExecKind.SFTP, transfer = true) { ch ->
+                            val sftp = ch as com.jcraft.jsch.ChannelSftp
+                            sftp.connect(5000)
+                            try { sftpDownload(sftp, remotePath, maxBytes, timeLeft()) } finally { sftp.disconnect() }
+                        }
+                    } catch (e: ExecUnavailable) {
+                        if (e.reason != ExecUnavailableReason.NOT_UP || !registry.transferMayFindRoom(serverId) ||
+                            System.currentTimeMillis() >= deadline) throw e
+                    }
+                } else {
+                    val conn = registry.ssh(sessionId) ?: return@withContext null
+                    val sshSession = conn.getSession() ?: return@withContext null
+                    val download: suspend (com.jcraft.jsch.Session) -> ByteArray? = { s ->
+                        val sftp = s.openChannel("sftp") as com.jcraft.jsch.ChannelSftp
+                        sftp.connect(5000)
+                        try {
+                            sftpDownload(sftp, remotePath, maxBytes, timeLeft())
+                        } finally {
+                            sftp.disconnect()
+                        }
+                    }
+                    if (serverId == null) return@withContext download(sshSession)
+                    // The tab's own session: the SFTP channel counted where the shells are packed, off the reserve (a
+                    // transfer, V12); no room = look again, or no download when none can come.
+                    registry.withTransferChannel(serverId, sshSession, "sftp-download", download)?.let { return@withContext it.value }
+                    if (!registry.transferMayFindRoom(serverId, sshSession) || System.currentTimeMillis() >= deadline) return@withContext null
                 }
+                kotlinx.coroutines.delay(roomRetryMs())
             }
-            val conn = registry.ssh(sessionId) ?: return@withContext null
-            val sshSession = conn.getSession() ?: return@withContext null
-            val sftp = sshSession.openChannel("sftp") as com.jcraft.jsch.ChannelSftp
-            sftp.connect(5000)
-            try {
-                sftpDownload(sftp, remotePath, maxBytes, timeoutMs)
-            } finally {
-                sftp.disconnect()
-            }
+            @Suppress("UNREACHABLE_CODE")
+            null
         } catch (e: OutOfMemoryError) {
             // The whole file is buffered in memory, so a large download can
             // exhaust the app heap. Report it like any other failure instead of
             // letting it tear the process down.
             FileLogger.error(TAG, "Download ran out of memory: $remotePath", RuntimeException(e))
             SessionOrchestrator.DOWNLOAD_TOO_LARGE
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
         } catch (e: Exception) {
             FileLogger.error(TAG, "Download file failed: $remotePath", e)
             null
         }
     }
+
+    /** One step of the wait for room of a transfer: jittered, so transfers waiting together do not retry in lockstep. */
+    private fun roomRetryMs(): Long = kotlin.random.Random.nextLong(ROOM_RETRY_MIN_MS, ROOM_RETRY_MAX_MS + 1)
 
     /** The download body on an already connected SFTP channel (the caller disconnects it). Null = failure/aborted. */
     private fun sftpDownload(sftp: com.jcraft.jsch.ChannelSftp, remotePath: String, maxBytes: Long, timeoutMs: Long): ByteArray? {
@@ -315,13 +386,18 @@ internal class RemoteOpsService(
                 }
                 val conn = registry.ssh(sessionId) ?: return@withContext emptySet()
                 val sshSession = conn.getSession() ?: return@withContext emptySet()
-                val sftp = sshSession.openChannel("sftp") as com.jcraft.jsch.ChannelSftp
-                sftp.connect(5000)
-                try {
-                    sftpRegularFiles(sftp, remotePaths)
-                } finally {
-                    sftp.disconnect()
+                val stat: suspend (com.jcraft.jsch.Session) -> Set<String> = { s ->
+                    val sftp = s.openChannel("sftp") as com.jcraft.jsch.ChannelSftp
+                    sftp.connect(5000)
+                    try {
+                        sftpRegularFiles(sftp, remotePaths)
+                    } finally {
+                        sftp.disconnect()
+                    }
                 }
+                // The tab's own session: counted where the shells are packed; no room = nothing confirmed this time.
+                if (serverId != null) registry.withTabChannel(serverId, sshSession, "sftp-stat", stat)?.value ?: emptySet()
+                else stat(sshSession)
             } catch (e: Exception) {
                 FileLogger.error(TAG, "statFiles failed for $sessionId", e)
                 emptySet()
@@ -351,5 +427,10 @@ internal class RemoteOpsService(
         // Raised from 50 MB on request. The download is buffered whole in memory,
         // so this rides on androidApp's largeHeap; see the OutOfMemoryError catch.
         private const val DOWNLOAD_SIZE_LIMIT = 200L * 1024 * 1024 // 200 MB
+        /** How long an upload (and a download without its own time limit) tries, waiting for room included. */
+        private const val TRANSFER_DEADLINE_MS = 20_000L
+        /** The step of a transfer's wait for room (R3-1), jittered between these. */
+        private const val ROOM_RETRY_MIN_MS = 300L
+        private const val ROOM_RETRY_MAX_MS = 1_000L
     }
 }

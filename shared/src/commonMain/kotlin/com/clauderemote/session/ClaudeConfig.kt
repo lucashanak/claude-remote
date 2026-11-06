@@ -3,6 +3,7 @@ package com.clauderemote.session
 import com.clauderemote.model.ClaudeEffort
 import com.clauderemote.model.ClaudeMode
 import com.clauderemote.model.ClaudeModel
+import com.clauderemote.model.TmuxNameParser
 import com.clauderemote.model.claudeConfigDirFor
 
 /**
@@ -148,7 +149,12 @@ object ClaudeConfig {
         claudeSessionId: String? = null,
         /** Null with a [claudeSessionId]: the server decides — see [buildLaunchCommandOrServerDecided]. */
         resume: Boolean? = false,
-        accountSlug: String? = null
+        accountSlug: String? = null,
+        /**
+         * What happens when a session of this name already exists (V14): a relaunch attaches it, a fresh launch refuses.
+         * No default (L4): a caller that forgot it would silently adopt whatever holds the name.
+         */
+        onExisting: OnExisting,
     ): String = buildTmuxRunCommand(
         tmuxSessionName,
         if (claudeSessionId != null) {
@@ -156,7 +162,50 @@ object ClaudeConfig {
         } else {
             buildLaunchCommand(folder, mode, model, null, false, accountSlug)
         },
+        onExisting = onExisting,
     )
+
+    /**
+     * What the tmux anchor does when a session of the name it is told to create already exists (V14). The caller
+     * knows which one it sends (`TmuxLaunchDecision`): a session that should exist, or a new one.
+     */
+    sealed interface OnExisting {
+        /**
+         * A relaunch of a session that should exist (Rebuild, `attach || relaunch`, resume): it may be alive in a
+         * server whose socket was just healed (R5, N1), so it is attached, never killed and created again.
+         * [command] is the caller's own attach (`SessionOrchestrator.buildAttachCommand`, with the single-client
+         * preamble — S2); null = a plain `tmux attach-session`.
+         */
+        data class Attach(val command: String? = null) : OnExisting
+
+        /**
+         * A fresh launch: a name that is taken is refused (non-zero exit, a readable message on stderr) — the session
+         * there is never killed and never adopted (the tab would show someone else's work under its own folder,
+         * account and manifest entry). The app picks a free name first ([freshTmuxSessionName]) and creates the
+         * session detached before its tab exists ([buildFreshCreateCommand], V16: no has-session, no kill-session —
+         * `new-session` fails on a taken name); in a tab this mode is the backstop.
+         */
+        data object Refuse : OnExisting
+    }
+
+    /**
+     * V14: the tmux name for a FRESH launch — the usual [TmuxNameParser.build] name when no session in [taken] holds
+     * it, else the first free `-2`, `-3`, … The number goes before the `-yolo` / `--alias` tail, so
+     * [TmuxNameParser.parse] still reads the mode and the alias back.
+     */
+    fun freshTmuxSessionName(
+        serverName: String,
+        folder: String,
+        isYolo: Boolean,
+        alias: String = "",
+        taken: Collection<String>,
+    ): String {
+        val base = TmuxNameParser.build(serverName, folder, isYolo, alias)
+        if (base !in taken) return base
+        val tail = TmuxNameParser.build(serverName, "x", isYolo, alias).removePrefix(TmuxNameParser.build(serverName, "x", false))
+        val stem = base.removeSuffix(tail)
+        return generateSequence(2) { it + 1 }.map { "$stem-$it$tail" }.first { it !in taken }
+    }
 
     /**
      * `claude auth login` under [accountSlug]'s own config dir — the ONLY
@@ -172,7 +221,79 @@ object ClaudeConfig {
             // Detached: this runs over an exec channel with no TTY, and the pane is
             // never attached — the app reads it with capture-pane.
             detached = true,
+            // ignored when detached (the login pane's path); spelled out because the parameter has no default (L4)
+            onExisting = OnExisting.Attach(),
         )
+
+    /**
+     * Server path of the tmux socket guard that [buildTmuxRunCommand] runs before anything that may create a tmux
+     * server. Written by `SessionPersistenceService.INSTALL_RESTORE_COMMAND` (marker v18).
+     */
+    internal const val SOCKHEAL_SCRIPT = "\$HOME/.claude-remote/tmux-sockheal.sh"
+
+    /**
+     * V16: a NEW session is created over an exec channel BEFORE any tab exists (`SessionOrchestrator.createFreshSession`):
+     * `tmux new-session -d … -e CR_LAUNCH=<nonce>`, the same anchored command as a launch in a tab, only detached and
+     * never over a session of that name (no has-session, no kill-session: `new-session` itself fails on a taken name,
+     * atomically). Its stderr is folded into stdout and its exit status echoed ([FRESH_CREATE_RC]); then, if a session
+     * of that name exists, its `CR_LAUNCH` ([FRESH_CREATE_OWNER], from `show-environment`), else [FRESH_CREATE_ABSENT].
+     * The owner tells the app whether the session of that name is the one it just created (its nonce) — also when the
+     * answer to an earlier try was lost and the retry ran into the session that try created.
+     */
+    const val FRESH_CREATE_RC = "__CR_CREATE_RC="
+    const val FRESH_CREATE_OWNER = "__CR_CREATE_OWNER="
+    const val FRESH_CREATE_ABSENT = "__CR_CREATE_ABSENT__"
+    /** The session environment variable carrying the creating launch's nonce. */
+    const val LAUNCH_ENV = "CR_LAUNCH"
+
+    fun buildFreshCreateCommand(
+        tmuxSessionName: String,
+        folder: String,
+        mode: ClaudeMode,
+        model: ClaudeModel,
+        claudeSessionId: String?,
+        accountSlug: String? = null,
+        nonce: String,
+    ): String {
+        require(nonce.isNotEmpty() && nonce.all { it.isLetterOrDigit() && it.code < 128 }) { "nonce must be ASCII alphanumeric" }
+        // `--session-id <uuid>` (never --resume: the conversation is new) on every transport, mosh and ET included
+        val claudeCmd = buildLaunchCommand(folder, mode, model, claudeSessionId, false, accountSlug)
+        val run = buildTmuxRunCommand(tmuxSessionName, claudeCmd, detached = true, onExisting = OnExisting.Refuse, launchNonce = nonce)
+        val target = "'" + ("=" + tmuxSessionName).replace("'", "'\\''") + "'"
+        val runQ = "'" + run.replace("'", "'\\''") + "'"
+        // K6-1: the server ends a hung creation itself (`timeout`, exit 124 = cut short = Lost) and each check after it,
+        // so a stuck tmux never keeps sshd's session once the client gave up (vzor K5-2). A check cut short prints no
+        // owner and no ABSENT line: Lost too, never "absent" or "taken".
+        return "{ timeout $FRESH_CREATE_SERVER_LIMIT_S sh -c $runQ; } 2>&1; echo \"$FRESH_CREATE_RC\$?\"; " +
+            "timeout $FRESH_CHECK_LIMIT_S tmux has-session -t $target 2>/dev/null; CR_HS=\$?; " +
+            "if [ \$CR_HS -eq 0 ]; then CR_OW=\$(timeout $FRESH_CHECK_LIMIT_S tmux show-environment -t $target $LAUNCH_ENV 2>/dev/null); " +
+            "[ \$? -ne 124 ] && echo \"$FRESH_CREATE_OWNER\$CR_OW\"; " +
+            "elif [ \$CR_HS -ne 124 ]; then echo $FRESH_CREATE_ABSENT; fi"
+    }
+
+    /**
+     * K6-1: the server's limit on the creation itself (socket guard, anchor, `new-session`), in seconds. With the two
+     * checks after it ([FRESH_CHECK_LIMIT_S] each) it stays below the client's limit (`SessionOrchestrator.FRESH_CREATE_MS`,
+     * 20 s): a creation the client gave up on is over on the server too. Needs coreutils `timeout` on the server (as the
+     * listing does): without it every creation fails with the server's "timeout: not found".
+     */
+    const val FRESH_CREATE_SERVER_LIMIT_S = 10
+    /** K6-1: the server's limit on each tmux check after the creation (has-session, show-environment) and on the cleanup's. */
+    const val FRESH_CHECK_LIMIT_S = 3
+    /** R6-2/R6-3: what [buildOwnSessionCleanupCommand] prints once it killed this launch's session. */
+    const val FRESH_CLEANED = "__CR_CLEANED__"
+
+    /**
+     * R6-2/R6-3: kill the session [tmuxSessionName] only when it is this launch's — its `CR_LAUNCH` is [nonce] — for a
+     * launch that ends without a tab after its creation may have run (cancelled, every answer lost). A session of the
+     * name without that nonce (another device's, a user's) is never touched.
+     */
+    fun buildOwnSessionCleanupCommand(tmuxSessionName: String, nonce: String): String {
+        require(nonce.isNotEmpty() && nonce.all { it.isLetterOrDigit() && it.code < 128 }) { "nonce must be ASCII alphanumeric" }
+        val target = "'" + ("=" + tmuxSessionName).replace("'", "'\\''") + "'"
+        return "[ \"\$(timeout $FRESH_CHECK_LIMIT_S tmux show-environment -t $target $LAUNCH_ENV 2>/dev/null)\" = '$LAUNCH_ENV=$nonce' ] && " +
+            "timeout $FRESH_CHECK_LIMIT_S tmux kill-session -t $target && echo $FRESH_CLEANED"
+    }
 
     /**
      * Create the anchored tmux session [tmuxSessionName] and `send-keys` the shell
@@ -191,6 +312,10 @@ object ClaudeConfig {
          * PTY channel and the app attaches that session immediately.
          */
         detached: Boolean = false,
+        /** Ignored when [detached] (the login pane keeps its old path). No default (L4). */
+        onExisting: OnExisting,
+        /** V16: the creating launch's nonce, set as the session's [LAUNCH_ENV] (detached fresh creation only). */
+        launchNonce: String? = null,
     ): String {
         // POSIX single-quote wrap: a literal ' inside a '...' string must be
         // written as '\'' — NOT \' (you can't backslash-escape a quote inside
@@ -217,7 +342,39 @@ object ClaudeConfig {
         //     (status=11/SEGV), so let it dump a core for the backtrace.
         // Kill existing session with same name to avoid -A reattaching
         // and sending keystrokes into a running program
+        //
+        // SOCKET GUARD first (installed with restore.sh/drift.sh, marker v18): when a tmux server is alive on the
+        // default socket path but its socket file is gone, `tmux list-sessions` below fails and this command would
+        // start a SECOND server next to it — on 2026-11-02 that duplicated every session. The helper exits
+        //   0  nothing to heal: everything below as before;
+        //   3  the socket was unusable and is back (SIGUSR1 / chmod 700);
+        //   anything else  refused (the helper printed why): NOTHING below runs and the command fails.
+        // Absent helper (older server install): the previous behaviour.
+        // A session of this name that EXISTS is never killed and created again (V14), whatever the guard's exit:
+        //  - OnExisting.Attach (a relaunch: Rebuild, `attach || relaunch`, resume) attaches it (R5, N1): this tab may
+        //    have healed the socket (3), or another tab or a drift tick healed it a moment earlier (0), and the
+        //    session ran in that server all along. The caller's attach carries the single-client preamble (S2). The
+        //    kill-session below stays for this mode: it acts only when a second creator of the same name wins the
+        //    moment between has-session and it (two creators of one name, as before this guard).
+        //  - OnExisting.Refuse (a fresh launch) refuses with a non-zero exit: no attach (that adopted someone else's
+        //    session, a bare shell or a dead pane under this tab's folder, account and manifest entry), no kill (that
+        //    killed live work). Nor in the race: no kill-session, so new-session fails on a name taken meanwhile.
+        // The detached login pane is never attached and keeps the old path (its point is a fresh `claude auth login`).
+        val heal = "\"$SOCKHEAL_SCRIPT\""
+        val target = sq("=" + tmuxSessionName)
+        val existing = when {
+            detached -> ""
+            onExisting is OnExisting.Attach ->
+                "elif tmux has-session -t $target 2>/dev/null; then ${onExisting.command ?: "tmux attach-session -t $target"}; "
+            else -> "elif tmux has-session -t $target 2>/dev/null; then " +
+                "echo ${sq("claude-remote: tmux session $tmuxSessionName already exists — not killing it, not attaching it; start the new session under another name")} >&2; false; "
+        }
         return "export XDG_RUNTIME_DIR=\${XDG_RUNTIME_DIR:-/run/user/\$(id -u)}; " +
+                "CR_SG=0; [ -x $heal ] && { $heal; CR_SG=\$?; }; " +
+                "if [ \$CR_SG -ne 0 ] && [ \$CR_SG -ne 3 ]; then " +
+                "echo \"claude-remote: not starting a tmux server (socket guard exit \$CR_SG, see ~/.claude-remote/sockheal.log)\" >&2; false; " +
+                existing +
+                "else " +
                 // No --unit=<fixed name> and no --property=LimitCORE: a scope does
                 // NOT accept LimitCORE ("Unknown assignment"), which made the whole
                 // systemd-run fail, and a leftover unit of a fixed name makes it
@@ -244,12 +401,14 @@ object ClaudeConfig {
                 // `-t '=name'`: plain `-t` prefix-matches, so killing "proj--cashy"
                 // would also hit a live "proj--cashy-2" (measured on tmux 3.5a).
                 // `=` forces an exact-name match for a target-session.
-                "tmux kill-session -t ${sq("=" + tmuxSessionName)} 2>/dev/null; " +
+                // Never for a fresh launch (Refuse): in a tab or detached (V16), a taken name fails new-session.
+                (if (onExisting is OnExisting.Refuse) "" else "tmux kill-session -t $target 2>/dev/null; ") +
                 "tmux set-option -g history-limit 100000 2>/dev/null; " +
                 "tmux new-session ${if (detached) "-d " else ""}-x 200 -y 50 -s ${sq(tmuxSessionName)} " +
+                (if (launchNonce != null) "-e $LAUNCH_ENV=$launchNonce " else "") +
                 "\\; set-option -g mouse on " +
                 "\\; set-option -g history-limit 100000 " +
-                "\\; send-keys ${sq(claudeCmd)} Enter"
+                "\\; send-keys ${sq(claudeCmd)} Enter; fi"
     }
 
     /**

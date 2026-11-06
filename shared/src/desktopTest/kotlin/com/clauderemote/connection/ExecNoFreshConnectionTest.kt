@@ -37,6 +37,8 @@ class ExecNoFreshConnectionTest {
     private val server = SshServer(id = "s1", name = "n", host = "127.0.0.1", port = listener.localPort, username = "u")
 
     @AfterTest fun close() {
+        com.clauderemote.session.service.CommFlags.resetForTest()
+        SshSessionHelper.fallbackRunner = null
         SshSessionHelper.execChannelsProvider = null
         SshSessionHelper.liveSessionProvider = null
         listener.close()
@@ -64,6 +66,8 @@ class ExecNoFreshConnectionTest {
             settle()
             s.stop()
             assertEquals(0, accepted.get())
+            // the pool off (a legacy server): only there may a poll still open its own connection (V6)
+            com.clauderemote.session.service.CommFlags.set(com.clauderemote.session.service.CommFlags.Raw(pool = false, exec = false))
             val legacy = TranscriptStream(server, "/work", scope, liveSession = { null }, viaExec = { false })
             legacy.start("22222222-2222-2222-2222-222222222222")
             settle(); settle()
@@ -80,6 +84,7 @@ class ExecNoFreshConnectionTest {
             settle(); settle()
             p.stop()
             assertEquals(0, accepted.get())
+            com.clauderemote.session.service.CommFlags.set(com.clauderemote.session.service.CommFlags.Raw(pool = false, exec = false))
             val legacy = SessionStatusPoller(server, "/work", { null }, scope, liveSession = { null }, viaExec = { false })
             legacy.start()
             settle(); settle()
@@ -132,7 +137,10 @@ class ExecNoFreshConnectionTest {
                 throw ExecUnavailable(ExecUnavailableReason.GATE_TIMEOUT)
         }
         SshSessionHelper.execChannelsProvider = { gate }
-        SshSessionHelper.liveSessionProvider = { JSch().getSession("u", "localhost", 22).also { s -> markConnected(s) } }
+        SshSessionHelper.fallbackRunner = object : FallbackRunner {
+            override suspend fun <T> run(server: SshServer, block: suspend (Session) -> T): Fallback<T> =
+                Fallback(block(JSch().getSession("u", "localhost", 22).also { s -> markConnected(s) }))
+        }
         var ran = false
         val e = assertFailsWith<ExecUnavailable> { SshSessionHelper.withSession(server) { ran = true; 1 } }
         assertEquals(ExecUnavailableReason.GATE_TIMEOUT, e.reason)

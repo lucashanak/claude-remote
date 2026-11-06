@@ -159,7 +159,7 @@ class ClaudeConfigTest {
     @Test
     fun buildTmuxLaunchCommand_sessionNameWithSingleQuote_escapedInKillAndNewSessionTargets() {
         val cmd = ClaudeConfig.buildTmuxLaunchCommand(
-            "bob's session", "/proj", ClaudeMode.NORMAL, ClaudeModel.DEFAULT
+            "bob's session", "/proj", ClaudeMode.NORMAL, ClaudeModel.DEFAULT, onExisting = ClaudeConfig.OnExisting.Attach(),
         )
         assertTrue(
             "tmux kill-session -t '=bob'\\''s session' 2>/dev/null;" in cmd,
@@ -175,7 +175,7 @@ class ClaudeConfigTest {
     fun buildTmuxLaunchCommand_killsExistingSessionBeforeCreatingNewOne() {
         // Prevents `-A` re-attach semantics from sending keystrokes into an
         // already-running program under a reused session name.
-        val cmd = ClaudeConfig.buildTmuxLaunchCommand("sess", "/proj", ClaudeMode.NORMAL, ClaudeModel.DEFAULT)
+        val cmd = ClaudeConfig.buildTmuxLaunchCommand("sess", "/proj", ClaudeMode.NORMAL, ClaudeModel.DEFAULT, onExisting = ClaudeConfig.OnExisting.Attach())
         val killIdx = cmd.indexOf("tmux kill-session -t '=sess'")
         val newIdx = cmd.indexOf("tmux new-session -x 200 -y 50 -s 'sess'")
         assertTrue(killIdx >= 0 && newIdx >= 0 && killIdx < newIdx)
@@ -187,7 +187,7 @@ class ClaudeConfigTest {
         // on kill-session prefix-matches, so killing "proj--cashy" also killed
         // a live "proj--cashy-2" sibling (measured on real tmux 3.5a). `-t
         // '=name'` forces an exact match for a target-session.
-        val cmd = ClaudeConfig.buildTmuxLaunchCommand("proj--cashy", "/proj", ClaudeMode.NORMAL, ClaudeModel.DEFAULT)
+        val cmd = ClaudeConfig.buildTmuxLaunchCommand("proj--cashy", "/proj", ClaudeMode.NORMAL, ClaudeModel.DEFAULT, onExisting = ClaudeConfig.OnExisting.Attach())
         assertTrue("tmux kill-session -t '=proj--cashy' " in cmd)
     }
 
@@ -196,27 +196,123 @@ class ClaudeConfigTest {
         // Guard against an over-eager future "make everything consistent" fix:
         // `new-session -s` takes a NAME, not a target, so it must never be
         // prefixed with '='.
-        val cmd = ClaudeConfig.buildTmuxLaunchCommand("proj--cashy", "/proj", ClaudeMode.NORMAL, ClaudeModel.DEFAULT)
+        val cmd = ClaudeConfig.buildTmuxLaunchCommand("proj--cashy", "/proj", ClaudeMode.NORMAL, ClaudeModel.DEFAULT, onExisting = ClaudeConfig.OnExisting.Attach())
         assertTrue("tmux new-session -x 200 -y 50 -s 'proj--cashy' " in cmd)
         assertTrue("-s '=proj--cashy'" !in cmd)
     }
 
     @Test
     fun buildTmuxLaunchCommand_sendsClaudeCommandSingleQuoteWrappedForSendKeys() {
-        val cmd = ClaudeConfig.buildTmuxLaunchCommand("sess", "/proj", ClaudeMode.NORMAL, ClaudeModel.DEFAULT)
+        val cmd = ClaudeConfig.buildTmuxLaunchCommand("sess", "/proj", ClaudeMode.NORMAL, ClaudeModel.DEFAULT, onExisting = ClaudeConfig.OnExisting.Attach())
         val claudeCmd = ClaudeConfig.buildLaunchCommand("/proj", ClaudeMode.NORMAL, ClaudeModel.DEFAULT)
         // claudeCmd itself contains a single-quoted 'cd ...' — sq() must
         // re-escape those embedded quotes when wrapping the whole thing for
         // send-keys, per the '\'' idiom documented at ClaudeConfig.kt:92-97.
         val expectedSendKeys = "send-keys 'cd '\\''/proj'\\'' && claude --allow-dangerously-skip-permissions' Enter"
         assertTrue(claudeCmd == "cd '/proj' && claude --allow-dangerously-skip-permissions")
-        assertTrue(cmd.endsWith(expectedSendKeys), "actual tail: ${cmd.takeLast(120)}")
+        // `; fi` closes the socket guard's else-branch (see buildTmuxLaunchCommand_socketGuardRunsBeforeAnythingThatCanCreateAServer)
+        assertTrue(cmd.endsWith("$expectedSendKeys; fi"), "actual tail: ${cmd.takeLast(120)}")
+    }
+
+    @Test
+    fun buildTmuxLaunchCommand_socketGuardRunsBeforeAnythingThatCanCreateAServer() {
+        // B3: a tmux server alive without its socket file makes `tmux list-sessions` fail, and the anchor would
+        // then start a SECOND server next to it (2026-11-02: every session duplicated). The guard must run first
+        // and, when it refuses, nothing that can create a server may run: both creators sit in its else-branch.
+        val h = "\"\$HOME/.claude-remote/tmux-sockheal.sh\""
+        for (cmd in listOf(
+            ClaudeConfig.buildTmuxLaunchCommand("sess", "/proj", ClaudeMode.NORMAL, ClaudeModel.DEFAULT, onExisting = ClaudeConfig.OnExisting.Attach()),
+            ClaudeConfig.buildTmuxLoginCommand("claude-login-x", "x"),
+        )) {
+            val guard = cmd.indexOf("CR_SG=0; [ -x $h ] && { $h; CR_SG=\$?; }; if [ \$CR_SG -ne 0 ] && [ \$CR_SG -ne 3 ]; then ")
+            val elseIdx = cmd.indexOf("; else ", guard)
+            val anchor = cmd.indexOf("systemd-run --user --scope")
+            val create = cmd.indexOf("tmux new-session ")
+            assertTrue(guard >= 0, "no socket guard in: $cmd")
+            assertTrue(guard < elseIdx && elseIdx < anchor && anchor < create, "guard/else/anchor/new-session out of order: $cmd")
+            assertTrue(cmd.endsWith("; fi"), "the else-branch must close after the last tmux command: ${cmd.takeLast(80)}")
+            val refusal = cmd.substring(guard, cmd.indexOf("; el", guard))
+            assertTrue(!Regex("""(then|;|&&|\|\|)\s*tmux """).containsMatchIn(refusal) && "systemd-run" !in refusal, "the refusal branch must not run tmux: $refusal")
+            // L3: the refusal tells its caller (non-zero) and points at the log, it does not claim a cause it does not know
+            assertTrue(refusal.endsWith(">&2; false"), "the refusal must end non-zero: $refusal")
+            assertTrue("not starting a tmux server" in refusal && "lost its socket" !in refusal, refusal)
+        }
+    }
+
+    @Test
+    fun buildTmuxLaunchCommand_anExistingSessionIsAttachedWhoeverHealedTheSocket() {
+        // R5 (kolo 2) + N1 (kolo 3): the session the tab is (re)launching may still be alive — in a server whose socket
+        // this tab healed (sockheal exit 3), or another tab or a drift tick healed a moment earlier (exit 0). Either
+        // way attach it; never kill-session + new-session (that restarted live work). No condition on the guard's exit.
+        val cmd = ClaudeConfig.buildTmuxLaunchCommand("proj--a", "/proj", ClaudeMode.NORMAL, ClaudeModel.DEFAULT, onExisting = ClaudeConfig.OnExisting.Attach())
+        val healed = "elif tmux has-session -t '=proj--a' 2>/dev/null; then tmux attach-session -t '=proj--a'; else "
+        val at = cmd.indexOf(healed)
+        assertTrue(at >= 0, "no attach-if-present branch in: $cmd")
+        assertTrue("-eq 3" !in cmd, "attaching must not depend on who healed the socket: $cmd")
+        assertTrue(at < cmd.indexOf("tmux kill-session") && at < cmd.indexOf("tmux new-session "), "the healed branch must come before kill/new: $cmd")
+        // the login pane is created detached over exec and is never attached: no such branch, the old path
+        val login = ClaudeConfig.buildTmuxLoginCommand("claude-login-x", "x")
+        assertTrue("elif" !in login && "attach-session" !in login, login)
+    }
+
+    @Test
+    fun buildTmuxLaunchCommand_aFreshLaunchRefusesATakenNameNeverKillsNorAttachesIt() {
+        // V14 (kolo 4): a fresh launch of a name that is taken (same folder basename, quick connect from another
+        // device, a session whose claude ended) must neither kill the session there (kolo 2) nor adopt it (kolo 3).
+        val cmd = ClaudeConfig.buildTmuxLaunchCommand(
+            "proj--a", "/proj", ClaudeMode.NORMAL, ClaudeModel.DEFAULT, onExisting = ClaudeConfig.OnExisting.Refuse,
+        )
+        val branch = "elif tmux has-session -t '=proj--a' 2>/dev/null; then echo "
+        val at = cmd.indexOf(branch)
+        assertTrue(at >= 0, "no refuse-if-present branch in: $cmd")
+        val refusal = cmd.substring(at, cmd.indexOf("; else ", at))
+        assertTrue(refusal.endsWith(">&2; false"), "the refusal must end non-zero: $refusal")
+        assertTrue("already exists" in refusal, "the refusal must say why: $refusal")
+        assertTrue("attach-session" !in cmd, "a fresh launch never attaches: $cmd")
+        assertTrue("kill-session" !in cmd, "a fresh launch never kills, not even in the race after has-session: $cmd")
+        assertTrue(cmd.indexOf("tmux new-session ") > at, "new-session only in the else-branch: $cmd")
+    }
+
+    @Test
+    fun buildTmuxLaunchCommand_aRelaunchAttachesWithTheCallersSingleClientAttach() {
+        // S2 (kolo 4): the attach after a heal goes through the caller's own attach (single-client preamble: the old
+        // client of this device is detached and the marker names the new one), not a bare attach-session.
+        val attach = "CRD=\"\$HOME/.claude-remote/clients\"; PREAMBLE; tmux attach-session -t '=proj--a'"
+        val cmd = ClaudeConfig.buildTmuxLaunchCommand(
+            "proj--a", "/proj", ClaudeMode.NORMAL, ClaudeModel.DEFAULT, onExisting = ClaudeConfig.OnExisting.Attach(attach),
+        )
+        assertTrue("elif tmux has-session -t '=proj--a' 2>/dev/null; then $attach; else " in cmd, "the caller's attach must be the branch: $cmd")
+        assertEquals(1, Regex("attach-session").findAll(cmd).count(), "no second, bare attach: $cmd")
+        // the default stays a plain attach (N1), and a relaunch still never refuses an existing session
+        val plain = ClaudeConfig.buildTmuxLaunchCommand("proj--a", "/proj", ClaudeMode.NORMAL, ClaudeModel.DEFAULT, onExisting = ClaudeConfig.OnExisting.Attach())
+        assertTrue("then tmux attach-session -t '=proj--a'; else " in plain && "already exists" !in plain, plain)
+    }
+
+    @Test
+    fun freshTmuxSessionName_takesTheFirstFreeNumberBeforeTheModeAndAliasTail() {
+        // V14 (kolo 4): the app starts a fresh session under a name no session on the server holds.
+        val folder = "/home/u/api"
+        assertEquals("claude-dev-api", ClaudeConfig.freshTmuxSessionName("dev", folder, false, taken = listOf("claude-dev-web")))
+        assertEquals("claude-dev-api-2", ClaudeConfig.freshTmuxSessionName("dev", folder, false, taken = listOf("claude-dev-api")))
+        assertEquals(
+            "claude-dev-api-3",
+            ClaudeConfig.freshTmuxSessionName("dev", folder, false, taken = listOf("claude-dev-api", "claude-dev-api-2")),
+        )
+        val yolo = ClaudeConfig.freshTmuxSessionName("dev", folder, true, "my fix", taken = listOf("claude-dev-api-yolo--my-fix"))
+        assertEquals("claude-dev-api-2-yolo--my-fix", yolo)
+        val parsed = com.clauderemote.model.TmuxNameParser.parse(yolo, "dev")
+        assertTrue(parsed.isYolo && parsed.alias == "my fix", "mode and alias must read back: $parsed")
+        // a long folder that build() shortens still gets a distinct name
+        val long = "/x/" + "f".repeat(80)
+        val base = com.clauderemote.model.TmuxNameParser.build("dev", long, false)
+        val next = ClaudeConfig.freshTmuxSessionName("dev", long, false, taken = listOf(base))
+        assertTrue(next != base && next.endsWith("-2"), next)
     }
 
     @Test
     fun buildTmuxLaunchCommand_sameInputsProduceIdenticalOutput() {
-        val a = ClaudeConfig.buildTmuxLaunchCommand("sess", "/proj", ClaudeMode.AUTO, ClaudeModel.OPUS, "uuid-1", true)
-        val b = ClaudeConfig.buildTmuxLaunchCommand("sess", "/proj", ClaudeMode.AUTO, ClaudeModel.OPUS, "uuid-1", true)
+        val a = ClaudeConfig.buildTmuxLaunchCommand("sess", "/proj", ClaudeMode.AUTO, ClaudeModel.OPUS, "uuid-1", true, onExisting = ClaudeConfig.OnExisting.Attach())
+        val b = ClaudeConfig.buildTmuxLaunchCommand("sess", "/proj", ClaudeMode.AUTO, ClaudeModel.OPUS, "uuid-1", true, onExisting = ClaudeConfig.OnExisting.Attach())
         assertEquals(a, b)
     }
 

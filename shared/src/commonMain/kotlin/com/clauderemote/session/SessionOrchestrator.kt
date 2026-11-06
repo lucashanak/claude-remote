@@ -56,7 +56,7 @@ class SessionOrchestrator(
     private val serverStorage: ServerStorage,
     private val tabManager: TabManager,
     private val sessionStorage: SessionStorage? = null
-) {
+) : NetworkCallbackHub.Target {
     internal val connectionRegistry = ConnectionRegistry(serverStorage, tabManager)
 
     // Shared background scope for all per-session/per-server loops. Declared
@@ -87,6 +87,9 @@ class SessionOrchestrator(
         // handshake each time — the dominant idle data drain.
         // With exec routing on, only a pooled transport that still has channel headroom (the exec
         // transport is down and the tabs sit 8 to a transport: a one-off op there would be refused).
+        // The runner holds one COUNTED channel on that transport while the op runs (NN1); the provider below is the
+        // look-only view of the same choice, for diagnostics.
+        com.clauderemote.connection.SshSessionHelper.fallbackRunner = connectionRegistry
         com.clauderemote.connection.SshSessionHelper.liveSessionProvider = { server ->
             connectionRegistry.fallbackPooledSession(server.id)
         }
@@ -518,7 +521,8 @@ class SessionOrchestrator(
      * session's autoReconnect arms, and the sweep on onAvailable/onResume
      * reconnects on the new network within ~1 s instead of ~20.
      */
-    fun onNetworkLost() {
+    override fun onNetworkLost() {
+        if (released) return
         FileLogger.log(TAG, "Network lost — tearing down ${connectionRegistry.transportPoolCount()} transport pool(s)")
         // Our own teardown must not count as Tailscale early-death strikes.
         transportResolver.markNetworkTeardown()
@@ -539,10 +543,53 @@ class SessionOrchestrator(
      * for it a moment ([awaitExecForWave]), so their leases find it up and get the shell cap of 8, and the
      * tab-side execs run on it.
      */
-    fun onNetworkAvailable() {
+    override fun onNetworkAvailable() {
+        if (released) return
         openReconnectWave()
         execManager.onNetworkAvailable()
         ensureExecTransports()
+    }
+
+    // Single in-flight reconnect sweep. Flapping networks fire onAvailable in bursts; without this each edge spawned
+    // a detached coroutine that piled stale connect attempts (5-10 s timeouts each) onto the half-dead link. One sweep
+    // at a time. The lock guards the check-and-launch: onAvailable fires on a binder thread, onResume on the main one.
+    @Volatile private var reconnectSweepJob: kotlinx.coroutines.Job? = null
+    private val reconnectSweepLock = Any()
+
+    /**
+     * Reconnect every tab that is DISCONNECTED **or ERROR** (a failed reconnectSession leaves the tab in ERROR, and a
+     * DISCONNECTED-only filter skipped those forever), concurrently. Called on a network edge ([NetworkCallbackHub])
+     * and on resume. Runs in this orchestrator's scope, so a replaced orchestrator ([shutdown]) sweeps nothing.
+     */
+    override fun reconnectDeadTabs(reason: String) {
+        if (released) return
+        val dead = tabManager.tabs.value.filter {
+            it.status == com.clauderemote.model.SessionStatus.DISCONNECTED ||
+                it.status == com.clauderemote.model.SessionStatus.ERROR
+        }
+        if (dead.isEmpty()) return
+        synchronized(reconnectSweepLock) {
+            if (reconnectSweepJob?.isActive == true) {
+                FileLogger.log("Network", "Reconnect sweep already running, skipping ($reason)")
+                return
+            }
+            FileLogger.log("Network", "Reconnect sweep ($reason): ${dead.size} dead tab(s)")
+            reconnectSweepJob = reconnectScope.launch {
+                // Concurrent, not sequential — see restoreAndReconnect's comment. reconnectSession's own single-flight
+                // guard makes this safe even if another sweep/trigger is mid-flight for the same tab.
+                dead.map { session ->
+                    async {
+                        try {
+                            reconnectSession(session.id)
+                        } catch (e: CancellationException) {
+                            throw e
+                        } catch (_: Exception) {
+                            // reconnectSession re-arms its own persistent retry loop.
+                        }
+                    }
+                }.forEach { it.join() }
+            }
+        }
     }
 
     /** End of the window in which a reconnect waits for its server's exec transport, see [awaitExecForWave]. */
@@ -572,6 +619,7 @@ class SessionOrchestrator(
      * (idempotent; foreground, network back, first connect of a tab). Fire and forget.
      */
     fun ensureExecTransports() {
+        if (released) return
         for (serverId in tabManager.tabs.value.map { it.server.id }.distinct()) {
             ensureExecTransport(serverId)
             kickBootstrap(serverId)
@@ -583,17 +631,67 @@ class SessionOrchestrator(
      * calling this again is free. It also starts the watch on the server's `exec` flag, which closes the
      * transport when the flag goes off at run time and starts it again when it comes back.
      */
-    internal fun ensureExecTransport(serverId: String) {
-        if (!hasLiveTab(serverId)) return
+    internal fun ensureExecTransport(serverId: String) = synchronized(execLock(serverId)) {
+        if (released) return@synchronized
+        if (!hasLiveTab(serverId)) return@synchronized
         watchExecFlag(serverId)
-        if (!CommFlags.effectiveFor(serverId).exec) return
+        if (!CommFlags.effectiveFor(serverId).exec) return@synchronized
+        execEnsureHook?.invoke(serverId)
         execEnsuredServers.add(serverId)
         execManager.ensure(serverId)
     }
 
-    /** A tab of [serverId] that is not on its way out ([closingIds]). */
+    /**
+     * Per-server lock of the exec transport's lifecycle (NN4): [ensureExecTransport] and every close (the last tab gone,
+     * the exec flag switched off, [releaseExecLayer]) decide and act under it, so a tab that opens while the last one
+     * closes either keeps the transport or starts it again after the close, never finds it closed behind its back.
+     * Nothing under it suspends (`ensure`/`close` only start or cancel work).
+     */
+    private fun execLock(serverId: String): Any = execLocks.computeIfAbsent(serverId) { Any() }
+    private val execLocks = java.util.concurrent.ConcurrentHashMap<String, Any>()
+
+    /** Test hooks inside [execLock]: after the checks of [ensureExecTransport] / before an exec transport is closed. */
+    @Volatile internal var execEnsureHook: ((serverId: String) -> Unit)? = null
+    @Volatile internal var execCloseHook: ((serverId: String) -> Unit)? = null
+
+    /** A tab of [serverId] that is not on its way out ([closingIds]), or a launch creating one (V16). */
     private fun hasLiveTab(serverId: String): Boolean =
-        tabManager.tabs.value.any { it.server.id == serverId && it.id !in closingIds }
+        tabManager.tabs.value.any { it.server.id == serverId && it.id !in closingIds } || launchPending(serverId)
+
+    /**
+     * V16: launches of [serverId] creating their session before their tab exists, over the exec transport (mosh): they
+     * keep the transport wanted like a tab does, so neither [ensureExecTransport] refuses it nor a close drops it.
+     */
+    private val pendingLaunches = java.util.concurrent.ConcurrentHashMap<String, java.util.concurrent.atomic.AtomicInteger>()
+
+    private fun launchPending(serverId: String): Boolean = (pendingLaunches[serverId]?.get() ?: 0) > 0
+
+    private fun beginLaunchPending(serverId: String) {
+        pendingLaunches.computeIfAbsent(serverId) { java.util.concurrent.atomic.AtomicInteger() }.incrementAndGet()
+    }
+
+    /**
+     * [hold]'s launch is through (its tab exists, or it failed): with no tab and no launch left, the transport goes as with
+     * the last tab. Once per launch.
+     */
+    private fun endLaunchPending(hold: LaunchHold) {
+        val serverId = hold.pendingOn ?: return
+        hold.pendingOn = null
+        pendingLaunches[serverId]?.decrementAndGet()
+        synchronized(execLock(serverId)) {
+            if (tabManager.tabs.value.none { it.server.id == serverId } && !launchPending(serverId) && serverId in execEnsuredServers) {
+                closeExecTransportLocked(serverId)
+            }
+        }
+    }
+
+    /** Close [serverId]'s exec transport and its flag watcher. Caller holds [execLock]. */
+    private fun closeExecTransportLocked(serverId: String) {
+        execCloseHook?.invoke(serverId)
+        execFlagWatchers.remove(serverId)?.cancel()
+        execEnsuredServers.remove(serverId)
+        execManager.close(serverId)
+    }
 
     /** Tabs whose [disconnectSession] is running: they no longer count as a reason to keep a server's exec transport. */
     private val closingIds = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
@@ -603,8 +701,11 @@ class SessionOrchestrator(
 
     private fun watchExecFlag(serverId: String) {
         execFlagWatchers.computeIfAbsent(serverId) {
+            // Read here, before the launch (K4-4): read inside the coroutine it could already be the flip of a kill
+            // switch that came right after this ensure, and the watcher would then take that flip for the old value.
+            val initial = CommFlags.effectiveFor(serverId).exec
             reconnectScope.launch {
-                var seen = CommFlags.effectiveFor(serverId).exec
+                var seen = initial
                 CommFlags.effectiveFlow(serverId).map { it.exec }.distinctUntilChanged().collect { on ->
                     if (on == seen) return@collect
                     seen = on
@@ -636,8 +737,11 @@ class SessionOrchestrator(
             kickBootstrap(serverId)
         } else {
             FileLogger.log(TAG, "exec routing was switched off for $serverId — closing its exec transport")
-            execEnsuredServers.remove(serverId)
-            execManager.close(serverId)
+            synchronized(execLock(serverId)) {
+                execCloseHook?.invoke(serverId)
+                execEnsuredServers.remove(serverId)
+                execManager.close(serverId)
+            }
             movePortForwards(serverId, toExec = false)
         }
         for (t in tabsOfServer) startReconcileLoop(t.id, t.tmuxSessionName)
@@ -693,6 +797,7 @@ class SessionOrchestrator(
      * tab transport, so deleting the force-off file lifts it.
      */
     private fun kickBootstrap(serverId: String) {
+        if (released) return
         val b = connectionRegistry.bootstrap ?: return
         if (!connectionRegistry.execActive(serverId) && !execForcedOffByServer(serverId)) return
         if (!connectionRegistry.execUp(serverId) &&
@@ -906,37 +1011,132 @@ class SessionOrchestrator(
             switchTab(existing.id)
             return@withContext existing
         }
+        if (!isNewTmuxSession) {
+            return@withContext openTab(server, folder, mode, model, connectionType, tmuxSessionName, false, resumeClaudeSessionId, accountSlug) {}
+        }
+        // R6-1: a launch creating its session has no tab yet, so the guard above cannot see it — a second tap, a second
+        // quick connect or Launch re-armed on the Connect screen would create a second session and a second tab. A
+        // launch of the same requested name on the same server joins the one under way: it waits for that launch's tab
+        // and switches to it; when that launch ends without a tab, so does this one (its error, no second session).
+        val key = server.id to tmuxSessionName
+        val mine = kotlinx.coroutines.CompletableDeferred<ClaudeSession>()
+        launchesInFlight.putIfAbsent(key, mine)?.let { first ->
+            FileLogger.log(TAG, "launchSession: '$tmuxSessionName' on ${server.name} is being launched already — joining that launch")
+            val tab = first.await()
+            switchTab(tab.id)
+            return@withContext tab
+        }
+        try {
+            openTab(server, folder, mode, model, connectionType, tmuxSessionName, true, resumeClaudeSessionId, accountSlug) { mine.complete(it) }
+        } catch (e: Throwable) {
+            mine.completeExceptionally(e)
+            throw e
+        } finally {
+            launchesInFlight.remove(key, mine)
+        }
+    }
+
+    /** R6-1: launches of a NEW session under way, by (server id, requested name); see [launchSession]. */
+    private val launchesInFlight =
+        java.util.concurrent.ConcurrentHashMap<Pair<String, String>, kotlinx.coroutines.CompletableDeferred<ClaudeSession>>()
+
+    /**
+     * The tmux names of [serverId] that are this device's own: its open tabs and the names launches are creating right
+     * now (R6-1). Quick connect names its session apart from every OTHER name, so a second quick connect during a
+     * creation picks the same name and joins that launch instead of creating a second session.
+     */
+    fun ownTmuxNames(serverId: String): Set<String> =
+        tabManager.tabs.value.filter { it.server.id == serverId }.map { it.tmuxSessionName }.toSet() +
+            launchesInFlight.keys.filter { it.first == serverId }.map { it.second }
+
+    /**
+     * The tab of [launchSession]: a NEW session ([isNewTmuxSession]) is created on the server first and the tab exists
+     * only once it is ours (V16); [onTab] gets the tab the moment it exists.
+     */
+    private suspend fun openTab(
+        server: SshServer,
+        folder: String,
+        mode: ClaudeMode,
+        model: ClaudeModel,
+        connectionType: ConnectionType,
+        tmuxSessionName: String,
+        isNewTmuxSession: Boolean,
+        resumeClaudeSessionId: String?,
+        accountSlug: String?,
+        onTab: (ClaudeSession) -> Unit,
+    ): ClaudeSession {
         val sessionId = generateId()
         // Pre-generate a UUID for `claude --session-id <uuid>` so we can later
         // restore the conversation deterministically via `claude --resume <uuid>`.
         // Avoids a polling race against `~/.claude/projects/<encoded-cwd>/*.jsonl`.
         val claudeSessionId = resumeClaudeSessionId ?: generateUuidV4()
 
-        val parsedAlias = com.clauderemote.model.TmuxNameParser.parse(tmuxSessionName, server.name).alias
-        val session = ClaudeSession(
-            id = sessionId,
-            server = server,
-            folder = folder,
-            mode = mode,
-            model = model,
-            tmuxSessionName = tmuxSessionName,
-            connectionType = connectionType,
-            status = SessionStatus.CONNECTING,
-            alias = parsedAlias,
-            claudeSessionId = claudeSessionId,
-            accountSlug = accountSlug
-        )
+        // V16: a NEW session is created on the server first, over an exec channel, and the tab exists only once it is
+        // ours: until then nothing can persist, push, probe, restart, rename or close a tab of a name someone else may
+        // hold. A taken name moves on to the next free one; no channel at all = a readable error and no tab.
+        val hold = LaunchHold()
+        var tabAdded = false
+        val session = try {
+            val tmuxName = if (isNewTmuxSession) {
+                createFreshSession(server, tmuxSessionName, folder, mode, model, claudeSessionId, accountSlug, connectionType, hold)
+            } else tmuxSessionName
+            // a slot the creation holds is the tab's own only while nothing else keeps that transport: with another holder
+            // (a tab, another launch's creation) it goes back now, so the tab's shell takes it instead of needing one more
+            yieldSharedHold(hold)
+            if (tmuxName != tmuxSessionName) {
+                tabManager.tabs.value.firstOrNull { it.server.id == server.id && it.tmuxSessionName == tmuxName }?.let { existing ->
+                    // not reachable (the session was just created under this name), but never two tabs of one name
+                    hold.mayOwn = null
+                    hold.release()
+                    endLaunchPending(hold)
+                    switchTab(existing.id)
+                    onTab(existing)
+                    return existing
+                }
+            }
 
-        terminalIO.initBuffer(sessionId)
-        tabManager.addTab(session)
+            val parsedAlias = com.clauderemote.model.TmuxNameParser.parse(tmuxName, server.name).alias
+            val created = ClaudeSession(
+                id = sessionId,
+                server = server,
+                folder = folder,
+                mode = mode,
+                model = model,
+                tmuxSessionName = tmuxName,
+                connectionType = connectionType,
+                status = SessionStatus.CONNECTING,
+                alias = parsedAlias,
+                claudeSessionId = claudeSessionId,
+                accountSlug = accountSlug
+            )
+
+            terminalIO.initBuffer(sessionId)
+            tabManager.addTab(created)
+            tabAdded = true
+            created
+        } catch (e: Throwable) {
+            if (!tabAdded) {
+                // R6-2/R6-3: ended without its tab (cancelled, every answer lost) after the creation may have run: the
+                // session this launch created goes again — only it, by its nonce
+                withContext(kotlinx.coroutines.NonCancellable) { abandonOwnSession(server, hold) }
+                hold.release()
+                endLaunchPending(hold)
+            }
+            throw e
+        }
+        onTab(session)
+        // the tab keeps its server's exec transport wanted from now on
+        endLaunchPending(hold)
         FileLogger.log(TAG, "Launching session: ${server.name} → $folder (${connectionType.name}, ${mode.name}, ${model.name}, account=${accountSlug ?: "default"})")
         // The exec transport comes first: it owns the port forwards and the shell cap of the server.
         ensureExecTransport(server.id)
 
-        try {
+        return try {
+            // V16: a created session is attached like any session of this device (single-client attach); one that is
+            // gone again before the attach is rebuilt by the usual recovery, never launched fresh in the tab.
             when (connectionType) {
-                ConnectionType.SSH -> connectSsh(session, isNewTmuxSession)
-                ConnectionType.MOSH -> connectMosh(session, isNewTmuxSession)
+                ConnectionType.SSH -> connectSsh(session, isNewTmuxSession = false)
+                ConnectionType.MOSH -> connectMosh(session, isNewTmuxSession = false)
             }
 
             serverStorage.updateServer(server.withRecentFolder(folder))
@@ -945,36 +1145,221 @@ class SessionOrchestrator(
             statusService.updateActivity(sessionId, SessionActivity.WAITING_FOR_INPUT)
             onSessionActive?.invoke(session)
             attachSessionRuntime(sessionId, session.tmuxSessionName)
-            // Persist session for app-restart and server-reboot recovery.
-            sessionStorage?.upsert(SessionStorage.fromClaudeSession(session))
-            connectionRegistry.ssh(sessionId)?.let { conn ->
-                launchGuarded("Server-side bookkeeping of $tmuxSessionName") {
-                    if (connectionRegistry.execActive(server.id)) {
-                        // Over the exec transport: no attached shell needed. When none is usable right now the
-                        // step waits for it once instead of being dropped; the push goes out even if the
-                        // tombstone could not be cleared (the failure is logged by the call).
-                        whenExecUp(server.id, "restore service install") { persistence.ensureRestoreService(server.id) }
-                        whenExecUp(server.id, "tombstone clear of $tmuxSessionName") { persistence.clearTombstone(server.id, tmuxSessionName) }
-                        whenExecUp(server.id, "sessions.json push") { persistence.pushSessionsToServer(server.id) }
-                    } else {
-                        persistence.ensureRestoreService(conn)
-                        // Launching (or deliberately attaching to) this tmux name is
-                        // positive intent that it is alive, so drop any tombstone
-                        // left by an earlier close of the SAME name. Must precede
-                        // the push: the push filters tombstoned names out of the
-                        // manifest, so a stale tombstone would otherwise keep this
-                        // brand-new session out of the restore manifest entirely.
-                        persistence.clearTombstone(conn, tmuxSessionName)
-                        persistence.pushSessionsToServer(conn, server.id)
-                    }
-                }
-            }
+            persistLaunched(session)
             session.copy(status = SessionStatus.ACTIVE)
         } catch (e: Exception) {
             FileLogger.error(TAG, "Session launch failed", e)
             tabManager.updateTabStatus(sessionId, SessionStatus.ERROR)
             throw e
+        } finally {
+            // the tab's own shell holds the transport now (or the connect failed): the creation's slot goes back
+            hold.release()
         }
+    }
+
+    /**
+     * V16: a pooled shell transport slot the creation of a new session leased because no channel without a handshake
+     * existed — the transport the tab's shell (SSH, ET carrier) leases next — held until that shell has it, so the
+     * transport is not drained in between and the tab pays no handshake of its own.
+     */
+    private inner class LaunchHold {
+        /** The server whose exec transport this launch keeps wanted while it creates its session (mosh), see [launchPending]. */
+        @Volatile var pendingOn: String? = null
+        /**
+         * R6-2/R6-3: (name, nonce) of a creation that has been sent and may have made this launch's session — cleared
+         * when the server said the name is another session's or nothing was created; see [abandonOwnSession].
+         */
+        @Volatile var mayOwn: Pair<String, String>? = null
+        @Volatile var pool: com.clauderemote.connection.ServerTransportPool? = null
+        @Volatile var session: com.jcraft.jsch.Session? = null
+        fun held(p: com.clauderemote.connection.ServerTransportPool, s: com.jcraft.jsch.Session) {
+            pool = p
+            session = s
+            launchHolds.add(this)
+        }
+        suspend fun release() {
+            val p = pool ?: return
+            pool = null
+            session = null
+            launchHolds.remove(this)
+            withContext(kotlinx.coroutines.NonCancellable) { p.release(this@LaunchHold) }
+        }
+    }
+
+    /** V16: creations that hold a pooled shell transport slot right now. */
+    private val launchHolds = java.util.concurrent.ConcurrentHashMap.newKeySet<LaunchHold>()
+
+    /**
+     * V16: give [hold]'s slot back once its creation is through when something else keeps the transport (another
+     * launch's hold, a tab's shell): the transport is not drained and the tab's shell takes the slot instead of needing
+     * a transport more (two launches at once on a cold server: 2 holds + 2 shells would pass the cap of 3). With no
+     * other holder the slot stays held until the tab's shell has the transport.
+     */
+    private suspend fun yieldSharedHold(hold: LaunchHold) {
+        val s = hold.session ?: return
+        // decided and taken out under one lock: two creations through at the same moment never both see the other's
+        // hold and both let go (the transport drained, both tabs then needing a handshake more)
+        val shared = synchronized(launchHolds) {
+            (launchHolds.any { it !== hold && it.session === s } || connectionRegistry.allSsh().any { it.getSession() === s })
+                .also { if (it) launchHolds.remove(hold) }
+        }
+        if (shared) hold.release()
+    }
+
+    /** V16: why a new session could not be created (no channel to the server at all, the server refused) — no tab. */
+    internal class FreshCreateException(message: String, cause: Throwable? = null) : java.io.IOException(message, cause)
+
+    /**
+     * R6-2/R6-3: a launch that ends without its tab once a creation was sent (cancelled, every answer lost) kills the
+     * session that creation made — only when the session of the name carries this launch's nonce, so another device's
+     * or a user's session of that name is never touched ([ClaudeConfig.buildOwnSessionCleanupCommand]). It goes over a
+     * channel without a handshake of its own: the exec transport or a counted channel ([ConnectionRegistry.execRun]),
+     * else the transport the creation holds. With neither, or no answer within [FRESH_CLEANUP_MS], the session stays
+     * (said in the log): the launcher lists it like any session of the server (a limit, see docs/architecture.md).
+     */
+    private suspend fun abandonOwnSession(server: SshServer, hold: LaunchHold) {
+        val (name, nonce) = hold.mayOwn ?: return
+        hold.mayOwn = null
+        val cmd = ClaudeConfig.buildOwnSessionCleanupCommand(name, nonce)
+        val out = kotlinx.coroutines.withTimeoutOrNull(FRESH_CLEANUP_MS) {
+            try {
+                connectionRegistry.execRun(server.id, cmd, totalMs = FRESH_CLEANUP_MS)?.stdout
+                    ?: hold.session?.takeIf { it.isConnected }?.let { execReadWithWatchdog(it, cmd, totalMs = FRESH_CLEANUP_MS) }
+            } catch (e: Exception) {
+                FileLogger.log(TAG, "Launch of '$name' on ${server.name} ended without its tab: cleanup failed (${e.message})")
+                null
+            }
+        }
+        when {
+            out == null -> FileLogger.log(TAG, "Launch of '$name' on ${server.name} ended without its tab: no channel to remove the session it may have created — it stays")
+            ClaudeConfig.FRESH_CLEANED in out -> FileLogger.log(TAG, "Launch of '$name' on ${server.name} ended without its tab: removed the session it created")
+            else -> FileLogger.log(TAG, "Launch of '$name' on ${server.name} ended without its tab: no session of this launch to remove")
+        }
+    }
+
+    /**
+     * V16: create the new session [requested] (or, when another session holds that name, the next free one) on
+     * [server] over an exec channel and return the name it got. The creation is one atomic `new-session -d` carrying
+     * this launch's nonce ([ClaudeConfig.buildFreshCreateCommand]); the session of the name is ours only when its
+     * `CR_LAUNCH` is that nonce — also on a retry after a lost answer, which finds the session the lost try created
+     * instead of taking a second name and leaving that one orphaned. A taken name is never touched (no kill, no attach).
+     */
+    private suspend fun createFreshSession(
+        server: SshServer,
+        requested: String,
+        folder: String,
+        mode: ClaudeMode,
+        model: ClaudeModel,
+        claudeSessionId: String,
+        accountSlug: String?,
+        connectionType: ConnectionType,
+        hold: LaunchHold,
+    ): String {
+        val nonce = randomAlphaNum(24)
+        val taken = mutableSetOf<String>()
+        var name = requested
+        repeat(FRESH_CREATE_NAMES) {
+            var lost = 0
+            while (true) {
+                val cmd = ClaudeConfig.buildFreshCreateCommand(name, folder, mode, model, claudeSessionId, accountSlug, nonce)
+                hold.mayOwn = name to nonce
+                val out = try {
+                    runFreshCreate(server, cmd, connectionType, hold)
+                } catch (e: FreshCreateException) {
+                    throw e
+                } catch (e: kotlinx.coroutines.CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    FileLogger.log(TAG, "Creating '$name' on ${server.name}: no answer (${e.message})")
+                    null
+                }
+                when (val r = FreshCreate.parse(out, nonce)) {
+                    FreshCreate.Result.Ours -> {
+                        FileLogger.log(TAG, "Created tmux session '$name' on ${server.name} for a new tab")
+                        return name
+                    }
+                    FreshCreate.Result.Taken -> {
+                        hold.mayOwn = null
+                        FileLogger.log(TAG, "tmux session name '$name' on ${server.name} is held by another session — left alone, taking the next free name")
+                        break
+                    }
+                    is FreshCreate.Result.Failed -> {
+                        hold.mayOwn = null   // no session of the name exists
+                        throw FreshCreateException(
+                            "Could not start a new session on ${server.name}: the server refused to create tmux session $name (${r.why})")
+                    }
+                    FreshCreate.Result.Lost -> if (++lost >= FRESH_CREATE_LOST_TRIES) throw FreshCreateException(
+                        "Could not start a new session on ${server.name}: no answer from the server while creating tmux session $name")
+                }
+            }
+            taken += name
+            name = nextFreshName(server.name, folder, requested, taken)
+        }
+        throw FreshCreateException("Could not start a new session on ${server.name}: $FRESH_CREATE_NAMES names in a row are held by other sessions")
+    }
+
+    /**
+     * One try of a creation [cmd] on a channel that costs no handshake of its own: the exec transport (one SHORT permit)
+     * or a counted channel of a tab transport with room ([ConnectionRegistry.execRun]); for mosh with exec routing, the
+     * exec transport the tab starts anyway ([hold] keeps it wanted until the tab exists); otherwise the pooled
+     * shell transport the tab's shell leases next, held in [hold]. Null output = cut short; [FreshCreateException] = no
+     * channel to the server at all.
+     */
+    private suspend fun runFreshCreate(
+        server: SshServer,
+        cmd: String,
+        connectionType: ConnectionType,
+        hold: LaunchHold,
+    ): String? {
+        connectionRegistry.execRun(server.id, cmd, totalMs = FRESH_CREATE_MS)?.let { return it.stdout }
+        hold.session?.takeIf { it.isConnected }?.let { return execReadWithWatchdog(it, cmd, totalMs = FRESH_CREATE_MS) }
+        if (connectionType == ConnectionType.MOSH && connectionRegistry.execActive(server.id)) {
+            // mosh brings its own SSH (not the pool's): the exec transport is the one connection its tab opens anyway
+            if (hold.pendingOn == null) {
+                hold.pendingOn = server.id
+                beginLaunchPending(server.id)
+            }
+            ensureExecTransport(server.id)
+            val viaExec = kotlinx.coroutines.withTimeoutOrNull(FRESH_CREATE_EXEC_WAIT_MS) {
+                var out: String? = null
+                while (out == null) {
+                    out = connectionRegistry.execRun(server.id, cmd, totalMs = FRESH_CREATE_MS)?.stdout
+                    if (out == null) kotlinx.coroutines.delay(FRESH_CREATE_EXEC_POLL_MS)
+                }
+                out
+            }
+            if (viaExec != null) return viaExec
+            FileLogger.log(TAG, "Creating a mosh session on ${server.name}: the exec transport did not come up — over a pooled transport")
+        }
+        val effective = transportResolver.resolveTransport(server)
+        val pool = connectionRegistry.transportPool(server.id)
+        val sess = try {
+            connectionRegistry.connectGate(server.id).withPermit { pool.lease(effective, FRESH_CREATE_CONNECT_MS, hold) }
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            throw FreshCreateException("Could not start a new session on ${server.name}: cannot reach the server (${e.message})", e)
+        }
+        hold.held(pool, sess)
+        return execReadWithWatchdog(sess, cmd, totalMs = FRESH_CREATE_MS)
+    }
+
+    /**
+     * V16: the next name to try once the names in [taken] proved held — `-2`, `-3`, … of [requested] before its `-yolo` /
+     * `--alias` tail, counting on from [requested]'s own number: the names before it were skipped by whoever picked it
+     * (the listing, the manifest or the last scan had them), so the creation never goes back to them.
+     */
+    internal fun nextFreshName(serverName: String, folder: String, requested: String, taken: Set<String>): String {
+        val p = com.clauderemote.model.TmuxNameParser.parse(requested, serverName)
+        val tail = com.clauderemote.model.TmuxNameParser.build(serverName, "x", p.isYolo, p.alias)
+            .removePrefix(com.clauderemote.model.TmuxNameParser.build(serverName, "x", false))
+        val hasTail = tail.isNotEmpty() && requested.endsWith(tail)
+        val stem = if (hasTail) requested.removeSuffix(tail) else requested
+        val suffix = if (hasTail) tail else ""
+        val baseStem = com.clauderemote.model.TmuxNameParser.build(serverName, folder, p.isYolo, p.alias).removeSuffix(tail)
+        val numbered = Regex(Regex.escape(baseStem) + "-(\\d+)").matchEntire(stem)?.groupValues?.get(1)?.toIntOrNull()
+        val (from, root) = if (numbered != null) numbered + 1 to baseStem else 2 to stem
+        return generateSequence(from) { it + 1 }.map { "$root-$it$suffix" }.first { it !in taken }
     }
 
     /**
@@ -1108,6 +1493,23 @@ class SessionOrchestrator(
      */
     fun remoteStatusFlow(sessionId: String) = statusService.remoteStatusFlow(sessionId)
 
+    /**
+     * Test seam: every connect path (`ssh`, `mosh`, `et`) calls it first with what it was asked to do — a new session
+     * (`isNew`, the anchor of a launch in the tab) or an existing one, and whether a missing one may read as closed
+     * elsewhere. True = the test stands in for the connect (nothing is opened). Null in production.
+     */
+    @Volatile internal var connectSeam: ((path: String, session: ClaudeSession, isNew: Boolean, checkClosedElsewhere: Boolean) -> Boolean)? = null
+
+    /** Test seam (T6-1): the shell [autoReconnect] re-opens, given instead of connected. Null in production. */
+    @Volatile internal var reconnectShellSeam: ((ClaudeSession) -> SshManager)? = null
+
+    /**
+     * Test seam (T6-1): [sendTmuxCommand] calls it first with what it was asked — a new session (`isNew`, the anchor of a
+     * launch in the tab) or the tab's own one — and whether a missing one may read as closed elsewhere. True = the test
+     * stands in for the tmux command. Null in production.
+     */
+    @Volatile internal var tmuxCommandSeam: ((session: ClaudeSession, isNew: Boolean, checkClosedElsewhere: Boolean) -> Boolean)? = null
+
     private suspend fun connectSsh(
         session: ClaudeSession,
         isNewTmuxSession: Boolean,
@@ -1120,6 +1522,7 @@ class SessionOrchestrator(
         // and calls back with forceSsh=true to fall back to plain SSH if the ET
         // path can't be established (avoids recursing back into connectEt).
         if (session.server.preferEternal && !forceSsh) { connectEt(session, isNewTmuxSession); return }
+        if (connectSeam?.invoke("ssh", session, isNewTmuxSession, checkClosedElsewhere) == true) return
         // Before the first shell of the server connects: the exec transport carries the port forwards and
         // decides the shell cap of every lease below.
         ensureExecTransport(session.server.id)
@@ -1335,6 +1738,36 @@ class SessionOrchestrator(
     // Last confirmation-probe per session, for AttachExitDetector.shouldProbe.
     private val attachExitProbes = java.util.concurrent.ConcurrentHashMap<String, Long>()
 
+    /** The persistence of a launched tab: app-restart record, then the server-side restore install, tombstone clear and manifest push. */
+    private fun persistLaunched(session: ClaudeSession) {
+        val server = session.server
+        val tmuxSessionName = session.tmuxSessionName
+        // Persist session for app-restart and server-reboot recovery.
+        sessionStorage?.upsert(SessionStorage.fromClaudeSession(session))
+        connectionRegistry.ssh(session.id)?.let { conn ->
+            launchGuarded("Server-side bookkeeping of $tmuxSessionName") {
+                if (connectionRegistry.execActive(server.id)) {
+                    // Over the exec transport: no attached shell needed. When none is usable right now the
+                    // step waits for it once instead of being dropped; the push goes out even if the
+                    // tombstone could not be cleared (the failure is logged by the call).
+                    whenExecUp(server.id, "restore service install") { persistence.ensureRestoreService(server.id) }
+                    whenExecUp(server.id, "tombstone clear of $tmuxSessionName") { persistence.clearTombstone(server.id, tmuxSessionName) }
+                    whenExecUp(server.id, "sessions.json push") { persistence.pushSessionsToServer(server.id) }
+                } else {
+                    persistence.ensureRestoreService(conn)
+                    // Launching (or deliberately attaching to) this tmux name is
+                    // positive intent that it is alive, so drop any tombstone
+                    // left by an earlier close of the SAME name. Must precede
+                    // the push: the push filters tombstoned names out of the
+                    // manifest, so a stale tombstone would otherwise keep this
+                    // brand-new session out of the restore manifest entirely.
+                    persistence.clearTombstone(conn, tmuxSessionName)
+                    persistence.pushSessionsToServer(conn, server.id)
+                }
+            }
+        }
+    }
+
     /**
      * React to this device's `tmux attach` ending.
      *
@@ -1401,6 +1834,7 @@ class SessionOrchestrator(
         checkClosedElsewhere: Boolean = false,
         trace: AttachTrace? = null,
     ) {
+        if (tmuxCommandSeam?.invoke(session, isNew, checkClosedElsewhere) == true) return
         // The decision itself lives in TmuxLaunchDecider — pure, exhaustively
         // tested (TmuxLaunchDecisionTest), and lazy: each probe below is an SSH
         // round-trip, sometimes over cellular, so it only runs on the paths that
@@ -1465,6 +1899,9 @@ class SessionOrchestrator(
 
         val command = when (decision) {
             is TmuxLaunchDecision.ForgetClosedElsewhere -> return // unreachable: threw above
+            // V14: a fresh launch never kills and never adopts a session that holds its name — the anchor refuses.
+            // V16: launchSession creates new sessions over exec before the tab exists and attaches them, so this is only
+            // the backstop of a launch in the tab.
             is TmuxLaunchDecision.FreshLaunch -> ClaudeConfig.buildTmuxLaunchCommand(
                 tmuxSessionName = session.tmuxSessionName,
                 folder = session.folder,
@@ -1472,11 +1909,14 @@ class SessionOrchestrator(
                 model = session.model,
                 claudeSessionId = session.claudeSessionId,
                 resume = false,
-                accountSlug = session.accountSlug
+                accountSlug = session.accountSlug,
+                onExisting = ClaudeConfig.OnExisting.Refuse,
             )
             // See buildAttachCommand for the attach semantics (single client per
             // device, no -d, manual window sizing, exact target).
             is TmuxLaunchDecision.Attach -> buildAttachCommand(session.tmuxSessionName)
+            // A relaunch of a session that should exist: if it is there after all (a socket heal), attach it with this
+            // device's single-client attach (N1, S2) — never kill it and start it again.
             is TmuxLaunchDecision.Rebuild -> when {
                 !decision.withSessionId -> {
                     FileLogger.log(TAG, "Tmux '${session.tmuxSessionName}' missing and no claudeSessionId — fresh launch")
@@ -1485,7 +1925,8 @@ class SessionOrchestrator(
                         folder = session.folder,
                         mode = session.mode,
                         model = session.model,
-                        accountSlug = session.accountSlug
+                        accountSlug = session.accountSlug,
+                        onExisting = ClaudeConfig.OnExisting.Attach(buildAttachCommand(session.tmuxSessionName)),
                     )
                 }
                 decision.resume != false -> {
@@ -1498,7 +1939,8 @@ class SessionOrchestrator(
                         model = session.model,
                         claudeSessionId = session.claudeSessionId,
                         resume = decision.resume,
-                        accountSlug = session.accountSlug
+                        accountSlug = session.accountSlug,
+                        onExisting = ClaudeConfig.OnExisting.Attach(buildAttachCommand(session.tmuxSessionName)),
                     )
                 }
                 else -> {
@@ -1513,7 +1955,8 @@ class SessionOrchestrator(
                         model = session.model,
                         claudeSessionId = session.claudeSessionId,
                         resume = false,
-                        accountSlug = session.accountSlug
+                        accountSlug = session.accountSlug,
+                        onExisting = ClaudeConfig.OnExisting.Attach(buildAttachCommand(session.tmuxSessionName)),
                     )
                 }
             }
@@ -1579,11 +2022,12 @@ class SessionOrchestrator(
     suspend fun tmuxPaneMatchesCwd(server: SshServer, tmuxName: String, cwd: String): Boolean? =
         remoteOps.tmuxPaneMatchesCwd(server, tmuxName, cwd)
 
-    private suspend fun autoReconnect(
+    internal suspend fun autoReconnect(
         session: ClaudeSession,
         emit: (String) -> Unit,
         maxAttempts: Int = 3
     ) {
+        if (released) return
         synchronized(reconnectingSessionIds) {
             if (!reconnectingSessionIds.add(session.id)) return // already reconnecting
         }
@@ -1632,7 +2076,9 @@ class SessionOrchestrator(
                     ensureExecTransport(session.server.id)
                     awaitExecForWave(session.server.id)
                     val trace = AttachTrace().also { attachTraces[session.id] = it }
-                    val sshManager = SshManager(serverStorage, transportPool = connectionRegistry.transportPool(session.server.id))
+                    val shellSeam = reconnectShellSeam
+                    val sshManager = shellSeam?.invoke(session)
+                        ?: SshManager(serverStorage, transportPool = connectionRegistry.transportPool(session.server.id))
                     connectionRegistry.putSsh(session.id, sshManager)
 
                     val reEffective = transportResolver.resolveTransport(session.server)
@@ -1642,7 +2088,7 @@ class SessionOrchestrator(
                         // sessions at once and each fires attempt-1 with zero
                         // backoff — without the gate that's a 21-way concurrent
                         // KEX storm on a just-recovered weak link.
-                        connectionRegistry.connectGate(session.server.id).withPermit {
+                        if (shellSeam == null) connectionRegistry.connectGate(session.server.id).withPermit {
                             sshManager.connect(
                                 reEffective,
                                 onOutput = { data -> emit(data) },
@@ -1732,6 +2178,7 @@ class SessionOrchestrator(
     }
 
     private suspend fun connectMosh(session: ClaudeSession, isNewTmuxSession: Boolean) {
+        if (connectSeam?.invoke("mosh", session, isNewTmuxSession, false) == true) return
         // Mosh needs DIRECT UDP. Over the Tailscale path (effective host=100.x,
         // no CF proxy) the UDP rides the WireGuard tunnel and mosh's roaming
         // survives Starlink egress-IP changes outright — the ideal path. Over
@@ -1757,7 +2204,8 @@ class SessionOrchestrator(
                 folder = session.folder,
                 mode = session.mode,
                 model = session.model,
-                accountSlug = session.accountSlug
+                accountSlug = session.accountSlug,
+                onExisting = ClaudeConfig.OnExisting.Refuse,
             )
         } else {
             // On a MISS (server reboot / tmux death) do NOT `tmux new-session -A`:
@@ -1775,7 +2223,8 @@ class SessionOrchestrator(
                 model = session.model,
                 claudeSessionId = session.claudeSessionId,
                 resume = true,
-                accountSlug = session.accountSlug
+                accountSlug = session.accountSlug,
+                onExisting = ClaudeConfig.OnExisting.Attach(buildAttachCommand(session.tmuxSessionName)),
             )
             "${buildAttachCommand(session.tmuxSessionName)} 2>/dev/null || { $relaunch ; }"
         }
@@ -1814,7 +2263,7 @@ class SessionOrchestrator(
 
         // Store mosh as connection (wrap in a pseudo SshManager interface won't work,
         // so store separately and handle sendInput/sendBytes via mosh)
-        connectionRegistry.putMosh(session.id, moshManager)
+        if (!adoptMosh(session.id, moshManager)) return
         transportResolver.setConnectionLabel(session.id, effectiveServer, session.server, "Mosh")
         FileLogger.log(TAG, "Mosh connected for ${session.id}")
     }
@@ -1839,6 +2288,7 @@ class SessionOrchestrator(
      * let ET replay is the follow-up; requires etserver on the server.
      */
     private suspend fun connectEt(session: ClaudeSession, isNewTmuxSession: Boolean) {
+        if (connectSeam?.invoke("et", session, isNewTmuxSession, false) == true) return
         val effective = transportResolver.resolveTransport(session.server)
         FileLogger.log(TAG, "Connecting via Eternal Terminal to ${session.server.name} (${effective.host})")
 
@@ -1947,7 +2397,8 @@ class SessionOrchestrator(
                 folder = session.folder,
                 mode = session.mode,
                 model = session.model,
-                accountSlug = session.accountSlug
+                accountSlug = session.accountSlug,
+                onExisting = ClaudeConfig.OnExisting.Refuse,
             )
         } else {
             // On a MISS do NOT `tmux new-session -A` (bare shell + tmux server
@@ -1963,7 +2414,8 @@ class SessionOrchestrator(
                 model = session.model,
                 claudeSessionId = session.claudeSessionId,
                 resume = true,
-                accountSlug = session.accountSlug
+                accountSlug = session.accountSlug,
+                onExisting = ClaudeConfig.OnExisting.Attach(buildAttachCommand(session.tmuxSessionName)),
             )
             "${buildAttachCommand(session.tmuxSessionName)} 2>/dev/null || { $relaunch ; }"
         }
@@ -1996,7 +2448,7 @@ class SessionOrchestrator(
             emit("\r\n[31mEternal Terminal client failed to start.[0m\r\n")
             throw IllegalStateException("EtManager.connect returned false")
         }
-        connectionRegistry.putEt(session.id, etManager)
+        if (!adoptEt(session.id, etManager)) return
         // Bootstrap done: the et client + forwarded port now exist, so a carrier
         // drop from here on is safe to resume via reconnectEtCarrier.
         carrierReady.set(true)
@@ -2337,6 +2789,7 @@ class SessionOrchestrator(
         // disconnect()/putSsh() stepping on the other's in-flight connect —
         // producing spurious "ET carrier SSH not connected" failures that only
         // a manual retry (landing after the race window) would clear.
+        if (released) return
         synchronized(reconnectingSessionIds) {
             if (!reconnectingSessionIds.add(sessionId)) {
                 FileLogger.log(TAG, "Skipping reconnectSession for $sessionId — already reconnecting")
@@ -2503,10 +2956,8 @@ class SessionOrchestrator(
         tabManager.removeTab(sessionId)
         // The exec transport lives while the server has a tab: closed only now that the tab is gone, so a
         // reconnect of this very tab (which checked that it exists) cannot start it again afterwards.
-        if (serverId != null && tabManager.tabs.value.none { it.server.id == serverId }) {
-            execFlagWatchers.remove(serverId)?.cancel()
-            execEnsuredServers.remove(serverId)
-            execManager.close(serverId)
+        if (serverId != null) synchronized(execLock(serverId)) {
+            if (tabManager.tabs.value.none { it.server.id == serverId } && !launchPending(serverId)) closeExecTransportLocked(serverId)
         }
         // After removal, the active tab may have shifted to another session.
         // Fire onTabSwitched so the platform terminal clears the now-stale
@@ -2534,8 +2985,74 @@ class SessionOrchestrator(
     fun releaseExecLayer() {
         execFlagWatchers.values.forEach { it.cancel() }
         execFlagWatchers.clear()
-        for (serverId in execEnsuredServers.toList()) execManager.close(serverId)
-        execEnsuredServers.clear()
+        // Every server that has a lock, not only the ones ensured so far: the FIRST ensure of a server that is past its
+        // checks holds the lock without being in the set yet; it is found here once it is through, and closed.
+        for (serverId in (execEnsuredServers + execLocks.keys).toSet()) synchronized(execLock(serverId)) {
+            if (serverId in execEnsuredServers) {
+                execCloseHook?.invoke(serverId)
+                execEnsuredServers.remove(serverId)
+                execManager.close(serverId)
+            }
+        }
+    }
+
+    /** Set by [shutdown]: this orchestrator was replaced and must not start, revive or reconnect anything any more. */
+    @Volatile private var released = false
+
+    /** Whether [shutdown] ran (tests, diagnostics). */
+    internal val isReleased: Boolean get() = released
+
+    /**
+     * Registers the mosh client of [sessionId] whose connect just succeeded. A connect still running when [shutdown] took
+     * its snapshot ([ConnectionRegistry.takeMoshAndEt]) ends here: the client is stopped instead of staying attached to
+     * tmux as a stale client of a replaced orchestrator. Put first, then the check: [shutdown] sets [released] before its
+     * snapshot, so a client put after the snapshot always sees it. False = stopped, the caller returns.
+     */
+    internal suspend fun adoptMosh(sessionId: String, m: com.clauderemote.connection.MoshManager): Boolean {
+        connectionRegistry.putMosh(sessionId, m)
+        if (!released) return true
+        if (connectionRegistry.mosh(sessionId) === m) connectionRegistry.removeMosh(sessionId)
+        FileLogger.log(TAG, "Mosh client of $sessionId connected after shutdown — stopping it")
+        try { m.disconnect() } catch (e: Exception) { FileLogger.log(TAG, "Stopping a replaced mosh client failed: ${e.message}") }
+        return false
+    }
+
+    /** [adoptMosh] for an Eternal Terminal client. */
+    internal suspend fun adoptEt(sessionId: String, e: com.clauderemote.connection.EtManager): Boolean {
+        connectionRegistry.putEt(sessionId, e)
+        if (!released) return true
+        if (connectionRegistry.et(sessionId) === e) connectionRegistry.removeEt(sessionId)
+        FileLogger.log(TAG, "ET client of $sessionId connected after shutdown — stopping it")
+        try { e.disconnect() } catch (ex: Exception) { FileLogger.log(TAG, "Stopping a replaced ET client failed: ${ex.message}") }
+        return false
+    }
+
+    /**
+     * The production end of an orchestrator that a new one replaced (a recreated Android activity builds its own with
+     * its own tabs): from now on nothing of this one starts, revives or reconnects anything (the [released] guard of
+     * [ensureExecTransports], [ensureExecTransport], `kickBootstrap`, [reconnectSession], [autoReconnect], the network
+     * events), its exec transports close, its background loops end (transcript, status and git pollers, the notify
+     * watcher, reconcile, bootstrap retries) and its tabs' shells are detached in the background. The tmux sessions stay;
+     * the new orchestrator has its own attaches. Idempotent.
+     *
+     * Its pollers would otherwise keep running through the PROCESS-WIDE [com.clauderemote.connection.SshSessionHelper],
+     * whose providers now belong to the new orchestrator (its exec transport, its pool).
+     */
+    fun shutdown() {
+        if (released) return
+        released = true
+        val shells = connectionRegistry.allSsh().toList()
+        // the native mosh / ET clients of its tabs too: each would stay attached to tmux as a stale client
+        val natives = connectionRegistry.takeMoshAndEt()
+        FileLogger.log(TAG, "Orchestrator replaced — stopping its loops and detaching ${shells.size} shell(s) and ${natives.size} mosh/ET client(s); tmux sessions stay")
+        releaseExecLayer()
+        reconnectScope.coroutineContext[kotlinx.coroutines.Job]?.cancel()
+        kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.IO).launch {
+            for (n in natives) try { n() } catch (e: Exception) { FileLogger.log(TAG, "Stopping a replaced mosh/ET client failed: ${e.message}") }
+            for (m in shells) try { m.disconnect() } catch (e: Exception) { FileLogger.log(TAG, "Detaching a replaced shell failed: ${e.message}") }
+            connectionRegistry.clearSsh()
+            connectionRegistry.teardownAllTransports()
+        }
     }
 
     /**
@@ -2935,6 +3452,19 @@ class SessionOrchestrator(
         internal const val EXEC_WAVE_WAIT_MS = 3_000L
         /** A one-off operation (restore install, tombstone, manifest push) that found no transport waits this long for the exec transport. */
         internal const val ONE_OFF_WAIT_MS = 60_000L
+        /** V16: names a new session's creation tries before it gives up (each taken one moves on to the next free one). */
+        internal const val FRESH_CREATE_NAMES = 8
+        /** V16: tries of one name whose answer was lost (cut short, timed out) before the launch fails. */
+        internal const val FRESH_CREATE_LOST_TRIES = 3
+        /** V16: the creation command's wall-clock limit (socket guard + anchor + new-session + owner check). */
+        internal const val FRESH_CREATE_MS = 20_000L
+        /** V16: handshake limit when the creation leases the pooled transport the tab uses next. */
+        internal const val FRESH_CREATE_CONNECT_MS = 15_000
+        /** V16, mosh with exec routing: how long the creation waits for the exec transport it started, and how often it asks. */
+        internal const val FRESH_CREATE_EXEC_WAIT_MS = 15_000L
+        internal const val FRESH_CREATE_EXEC_POLL_MS = 250L
+        /** R6-2/R6-3: client limit of the cleanup of a launch that ended without its tab (two server checks of 3 s). */
+        internal const val FRESH_CLEANUP_MS = 8_000L
         private const val FORWARD_MOVE_TRIES = 20
         private const val FORWARD_MOVE_RETRY_MS = 250L
         /** Sentinel returned by [downloadFile] when the remote file exceeds [DOWNLOAD_SIZE_LIMIT]. */
@@ -3024,6 +3554,42 @@ internal object HookApprovalPolicy {
 
     fun survivesSwitch(sinceMs: Long?, nowMs: Long, hooksOn: Boolean): Boolean =
         hooksOn && sinceMs != null && kotlin.math.abs(nowMs - sinceMs) < MAX_AGE_MS
+}
+
+/**
+ * V16: what the answer of [ClaudeConfig.buildFreshCreateCommand] says. [Result.Ours]: the session of the name carries this
+ * launch's nonce (created now, or by an earlier try whose answer was lost), or `new-session` succeeded; [Result.Taken]:
+ * another session holds the name (another nonce, or none — a session this launch did not start); [Result.Failed]: no
+ * session of the name and the creation failed (the socket guard refused, tmux failed: the server says why);
+ * [Result.Lost]: the answer is missing or cut short — try the same name again.
+ */
+internal object FreshCreate {
+    sealed interface Result {
+        data object Ours : Result
+        data object Taken : Result
+        data class Failed(val why: String) : Result
+        data object Lost : Result
+    }
+
+    fun parse(output: String?, nonce: String): Result {
+        if (output == null) return Result.Lost
+        val lines = output.lines()
+        val rcAt = lines.indexOfLast { it.startsWith(ClaudeConfig.FRESH_CREATE_RC) }
+        if (rcAt < 0) return Result.Lost
+        val rc = lines[rcAt].removePrefix(ClaudeConfig.FRESH_CREATE_RC).trim().toIntOrNull()
+        val after = lines.drop(rcAt + 1).map { it.trim() }
+        val owner = after.firstOrNull { it.startsWith(ClaudeConfig.FRESH_CREATE_OWNER) }?.removePrefix(ClaudeConfig.FRESH_CREATE_OWNER)
+        return when {
+            owner == "${ClaudeConfig.LAUNCH_ENV}=$nonce" -> Result.Ours
+            owner != null -> Result.Taken
+            ClaudeConfig.FRESH_CREATE_ABSENT !in after -> Result.Lost
+            // K6-1: the server's limit cut the creation short — whether it got to create is unknown: the same name again
+            rc == 124 -> Result.Lost
+            // created, and gone again before the check (claude's shell exited at once): ours; the tab's attach rebuilds it
+            rc == 0 -> Result.Ours
+            else -> Result.Failed(lines.take(rcAt).joinToString(" ").trim().takeLast(300).ifEmpty { "exit ${rc ?: "unknown"}" })
+        }
+    }
 }
 
 /** A [ServerBootstrap] created by [create] the first time anything calls it. */

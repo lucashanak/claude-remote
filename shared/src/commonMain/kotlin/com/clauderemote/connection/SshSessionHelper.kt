@@ -13,17 +13,38 @@ import com.jcraft.jsch.Session
  * Utility to create a quick SSH session for one-off operations
  * (tmux listing, folder browsing, etc.). Handles Cloudflare proxy.
  */
+/** The result of a block that ran on a fallback transport; null instead of it = the block did not run (no room, no transport). */
+internal class Fallback<T>(val value: T)
+
+/**
+ * Runs a block on a transport the server already has, holding whatever that transport's channel budget demands for
+ * the whole block (ConnectionRegistry implements it):
+ *  - the server needs a room check (exec routing on, or shells packed beyond the legacy 3 per transport): one COUNTED
+ *    channel on a shell transport with headroom, given back in `finally` under `NonCancellable`;
+ *  - a legacy server: a pooled shell transport, nothing counted (the legacy lease would otherwise lose a slot).
+ * Null = no transport, or none with room; the block did not run. A block's own null is wrapped ([Fallback]), so it is
+ * never mistaken for "no room" and the block never runs twice.
+ */
+internal interface FallbackRunner {
+    suspend fun <T> run(server: SshServer, block: suspend (Session) -> T): Fallback<T>?
+}
+
 object SshSessionHelper {
 
     /**
-     * Optional hook to a live pooled session for a server. Set once at startup
-     * (→ ConnectionRegistry.pooledSession). When it returns a connected session,
-     * [withSession] runs the one-off op on THAT transport instead of opening a
-     * fresh SSH-over-Cloudflare connection — periodic polls (scanRemoteSessions,
-     * SessionStatusPoller, transcript poll) were each doing a full handshake
-     * every time, which dominated idle data usage.
+     * LOOK-ONLY view of the pooled session a fallback would get for a server (ConnectionRegistry.fallbackPooledSession):
+     * nothing is counted, so [withSession] never runs a block on it — it uses [fallbackRunner]. Kept for diagnostics and
+     * the wiring tests; set by the orchestrator.
      */
     @Volatile var liveSessionProvider: ((SshServer) -> Session?)? = null
+
+    /**
+     * The pooled step of [withSession]: periodic polls (scanRemoteSessions, SessionStatusPoller, transcript poll) used to
+     * do a full handshake every time, which dominated idle data usage, so a one-off op reuses a transport the server
+     * already has — through this runner, which counts its channel where the server needs it. Set by the orchestrator
+     * (→ ConnectionRegistry). Null = no pooled step.
+     */
+    @Volatile internal var fallbackRunner: FallbackRunner? = null
 
     /**
      * Gated exec channels of a server when exec routing is active for it, null =
@@ -64,7 +85,8 @@ object SshSessionHelper {
      *
      * Order of transports: the server's exec transport (holding one SHORT permit while
      * [block] runs; skipped when it is not UP) → a pooled transport the server already
-     * has → a fresh connection, unless [allowFresh] is false, in which case
+     * has ([fallbackRunner]: a counted channel when the server needs a room check, skipped
+     * without room) → a fresh connection, unless [allowFresh] is false, in which case
      * [ExecUnavailable] ([ExecUnavailableReason.NOT_UP]) is thrown instead of paying a
      * handshake. Only NOT_UP falls through to those transports; a permit wait that timed out
      * ([ExecUnavailableReason.GATE_TIMEOUT]) is thrown to the caller. A caller that can skip a tick (a poller) passes `allowFresh = false`.
@@ -89,10 +111,9 @@ object SshSessionHelper {
             }
         }
 
-        // Reuse an existing pooled transport when the server already has one —
-        // no fresh handshake, and we must NOT disconnect it (it's shared).
-        val reuse = liveSessionProvider?.invoke(server)?.takeIf { it.isConnected }
-        if (reuse != null) return block(reuse)
+        // Reuse an existing pooled transport when the server already has one — no fresh handshake, and we must NOT
+        // disconnect it (it's shared). The runner holds the transport's channel count for the whole block.
+        fallbackRunner?.run(server, block)?.let { return it.value }
 
         if (!allowFresh) throw ExecUnavailable(ExecUnavailableReason.NOT_UP, "no live transport and a fresh connection is not allowed")
 

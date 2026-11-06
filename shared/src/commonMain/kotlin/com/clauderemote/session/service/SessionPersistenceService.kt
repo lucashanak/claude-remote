@@ -1255,8 +1255,18 @@ DTIMER_EOF
                 // (~104 radio wakeups/min at 13 sessions) and only matters for
                 // UUID/restore correctness, which onResume refreshes anyway.
                 if (isBackground()) { kotlinx.coroutines.delay(15_000); continue }
+                // The kill switch with shells still packed on the transport: this tick's channels (one at a time) are
+                // counted against it, and a tick without room is skipped.
+                val serverId = registry.serverIdOf(sessionId)
+                val tickSession = sshManager.getSession()
+                val tickChannel = if (serverId != null && tickSession != null) registry.reserveTabChannel(serverId, tickSession) else null
+                if (serverId != null && tickSession != null && tickChannel == null) {
+                    registry.noteSkipped("session-id", serverId)
+                    kotlinx.coroutines.delay(15_000)
+                    continue
+                }
                 try {
-                    val remote = fetchSessionsCached(registry.serverIdOf(sessionId), sshManager)
+                    val remote = fetchSessionsCached(serverId, sshManager)
                     // CLOSED ON ANOTHER DEVICE, noticed without a disconnect.
                     // Killing the pane drops this device's `tmux attach`, but
                     // the SSH shell underneath survives — so onConnectionLost
@@ -1292,7 +1302,12 @@ DTIMER_EOF
                     if (!realUuid.isNullOrBlank()) {
                         adoptUuid(sessionId, realUuid, if (entry?.claudeSessionId == realUuid) "server" else "pid-probe")
                     }
-                } catch (_: Exception) {}
+                } catch (e: kotlinx.coroutines.CancellationException) {
+                    throw e
+                } catch (_: Exception) {
+                } finally {
+                    withContext(kotlinx.coroutines.NonCancellable) { tickChannel?.release() }
+                }
                 kotlinx.coroutines.delay(15_000)
             }
         }

@@ -53,6 +53,88 @@ object TmuxManager {
     }
 
     /**
+     * What a FRESH launch must not be named (V15): the server's tmux sessions and the names in its restore manifest
+     * (`sessions.json`: a session another device runs that is not back yet after a reboot, R2). Unlike [listSessions]
+     * a failure THROWS — an exec that did not run to its end never reads as "no sessions" (M2). No tmux server is an
+     * answer (no sessions); an unreadable manifest only drops the manifest's names. The read is interruptible, so the
+     * caller's timeout really ends it (K4-2); the channel's OPEN is not (K5-1, see [listForFreshName]). The server ends
+     * the listing itself within [LISTING_SERVER_LIMIT_S] s (K5-2), so a hung tmux or file read never keeps sshd's session
+     * once the client has given its slot back; a listing the server cut short THROWS too.
+     */
+    data class FreshNameListing(val sessions: List<TmuxSession>, val manifestNames: Set<String>) {
+        val names: Set<String> get() = sessions.map { it.name }.toSet() + manifestNames
+    }
+
+    internal const val LISTING_END = "__CR_LISTED__"
+    /** Last line of the listing: the exit status of the server-side limit around it (124 = the server cut it short). */
+    internal const val LISTING_RC = "__CR_LISTING_RC__"
+    /**
+     * K5-2: the server's own limit on the whole listing, shorter than the client's (quick connect 3 s, Connect screen
+     * 6 s). `timeout` signals its process group (the tmux CLIENT and `cat`), never the tmux server.
+     */
+    internal const val LISTING_SERVER_LIMIT_S = 2
+
+    internal fun freshNameListingCommand(): String =
+        "timeout $LISTING_SERVER_LIMIT_S sh -c \"tmux -u list-sessions -F '$SESSION_FORMAT' 2>/dev/null; echo \\\"$LISTING_END \\\$?\\\"; " +
+            "cat \\\"\\\$HOME/.claude-remote/sessions.json\\\" 2>/dev/null; true\"; echo \"$LISTING_RC \$?\""
+
+    /**
+     * Parses [freshNameListingCommand]'s output; throws when the end-of-listing line or the final status line is missing
+     * (the exec was cut short) or the server's limit cut the listing short (status 124).
+     */
+    internal fun parseFreshNameListing(output: String): FreshNameListing {
+        val lines = output.lines()
+        val rcAt = lines.indexOfLast { it.startsWith("$LISTING_RC ") }
+        if (rcAt < 0) throw java.io.IOException("tmux listing cut short (no status line)")
+        val rc = lines[rcAt].removePrefix("$LISTING_RC ").trim().toIntOrNull()
+        if (rc != 0) throw java.io.IOException("tmux listing ended by the server's limit or failed (status ${rc ?: "unknown"})")
+        val end = lines.indexOfFirst { it.startsWith("$LISTING_END ") }
+        if (end < 0 || end > rcAt) throw java.io.IOException("tmux listing cut short (no end line)")
+        val sessions = parseSessionLines(lines.take(end))
+        val manifest = lines.subList(end + 1, rcAt).joinToString("\n").trim()
+        val manifestNames = if (manifest.isEmpty()) emptySet() else try {
+            kotlinx.serialization.json.Json.parseToJsonElement(manifest).let { it as? kotlinx.serialization.json.JsonArray }
+                ?.mapNotNull { (it as? kotlinx.serialization.json.JsonObject)?.get("tmuxSessionName")?.let { n -> (n as? kotlinx.serialization.json.JsonPrimitive)?.content } }
+                ?.toSet() ?: emptySet()
+        } catch (_: Exception) {
+            emptySet()
+        }
+        return FreshNameListing(sessions, manifestNames)
+    }
+
+    suspend fun listForFreshName(session: Session): FreshNameListing = withContext(Dispatchers.IO) {
+        val channel = session.openChannel("exec") as ChannelExec
+        channel.setCommand(freshNameListingCommand())
+        channel.inputStream = null
+        val input = channel.inputStream
+        try {
+            // K5-1: the OPEN is never interrupted. jsch gives up a channel interrupted before the server confirmed it
+            // without sending CLOSE (it has no recipient yet), so a late confirmation left sshd a session nobody ever
+            // closed: one MaxSessions slot gone for the life of the transport. Opened, the channel is closed below.
+            withContext(kotlinx.coroutines.NonCancellable) { channel.connect(5000) }
+            parseFreshNameListing(kotlinx.coroutines.runInterruptible { input.bufferedReader().readText() })
+        } finally {
+            try { channel.disconnect() } catch (_: Exception) {}
+        }
+    }
+
+    private const val SESSION_FORMAT = "#{session_name}|#{session_windows}|#{session_attached}|#{session_created}|#{session_activity}"
+
+    private fun parseSessionLines(lines: List<String>): List<TmuxSession> =
+        lines.filter { it.isNotBlank() }.mapNotNull { line ->
+            val parts = line.split("|")
+            if (parts.size >= 4) {
+                TmuxSession(
+                    name = parts[0],
+                    windows = parts[1].toIntOrNull() ?: 0,
+                    attached = parts[2] == "1",
+                    created = parts[3],
+                    lastActivity = parts.getOrNull(4)?.trim()?.toLongOrNull() ?: 0L,
+                )
+            } else null
+        }
+
+    /**
      * Build the tmux attach/create command.
      */
     fun buildAttachCommand(sessionName: String): String {
@@ -140,10 +222,12 @@ object TmuxManager {
         channel.setCommand(command)
         channel.inputStream = null
         val input = channel.inputStream
-        channel.connect(5000)
-
-        val output = input.bufferedReader().readText()
-        channel.disconnect()
-        return output
+        try {
+            channel.connect(5000)
+            return input.bufferedReader().readText()
+        } finally {
+            // also when the read is interrupted (listForFreshName's timeout) or throws: never leak the channel
+            try { channel.disconnect() } catch (_: Exception) {}
+        }
     }
 }

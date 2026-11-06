@@ -11,6 +11,7 @@ import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import androidx.fragment.app.FragmentActivity
 import androidx.core.content.FileProvider
+import com.clauderemote.session.NetworkCallbackHub
 import com.clauderemote.session.SessionOrchestrator
 import com.clauderemote.session.TabManager
 import com.clauderemote.storage.AppSettings
@@ -23,7 +24,6 @@ import com.clauderemote.util.FileLogger
 import com.clauderemote.util.UpdateInfo
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.GlobalScope
-import kotlinx.coroutines.async
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -280,8 +280,9 @@ class MainActivity : FragmentActivity() {
         val sessionStorage = com.clauderemote.storage.SessionStorage(prefs)
         // A recreated activity (a configuration change the manifest does not absorb, the system destroying it) builds a
         // new orchestrator with its own tab list; the one it replaces is unreachable from the UI from here on, but its
-        // exec transports would go on reconnecting for ever. Closing just those leaves every tab as it was: the old
-        // tabs' own connections and loops are untouched, and the user only ever sees the new orchestrator's tabs.
+        // exec transports would go on reconnecting for ever and its pollers would keep polling through the process-wide
+        // SshSessionHelper (now wired to the NEW orchestrator). shutdown() ends all of it and detaches its shells; the
+        // tmux sessions stay, and the user only ever sees the new orchestrator's tabs.
         val replacedOrchestrator = OrchestratorHolder.orchestrator
         sessionOrchestrator = SessionOrchestrator(serverStorage, tabManager, sessionStorage)
         // Mirror FileLogger to the server (per-install file) — makes phone
@@ -290,7 +291,7 @@ class MainActivity : FragmentActivity() {
         // Expose to non-Compose entry points (notification RemoteInput reply,
         // future Wear data layer).
         OrchestratorHolder.orchestrator = sessionOrchestrator
-        replacedOrchestrator?.releaseExecLayer()
+        replacedOrchestrator?.shutdown()
         // Keep the Wear companion app's session list in sync (Data Layer).
         WearSync.start(applicationContext, tabManager, sessionOrchestrator)
         // WearSync already observes the tab list to prune its own per-session
@@ -632,7 +633,7 @@ class MainActivity : FragmentActivity() {
         // user-visible "I'm back" moment, so sweep here too. The exec transports first (idempotent):
         // a connection that died in the background is back before the tabs ask for it.
         sessionOrchestrator.ensureExecTransports()
-        reconnectDeadTabs("onResume")
+        sessionOrchestrator.reconnectDeadTabs("onResume")
     }
 
     override fun onPause() {
@@ -685,85 +686,25 @@ class MainActivity : FragmentActivity() {
         }
     }
 
-    // Single in-flight reconnect sweep. Flapping networks fire onAvailable in
-    // bursts; without this each edge spawned a detached GlobalScope coroutine
-    // that piled stale connect attempts (5-10s timeouts each) onto the
-    // half-dead link. One sweep at a time; a newer trigger replaces the wait.
-    @Volatile private var reconnectSweepJob: kotlinx.coroutines.Job? = null
-    // Guards the check-and-launch below: onAvailable can fire from a binder
-    // thread while onResume fires on the main thread, so a plain @Volatile
-    // read-then-write race could let two bursty callbacks both see
-    // isActive==false and launch overlapping sweeps.
-    private val reconnectSweepLock = Any()
-
-    private fun reconnectDeadTabs(reason: String) {
-        // DISCONNECTED **and ERROR**: a failed reconnectSession leaves the tab
-        // in ERROR, and the old DISCONNECTED-only filter skipped those forever.
-        val dead = tabManager.tabs.value.filter {
-            it.status == com.clauderemote.model.SessionStatus.DISCONNECTED ||
-                it.status == com.clauderemote.model.SessionStatus.ERROR
-        }
-        if (dead.isEmpty()) return
-        synchronized(reconnectSweepLock) {
-            if (reconnectSweepJob?.isActive == true) {
-                FileLogger.log("Network", "Reconnect sweep already running, skipping ($reason)")
-                return
-            }
-            FileLogger.log("Network", "Reconnect sweep ($reason): ${dead.size} dead tab(s)")
-            reconnectSweepJob = GlobalScope.launch(Dispatchers.IO) {
-                // Concurrent, not sequential — see restoreAndReconnect's comment.
-                // reconnectSession's own single-flight guard makes this safe even
-                // if another sweep/trigger is mid-flight for the same tab.
-                dead.map { session ->
-                    async {
-                        try {
-                            sessionOrchestrator.reconnectSession(session.id)
-                        } catch (_: Exception) {
-                            // reconnectSession re-arms its own persistent retry loop.
-                        }
-                    }
-                }.forEach { it.join() }
-            }
-        }
-    }
-
+    /**
+     * The default-network callback, registered ONCE per process ([NetworkCallbackHub]) on the application's
+     * ConnectivityManager and always delivered to the CURRENT orchestrator ([OrchestratorHolder]): a callback per
+     * activity instance kept driving the orchestrator of a destroyed activity (a second teardown and a sweep over its
+     * old tabs on every network change), and unregistering in onDestroy would stop the reaction to the network while
+     * the process lives on in the background without an activity.
+     *
+     * registerDefaultNetworkCallback — NOT the generic NetworkRequest form — tracks only the network actually carrying
+     * our traffic. The old broad "any network with NET_CAPABILITY_INTERNET" request fired onAvailable/onLost for EVERY
+     * matching network, including a known Wi-Fi the OS silently validates in the background without ever making it the
+     * default route: pointless reconnect sweeps, and a real drop of the default discarded as "not the last available".
+     */
     private fun registerNetworkCallback() {
-        try {
-            val cm = getSystemService(CONNECTIVITY_SERVICE) as android.net.ConnectivityManager
-            // registerDefaultNetworkCallback — NOT the generic NetworkRequest
-            // form — tracks only the network actually carrying our traffic.
-            // The old broad "any network with NET_CAPABILITY_INTERNET" request
-            // fired onAvailable/onLost for EVERY matching network, including a
-            // known Wi-Fi the OS silently validates in the background without
-            // ever making it the default route. That both spammed pointless
-            // reconnect sweeps AND — worse — could point "lastAvailable" at
-            // that non-default network, so when the REAL default actually
-            // dropped, onLost's "network != lastAvailable" check discarded it:
-            // no immediate teardown, just a silent wait for the ~20s keepalive
-            // to notice. With 2-3 known Wi-Fis plus cellular in range that was
-            // a frequent multi-second hiccup on every handover. The default
-            // callback only ever reports transitions of the actual default
-            // network, so there's no second network to get confused with.
+        val cm = applicationContext.getSystemService(CONNECTIVITY_SERVICE) as android.net.ConnectivityManager
+        NetworkCallbackHub.register(current = { OrchestratorHolder.orchestrator }) { listener ->
             cm.registerDefaultNetworkCallback(object : android.net.ConnectivityManager.NetworkCallback() {
-                override fun onAvailable(network: android.net.Network) {
-                    FileLogger.log("Network", "Default network available, checking for dead sessions")
-                    // exec transports before the tabs reconnect (they keep the shell cap and the forwards)
-                    sessionOrchestrator.onNetworkAvailable()
-                    reconnectDeadTabs("onAvailable")
-                }
-
-                override fun onLost(network: android.net.Network) {
-                    // Always about the default (that's the contract of this
-                    // callback variant) — proactively kill the pooled
-                    // transports instead of waiting ~20s for keepalive to
-                    // notice, turning a handover freeze into a ~1s blip
-                    // (reconnect fires on the next onAvailable).
-                    FileLogger.log("Network", "Default network lost — tearing down transports")
-                    sessionOrchestrator.onNetworkLost()
-                }
+                override fun onAvailable(network: android.net.Network) = listener.onAvailable()
+                override fun onLost(network: android.net.Network) = listener.onLost()
             })
-        } catch (e: Exception) {
-            FileLogger.error("Network", "Failed to register network callback", e)
         }
     }
 

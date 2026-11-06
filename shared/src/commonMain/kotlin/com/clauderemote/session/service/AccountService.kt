@@ -137,12 +137,15 @@ internal class AccountService(
         // is a normal thing to want — it is the one every fresh install uses.
         if (slug != ClaudeAccount.DEFAULT_SLUG && !provisionAccount(serverId, slug)) return@withContext false
         try {
-            withServerSession(serverId) { sess ->
-                execReadWithWatchdog(
-                    sess,
-                    ClaudeConfig.buildTmuxLoginCommand(loginTmuxName(slug), slug),
-                    totalMs = 20_000,
-                )
+            val out = withServerSession(serverId) { sess ->
+                execReadWithWatchdog(sess, loginLaunchCmd(loginTmuxName(slug), slug), totalMs = 20_000)
+            }
+            // The socket guard may refuse to start a tmux server (exit ≠ 0, its reason on stderr): no pane, not "launched".
+            val rc = out?.let { LAUNCH_RC.findAll(it).lastOrNull() }?.groupValues?.get(1)?.toIntOrNull()
+            if (rc != 0 || out?.contains(GUARD_REFUSAL) == true) {
+                val why = out?.replace(LAUNCH_RC, "")?.trim()?.takeLast(300)?.ifEmpty { null } ?: "no output"
+                FileLogger.error(TAG, "startLogin($slug) on $serverId: tmux ${loginTmuxName(slug)} NOT launched (exit ${rc ?: "unknown"}): $why", null)
+                return@withContext false
             }
             FileLogger.log(TAG, "startLogin($slug) on $serverId: tmux ${loginTmuxName(slug)} launched")
             true
@@ -335,7 +338,8 @@ internal class AccountService(
                 }
             }
         }
-        registry.liveServerSession(serverId)?.let { return block(it) }
+        // A live tab session of the server, its channel counted where the shells are packed (no room: the helper below).
+        registry.onServerTabChannel(serverId, ExecKind.SHORT) { block(it) }?.let { return it.value }
         val server = serverStorage.getServer(serverId) ?: run {
             FileLogger.error(TAG, "AccountService: no server $serverId in storage", null)
             return null
@@ -358,6 +362,18 @@ internal class AccountService(
 
     internal companion object {
         private const val BLOCK_MARKER = "==="
+
+        /** The exit status of the login launch, echoed after it (an exec read returns stdout only). */
+        private val LAUNCH_RC = Regex("__CR_LOGIN_RC=(\\d+)\\s*")
+        /** What the socket guard of the tmux run command prints to stderr when it refuses (ClaudeConfig, B3). */
+        private const val GUARD_REFUSAL = "not starting a tmux server"
+
+        /**
+         * The login pane's launch with its stderr folded into stdout and its exit status echoed after it, so a refusal
+         * of the socket guard (exit ≠ 0: split brain, hung server, unsafe socket dir) is read as one.
+         */
+        internal fun loginLaunchCmd(tmuxName: String, slug: String): String =
+            "{ ${ClaudeConfig.buildTmuxLoginCommand(tmuxName, slug)}; } 2>&1; echo \"__CR_LOGIN_RC=$?\""
 
         /**
          * Pull the OAuth URL out of a captured login pane.
