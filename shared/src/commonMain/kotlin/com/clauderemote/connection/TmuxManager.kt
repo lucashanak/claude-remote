@@ -76,22 +76,23 @@ object TmuxManager {
 
     internal fun freshNameListingCommand(): String =
         "timeout $LISTING_SERVER_LIMIT_S sh -c \"tmux -u list-sessions -F '$SESSION_FORMAT' 2>/dev/null; echo \\\"$LISTING_END \\\$?\\\"; " +
-            "cat \\\"\\\$HOME/.claude-remote/sessions.json\\\" 2>/dev/null; true\"; echo \"$LISTING_RC \$?\""
+            "cat \\\"\\\$HOME/.claude-remote/sessions.json\\\" 2>/dev/null; echo; true\"; echo \"$LISTING_RC \$?\""
 
     /**
      * Parses [freshNameListingCommand]'s output; throws when the end-of-listing line or the final status line is missing
-     * (the exec was cut short) or the server's limit cut the listing short (status 124).
+     * (the exec was cut short) or the server's limit cut the listing short (status 124). The status may also end a line
+     * (N1): the manifest is written without a final newline, and a limit that cuts `cat` short leaves no `echo` after it.
      */
     internal fun parseFreshNameListing(output: String): FreshNameListing {
-        val lines = output.lines()
-        val rcAt = lines.indexOfLast { it.startsWith("$LISTING_RC ") }
-        if (rcAt < 0) throw java.io.IOException("tmux listing cut short (no status line)")
-        val rc = lines[rcAt].removePrefix("$LISTING_RC ").trim().toIntOrNull()
+        val rcIdx = output.lastIndexOf("$LISTING_RC ")
+        if (rcIdx < 0) throw java.io.IOException("tmux listing cut short (no status line)")
+        val rc = output.substring(rcIdx + LISTING_RC.length + 1).lineSequence().first().trim().toIntOrNull()
         if (rc != 0) throw java.io.IOException("tmux listing ended by the server's limit or failed (status ${rc ?: "unknown"})")
+        val lines = output.substring(0, rcIdx).lines()
         val end = lines.indexOfFirst { it.startsWith("$LISTING_END ") }
-        if (end < 0 || end > rcAt) throw java.io.IOException("tmux listing cut short (no end line)")
+        if (end < 0) throw java.io.IOException("tmux listing cut short (no end line)")
         val sessions = parseSessionLines(lines.take(end))
-        val manifest = lines.subList(end + 1, rcAt).joinToString("\n").trim()
+        val manifest = lines.drop(end + 1).joinToString("\n").trim()
         val manifestNames = if (manifest.isEmpty()) emptySet() else try {
             kotlinx.serialization.json.Json.parseToJsonElement(manifest).let { it as? kotlinx.serialization.json.JsonArray }
                 ?.mapNotNull { (it as? kotlinx.serialization.json.JsonObject)?.get("tmuxSessionName")?.let { n -> (n as? kotlinx.serialization.json.JsonPrimitive)?.content } }

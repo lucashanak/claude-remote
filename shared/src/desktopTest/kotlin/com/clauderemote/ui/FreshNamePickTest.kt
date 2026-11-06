@@ -115,6 +115,39 @@ class FreshNamePickTest {
             "an unreadable manifest drops only its names")
     }
 
+    @Test fun aManifestWithoutAFinalNewlineStillListsTheSessionsAndItsNames() {   // N1: the app writes sessions.json via printf '%s'
+        val l = TmuxManager.parseFreshNameListing(
+            "$base|1|0|0|0\n${TmuxManager.LISTING_END} 0\n[\n  {\"tmuxSessionName\": \"claude-box-x\"}\n]${TmuxManager.LISTING_RC} 0\n",
+        )
+        assertEquals(setOf(base, "claude-box-x"), l.names)
+        assertFailsWith<java.io.IOException>("the server's limit cut the manifest short") {
+            TmuxManager.parseFreshNameListing("$base|1|0|0|0\n${TmuxManager.LISTING_END} 0\n[{\"tmuxSess${TmuxManager.LISTING_RC} 124\n")
+        }
+    }
+
+    @Test fun theRealListingCommandPutsItsStatusOnALineOfItsOwnAfterAManifestWithoutAFinalNewline() {   // N1, on a real sh
+        val dir = java.nio.file.Files.createTempDirectory("n1-srv").toFile()
+        try {
+            // a fake tmux first on PATH and a HOME of its own: never the real tmux or the user's manifest
+            java.io.File(dir, "tmux").apply {
+                writeText("#!/bin/sh\ncase \"${'$'}*\" in *list-sessions*) echo '$base|1|0|0|0' ;; esac\nexit 0\n")
+                setExecutable(true)
+            }
+            java.io.File(dir, ".claude-remote").mkdirs()
+            java.io.File(dir, ".claude-remote/sessions.json").writeText("[\n  {\"tmuxSessionName\": \"claude-box-x\"}\n]")
+            val pb = ProcessBuilder("sh", "-c", TmuxManager.freshNameListingCommand()).redirectErrorStream(true)
+            pb.environment()["PATH"] = "${dir.absolutePath}:${System.getenv("PATH")}"
+            pb.environment()["HOME"] = dir.absolutePath
+            val p = pb.start()
+            val out = p.inputStream.bufferedReader().readText()
+            assertTrue(p.waitFor(10, java.util.concurrent.TimeUnit.SECONDS))
+            assertTrue(out.lines().any { it.startsWith("${TmuxManager.LISTING_RC} ") }, "status on a line of its own:\n$out")
+            assertEquals(setOf(base, "claude-box-x"), TmuxManager.parseFreshNameListing(out).names, out)
+        } finally {
+            com.clauderemote.testsupport.safeDeleteTree(dir)
+        }
+    }
+
     @Test fun aTimedOutListingNeverGivesUpItsChannelInTheMiddleOfTheOpenOnlyItsRead() {   // K5-1
         // the server confirms the OPEN only after 800 ms; quick connect gives up after 300 ms
         val ch = com.jcraft.jsch.SlowOpenExecChannel(openMs = 800)
@@ -203,6 +236,22 @@ class FreshNamePickTest {
         assertTrue(!cl.loading)
         assertEquals(listOf("from-b"), cl.sessions.map { it.name })
         assertEquals(setOf("b", "mb"), cl.taken)
+    }
+
+    @Test fun aFailedListingOnTheConnectScreenLeavesItsCauseInTheLog() {   // N2
+        val saved = com.clauderemote.util.FileLogger.platformLog
+        val logLines = java.util.Collections.synchronizedList(mutableListOf<String>())
+        com.clauderemote.util.FileLogger.platformLog = { _, tag, message, _ -> logLines += "$tag: $message" }
+        try {
+            val cl = ConnectListing(timeoutMs = 5_000)
+            val op = cl.open(setOf("x"))
+            runBlocking { withTimeout(5_000) { cl.load(op, setOf("x")) { throw java.io.IOException("tmux listing cut short (no status line)") } } }
+            assertTrue(!cl.loading)
+            assertEquals(setOf("x"), cl.taken)
+            assertEquals(1, logLines.count { "tmux listing cut short (no status line)" in it }, "one line with the cause: $logLines")
+        } finally {
+            com.clauderemote.util.FileLogger.platformLog = saved
+        }
     }
 
     // ---- the Connect screen ----

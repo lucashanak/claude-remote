@@ -1922,7 +1922,8 @@ internal class ConnectListing(private val timeoutMs: Long = CONNECT_LIST_MS) {
             taken = fallbackTaken + listing.manifestNames
         } catch (e: kotlinx.coroutines.CancellationException) {
             throw e
-        } catch (_: Exception) {
+        } catch (e: Exception) {
+            FileLogger.log("App", "Connect screen: listing failed (${e::class.simpleName}: ${e.message}) — no sessions shown, new session named from the other taken names")
             if (openings.get() == opening) sessions = emptyList()
         } finally {
             if (openings.get() == opening) loading = false
