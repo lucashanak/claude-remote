@@ -148,6 +148,8 @@ internal class SshdFixture private constructor(
             pb.environment().apply {
                 remove("TMUX")
                 remove("TMUX_PANE")
+                // a live session's account dir: a claude stand-in in the private server would read its settings.json
+                remove("CLAUDE_CONFIG_DIR")
                 put("HOME", home.absolutePath)
                 put("TMUX_TMPDIR", tmuxTmpDir.absolutePath)
             }
@@ -203,9 +205,13 @@ internal class SshdFixture private constructor(
      *
      * Via `list-sessions`, not `display-message -t`: the latter takes a
      * target-PANE, for which the `=name` exact-session syntax does not parse.
+     *
+     * `-u`: [run] passes no locale, and a tmux client outside a UTF-8 locale replaces the
+     * TAB in the format with `_` (tmux 3.5a utf8_sanitize), so the split below never
+     * matched and this returned null for every session.
      */
     fun sessionCreatedAt(name: String): String? {
-        val r = tmux("list-sessions", "-F", "#{session_name}\t#{session_created}")
+        val r = tmux("-u", "list-sessions", "-F", "#{session_name}\t#{session_created}")
         if (r.exit != 0) return null
         return r.out.lineSequence()
             .map { it.trim().split("\t") }
@@ -523,6 +529,8 @@ internal class SshdFixture private constructor(
                 # See SshdFixture's safety note: a set TMUX overrides TMUX_TMPDIR and
                 # would point tmux at the user's REAL server full of live work.
                 unset TMUX TMUX_PANE
+                # The tests run inside a live Claude session: its CLAUDE_CONFIG_DIR names a LIVE account dir.
+                unset CLAUDE_CONFIG_DIR
                 export PATH='${shims.absolutePath}':${System.getProperty("clauderemote.test.shimDir")?.let { "'$it':" } ?: ""}/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin
                 # mosh-server refuses to start unless the locale is UTF-8, and an
                 # sshd child inherits no LANG. C.UTF-8 keeps C collation/sorting
@@ -574,7 +582,7 @@ internal class SshdFixture private constructor(
             // daemon, not just in wrap.sh (defence in depth).
             val startupSink = File(root, "sshd.startup")
             val pb = ProcessBuilder(
-                "env", "-u", "TMUX", "-u", "TMUX_PANE",
+                "env", "-u", "TMUX", "-u", "TMUX_PANE", "-u", "CLAUDE_CONFIG_DIR",
                 "/usr/sbin/sshd", "-f", config.absolutePath, "-E", sshdLog.absolutePath,
             ).redirectErrorStream(true).redirectOutput(ProcessBuilder.Redirect.to(startupSink))
             val proc = pb.start()

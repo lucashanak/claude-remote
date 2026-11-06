@@ -157,6 +157,35 @@ class RestoreScriptSyntaxTest {
     }
 
     /**
+     * tmux-sockheal.sh, the socket guard the app's tmux anchor runs before it may create a server (B3). Small, so
+     * the size guard is lower than for the two big scripts — but it must contain the shared guard, not just a stub.
+     */
+    @Test
+    fun sockhealDotSh_extractsTheGuard_andPassesBashSyntaxCheck() {
+        val body = extractHeredoc("SOCKHEAL_EOF")
+        assertTrue(body.contains("sg_guard()") && body.contains("SIGUSR1"), "tmux-sockheal.sh must carry the socket guard:\n$body")
+        if (!bashAvailable()) {
+            println("bash not on PATH — skipping tmux-sockheal.sh syntax check")
+            return
+        }
+        assertBashSyntaxValid(body, "tmux-sockheal.sh (SOCKHEAL_EOF heredoc body)")
+    }
+
+    /**
+     * The socket guard must be in all three scripts and drift must be able to switch it off: a drift.sh without
+     * it relaunches every session into a second tmux server when the socket file vanishes (2026-11-02).
+     */
+    @Test
+    fun socketGuardIsInEveryScriptThatMayCreateAServer() {
+        for (d in listOf("RESTORE_EOF", "DRIFT_EOF", "SOCKHEAL_EOF")) {
+            val body = extractHeredoc(d)
+            assertTrue(body.contains("kill -USR1"), "$d: no SIGUSR1 heal")
+            assertTrue(body.contains("drift-heal.off"), "$d: no off switch")
+            assertTrue(body.contains("tmux-server.lock"), "$d: no shared lock")
+        }
+    }
+
+    /**
      * Regression: both restore.sh and drift.sh gate a full rewrite behind
      * `grep -q "$MARKER" <existing file>`, where MARKER is
      * "claude-remote-restore-vN". Each script's own header lists a
@@ -189,8 +218,8 @@ class RestoreScriptSyntaxTest {
             "no '# marker-compat (do NOT remove): ...' line found — cannot verify restore.sh/drift.sh " +
                 "self-update compatibility"
         )
-        // Both restore.sh and drift.sh carry their own compat comment.
-        assertEquals(2, compatLines.size, "expected exactly 2 marker-compat lines (restore.sh + drift.sh), found ${compatLines.size}: $compatLines")
+        // restore.sh, drift.sh and tmux-sockheal.sh each carry their own compat comment.
+        assertEquals(3, compatLines.size, "expected exactly 3 marker-compat lines (restore.sh + drift.sh + tmux-sockheal.sh), found ${compatLines.size}: $compatLines")
 
         val expected = (6..marker).toList()
         compatLines.forEachIndexed { idx, line ->
@@ -245,6 +274,7 @@ class RestoreScriptSyntaxTest {
             "outer installer" to script,
             "restore.sh" to extractHeredoc("RESTORE_EOF"),
             "drift.sh" to extractHeredoc("DRIFT_EOF"),
+            "tmux-sockheal.sh" to extractHeredoc("SOCKHEAL_EOF"),
         )
         for ((label, body) in scripts) {
             val tmp = File.createTempFile("shellcheck", ".sh")

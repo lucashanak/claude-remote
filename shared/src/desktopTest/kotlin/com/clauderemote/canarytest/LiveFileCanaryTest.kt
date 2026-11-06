@@ -288,6 +288,109 @@ class LiveFileCanaryTest {
         assertFailsWith<AssertionError> { guard { File(live, ".claude-remote/accounts/x/$token.credentials.json").writeText("") } }
     }
 
+    /** Rewrite [f] the way Claude's refresh does: a temp file renamed over it (new inode). */
+    private fun atomicReplace(f: File, text: String) {
+        val tmp = File(f.parentFile, "cred.tmp").apply { writeText(text) }
+        Files.move(tmp.toPath(), f.toPath(), java.nio.file.StandardCopyOption.ATOMIC_MOVE)
+    }
+
+    /**
+     * The false alarm of HookMergeTest (davka A): a live Claude refreshed its OAuth token while the guard ran,
+     * rewrote `~/.claude/.credentials.json` and removed `.oauth_refresh.lock.owner`. That is not damage.
+     */
+    @Test fun anOauthRefreshThatRemovesItsLockIsTolerated() {
+        val cred = File(live, ".claude/.credentials.json").apply { writeText("secret") }
+        val lockDir = File(live, ".claude/.oauth_refresh.lock").apply { mkdirs() }
+        val owner = File(live, ".claude/.oauth_refresh.lock.owner").apply { writeText("{}") }
+        guard {
+            atomicReplace(cred, "SECRET-2")
+            assertTrue(owner.delete() && lockDir.delete())
+        }
+    }
+
+    /** A refresh is fast: its lock may appear and vanish between the two snapshots. Both kinds of config dir. */
+    @Test fun anOauthRefreshWhoseLockComesAndGoesInsideTheGuardIsTolerated() {
+        for (dir in listOf(".claude", ".claude-remote/accounts/x")) {
+            val cred = File(live, "$dir/.credentials.json").apply { writeText("secret") }
+            guard {
+                val lockDir = File(live, "$dir/.oauth_refresh.lock").apply { mkdirs() }
+                val owner = File(live, "$dir/.oauth_refresh.lock.owner").apply { writeText("{}") }
+                atomicReplace(cred, "SECRET-2")
+                assertTrue(owner.delete() && lockDir.delete())
+            }
+        }
+    }
+
+    /** The exception is NOT a blind spot: without a refresh lock in the SAME config dir a credentials change fails. */
+    @Test fun aCredentialsChangeWithoutARefreshLockInTheSameDirStillFails() {
+        val cred = File(live, ".claude-remote/accounts/x/.credentials.json").apply { writeText("secret") }
+        val bare = assertFailsWith<AssertionError> { guard { atomicReplace(cred, "SECRET-2") } }
+        assertTrue(bare.message!!.contains("accounts/x/.credentials.json"), bare.message)
+        // a lock in ANOTHER config dir does not excuse it
+        val other = File(live, ".claude/.oauth_refresh.lock")
+        val elsewhere = assertFailsWith<AssertionError> { guard { other.mkdirs(); atomicReplace(cred, "SECRET-3"); other.delete() } }
+        assertTrue(elsewhere.message!!.contains("accounts/x/.credentials.json"), elsewhere.message)
+        // nor a lock that was there before and still is (it did not come or go during the guard)
+        File(live, ".claude-remote/accounts/x/.oauth_refresh.lock").mkdirs()
+        val stale = assertFailsWith<AssertionError> { guard { atomicReplace(cred, "SECRET-4") } }
+        assertTrue(stale.message!!.contains("accounts/x/.credentials.json"), stale.message)
+    }
+
+    /** Lay out the config-dir trees a live Claude writes behind every test's back (measured false alarms, kolo 2). */
+    private fun liveNoiseDirs(dir: String) {
+        File(live, "$dir/telemetry").mkdirs()
+        File(live, "$dir/telemetry/1p_failed_events.old.json").writeText("[]")
+        File(live, "$dir/tasks").mkdirs()
+        File(live, "$dir/.omc").mkdirs()
+        File(live, "$dir/.omc/update-check.json").writeText("{\"t\":1}")
+    }
+
+    /**
+     * False alarms seen in 3 review runs: a live Claude writes its telemetry, its per-session task dirs and the
+     * oh-my-claudecode update check. Those are TRANSIENT in both kinds of config dir.
+     */
+    @Test fun liveClaudeTelemetryTasksAndUpdateCheckAreTolerated() {
+        for (dir in listOf(".claude", ".claude-remote/accounts/x")) {
+            liveNoiseDirs(dir)
+            guard {
+                File(live, "$dir/telemetry/1p_failed_events.new-session.json").writeText("[1,2,3]")
+                assertTrue(File(live, "$dir/telemetry/1p_failed_events.old.json").delete())
+                File(live, "$dir/tasks/session-701c36a0").mkdirs()
+                File(live, "$dir/tasks/session-701c36a0/1.json").writeText("{}")
+                File(live, "$dir/.omc/update-check.json").writeText("{\"t\":22222}")
+            }
+        }
+    }
+
+    /** ...and nothing more: the neighbours stay STRICT, and the noise never excuses a credentials change. */
+    @Test fun theLiveNoiseExceptionIsNarrow() {
+        liveNoiseDirs(".claude-remote/accounts/x")
+        val a = ".claude-remote/accounts/x"
+        val omc = assertFailsWith<AssertionError> { guard { File(live, "$a/.omc/other.json").writeText("{}") } }
+        assertTrue(omc.message!!.contains("$a/.omc/other.json"), omc.message)
+        val task = assertFailsWith<AssertionError> { guard { File(live, "$a/tasks/not-a-session").writeText("x") } }
+        assertTrue(task.message!!.contains("$a/tasks/not-a-session"), task.message)
+        val tele = assertFailsWith<AssertionError> { guard { File(live, ".claude/telemetry").mkdirs() } }
+        assertTrue(tele.message!!.contains(".claude/telemetry"), tele.message)
+        val cred = File(live, "$a/.credentials.json").apply { writeText("secret") }
+        val withNoise = assertFailsWith<AssertionError> {
+            guard {
+                File(live, "$a/telemetry/1p_failed_events.x.json").writeText("[]")
+                atomicReplace(cred, "SECRET-2")
+            }
+        }
+        assertTrue(withNoise.message!!.contains("$a/.credentials.json"), withNoise.message)
+    }
+
+    /** A refresh rewrites credentials; it never creates or deletes them. */
+    @Test fun aRefreshLockDoesNotExcuseCreatingOrDeletingCredentials() {
+        val cred = File(live, ".claude/.credentials.json")
+        val lock = File(live, ".claude/.oauth_refresh.lock")
+        assertFailsWith<AssertionError> { guard { lock.mkdirs(); cred.writeText("new"); lock.delete() } }
+        assertTrue(cred.isFile)
+        assertFailsWith<AssertionError> { guard { lock.mkdirs(); cred.delete(); lock.delete() } }
+    }
+
     @Test fun aCredentialsFileIsNeverOpenedNotEvenForTheTokenScan() {
         // By design the canary does not read secrets, so an in-place change that keeps size, mtime and
         // inode is invisible to it. That blind spot is exactly what proves the file is not hashed or scanned

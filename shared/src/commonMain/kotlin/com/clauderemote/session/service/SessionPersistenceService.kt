@@ -125,6 +125,172 @@ internal class SessionPersistenceService(
         private const val CLOSED_LOCALLY_RETAIN_MS = 30 * 60_000L
 
         /**
+         * The tmux socket guard, pasted VERBATIM into restore.sh, drift.sh and tmux-sockheal.sh. Must be declared
+         * before [INSTALL_RESTORE_COMMAND]: companion properties initialise in textual order.
+         *
+         * Incident 2026-11-02: the whole `/tmp/tmux-<uid>` directory vanished while the tmux server kept running.
+         * drift saw `LIVE=[]`, restore.sh started a SECOND server and relaunched all 51 sessions into it as
+         * duplicates; with the second server up, `LIVE` was never empty again and the duplicates continued.
+         * SIGUSR1 makes tmux recreate its socket, but only when the directory exists (measured: tmux 3.5a), and two
+         * servers on one path must never be signalled (the signalled one unlinks the other's socket).
+         */
+        private val SOCK_GUARD_FUNCS = """
+# ---- tmux socket guard (identical in restore.sh, drift.sh and tmux-sockheal.sh) ----
+# Before anything relaunches sessions or creates a tmux server, count the servers LISTENING on the exact path
+# ${'$'}{TMUX_TMPDIR:-/tmp}/tmux-<uid>/default (a deleted socket file keeps its bound name in the kernel):
+#   0   nothing alive there: the old behaviour (relaunch / create)                         rc 0
+#   1   the socket answers                                                                  rc 0
+#       socket file gone: mkdir -m 700, SIGUSR1 (tmux recreates it), wait <= 2 s            rc 2 healed, 1 failed
+#       a stale socket file there (connect refused): the same heal                          rc 2 healed, 1 failed
+#       answers only through -S (directory not private): chmod 700                         rc 2 healed, 1 failed
+#       socket there but list-sessions fails (hung server): do nothing                      rc 1
+#   2+  split brain: no signal, no relaunch, no new server                                  rc 1
+# rc 2 = "it was unusable when we looked and is usable again": the caller relaunches nothing this time (the app's
+# anchor attaches a session that is still there). On rc 1 SG_WHY names the cause (split, hung, unsafe, heal).
+# Never relaunch while anything listens there. The server is identified by the listening socket's exact path,
+# never by cmdline: the live server's cmdline names no socket, and test servers isolate through TMUX_TMPDIR.
+# ~/.claude-remote/drift-heal.off switches all of this off: the only rollback, since an older client never
+# rewrites a v18 script.
+SG_DIR="${'$'}HOME/.claude-remote"
+SG_UID=${'$'}(id -u)
+# tmux binds realpath(TMUX_TMPDIR)/tmux-<uid>/default: a trailing / or a symlink in TMUX_TMPDIR must not hide it.
+SG_BASE="${'$'}{TMUX_TMPDIR:-/tmp}"
+SG_BASE=${'$'}(realpath -m -- "${'$'}SG_BASE" 2>/dev/null || printf '%s' "${'$'}SG_BASE")
+SG_SOCK_DIR="${'$'}SG_BASE/tmux-${'$'}SG_UID"
+SG_SOCK="${'$'}SG_SOCK_DIR/default"
+SG_LOCK="${'$'}SG_DIR/tmux-server.lock"
+SG_OFF="${'$'}SG_DIR/drift-heal.off"
+SG_WHO=${'$'}{SG_WHO:-script}
+# A lasting fault logs one line per kind per 15 minutes, not one block per tick (1 440 a day). Per caller: drift.log,
+# restore.log and sockheal.log each get the line (one caller's stamp silenced the fault in the others' logs).
+# A line the stamp holds back still goes out with SG_QUIET in front when that is set (only tmux-sockheal.sh sets it:
+# the log gets no copy, the refused tab gets its cause on stderr every time).
+sg_log() {
+    local st="${'$'}SG_DIR/.drift.sockguard.${'$'}SG_WHO.${'$'}1" now last
+    now=${'$'}(date +%s); last=${'$'}(stat -c %Y "${'$'}st" 2>/dev/null || echo 0)
+    if [ ${'$'}((now - last)) -lt 900 ]; then
+        [ -n "${'$'}{SG_QUIET:-}" ] && echo "${'$'}SG_QUIET[${'$'}(date -u +%FT%TZ)] sockguard(${'$'}SG_WHO): ${'$'}2"
+        return 0
+    fi
+    touch "${'$'}st" 2>/dev/null || true
+    echo "[${'$'}(date -u +%FT%TZ)] sockguard(${'$'}SG_WHO): ${'$'}2"
+}
+# One line per server listening on exactly ${'$'}SG_SOCK: its pid, or "?" when it cannot be seen.
+# Primary `ss -xlpH`; fallback /proc/net/unix, where only Flags=00010000 St=01 is the listening socket (the other
+# rows with that path are accepted client connections).
+sg_listeners() {
+    local out ino pid
+    if out=${'$'}(timeout 5 ss -xlpH 2>/dev/null); then
+        printf '%s\n' "${'$'}out" | awk -v p="${'$'}SG_SOCK" '$2 == "LISTEN" && $5 == p {
+            if (match($0, /pid=[0-9]+/)) print substr($0, RSTART + 4, RLENGTH - 4); else print "?" }'
+        return 0
+    fi
+    awk -v p="${'$'}SG_SOCK" '$4 == "00010000" && $6 == "01" && $8 == p { print $7 }' /proc/net/unix 2>/dev/null \
+        | while read -r ino; do
+            pid=${'$'}(timeout 10 find /proc/[0-9]*/fd -maxdepth 1 -lname "socket:\[${'$'}ino\]" 2>/dev/null | head -1 | cut -d/ -f3)
+            echo "${'$'}{pid:-?}"
+        done
+}
+sg_count() { printf '%s\n' "${'$'}1" | awk 'NF { n++ } END { print n + 0 }'; }
+# Answers through its path AND for a plain client: only a plain client checks the directory (tmux refuses one others can
+# enter, "unsafe permissions"), and drift, restore.sh and the app are plain clients.
+sg_answers() {
+    [ -S "${'$'}SG_SOCK" ] && timeout 5 tmux -S "${'$'}SG_SOCK" list-sessions >/dev/null 2>&1 \
+        && timeout 5 env -u TMUX tmux list-sessions >/dev/null 2>&1
+}
+# SG_PROBE = what is on the path, through -S: ok (answers), stale (a socket file nobody accepts on: what `tmux attach`
+# leaves when it finds the path empty and starts a short-lived server of its own, measured on tmux 3.5a) or hung
+# (accepts, then times out). A socket file gone between the caller's [ -S ] and this probe ("No such file or directory")
+# is stale too: the heal re-checks everything under the lock.
+sg_probe() {
+    local o
+    # only stderr is captured: the client hands its stdin/stdout to the server (SCM_RIGHTS), and a stopped server
+    # would hold a captured stdout open, so the capture never ended (measured with SIGSTOP)
+    if o=${'$'}(timeout -k 1 5 tmux -S "${'$'}SG_SOCK" list-sessions 2>&1 >/dev/null </dev/null); then SG_PROBE=ok; return 0; fi
+    case "${'$'}o" in *"no server running"*|*"onnection refused"*|*"No such file or directory"*) SG_PROBE=stale;; *) SG_PROBE=hung;; esac
+}
+sg_stale() { [ -S "${'$'}SG_SOCK" ] && sg_probe && [ "${'$'}SG_PROBE" = stale ]; }
+# 0 when the socket directory is a real directory of ours with mode 700 (made so when it was looser); else 1.
+sg_dir_private() {
+    local m
+    { [ ! -L "${'$'}SG_SOCK_DIR" ] && [ -d "${'$'}SG_SOCK_DIR" ] && [ "${'$'}(stat -c %u "${'$'}SG_SOCK_DIR" 2>/dev/null)" = "${'$'}SG_UID" ]; } || return 1
+    m=${'$'}(stat -c %a "${'$'}SG_SOCK_DIR" 2>/dev/null)
+    [ "${'$'}m" = 700 ] && return 0
+    { chmod 700 "${'$'}SG_SOCK_DIR" 2>/dev/null && [ "${'$'}(stat -c %a "${'$'}SG_SOCK_DIR" 2>/dev/null)" = 700 ]; } || return 1
+    echo "[${'$'}(date -u +%FT%TZ)] sockguard(${'$'}SG_WHO): ${'$'}SG_SOCK_DIR had mode ${'$'}m — set to 700 (tmux clients refuse a socket directory others can enter)"
+}
+# Heal under the shared lock (drift, restore.sh's create branch and the app's tmux-sockheal.sh).
+sg_heal() {
+    local pid=${'$'}1
+    (
+        flock -w 2 8 || { sg_log lock "could not take ${'$'}SG_LOCK within 2 s (another heal or create runs) — not relaunching now"; exit 1; }
+        # healed by someone else meanwhile: usable again, as far as the caller is concerned
+        sg_answers && exit 2
+        case "${'$'}pid" in ''|*[!0-9]*) sg_log nopid "a tmux server listens on ${'$'}SG_SOCK without its socket file and its pid is unknown — NOT relaunching"; exit 1;; esac
+        if [ "${'$'}(cat "/proc/${'$'}pid/comm" 2>/dev/null)" != "tmux: server" ] || [ "${'$'}(stat -c %u "/proc/${'$'}pid" 2>/dev/null)" != "${'$'}SG_UID" ]; then
+            sg_log notours "listener ${'$'}pid on ${'$'}SG_SOCK is not our tmux server — not signalling, NOT relaunching"; exit 1
+        fi
+        # SIGUSR1 cannot bind into a missing directory (the 2026-11-02 shape).
+        [ -d "${'$'}SG_SOCK_DIR" ] || mkdir -p -m 700 "${'$'}SG_SOCK_DIR" 2>/dev/null
+        if ! sg_dir_private; then
+            sg_log baddir "${'$'}SG_SOCK_DIR is missing, a symlink, not ours or cannot be made private — not signalling, NOT relaunching"; exit 1
+        fi
+        # Re-checked right before the signal: still exactly this one server on the path (never signal one of two), and
+        # the path is empty or a stale file (tmux unlinks it and binds anew). A socket that answers was healed meanwhile.
+        [ "${'$'}(sg_listeners)" = "${'$'}pid" ] || { sg_log moved "the listeners on ${'$'}SG_SOCK changed while healing — not signalling, NOT relaunching"; exit 1; }
+        if [ ! -S "${'$'}SG_SOCK" ] || sg_stale; then
+            kill -USR1 "${'$'}pid" 2>/dev/null || { sg_log kill "SIGUSR1 to ${'$'}pid failed — NOT relaunching"; exit 1; }
+        fi
+        # At most 2 s in all: a deadline, not a number of tries (each try may itself wait).
+        local end left
+        end=${'$'}(( ${'$'}(date +%s%N) / 1000000 + 2000 ))
+        while left=${'$'}(( end - ${'$'}(date +%s%N) / 1000000 )); [ "${'$'}left" -gt 0 ]; do
+            [ -S "${'$'}SG_SOCK" ] && timeout "${'$'}((left / 1000)).${'$'}(printf %03d ${'$'}((left % 1000)))" tmux -S "${'$'}SG_SOCK" list-sessions >/dev/null 2>&1 && exit 2
+            sleep 0.1
+        done
+        sg_log healfail "tmux server ${'$'}pid alive without its socket ${'$'}SG_SOCK, SIGUSR1 did not bring it back — NOT relaunching"
+        exit 1
+    ) 8>>"${'$'}SG_LOCK"
+}
+sg_guard() {
+    SG_WHY=
+    [ -e "${'$'}SG_OFF" ] && return 0
+    command -v tmux >/dev/null 2>&1 || return 0
+    local pids n rc
+    pids=${'$'}(sg_listeners)
+    n=${'$'}(sg_count "${'$'}pids")
+    [ "${'$'}n" -eq 0 ] && return 0
+    if [ "${'$'}n" -ge 2 ]; then
+        SG_WHY=split
+        sg_log split "SPLIT BRAIN: ${'$'}n tmux servers listen on ${'$'}SG_SOCK (pids ${'$'}(printf '%s' "${'$'}pids" | tr '\n' ' ')) — no signal, no relaunch, no new server; needs a human"
+        return 1
+    fi
+    if [ -S "${'$'}SG_SOCK" ]; then
+        # One wait for the answer (5 s), not sg_answers' and then sg_probe's: a hung server was refused after 10 s.
+        sg_probe
+        case "${'$'}SG_PROBE" in
+            ok)
+                timeout 5 env -u TMUX tmux list-sessions >/dev/null 2>&1 && return 0
+                # it answers through its path but plain clients refuse the directory
+                sg_dir_private && sg_answers && return 2
+                SG_WHY=unsafe
+                sg_log unsafe "${'$'}SG_SOCK answers only through -S: ${'$'}SG_SOCK_DIR is not a private directory of ours and cannot be made one — NOT relaunching"
+                return 1;;
+            hung)
+                SG_WHY=hung
+                sg_log hung "tmux server ${'$'}pids listens on ${'$'}SG_SOCK but does not answer — NOT relaunching"
+                return 1;;
+        esac
+    fi
+    # the socket file is gone, or a stale file nobody accepts on took its place
+    sg_heal "${'$'}pids"; rc=${'$'}?
+    [ "${'$'}rc" -eq 2 ] && echo "[${'$'}(date -u +%FT%TZ)] sockguard(${'$'}SG_WHO): tmux server ${'$'}pids was alive without its socket — ${'$'}SG_SOCK recreated (SIGUSR1), nothing relaunched"
+    [ "${'$'}rc" -eq 1 ] && SG_WHY=heal
+    return "${'$'}rc"
+}
+# ---- end of tmux socket guard ----"""
+
+        /**
          * Idempotent installer for the user-level systemd service that restores
          * tmux + claude sessions after a server reboot. Writes:
          *   ~/.claude-remote/restore.sh
@@ -140,18 +306,23 @@ internal class SessionPersistenceService(
         mkdir -p "${'$'}HOME/.claude-remote" "${'$'}HOME/.config/systemd/user"
         SCRIPT="${'$'}HOME/.claude-remote/restore.sh"
         DRIFT="${'$'}HOME/.claude-remote/drift.sh"
+        SOCKHEAL="${'$'}HOME/.claude-remote/tmux-sockheal.sh"
         UNIT="${'$'}HOME/.config/systemd/user/claude-remote-restore.service"
         DUNIT="${'$'}HOME/.config/systemd/user/claude-remote-drift.service"
         DTIMER="${'$'}HOME/.config/systemd/user/claude-remote-drift.timer"
         LOCK="${'$'}HOME/.claude-remote/sessions.lock"
-        MARKER="claude-remote-restore-v17"
+        MARKER="claude-remote-restore-v18"
+        # An install cut short (set -e, a dropped SSH session) must not leave a temp script behind.
+        trap 'rm -f "${'$'}SCRIPT.tmp.${'$'}${'$'}" "${'$'}DRIFT.tmp.${'$'}${'$'}" "${'$'}SOCKHEAL.tmp.${'$'}${'$'}"' EXIT
         touch "${'$'}LOCK"
         echo "[${'$'}(date -u +%FT%TZ)] install: invoked by client" >> "${'$'}HOME/.claude-remote/install.log"
         if ! grep -q "${'$'}MARKER" "${'$'}SCRIPT" 2>/dev/null; then
             echo "[${'$'}(date -u +%FT%TZ)] install: restore.sh missing ${'$'}MARKER — rewriting; prior marker line: ${'$'}(grep -m1 'claude-remote-restore-v' "${'$'}SCRIPT" 2>/dev/null || echo '<none/new file>')" >> "${'$'}HOME/.claude-remote/install.log"
-            cat > "${'$'}SCRIPT" <<'RESTORE_EOF'
+            # Atomic: a fresh inode renamed into place. `cat >` truncated the file a running bash may be reading
+            # block by block, which could execute a mix of the old and the new script.
+            cat > "${'$'}SCRIPT.tmp.${'$'}${'$'}" <<'RESTORE_EOF'
 #!/usr/bin/env bash
-# marker-compat (do NOT remove): claude-remote-restore-v6 claude-remote-restore-v7 claude-remote-restore-v8 claude-remote-restore-v9 claude-remote-restore-v10 claude-remote-restore-v11 claude-remote-restore-v12 claude-remote-restore-v13 claude-remote-restore-v14 claude-remote-restore-v15 claude-remote-restore-v16 claude-remote-restore-v17
+# marker-compat (do NOT remove): claude-remote-restore-v6 claude-remote-restore-v7 claude-remote-restore-v8 claude-remote-restore-v9 claude-remote-restore-v10 claude-remote-restore-v11 claude-remote-restore-v12 claude-remote-restore-v13 claude-remote-restore-v14 claude-remote-restore-v15 claude-remote-restore-v16 claude-remote-restore-v17 claude-remote-restore-v18
 # Makes any installed client's `grep -q ${'$'}MARKER` find its marker so it takes the
 # PRESENT no-op path and does NOT rewrite this file (reverting the fixes) nor run
 # the daemon-reload/enable reinstall that correlates with the tmux-server death.
@@ -174,6 +345,18 @@ echo "----- ${'$'}(date -u +%FT%TZ) restore.sh start (pid=${'$'}${'$'}) -----"
 # Best-effort (`|| true`): an existing server or a failed systemd-run must never
 # break the launch.
 export XDG_RUNTIME_DIR="${'$'}{XDG_RUNTIME_DIR:-/run/user/${'$'}(id -u)}"
+$SOCK_GUARD_FUNCS
+SG_WHO=restore
+mkdir -p "${'$'}SG_DIR" 2>/dev/null
+# A server that is alive on the default socket path but unusable (socket gone and not healable, hung, two
+# servers) must never get a second server next to it: that is the 2026-11-02 duplicate-51-sessions incident.
+if [ ! -e "${'$'}SG_OFF" ]; then
+    SG_RC=0; sg_guard || SG_RC=${'$'}?
+    if [ "${'$'}SG_RC" -eq 1 ]; then
+        echo "a tmux server is alive on ${'$'}SG_SOCK but unusable — NOT creating a second server, skipping restore (drift retries next tick)"
+        exit 0
+    fi
+fi
 if ! tmux list-sessions >/dev/null 2>&1; then
     # Create the server in its OWN transient scope, never in the caller's cgroup.
     # NOTE: no --unit=<fixed name> — a leftover unit of that name makes systemd-run
@@ -181,8 +364,19 @@ if ! tmux list-sessions >/dev/null 2>&1; then
     # server instead. When the caller was claude-remote-drift.service (oneshot,
     # KillMode=control-group, no RemainAfterExit) the whole fleet died with the
     # tick. Verified: no claude-tmux-server.scope ever existed on this box.
-    systemd-run --user --scope --quiet \
-        tmux new-session -d -x 200 -y 50 -s __anchor__ sleep infinity >/dev/null 2>&1 || true
+    if [ -e "${'$'}SG_OFF" ]; then
+        systemd-run --user --scope --quiet \
+            tmux new-session -d -x 200 -y 50 -s __anchor__ sleep infinity >/dev/null 2>&1 || true
+    else
+        # Under the shared lock, and only while still nothing listens on the path (a concurrent heal or
+        # creator wins). `8>&-`: the daemonizing server must not inherit the lock fd and hold it forever.
+        (
+            flock -w 2 8 || { echo "could not take ${'$'}SG_LOCK within 2 s — not creating a tmux server now"; exit 0; }
+            [ "${'$'}(sg_count "${'$'}(sg_listeners)")" -eq 0 ] || { echo "a tmux server appeared on ${'$'}SG_SOCK meanwhile — not creating another"; exit 0; }
+            systemd-run --user --scope --quiet \
+                tmux new-session -d -x 200 -y 50 -s __anchor__ sleep infinity >/dev/null 2>&1 8>&- || true
+        ) 8>>"${'$'}SG_LOCK"
+    fi
     for _ in ${'$'}(seq 1 25); do tmux list-sessions >/dev/null 2>&1 && break; sleep 0.2; done
     if ! tmux list-sessions >/dev/null 2>&1; then
         echo "no tmux server and could not create one in a transient scope — skipping restore (drift retries next tick)"
@@ -390,16 +584,17 @@ else
     done < "${'$'}SESSIONS_FILE"
 fi
 RESTORE_EOF
-            chmod +x "${'$'}SCRIPT"
+            chmod +x "${'$'}SCRIPT.tmp.${'$'}${'$'}"
+            mv -f "${'$'}SCRIPT.tmp.${'$'}${'$'}" "${'$'}SCRIPT"
             echo "RESTORE_SCRIPT_INSTALLED"
         else
             echo "RESTORE_SCRIPT_PRESENT"
         fi
         if ! grep -q "${'$'}MARKER" "${'$'}DRIFT" 2>/dev/null; then
             echo "[${'$'}(date -u +%FT%TZ)] install: drift.sh missing ${'$'}MARKER — rewriting; prior marker line: ${'$'}(grep -m1 'claude-remote-restore-v' "${'$'}DRIFT" 2>/dev/null || echo '<none/new file>')" >> "${'$'}HOME/.claude-remote/install.log"
-            cat > "${'$'}DRIFT" <<'DRIFT_EOF'
+            cat > "${'$'}DRIFT.tmp.${'$'}${'$'}" <<'DRIFT_EOF'
 #!/usr/bin/env bash
-# marker-compat (do NOT remove): claude-remote-restore-v6 claude-remote-restore-v7 claude-remote-restore-v8 claude-remote-restore-v9 claude-remote-restore-v10 claude-remote-restore-v11 claude-remote-restore-v12 claude-remote-restore-v13 claude-remote-restore-v14 claude-remote-restore-v15 claude-remote-restore-v16 claude-remote-restore-v17
+# marker-compat (do NOT remove): claude-remote-restore-v6 claude-remote-restore-v7 claude-remote-restore-v8 claude-remote-restore-v9 claude-remote-restore-v10 claude-remote-restore-v11 claude-remote-restore-v12 claude-remote-restore-v13 claude-remote-restore-v14 claude-remote-restore-v15 claude-remote-restore-v16 claude-remote-restore-v17 claude-remote-restore-v18
 # Makes any installed client's `grep -q ${'$'}MARKER` find its marker so it takes the
 # PRESENT no-op path and does NOT rewrite this file (reverting the fixes) nor run
 # the daemon-reload/enable reinstall that correlates with the tmux-server death.
@@ -444,6 +639,18 @@ TOMBSTONE_WINDOW=14                                 # days a durable marker stay
 command -v tmux >/dev/null 2>&1 || { echo "no tmux"; exit 0; }
 command -v jq >/dev/null 2>&1 || { echo "no jq"; exit 0; }
 touch "${'$'}LOCK"
+
+$SOCK_GUARD_FUNCS
+SG_WHO=drift
+# SOCKET GUARD, every tick and before anything below can decide to relaunch (not only at LIVE=[]: at 23:38:14 on
+# 2026-11-02 LIVE held part of a SECOND server's sessions and drift relaunched 24 more duplicates).
+# Healed (rc 2) or refused (rc 1): this tick relaunches nothing and writes no manifest.
+if [ ! -e "${'$'}SG_OFF" ]; then
+    # Every tmux call of a tick gets a time limit: a hung server must not wedge the timer unit.
+    command -v timeout >/dev/null 2>&1 && tmux() { timeout -k 2 10 tmux "${'$'}@"; }
+    SG_RC=0; sg_guard || SG_RC=${'$'}?
+    [ "${'$'}SG_RC" -eq 0 ] || exit 0
+fi
 
 # Enforce exit-empty=off every tick so ANY tmux server (however created) never
 # exits when sessions momentarily hit 0 (app churn/close) — server-side, no
@@ -784,6 +991,11 @@ if [ -f "${'$'}SF" ]; then
             && [ -n "${'$'}(find "${'$'}FORGOTTEN_D/${'$'}n" -maxdepth 0 -mtime -${'$'}TOMBSTONE_WINDOW 2>/dev/null)" ] \
             && continue
         ! tmux has-session -t="${'$'}n" 2>/dev/null && echo "${'$'}n"; done)
+    # Same guard again right before relaunching: the socket may have gone (or a second server appeared) during
+    # this tick, and then every name above is "missing".
+    if [ -n "${'$'}MISSING" ] && [ ! -e "${'$'}SG_OFF" ]; then
+        sg_guard || MISSING=""
+    fi
     if [ -n "${'$'}MISSING" ]; then
         echo "[${'$'}(date -u +%FT%TZ)] drift: self-heal — relaunching missing: ${'$'}(echo ${'$'}MISSING | tr '\n' ' ')"
         # Run the heal in its OWN transient scope. Anything restore.sh starts
@@ -800,8 +1012,61 @@ if [ -f "${'$'}SF" ]; then
     fi
 fi
 DRIFT_EOF
-            chmod +x "${'$'}DRIFT"
+            chmod +x "${'$'}DRIFT.tmp.${'$'}${'$'}"
+            mv -f "${'$'}DRIFT.tmp.${'$'}${'$'}" "${'$'}DRIFT"
             echo "DRIFT_SCRIPT_INSTALLED"
+        fi
+        # The app's tmux anchor (ClaudeConfig.buildTmuxRunCommand) runs this before it may create a server.
+        if ! grep -q "${'$'}MARKER" "${'$'}SOCKHEAL" 2>/dev/null; then
+            echo "[${'$'}(date -u +%FT%TZ)] install: tmux-sockheal.sh missing ${'$'}MARKER — rewriting; prior marker line: ${'$'}(grep -m1 'claude-remote-restore-v' "${'$'}SOCKHEAL" 2>/dev/null || echo '<none/new file>')" >> "${'$'}HOME/.claude-remote/install.log"
+            cat > "${'$'}SOCKHEAL.tmp.${'$'}${'$'}" <<'SOCKHEAL_EOF'
+#!/usr/bin/env bash
+# marker-compat (do NOT remove): claude-remote-restore-v6 claude-remote-restore-v7 claude-remote-restore-v8 claude-remote-restore-v9 claude-remote-restore-v10 claude-remote-restore-v11 claude-remote-restore-v12 claude-remote-restore-v13 claude-remote-restore-v14 claude-remote-restore-v15 claude-remote-restore-v16 claude-remote-restore-v17 claude-remote-restore-v18
+# claude-remote-restore-v18 — tmux socket guard for the app's own tmux anchor. The app runs it before any command
+# that may create a tmux server (a second server next to a live one is how 51 sessions got duplicated on 2026-11-02):
+#   exit 0  nothing listens on the default socket path, or the socket answers: the app goes on as before
+#   exit 3  it was unusable and is usable again (socket recreated with SIGUSR1, or directory made private): the app
+#           attaches a session that is still there instead of killing and restarting it
+#   exit 1  refused (split brain, hung, not healable): the app creates nothing; the reason goes to stderr
+set -u
+$SOCK_GUARD_FUNCS
+SG_WHO=app
+SG_QUIET='#quiet# '
+[ -e "${'$'}SG_OFF" ] && exit 0
+mkdir -p "${'$'}SG_DIR" 2>/dev/null
+# Only an event is logged: a normal launch must not create or grow any file. The last line carries rc and cause.
+# Lines the rate-limit stamp holds back (SG_QUIET in front) stay out of the log; a refused tab gets every line.
+SG_ALL=
+sg_run() {
+    local res tail out logged
+    res=${'$'}(sg_guard 2>&1; printf '%s %s' "${'$'}?" "${'$'}{SG_WHY:-}")
+    tail=${'$'}{res##*${'$'}'\n'}; out=${'$'}{res%"${'$'}tail"}
+    SG_RC=${'$'}{tail%% *}; SG_WHY=${'$'}{tail#* }
+    logged=${'$'}(printf '%s' "${'$'}out" | sed "/^${'$'}SG_QUIET/d")
+    [ -n "${'$'}logged" ] && printf '%s\n' "${'$'}logged" >> "${'$'}SG_DIR/sockheal.log"
+    SG_ALL="${'$'}SG_ALL${'$'}out"
+}
+sg_run
+# A heal that failed (lock not taken, listeners changed meanwhile, socket not back) mostly lost a race with another
+# tab's heal or attach: one more look after 0.5 s before the tab is refused (S3).
+if [ "${'$'}SG_RC" = 1 ] && [ "${'$'}SG_WHY" = heal ]; then sleep 0.5; sg_run; fi
+case "${'$'}SG_RC" in
+    0) exit 0;;
+    2) exit 3;;
+esac
+case "${'$'}SG_WHY" in
+    split) why="two tmux servers listen on ${'$'}SG_SOCK (split brain) — a human must pick the one that stays";;
+    hung) why="the tmux server on ${'$'}SG_SOCK does not answer";;
+    unsafe) why="${'$'}SG_SOCK_DIR is not a private directory of ours and cannot be made one";;
+    *) why="a tmux server is alive on ${'$'}SG_SOCK without its socket and it could not be recreated now";;
+esac
+printf '%s' "${'$'}SG_ALL" | sed "s/^${'$'}SG_QUIET//" >&2
+echo "claude-remote: ${'$'}why — not starting a second tmux server (details: ${'$'}SG_DIR/sockheal.log)" >&2
+exit 1
+SOCKHEAL_EOF
+            chmod +x "${'$'}SOCKHEAL.tmp.${'$'}${'$'}"
+            mv -f "${'$'}SOCKHEAL.tmp.${'$'}${'$'}" "${'$'}SOCKHEAL"
+            echo "SOCKHEAL_SCRIPT_INSTALLED"
         fi
         # REMOVED (was: an OWNING claude-tmux.service that "ended a create-race").
         # The create-race theory is refuted — a second `tmux new-session` on the

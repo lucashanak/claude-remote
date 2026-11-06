@@ -2,6 +2,7 @@ package com.clauderemote.testsupport
 
 import java.io.File
 import java.io.IOException
+import java.nio.file.FileSystems
 import java.nio.file.FileVisitOption
 import java.nio.file.FileVisitResult
 import java.nio.file.Files
@@ -9,6 +10,9 @@ import java.nio.file.LinkOption
 import java.nio.file.NoSuchFileException
 import java.nio.file.Path
 import java.nio.file.SimpleFileVisitor
+import java.nio.file.StandardWatchEventKinds
+import java.nio.file.WatchKey
+import java.nio.file.WatchService
 import java.nio.file.attribute.BasicFileAttributes
 import java.security.MessageDigest
 import java.util.Base64
@@ -27,7 +31,11 @@ import java.util.concurrent.TimeUnit
  *     - a directory, a symlink (its TARGET string — a symlink replaced by a regular file with the
  *       same bytes is a change) or any other node is recorded by type;
  *     - a regular file by type + SHA-256 of its content (files over [MAX_READ_BYTES]: size, mtime, inode);
- *     - `*.credentials.json` is NEVER opened: size + mtime + inode only;
+ *     - `*.credentials.json` is NEVER opened: size + mtime + inode only. A live OAuth refresh rewrites
+ *       `.credentials.json` of a config dir (`~/.claude`, `accounts/<a>`) under the lock `.oauth_refresh.lock` (a
+ *       directory) + `.oauth_refresh.lock.owner`; that change is tolerated ONLY when such a lock appeared or vanished in
+ *       the SAME config dir during the guard (snapshot difference or an inotify event). A bare credentials change, a
+ *       lock in another dir, or a credentials file that was created or deleted still fails;
  *     - files that are legitimately appended to by live processes (`logs/`, `events`) must still
  *       exist, must not shrink and, while they keep their inode, keep their first [HEAD_BYTES] bytes (a replacement
  *       by another inode that did not shrink is tolerated; over [MAX_READ_BYTES] only size and inode are compared);
@@ -38,7 +46,9 @@ import java.util.concurrent.TimeUnit
  *       directory of `plugins/cache` are compared (by content): they inject hooks and skills into every live session; every
  *       other plugin file contributes just its path name to the token search;
  *     - temp/lock files (`*.tmp.*`, `*.lock`, `.drift.*`, `temp_subdir_*`) are not recorded (they come and go, and
- *       one that vanishes while the tree is walked is simply skipped) but are still searched for the token.
+ *       one that vanishes while the tree is walked is simply skipped) but are still searched for the token; so are,
+ *       in a config dir, the entries of `telemetry`, the `session-…` entries of `tasks` and `.omc/update-check.json`
+ *       (a live Claude writes them).
  *     `~/.claude.json` is a live-rewritten file: existence and type only.
  *     Anything created, deleted, retyped or modified fails — including a marker created in a config
  *     dir (`~/.claude/claude-remote-hookev.installed`) and writes through the account symlinks
@@ -156,6 +166,8 @@ internal class LiveFileCanary(
         val tmux: TmuxState?,
         val socketKey: String?,
         val dirKeys: Map<String, String?>,
+        /** Paths of the OAuth refresh lock entries (`.oauth_refresh.lock*`) found directly in a config dir. */
+        val refreshLocks: Set<String> = emptySet(),
     )
 
     /** Walk roots: path (relative to the live home) and whether it is a directory tree. */
@@ -170,7 +182,7 @@ internal class LiveFileCanary(
         // appear and vanish by themselves (atomic-write temp files, lock files/dirs, the drift cron's scratch files,
         // the plugin installer's clone directories)
         if (name.contains(".tmp.") || name.endsWith(".tmp") || name.endsWith(".lock") || name.startsWith(".drift.") ||
-            name.startsWith("temp_subdir_")
+            name.startsWith("temp_subdir_") || name.startsWith(OAUTH_REFRESH_LOCK)
         ) return Tier.TRANSIENT
         return when {
             parts[0] == ".claude" -> if (parts.size >= 2) configTier(parts.drop(1)) else Tier.STRICT
@@ -198,6 +210,11 @@ internal class LiveFileCanary(
         val top = c[0]
         if (top in CONFIG_LIVE_TOP || CONFIG_LIVE_PREFIXES.any { top.startsWith(it) }) return Tier.PRESENCE
         return when (top) {
+            // written by every live Claude behind each test's back (false alarms in 3 review runs, kolo 2): its
+            // telemetry, its per-session task dirs and the oh-my-claudecode update check. Nothing next to them.
+            "telemetry" -> if (c.size >= 2) Tier.TRANSIENT else Tier.STRICT
+            "tasks" -> if (c.size >= 2 && c[1].startsWith("session-")) Tier.TRANSIENT else Tier.STRICT
+            ".omc" -> if (c.size == 2 && c[1] == "update-check.json") Tier.TRANSIENT else Tier.STRICT
             // user skills are content that every live session loads; only the sync cache is live-written
             "skills" -> if (c.size >= 2 && c[1] == "synced") Tier.PRESENCE else Tier.STRICT
             // plugins: ~1 GB, only the files that inject hooks into live sessions are compared by content
@@ -219,6 +236,7 @@ internal class LiveFileCanary(
         val needles = if (token == null) emptyList() else needles(token)
         val entries = HashMap<String, Entry>()
         val hits = ArrayList<String>()
+        val locks = HashSet<String>()
         val nofollow = LinkOption.NOFOLLOW_LINKS
 
         fun record(p: Path, attrs: BasicFileAttributes): FileVisitResult {
@@ -226,6 +244,7 @@ internal class LiveFileCanary(
             val rel = relOf(p)
             var tier = tierOf(rel)
             val key = p.toString()
+            if (p.fileName.toString().startsWith(OAUTH_REFRESH_LOCK) && isConfigDir(p.parent)) locks.add(key)
             if (token != null && key.contains(token)) hits.add("canary: test token found in the NAME of live path $key")
             if (tier == Tier.TRANSIENT) {
                 if (token != null && attrs.isRegularFile && attrs.size() <= MAX_READ_BYTES && readFile(p, needles, 0).found) {
@@ -301,7 +320,65 @@ internal class LiveFileCanary(
                 hits.add("canary: test token found in LIVE file $cj")
             }
         }
-        return Snapshot(entries, hits, tmuxState(), tmuxSocket?.let { inodeOf(it) }, watchedDirs.associate { it.path to inodeOf(it) })
+        return Snapshot(entries, hits, tmuxState(), tmuxSocket?.let { inodeOf(it) }, watchedDirs.associate { it.path to inodeOf(it) }, locks)
+    }
+
+    /** `~/.claude` or `~/.claude-remote/accounts/<a>`: the dirs where Claude keeps `.credentials.json` and its refresh lock. */
+    private fun isConfigDir(dir: Path?): Boolean {
+        if (dir == null || !dir.startsWith(liveHome.toPath())) return false
+        val rel = relOf(dir).split('/')
+        return rel == listOf(".claude") || (rel.size == 3 && rel[0] == ".claude-remote" && rel[1] == "accounts")
+    }
+
+    /** The config dirs that exist now as real directories (an account that is a symlink is not watched through it). */
+    private fun configDirs(): List<Path> {
+        val out = ArrayList<Path>()
+        val claude = File(liveHome, ".claude").toPath()
+        if (Files.isDirectory(claude, LinkOption.NOFOLLOW_LINKS)) out.add(claude)
+        File(liveHome, ".claude-remote/accounts").listFiles().orEmpty()
+            .map { it.toPath() }.filterTo(out) { Files.isDirectory(it, LinkOption.NOFOLLOW_LINKS) }
+        return out
+    }
+
+    /**
+     * Watches the config dirs for an OAuth refresh lock that appears AND vanishes between the two snapshots (a refresh
+     * takes a fraction of a second, so neither snapshot may see it). Metadata events only, nothing is read.
+     */
+    private inner class RefreshLockWatch : AutoCloseable {
+        private val service: WatchService? = try { FileSystems.getDefault().newWatchService() } catch (_: Exception) { null }
+        private val keys = HashMap<WatchKey, Path>()
+        private val seen = HashSet<String>()
+
+        init {
+            for (dir in configDirs()) {
+                try {
+                    if (service != null) keys[dir.register(service, StandardWatchEventKinds.ENTRY_CREATE, StandardWatchEventKinds.ENTRY_DELETE)] = dir
+                } catch (_: Exception) { /* a dir that vanished: nothing to tolerate there */ }
+            }
+        }
+
+        private fun drain(first: WatchKey?) {
+            var key = first
+            while (key != null) {
+                val dir = keys[key]
+                for (ev in key.pollEvents()) {
+                    val name = (ev.context() as? Path)?.toString() ?: continue
+                    if (dir != null && name.startsWith(OAUTH_REFRESH_LOCK)) seen.add(dir.toString())
+                }
+                key.reset()
+                key = service?.poll()
+            }
+        }
+
+        /** Config dirs (as path strings) in which a refresh lock was created or deleted; waits up to [waitMs] for late events. */
+        fun dirsWithLockEvents(waitMs: Long): Set<String> {
+            val s = service ?: return emptySet()
+            drain(s.poll())
+            if (waitMs > 0) drain(s.poll(waitMs, TimeUnit.MILLISECONDS))
+            return seen
+        }
+
+        override fun close() { try { service?.close() } catch (_: Exception) { /* closing a watch */ } }
     }
 
     /** Read-only `list-sessions` / `list-clients` against the live server's socket, with the REAL tmux (not the PATH shim, which refuses it). */
@@ -406,7 +483,8 @@ internal class LiveFileCanary(
         assertIsolated(testHome, tempRoot)
         val tmux = File(tempRoot, "t").apply { mkdirs() }
         val env = GuardEnv(testHome, tmux, token)
-        val before = snapshot(null)
+        val watch = RefreshLockWatch()
+        val before = try { snapshot(null) } catch (t: Throwable) { watch.close(); throw t }
         var result: T? = null
         var failure: Throwable? = null
         try {
@@ -416,10 +494,12 @@ internal class LiveFileCanary(
         }
         val violation: Throwable? = try {
             env.reap()
-            verify(before, snapshot(token))
+            verify(before, snapshot(token), watch)
             null
         } catch (v: AssertionError) {
             v
+        } finally {
+            watch.close()
         }
         if (violation != null) {
             failure?.let { violation.addSuppressed(it) }
@@ -430,9 +510,14 @@ internal class LiveFileCanary(
         return result as T
     }
 
-    private fun verify(before: Snapshot, after: Snapshot) {
+    private fun verify(before: Snapshot, after: Snapshot, watch: RefreshLockWatch? = null) {
         val problems = ArrayList<String>()
         val falseAlarm = "possible FALSE ALARM if a live process or the live app wrote it: rerun to confirm"
+        // Config dirs where an OAuth refresh lock appeared or vanished: computed lazily, only a credentials change asks.
+        val refreshed: Set<String> by lazy {
+            val changed = (before.refreshLocks - after.refreshLocks) + (after.refreshLocks - before.refreshLocks)
+            changed.mapNotNull { File(it).parent }.toSet() + (watch?.dirsWithLockEvents(REFRESH_EVENT_WAIT_MS) ?: emptySet())
+        }
         for (path in (before.entries.keys + after.entries.keys).sorted()) {
             val b = before.entries[path]; val a = after.entries[path]
             when {
@@ -457,6 +542,9 @@ internal class LiveFileCanary(
                         problems.add("canary: append-only live file $path was truncated or rewritten during the test (size ${b.size} -> ${a.size}); $falseAlarm.")
                     }
                 }
+                // a live OAuth refresh: the credentials of a config dir rewritten while its refresh lock came or went
+                b.detail != a.detail && b.tier == Tier.CREDENTIALS && a.tier == Tier.CREDENTIALS && File(path).name == ".credentials.json" &&
+                    isConfigDir(File(path).toPath().parent) && File(path).parent in refreshed -> Unit
                 b.detail != a.detail -> problems.add(
                     "canary: live file $path was modified during the test" +
                         (if (b.kind == "symlink") " (symlink target ${b.detail} -> ${a.detail})" else "") + "; $falseAlarm.",
@@ -552,6 +640,17 @@ internal class LiveFileCanary(
 
     companion object {
         const val TAG_VARIABLE = "CRIT_CANARY_TAG"
+
+        /**
+         * Claude Code's OAuth refresh lock in a config dir: `.oauth_refresh.lock` (a proper-lockfile directory) and
+         * `.oauth_refresh.lock.owner`. Measured 2026-11-04 from the names alone (`ls` of the config dirs, the string
+         * table of claude 2.1.318: `lockfilePath: join(configDir, ".oauth_refresh.lock")`, `".oauth_refresh.lock.owner"`);
+         * no credentials file was opened.
+         */
+        const val OAUTH_REFRESH_LOCK = ".oauth_refresh.lock"
+
+        /** How long [verify] waits for a late inotify event before it reports a credentials change. */
+        const val REFRESH_EVENT_WAIT_MS = 300L
 
         /** Files above this are not read: size + mtime + inode instead of a content hash, and no token search. */
         const val MAX_READ_BYTES = 64L * 1024 * 1024
