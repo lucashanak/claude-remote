@@ -155,7 +155,12 @@ canary compares a fingerprint of the live home taken before and after:
   so a truncation, an atomic rename, a delete-and-recreate, a symlink replaced
   by a regular file with the same bytes and a marker created in a config dir
   (`claude-remote-hookev.installed`) all fail;
-- `*.credentials.json` is never opened: size + mtime + inode only;
+- `*.credentials.json` is never opened: size + mtime + inode only. A live OAuth refresh rewrites a config dir's
+  `.credentials.json` (`~/.claude` or `~/.claude-remote/accounts/<a>`) under the lock `.oauth_refresh.lock` (a directory) and
+  `.oauth_refresh.lock.owner` (names measured from `ls` and the claude 2.1.318 string table, no credentials opened). That change is
+  tolerated only when such a lock appeared or vanished in the SAME config dir during the guard (snapshot difference or an inotify
+  event, so a refresh that starts and ends between the snapshots counts). A bare credentials change, a lock in another dir, a lock
+  that stood unchanged throughout, or credentials created or deleted still fail;
 - append-only live files (`logs/`, `events`, top-level `*.log`) must still
   exist and not shrink; while they keep their inode they keep their first 64 KiB (a file
   replaced by another inode that did not shrink is tolerated: the log shipper trims through a rename);
@@ -195,10 +200,13 @@ search, except `hooks*.json` and `SKILL.md` outside `marketplaces` and the files
 which are compared by content (they inject hooks and skills into every live session; a script in a deeper subdirectory of `scripts`
 is not). User `skills`,
 `settings*.json` and the rest of a config dir are compared by content.
-Temp and lock files (`*.tmp.*`, `*.lock`, `.drift.*`) are not recorded because they come and go, and one that vanishes
-while the tree is walked is skipped; they are still searched for the token. Files over 64 MiB are compared by size/mtime/inode.
+Temp and lock files (`*.tmp.*`, `*.lock`, `.drift.*`, `.oauth_refresh.lock*`) are not recorded because they come and go, and one that vanishes
+while the tree is walked is skipped; they are still searched for the token. The same holds, in either kind of config dir, for what every live
+Claude writes behind a test's back: the entries of `telemetry`, the `session-*` entries of `tasks` and `.omc/update-check.json` (false
+alarms in three review runs). Their neighbours stay compared, and `.credentials.json` keeps its own rule. Files over 64 MiB are compared by size/mtime/inode.
 A live user who opens or closes a tmux session during a run raises a false alarm (the message says so; rerun).
-Known blind spots: an in-place change of a credentials file that keeps size, mtime and inode;
+Known blind spots: an in-place change of a credentials file that keeps size, mtime and inode; a credentials rewrite made
+while a real refresh lock of that dir came or went;
 anything written below the live-rewritten trees; a test that swallows the canary's
 `AssertionError` itself (`assertFailsWith<AssertionError>` around `guard`).
 
@@ -275,11 +283,13 @@ Targets were chosen by *churn × fragility*, not coverage percentage.
   bar and no-bar forms, last-match-wins semantics over the rolling buffer (an
   older `thinking` render must not re-assert WORKING after going idle),
   reset-time parsing with any of `(XdYhZm)` omitted, and that "no statusline"
-  yields `null` rather than `false`.
+  yields `null` rather than `false`. For a session with hook events (CAP=1) the
+  working/idle parse returns `null` (`HookCapDetectorTest`): there the hooks own
+  the state (`HookStateNotifyTest`).
 
 - **Embedded restore/drift bash** — `SessionPersistenceService` carries a
-  ~615-line bash installer as a Kotlin raw string, which writes `restore.sh`
-  and `drift.sh` to the user's server via heredocs. It has been through 14
+  ~700-line bash installer as a Kotlin raw string, which writes `restore.sh`,
+  `drift.sh` and `tmux-sockheal.sh` to the user's server via heredocs. It has been through 14
   revisions and one of them SIGSEGV'd the tmux server, killing every session.
   The test extracts all three layers and syntax-checks them (`bash -n`, plus
   `shellcheck` when available). Note `bash -n` on the outer script does *not*
@@ -363,6 +373,41 @@ construction.
   `proj--cashy-2` exists.
 - **drift self-heal**: kill one restored session, run the real `drift.sh`,
   assert only that one is relaunched and the healthy sibling is untouched.
+- **the tmux socket guard** (B3, marker v18), in the fixture's private
+  `TMUX_TMPDIR` only: the socket file deleted, the whole `tmux-<uid>` directory
+  deleted, and a split brain (a second server on the same path holding part of
+  the sessions). drift must heal the first two with SIGUSR1 in the SAME server
+  (pid, `session_created` and manifest unchanged, nothing relaunched) and must
+  neither signal nor relaunch in the third; `restore.sh` and the app's tmux
+  anchor (`ClaudeConfig`) must refuse there too. A `-L other` server in the same
+  directory and one in another `TMUX_TMPDIR` keep their socket inodes. Also: the
+  `/proc/net/unix` fallback (an `ss` shim that fails), the `drift-heal.off`
+  rollback, a no-op tick writing nothing, and an upgrade over v17 scripts
+  (rewritten by rename: new inode). Kolo 2: a tab reconnecting on a PTY after
+  the socket was deleted (both the `attach || relaunch` form and the bare
+  relaunch) keeps its pane pid; the stale socket file a failed `tmux attach`
+  leaves is healed; a hung server (SIGSTOP of the private server, SIGCONT in
+  `finally`) is never relaunched next to and the anchor refuses non-zero with
+  the cause; a socket directory re-created 755 is made 700 again; a
+  non-canonical `TMUX_TMPDIR`; an install interrupted by a failing `chmod`
+  leaves no temp file; nothing the fixture starts sees `CLAUDE_CONFIG_DIR`.
+  Kolo 3: tabs that relaunch one after another after the first one healed the
+  socket, and a tab after a drift tick healed it, keep their pane pids; the
+  heal re-checks the listeners under the lock (`sg_heal` called while two
+  servers listen: rc 1, nobody signalled); a hung server is refused within one
+  5 s wait; a split brain lands in drift.log, restore.log and sockheal.log.
+  Kolo 4: a fresh launch of a taken name is refused non-zero and leaves that
+  session's pane pid and `session_created` alone, and the free name
+  (`freshTmuxSessionName`) runs a fresh `claude` stand-in in the chosen folder
+  (the pane's login shell gets the stand-in's `PATH` from a test
+  `.bash_profile`); a relaunch after a heal attaches with the real
+  `TmuxProbes.singleClientPreamble`, so this device's old client is detached and
+  the marker names the new one; `sg_probe` reads "No such file or directory" as
+  stale; the app's guard looks once more after a heal that lost the lock (the
+  lock held by a local `flock` until the first attempt's log stamp appears); a
+  refused tab gets the cause on stderr every time while sockheal.log gets it
+  once; an unknown listener pid stays `?` in the split-brain line with a file
+  `t` in the cwd.
 - **Eternal Terminal** round-trips a command through a real `etserver`, and
   `mosh-server new` really emits the `MOSH CONNECT <port> <key>` line the app
   parses.
@@ -380,6 +425,10 @@ socket, and the test JVM is started from inside one of them, so it inherits
 
 - `TMUX`/`TMUX_PANE` are stripped from the test JVM, from the daemon, and from
   every child process.
+- `CLAUDE_CONFIG_DIR` (the live session's account dir) is stripped by `SshdFixture` from `run()`, the
+  sshd daemon and `wrap.sh`: a claude stand-in in the private server would otherwise read the LIVE
+  `settings.json` (`ExecRoutingIntegrationTest.capVerdict…` was red locally, green on CI). The Gradle
+  Test task itself does not strip it yet (root `build.gradle.kts` is outside B3).
 - Every tmux call passes an explicit `-S <private socket>`.
 - `kill-server` runs only after asserting the socket is inside the fixture root.
 - Teardown kills tracked PIDs, never `pkill -f <pattern>` — that matches any

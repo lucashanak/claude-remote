@@ -133,7 +133,21 @@ suspend fun killSession(session: Session, sessionName: String): Boolean
 // Build attach-or-create command
 fun buildAttachCommand(sessionName: String): String
 // Returns: tmux new-session -A -s 'name' \; set-option -g mouse on
+
+// What a NEW session must not be named: tmux sessions + names in sessions.json; THROWS on failure
+suspend fun listForFreshName(session: Session): FreshNameListing
 ```
+
+`listForFreshName` (quick connect, Connect screen) never gives up its channel in the middle of the OPEN (K5-1):
+jsch abandons a channel interrupted before the server confirmed it without sending CLOSE (it has no recipient
+yet), and the late confirmation left sshd a session nobody closes — one `MaxSessions` slot gone for the life of the
+transport, while the client had returned its permit. So only the read is interruptible (the caller's 3 s / 6 s
+timeout ends it, and the opened channel is closed); a stalled OPEN delays the timeout by up to its 5 s connect
+limit. The server bounds the listing itself (K5-2): `timeout 2 sh -c "tmux list-sessions …; cat sessions.json"`
+(the signal reaches the tmux CLIENT and `cat`, never the tmux server); status 124 or a missing status line reads as
+a failure, so a hung tmux or file read never keeps sshd's session after the client gave its slot back. The creation
+of a new session is bounded the same way (K6-1, `ClaudeConfig.buildFreshCreateCommand`: 10 s for the creation,
+3 s for each check, below the client's 20 s). Both need coreutils `timeout` on the server.
 
 ### Remote Folder Operations
 
@@ -229,6 +243,14 @@ suspend fun launchSession(
     connectionType: ConnectionType,
     tmuxSessionName: String
 ): ClaudeSession {
+    // 0. V16: a NEW session is created first, over an exec channel (exec transport / counted channel / the pooled
+    //    transport the tab leases next): `new-session -d … -e CR_LAUNCH=<nonce>`; a taken name moves on to the next
+    //    free one, a lost answer is recognised by the nonce. No channel or a refusal: readable error, no tab.
+    //    The server bounds the creation (`timeout 10 sh -c …`, 3 s per check; status 124 = lost answer, K6-1).
+    //    Ended without its tab after a creation was sent (cancelled, every answer lost): the session it created is
+    //    killed only when it carries the nonce (R6-2/R6-3). A second launch of the same (server, requested name)
+    //    while this one creates joins it: its tab, or its error (R6-1).
+    //    The tab below then ATTACHES it (single-client attach), on SSH, mosh and ET alike.
     // 1. Create session object
     val session = ClaudeSession(...)
     tabManager.addTab(session)
@@ -317,8 +339,15 @@ A transport has a **role** and the pool key is `(host, port, viaProxy, role)`:
   the handshake itself runs outside the mutex in a pool-owned coroutine (`SingleFlight`). A
   reconnect wave of N tabs therefore starts at most `ceil(N / cap)` handshakes, at most
   `MAX_PARALLEL_HANDSHAKES` = 3 of them at once (the bound lives in the pool: `SingleFlight.tryJoin`
-  refuses a fourth connect of the key and the claimant waits for the oldest one, then asks again; see
-  "Handshake gate").
+  refuses a fourth connect of the key and the claimant waits until ANY of the key's running connects ends
+  (`select` over the snapshot `SingleFlight.pendingAll`, taken under the mutex with the refusal), then asks again; see
+  "Handshake gate"). Waiting for the oldest one held a throttled tab behind a slow handshake although a fast one had
+  long freed a slot. That wait is bounded: when no handshake of the key has succeeded for `connectTimeout` (counted
+  from the lease's start, restarted by every success it sees), the lease fails with `IOException("no handshake slot
+  ...")` like a claimant whose handshake timed out. A blackhole thus fails a wave of 49 tabs after one
+  `connectTimeout` (+ at most one handshake) instead of round after round; a slow wave that keeps connecting is never
+  cut. The shell cap is read again on every pass of the lease loop, so tabs still waiting when the exec transport
+  comes up pack by 8, not 3.
   A cancelled initiator neither cancels the handshake for the others nor leaks its session:
   when the handshake finishes with nobody left it is disconnected. A failed handshake fails
   every waiter at once and is forgotten.
@@ -336,8 +365,32 @@ starts with the background interval.
 **Log lines** (parsed by the metrics extractor, so keep the shape):
 `New transport to <host>:<port> role=shell|exec route=lan|tunnel|cf|unknown (<n> in pool)`,
 `Awaited in-flight transport (<ms>ms)`, `Transport for <server>: <choice> -> <host> (cf=<bool>) route=...`,
-`Exec transport <server> up via TS|CF|DIRECT in <ms>ms route=...`,
-`Exec transport <server> down after <ms>ms via TS|CF|DIRECT`. `route` says which path the
+`Exec transport <server> up via TS|CF|DIRECT in <ms>ms route=... (resolve=<ms>ms lease=<ms>ms forwards=<ms>ms total=<ms>ms wall=<ms>ms)`
+(the phases and `in` are monotonic (`nanoTime`), so a process frozen by Doze no longer shows up as a 400 s connect;
+`wall` is the wall-clock span for diagnosis),
+`Exec transport <server> down after <ms>ms via TS|CF|DIRECT[ (network lost)]`,
+`Tailscale transport died <ms>ms after connect for <tab> on <server>[ transport=<id>][ transport_age=<ms>ms]` (one line
+per tab; `<ms>` is the TAB's age, which the strike rule uses; `<id>` is the hex identity hash of the shared jsch session,
+the key of the strike debounce, left out when the tab's transport is unknown; `transport_age` is the transport's own age,
+counted from the first tab that connected on it, left out when unknown). Metric M7 (decision V13) counts TRANSPORTS on
+both sides: the numerator is the Tailscale transports that died young (by `transport_age` where the line has it, else by
+the tab's age: a tab that joined a transport up for an hour and died with it is no young death; the tab lines of one
+server and transport id within 30 s are one death, an exec `down ... via TS` line is one, and one lost with the network
+is none), the denominator the `New transport ... role=` lines (shell and exec) to a host some
+`Transport for <server>: TAILSCALE -> <host>` decision chose, so a server without Tailscale does not dilute it. A link
+outage that takes a server's 3 transports is 3 of 3. Lines without an id (older logs) fall back to one wave per server
+within 2 s. The numerator counts only deaths of the same log generation as the denominator, i.e. after a
+`New transport ... role=` line: a build before that logged `New transport ... (<n> in pool)` without `role=`, so on the
+day of an update its deaths had no transports to divide by (2026-11-03 on the phone: 218/18 = 12.1, now 1/18); a day
+with no denominator is `n/a`. Known limits: a server pinned to Tailscale logs no decision line, so its transports are not
+in the denominator; the transport's age starts at its first tab's connect, not its handshake (the attach is not in it). `tools/relay-metrics` and `TransportResolverDeathLineTest` keep the two sides in step,
+`Exec transport <server> reroute probe: direct endpoint offered|still the fallback (<n>/2)`,
+`Exec transport <server> rerouted <via> -> <via> in <ms>ms route=...`,
+`Exec transport <server> reroute <via> -> <via> failed after <ms>ms, staying on <via>: ...`,
+`Transport for <server>: CLOUDFLARE (cooling down|no tailscale host|probe failed)[ [exec]]`,
+`Transport probe <server> <host>:<port> attempt <n>/2 ok after <ms>ms|failed after <ms>ms: <reason>`,
+`Transport to <host>:<port> role=shell|exec route=... ended after <ms>ms: cause=<reason>` and the tab's
+`Connection lost cause=<reason> ...` (see "Why a transport ended"). `route` says which path the
 socket really took: `cf` (Cloudflare tunnel), `tunnel` (the socket's local or remote address is in
 Tailscale's 100.64.0.0/10 or fd7a:115c:a1e0::/48, or its interface is a tun/tailscale one), `lan`
 (anything else, loopback included), `unknown` (the local address could not be read). A Tailscale
@@ -357,7 +410,15 @@ Tailscale strike rule and reconnects after a backoff.
 - `DownNetwork` heals by itself: it retries every 10 s (30 s in the background), at once on
   `onNetworkAvailable`, and on demand when someone `await`s or asks for the `session`.
 - `Closed` is never revived by `await`, `session` or the network callbacks; only an explicit
-  `ensure` re-opens it.
+  `ensure` re-opens it. The supervisor writes its states under the entry lock and only while it is the entry's run
+  and the entry is not closed (review B-3 F1): a `close()` that lands after its last `closed` check (just before
+  `Connecting`, during a connect that then fails, while it lets a dead transport go) stays `Closed`, and a connect that
+  fails after the close is no Tailscale strike, not even when an `ensure` has opened a new run in between (only the
+  entry's current run strikes, review B-4 K4-5). The same holds at the end of the watch (review B-5 K5-3): a run that
+  `close()` and a new `ensure()` ended while it was in non-suspending code (e.g. a forward re-bind) leaves the watch
+  without a "down after" line, a generation bump on the new run's transport, a strike, or a stable report
+  (`onStable`), and the strike is checked again after the lifetime is read. `onNetworkLost` / `onNetworkAvailable` check `closed` and write under
+  the same lock (review B-4 L2), so a `close()` racing the network callback also stays `Closed`.
 - Backoff: 0, 1, 2, 4, 8, 16, 30 s in the foreground; twice that, at least 5 s and at most 60 s,
   in the background (`background = true`). A transport that lived 60 s resets it.
 - Strikes: only a Tailscale transport that died within 30 s of coming up counts
@@ -366,10 +427,24 @@ Tailscale strike rule and reconnects after a backoff.
   is gone (`networkLost`): then every attempt fails and none says anything about Tailscale.
   A Tailscale transport that stays up past the 30 s window clears the strike streak
   (`TransportResolver.noteServerTransportStable`). Cloudflare is the last resort and never strikes.
+  The tabs of ONE shared transport report its death one by one within milliseconds; they are one strike, not one
+  per tab (`TransportResolver.tsStrikeDebounced`: one strike per transport identity per 1 s; two different
+  transports dying together are still two). A strike for a LAN death stays: the strike rule itself is unchanged.
+- The resolver's probe is serialised per SERVER (a probe can take 14.5 s and used to hold up every other server's
+  resolve). The exec transport resolves inside `withContext(ResolveForExec)` and does not take a cached decision that
+  came from a FAILED probe (the tabs keep the one-decision-per-wave rule for 10 s): it probes again.
+- **Back from the fallback (F1).** An exec transport that came up on the fallback endpoint (Cloudflare on the phone)
+  of a server with a Tailscale/LAN host, not pinned to Cloudflare, looks for the way back from its watch loop: after
+  it has lived 60 s, at most one probe (a fresh `resolve` as the exec transport) per 60 s, only in the foreground,
+  never within 5 min of the last move or tried move (`ExecTransportPolicy.REROUTE_*`). Two probes IN A ROW that
+  offer the direct endpoint move it, make-before-break: lease the new transport, publish it (`generation++`, state
+  `Up(newVia)`), move the port forwards, and let the old transport go 5 s later. A failed move keeps the old transport
+  and is no strike. The probe runs detached, so a death is still noticed while it runs; a gap of more than 30 s
+  between two watch passes (a wake from Doze) restarts the schedule, so the wake adds no probe to its reconnect wave.
 - A `DownNetwork` nudge (from `session()`/`await()`) is limited to once per 2 s in the foreground
   and once per half retry period in the background, so a poller does not turn the slow
   background pace into a connect every 2 s.
-- `generation(serverId)` increases on every death, network loss and close.
+- `generation(serverId)` increases on every death, network loss, close and move back from the fallback.
 - Port forwards: while the exec manager owns a server's forwards
   (`ServerTransportPool.setExecForwardsOwned`) a shell session does not register them; the
   manager registers them again after every reconnect. They therefore keep working with zero tabs.
@@ -378,6 +453,43 @@ Tailscale strike rule and reconnects after a backoff.
   forwards are not available even though the tabs run. Shell sessions do not bind them in the
   meantime on purpose: a forward bound on a shell would collide with the exec transport's bind
   when it comes back, and would die with that shell's transport without anyone rebinding it.
+  A move back from the fallback (F1 above) unbinds them on the old transport and binds them on the new one
+  right after it is published. They cannot be bound on the new one first: an L port is a listener of this process,
+  an R port one of the old sshd process, and a second bind of either fails. The port may also stay taken for a moment
+  after the unbind (the old listener under load; for R, jsch sends `cancel-tcpip-forward` with want-reply=0, so the
+  old sshd may not have let the port go yet). So each bind of a move is tried up to 5 times, 200 ms apart
+  (`ExecTransportPolicy.FORWARD_BIND_TRIES` / `FORWARD_BIND_RETRY_MS`), and a forward still unbound after that (or
+  after a reconnect's single try) is bound again on every watch pass (5 s) for as long as the transport lives, so at
+  the latest one pass after the old transport is gone. Only a quick refusal is retried: a try that failed after more
+  than 1 s (`FORWARD_BIND_QUICK_MS`), or on a transport that is no longer connected, ends the move's tries and leaves
+  the forward to the watch. A transport that stalls without a RST makes jsch wait 10 x 1 s for the reply of each R
+  request, so 5 tries held the move, and the watch it runs in, for 51 s; a taken port is refused at once. Such a slow
+  (or dead-transport) failure also ends the whole pass, in a move, a connect and every watch pass alike (review B-3
+  R3-2, OQ1): the forwards not tried yet go to the watch untried, so a stalled transport costs one 10 s wait per pass,
+  not one per R forward (a move with 2 R forwards took 20 s). The untried forwards go first on the next pass, so one
+  forward that always fails slowly does not keep the watch from the others. Lines:
+  `Exec transport <server>: port forward <L|R> <localPort> <-> <host>:<remotePort>[ (try <n>/5)| bound again]`,
+  `... port forward <L|R> <localPort> failed|not bound after 5 tries|not bound (try <n>/5 took <ms>ms|try <n>/5, the
+  transport is down): <reason>; the watch binds it again` (logged once; the watch's failed re-binds are silent),
+  `... <n> more forward(s) left to the watch untried (<why>)` and `... not freed on the old transport: <reason>`.
+  Known limit (review B-2, OQ1): an R forward is requested for `localhost`, which sshd (with `GatewayPorts no`) binds on
+  127.0.0.1 and ::1 and reports bound when either family succeeds. If a foreign process held one family's port (the old
+  sshd frees both in one cancel), the forward would be bound on the other family only: jsch counts it bound, nothing
+  retries it, and clients of the held family are refused until the transport ends. It is not bound on `127.0.0.1`
+  explicitly, because that would drop the ::1 listener that `localhost` clients may try first.
+
+### Why a transport ended
+
+Log only; nothing behaves differently. Every pooled jsch session gets a `TransportEnd` as its jsch `Logger`: jsch
+reports why its main loop stopped (`Caught an exception, leaving main loop due to <message>`, the message only) to
+nobody but a logger, and `TransportEnd` keeps that message. When WE close a transport (`teardownAll` on a network
+change, a drained or idle transport, a write-timeout zombie pruned after `reportDead`, a handshake nobody waits for any
+more) the cause is ours, `local: <why>`, and the first word wins. Lines:
+`Transport to <host>:<port> role=... route=... ended after <ms>ms: cause=<reason>` (pool), and the tab's
+`Connection lost cause=<reason>` (`SshManager` read loop): `cause=local: <why>` for our own close,
+`cause=transport: <jsch's reason> (channel: <end>)` when the transport ended under the tab, else the channel's own end
+(`EOF`, `<Exception>: <message>`, `channel closed`) with `transport=up|down exitStatus=<n>`. This is what tells the
+`channel is not opened` failures with `exitStatus=-1` (a dead transport) apart by cause.
 
 ### Channel budget
 
@@ -393,6 +505,14 @@ transport it borrowed (`reserveChannel`, so a shell lease cannot fill the transp
 back) and is ended with EOF when the exec transport comes `Up` again, so its owner reopens it
 there. With the exec transport in `Down` or `Closed` a SHORT call answers `NOT_UP` at once instead
 of waiting; only `Connecting` is waited for.
+
+Limit (P-1, adversarial review round 5, older than this batch): every `ch.connect(5000)` of the exec layer and of
+the one-off helpers (`RemoteExec`, `TmuxManager`, about 26 places) gives up an OPEN after 5 s the same way. When
+the link stalls longer than that and then recovers (Starlink), sshd keeps the session that the late confirmation
+opened, and the client counts that slot as free: measured 11 stalls of 6 s, then 3 of 3 further channels refused
+(`no more sessions`) on a transport that still reads as connected. Not fixed here — it needs the pool to count such
+an orphaned OPEN (or to replace the transport from the first one), or a jsch patch that answers an unknown
+confirmation with CLOSE. Next batch.
 
 `PooledRemoteExec.run` runs one command on a gated channel, bounded by a wall-clock watchdog that
 is independent of the caller. The bound `totalMs` is an absolute deadline: waiting for a permit
@@ -526,17 +646,36 @@ Lifecycle:
   17 transports where 7 do. `restoreAndReconnect`, `onNetworkLost` and `onNetworkAvailable` open a window of
   3 s (`EXEC_WAVE_WAIT_MS`, together, not per tab); `reconnectSession` and `autoReconnect` wait inside it for
   `execManager.await(serverId)` when the exec transport is `Connecting` or `DownNetwork` (not when it is
-  Down in a backoff, closed or switched off). Whatever is not up by then connects at cap 3 as before.
+  Down in a backoff, closed or switched off). Whatever is not up by then starts at cap 3; a lease still waiting in
+  the pool when the exec transport comes up reads the cap of 8 on its next pass. Measured with 2 s handshakes and 49
+  tabs (`ExecRerouteIntegrationTest`): exec transport up after 3 s = at most 8 transports (17 on c2915d1, which read
+  the cap once per lease); up after 9 s, when the wave is over, = 17, as expected.
 - `setBackgroundMode` sets `PoolExecTransportManager.background` (slower reconnect pace) next to the
   keepalive. The desktop never reports a background mode.
 - `close(serverId)` runs in `disconnectSession` once the LAST tab of the server is gone (after `removeTab`;
   a tab that is being closed is in `closingIds` and no longer counts as a reason to start the transport, so a
   reconnect of it that is still in flight cannot revive it behind the close), and in `releaseExecLayer()`.
-  `disconnectAll()` calls the latter; no platform calls `disconnectAll` today. The Android `MainActivity`
-  calls `releaseExecLayer()` on the orchestrator it replaces: a recreated activity builds a new orchestrator
-  with its own `TabManager`, so the old one is unreachable from the UI, and its exec supervisors would
-  reconnect for ever. (Closing just them leaves every tab as the user sees it; the old orchestrator's own
-  tab connections are a leak that predates the exec layer and is untouched.)
+  `disconnectAll()` calls the latter; no platform calls `disconnectAll` today. `ensureExecTransport` and every
+  close (the last tab gone, the `exec` flag switched off, `releaseExecLayer`) decide and act under one
+  per-server lock (`execLock`), so a tab opened while the last one closes keeps (or restarts) the transport and
+  a kill switch or a release is never undone by an ensure that was already past its checks (`releaseExecLayer` visits
+  every server that has a lock, not only the ones ensured so far, so the very first ensure of a server that is past
+  its checks is waited for and closed too). The Android
+  `MainActivity` calls `shutdown()` on the orchestrator it replaces: a recreated activity builds a new
+  orchestrator with its own `TabManager`, so the old one is unreachable from the UI. `shutdown()` sets
+  `released` (from then on `ensureExecTransports`, `ensureExecTransport`, the bootstrap kick, `reconnectSession`,
+  `autoReconnect`, the reconnect sweep and the network events do nothing), closes its exec transports, cancels its
+  background scope (transcript, status and git pollers, notify watcher, reconcile and retry loops, which would
+  otherwise go on polling through the process-wide `SshSessionHelper`, now wired to the new orchestrator), stops the
+  native mosh / ET clients of its tabs (each would stay attached to tmux as a stale client) and detaches its shells.
+  A mosh / ET connect still running at that moment registers its client after the snapshot; it sees `released` there
+  (`adoptMosh`/`adoptEt`: put first, then the check) and stops the client itself.
+  The tmux sessions stay; the new orchestrator attaches its own.
+- **Network callback.** One default-network callback per PROCESS (`NetworkCallbackHub`, registered by the first
+  activity on the application's `ConnectivityManager`), delivered to the current `OrchestratorHolder.orchestrator`:
+  `onLost` → `onNetworkLost`, `onAvailable` → `onNetworkAvailable` and the orchestrator's `reconnectDeadTabs`
+  sweep (DISCONNECTED and ERROR tabs, one sweep at a time, in the orchestrator's scope). It is never unregistered:
+  the process (KeepAliveService) must keep reacting to the network while no activity exists.
 - **Kill switch at run time.** The orchestrator watches `CommFlags.effectiveFlow(serverId).exec` of every
   server that has a tab. `exec` going off (Settings, the legacy set, a server-side force-off) closes the
   server's exec transport (its supervisor would otherwise revive it and feed the Tailscale strike rule),
@@ -568,7 +707,7 @@ Lifecycle:
   push. Every coroutine the exec paths launch catches and logs its failure (`launchGuarded`), and the
   orchestrator's scope has a `CoroutineExceptionHandler` as a net: on Android an exception nobody caught ends
   the process. `ExecServerReconciler.round` / `checkClosed` / `checkUuid` never throw (a failed exec is "no answer").
-- Hook sink: `work` re-arms the notify latch of the tab (like the statusline does), `start` asks the
+- Hook sink: `work` re-arms the notify latch of the tab (the statusline does it only for a tab without hook events), `start` asks the
   reconciler for the tab's uuid, a forget.log line asks it to check whether the tab is closed
   (`checkClosed` after the delay). Tabs are found by `(serverId, tmux name)`.
 - FIX 4 (leaving a tab resets its APPROVAL to ready): a hook-reported approval (the pane's own claude said
@@ -596,26 +735,75 @@ Limits of the wiring that are known and accepted (they are not bugs to fix next)
 
 ### Fallback with headroom
 
-The shell cap of 8 is decided when a tab leases, but the fallbacks happen later: when the exec
+The shell cap of 8 is decided when a tab leases (read again on every pass while it waits), but the fallbacks happen later: when the exec
 transport is down, short execs, the bootstrap, the watcher and the stream daemon fall back to a tab
 transport, and tabs sit 8 to a transport (sshd's default `MaxSessions` is 10). A fallback must not land on
 a transport without room, so while exec routing is on a fallback only uses a shell transport where
 `shells + reserved slots + borrowed channels + 1 + 2 <= 10` (`ServerTransportPool.fallbackHeadroom`, 2 =
-channels left for the tabs' own transient channels, `FALLBACK_RESERVE`). A transport packed with 8 shells
-has none: the fallback gets `NOT_UP` (callers skip the round, the watcher retries) until the exec
-transport is back, which the manager retries with its backoff (at most 30 s in the foreground). The polls of a
+channels left for the channels that are still uncounted, `FALLBACK_RESERVE`: the close-state and peer probes of a
+tab's connect, the UI's one-offs that open a channel on a tab's session themselves (`App.kt`: rename, ...), the script
+install and the `sessions.json` push of `SessionPersistenceService`). A SHORT channel (a poll, a one-off command, the
+redraw kick, an SFTP stat, `withSession`) may take ONE slot of that reserve (`SHORT_RESERVE_SLOTS`, V9 of dávka B):
+the rule is counted by occupancy (`... + 1 + 2 - 1 <= 10`), so two short channels never sit in the reserve at once
+and a LONG one (the watcher, the stream daemon's fallback) never fits once a short one sits there. A transport packed
+with 8 shells therefore has room for one short channel at a time (8 + 1, which leaves one slot of the 10 to the
+uncounted channels above) and none for a long one: the long fallback gets `NOT_UP` (the watcher retries) until the exec
+transport is back, which the manager retries with its backoff (at most 30 s in the foreground). A transfer (the upload
+and the SFTP download: `withTransferChannel` on the tab's own session, `transfer = true` in the fallback of
+`execRun`/`useChannel`) keeps off the reserve like a LONG channel (V12): one 3 MB upload held the one slot for 15.7 s and not one poll of the 8
+tabs ran meanwhile (adversarial review, round 2). A transfer without room waits for it, holding nothing meanwhile (no
+reserve slot, no channel; R3-1, round 4): it looks again every 300-1000 ms (jittered) until its deadline (upload 20 s,
+download its own time limit, else 20 s), so a poll in flight on 7 shells, another transfer, or an exec transport that is
+briefly down (a backoff, an early death) no longer fail it. It gives up at once only when no room can come
+(`ConnectionRegistry.transferMayFindRoom`): the exec transport is switched off (kill switch) or `Closed`, and no tab
+transport of the server (for the tab's own session: that one) can ever fit a transfer, i.e. 8 shells
+(8 + 1 + 2 > 10), or 7 shells and a LONG channel held there (the notify watcher's tail through
+`onServerTabChannel`, counted per tab session by the registry; K4-3, round 5). Then the upload fails at once with `No free SSH channel ... the exec transport is off, reconnect the
+tab` and the download returns null; after the deadline the upload says `... stayed full for 20 s, try again`. The
+shells of a transport are counted as the tabs whose session it is. A 7-shell transport has room for ONE transfer at a
+time: a 1 MB upload on a tab's session took ~5.2 s in the integration fixture, so twelve of them at once are ~62 s of
+that slot and some end at their deadline (a limit of the budget; `ChannelBudgetIntegrationTest.r31a` moves 64 KB up and
+1 MB down). An inline image whose download ends null is still cached as "could not be loaded" until a tap
+(`InlineImageView`, not changed here); with the wait this needs the room to stay away for its whole 30 s limit.
+A failed transfer is visible and can be repeated, a frozen chat is not. The SFTP stat (link check of the paths in a
+chat) and the short execs still take the slot. Before V9 the whole
+reserve stayed free, so with the kill switch and 8 packed shells not one poll of any tab ran (0 polls in 20 s, review
+round 1; `ChannelBudgetIntegrationTest.n4`). The price: the polls of the 8 tabs serialize on that one channel
+(measured with 8 tabs, their session-id loops and a status poller: 2-3 transcript polls per tab in 30 s, 18 for one
+tab, instead of one every 1.5-15 s), until the tabs re-lease at cap 3. The slot is not handed out in turn: whoever
+asks while it is free gets it (measured 2-19 polls per tab in 30 s), so a tab may wait well beyond one poll period; the
+soak measures the largest gap between two polls of one tab for this. Two uncounted channels at once on top of a short
+channel in the reserve exceed `MaxSessions` 10 (8 + 1 + 2: 35-46 refused polls in 20 s, adversarial review round 2,
+N3); only on an sshd with the default 10 (the dev box has 30) and two of the uncounted one-offs above at the same
+moment. The polls of a
 tab (`TranscriptStream`, `SessionStatusPoller`) and the redraw kick, which used to fall back to the tab's own
 session without any check, take a counted channel through `ConnectionRegistry.reserveTabChannel` and skip the
-tick (the kick: use the geometry fallback) when there is no room. Short
+tick (the kick: use the geometry fallback) when there is no room. The same holds whenever the server needs a room
+check (`needsRoom`: exec routing on, or a shell transport packed beyond the legacy 3, i.e. the kill switch with 8
+shells still on a transport) for every channel a service opens on a tab's own session: both legacy branches of the
+two pollers, the git probe, scroll, upload, the SFTP download and stat of a tab, `refresh-client`, the Stop-hook
+setup, the notify watcher's LONG channel and the accounts screen (`onServerTabChannel`, SHORT), the per-tab session-id
+loop (one token per tick) and the uuid pid probe when a transcript opens. An upload without room says so
+(`No free SSH channel ...`, see the transfer wait above), not `SSH not ready`. `reserveTabChannel` returns a token (`TabChannel`): its `release()` is
+atomic and idempotent and gives back exactly what that reservation took (nothing when the server needed no room
+check at the moment of the reservation), so a double release or a race with another reservation of the same
+session can no longer leak or steal a slot. A skipped tick logs `poll skipped (no room) src=<who> server=<id> n=<k>`
+(the first at once, then at most one line a minute per source and server, with the count; the skips counted after the
+last line are written by the next skip or at the next tab channel the server grants (`reserveTabChannel`) once the
+minute is over; a streak after which neither comes, e.g. the last tab closed, keeps its count unwritten); a channel
+that fails to
+open logs `channel open failed src=<who> exitStatus=<n|n/a> route=… usable=… shells=… headroom=…` (tag
+`ChannelBudget`; -1 = the server never answered, a dying transport; 1/2 = refused by sshd). Short
 fallbacks, `useChannel` fallbacks and the bootstrap's hold ONE counted channel for the whole call
 (`reserveFallbackChannel`, decided under the pool mutex so two callers cannot take the last slot) and give
 it back in `finally`; the LONG fallback of `GatedExecChannels` counts its channel the same way through the
 gate's `reserveFallback` hooks. Chosen over "back to cap 3 after exec has been down for X s" because it
-needs no migration of live shells and costs nothing while the exec transport is up. Limits: the headroom
-lookups used by `liveServerSession` (the notify watcher's own fallback, which opens its channel itself) and
-`fallbackPooledSession` (`SshSessionHelper.withSession`'s pooled step, the LONG fallback's pick) only look,
-they do not count, so two callers can both see the last slot; the reserve of 2 absorbs that. The LONG
-fallback of the watcher is therefore bounded but not exact. The LONG fallback of `GatedExecChannels` claims
+needs no migration of live shells and costs nothing while the exec transport is up. `SshSessionHelper.withSession`'s
+pooled step runs through `ConnectionRegistry` as its `FallbackRunner`: with a room check the block holds one counted
+channel for its whole run (claimed and released in `finally` under `NonCancellable`), without room it does not run
+there; a legacy server keeps the uncounted pooled session (a legacy lease would otherwise lose a slot). The block's
+own `null` is wrapped (`Fallback<T>`) and never mistaken for "no room". `fallbackPooledSession` (the
+`liveSessionProvider`) is kept as a look-only view for diagnostics; nothing runs on it. The LONG fallback of `GatedExecChannels` claims
 its channel with a check-and-reserve under the pool mutex: when the room went to someone else between the look
 and the claim the stream does not start (`NOT_UP`). The close-state and peer probes of a tab's connect
 (`fetchCloseState`, `serverHasOtherLiveSession`) still run on the tab's own shell session (no by-server-id
@@ -660,10 +848,13 @@ server through the server's exec transport instead of borrowing a tab's shell:
   `hello`; the new by-server-id overloads exist (nothing calls them).
 - `SshSessionHelper.withSession` runs its block on the exec session under ONE short permit
   (so every one-off user is inside the per-server channel budget), then on a pooled
-  transport, and only then on a fresh connection, unless `allowFresh = false`, where it
+  transport (a counted channel where the server needs a room check, see "Fallback with headroom"), and only
+  then on a fresh connection, unless `allowFresh = false`, where it
   throws `ExecUnavailable(NOT_UP)` instead. Only `NOT_UP` falls through to those
   transports; a permit wait that timed out is thrown to the caller. The transcript and status pollers use
-  `allowFresh = false` under exec routing: a tick without a live transport is skipped.
+  `allowFresh = false` under exec routing, and also in their legacy branch for a tab without a live session
+  whenever `comm_pool` is on (a fresh handshake per poll per tab would bypass the pool's limit of 3 handshakes):
+  a tick without a usable transport is skipped.
 - Moved over: usage and rate-limit polls, server latency, git status, upload / download /
   stat / scroll, tmux refresh-client, the stream daemon channel (long permit), log
   shipping (optional `execFlush`, short permit), rename and close of a tab (a parked tab can be renamed
@@ -882,8 +1073,86 @@ for `perm`/`ask` is raised only for a session not in the foreground, only when t
 event is younger than 10 min (60 s for an event stamped before the watcher's first
 event, i.e. the replayed backlog of a cold start, whichever session it belongs to) and
 only if no later event superseded it within a short settle time. One dialog is one
-notification: the hook event and the screen detector hold each other back for 15 s
-(the first one to notify wins; repeats from the same source pass).
+notification (`PromptDialogDedup`): while the announced hook approval is still pending in
+the reducer (`approvalSince`), the screen detector's APPROVAL for that session is held back
+even when it comes late (the phone log had it 35 s after the hook); the next hook event of
+the pane (`work`, `stop`, `askdone`, `end`, or a new `perm`/`ask`) ends the pending approval
+and the hold. A pending approval nobody announced (the active tab in the foreground, an old
+replayed event) holds nothing back. In the opposite order (screen first) the hook event is
+held back for 15 s, and the dialog counts as announced all the same, so a later screen
+re-sighting of it is held as above; repeats from the same source pass. Allow and deny emit no
+hook, so the reducer keeps an answered approval pending until the next hook event, and the hold
+must never silence a real new request: it applies only while the hooks are live (the watcher's
+tail is connected and the bootstrap has not reported `hookev.off`), it lasts at most 120 s after
+the announcement (`HOLD_MAX_MS`: a dialog still up then alerts once more), and it ends when a
+key sent from this app answers the dialog (also for a session that is CAP=0 by then) or when the
+screen classifier reads the input box or the spinner on a screen that can show the dialog's fate:
+the classifier saw the dialog (APPROVAL) since the announcement, or terminal output arrived 5 s or
+more after it. A screen whose newest output is older is ignored: the hook may beat the drawing of
+the dialog, and a tab's stream can lag the hook by seconds, so its spinner predates the dialog and
+taking it for an answer let the late sighting of the same dialog alert twice. An unreadable screen
+ends nothing. Known limit: the time is the time output reached this device, not the time it was
+drawn, so a stream that lags the hook by 5 s or more and delivers the spinner from before the
+dialog then still ends the hold, and the late sighting of the same dialog alerts a second time
+(a duplicate, never a lost alert). Each screen detection logs
+`detection APPROVAL source=SCREEN seq=<n> for <session>`.
+
+**Working / ready of a session with hooks (CAP=1).** A session counts as CAP=1 once a
+v2 event of its pane has been applied by the reducer since it was attached in this process
+and was at most 60 s old (`InputPromptDetector.markHookEvents` from
+`NotificationService.dispatchHookEvent`; a replayed duplicate or the hour-old backlog of a
+cold start proves nothing about the hooks now). It ends when the session is removed, when the
+bootstrap of its server reports `hookev.off`, and when the legacy Stop marker of a live turn
+end arrives and no v2 event of the session (its own `stop` included, given 5 s to arrive from
+the other file) came for 2 min: the Stop hook runs but the v2 hooks are silent. The check runs
+only at a turn end because an idle session emits nothing for hours. For it:
+the OMC statusline no longer drives working/ready (`parseClaudeWorking` returns null:
+its `thinking` segment only means a thinking block within 30 s of a render the HUD
+cache shows one frame late, so it froze "● Working" after a turn); the optimistic
+WORKING of a send is set only for a submitted prompt (a CR outside a bracketed paste; a paste split
+across sends counts to the end of its part, so a CR that ends such a part is no submit; a LF and
+Shift+Enter's `ESC CR` are newlines in the draft), not for Escape, arrows, digits or
+typing, except at APPROVAL: there a printable key or a lone Escape answers the dialog (a digit,
+`y`, Escape = deny; an escape sequence such as an arrow or a terminal reply does not) and no
+hook reports the answer, so it sets WORKING too and ends the hold of the screen alert; and
+because an interrupt emits no hook, a WORKING session whose terminal stays silent for 10 s (the
+spinner and the elapsed-time counter repaint continuously while Claude works) drops to ready,
+logged as `No terminal output from <session> for <n>ms while WORKING and no hook stop: ready`.
+The drop is armed whenever the session is set WORKING by an Enter from this app, by an answer
+to an APPROVAL from this app, or by a hook event (`work`, `askdone`, and a `stop` that leaves an
+approval). The silence counts only from the moment output can reach this device again: no
+transport of the session connected (the watch then backs off up to 30 s between checks instead
+of waking every second), or a check that comes far later than asked (the process was frozen),
+restarts it, so a reconnect or a wake does not read the outage as silence. It never ends an
+APPROVAL (a dialog is a silent screen). Sessions without hook events are unchanged
+(statusline, every send sets WORKING, the UI's 45 s stale-WORKING decay). Known limits: after
+an answer given in another client's terminal or on another device APPROVAL lasts until the
+next hook event (no hook fires on an answer); a session whose last fresh event predates this
+process (idle since before a cold start, or only in the replay) stays CAP=0 until its next
+event; a pause of the spinner output of 10 s or more while the transport stays connected shows
+ready early, and nothing but the next hook event or Enter brings back WORKING.
+
+**Watch.** The routine snapshot push to the watch (`WearSync`, 400 ms debounce) is not
+urgent (battery), except where the watch will announce something: a session ENTERS
+APPROVAL_NEEDED from another known state, or ENTERS WAITING_FOR_INPUT with a `lastMessageAt`
+other than the one it had when it was last seen waiting (a flip without a new message, e.g. the
+silence drop, is dropped by the watch as a "stale flip"). Then the DataItem goes out urgent, at
+most one urgent push per 10 s in all outside `pushNow()` (`WatchPushUrgency`,
+`WatchUrgencyTracker`; logged as `Urgent push: <ids> entered WAITING/APPROVAL`). An edge stays
+pending until a written snapshot that still shows the session waiting claims it (inside the
+write lock, after the stale-sequence check), so a push that `collectLatest` cancels loses
+nothing. A write the budget holds an edge back from puts nothing and schedules one write for when
+the budget allows the next urgent push (`WatchUrgencyTracker.write`, logged as `Urgent push
+deferred by the budget: write held back, another in <n> ms`); that write carries the change,
+urgent. A write held back while that scheduled write waits or runs (its own write, or another
+push's while it waits on a summary) makes it write once more when it is done
+(`WatchDeferredWrite`), so a held back change never waits for the next unrelated push.
+Putting the held back write routine would make the scheduled one carry the same bytes,
+and Data Layer drops a DataItem identical to the last one, urgent flag and all. The tracker runs
+on the monotonic clock (`SystemClock.elapsedRealtime`), so a wall clock step cannot hold writes
+back. As a routine item the
+"done" after a Stop hook reached the wrist 91 s late. The reducer and the "body before the
+flip" order of the Stop path are unchanged.
 `forget.log` lines (`[<utc>] forget: <name> (durable=N...)`, free text after
 `durable=` tolerated) for one of our tabs that this device did not just close ask the
 reconciler to check, after 3 s and once more 5 s later; a line is acted on once and
@@ -903,7 +1172,7 @@ PortForward(type = "R", localPort = 5000, remoteHost = "127.0.0.1", remotePort =
 // Result: remote:5000 → localhost:5000
 ```
 
-Set up during SSH connection, before the shell channel opens. With `comm_pool` on and an exec transport manager owning the server, the forwards live on the exec transport instead (registered once, again after every reconnect), so they survive with no tab open.
+Set up during SSH connection, before the shell channel opens. With `comm_pool` on and an exec transport manager owning the server, the forwards live on the exec transport instead (registered once, again after every reconnect, and a forward whose bind failed is tried again on every 5 s watch pass), so they survive with no tab open.
 
 ## Security
 

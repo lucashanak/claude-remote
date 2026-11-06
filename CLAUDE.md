@@ -10,7 +10,12 @@ Details live in `docs/`; this file only points at the places of truth and at the
   while the server's exec transport is up, else 3).
 - **Exec transport and channel budget** — `session/service/ExecTransportManager.kt`, `RemoteExec.kt` (`GatedExecChannels`, typed
   `ExecUnavailable`); routing helpers in `ConnectionRegistry` (`execRun`, `execRead`, `useChannel`). Fallbacks only onto a transport
-  with channel headroom (sshd default `MaxSessions 10`; the dev box has 30).
+  with channel headroom (sshd default `MaxSessions 10`; the dev box has 30). Every tab-side channel is counted against its transport
+  (`withTabChannel`/`onServerTabChannel`, `TabChannels`); no room = skip the turn, never let sshd refuse. One reserve slot for short
+  channels only; transfers never take it. A new channel site without a token is a budget leak.
+- **Fresh launch** — `SessionOrchestrator.launchSession` creates the session first over exec (`ClaudeConfig.buildFreshCreateCommand`:
+  `new-session -d -e CR_LAUNCH=<nonce>`), only then adds the tab, which attaches. Never kill or adopt a session that holds the name;
+  never let a tab exist before its name is ours. Socket heal: `tmux-sockheal.sh`/`sg_guard` generated in `SessionPersistenceService`.
 - **Forget rules** — `session/service/ServerReconciler.kt` + `ManifestCommands.reconcileAll`: forget only if tombstoned ∧ absent from
   `list-sessions` ∧ another live `claude-server-*` exists; an unknown/truncated section never forgets.
 - **Hooks** — `HookCommands.kt` (install/merge/`hook-ev.sh`), `HookEventReducer.kt`, `NotificationService` watcher. Claude 2.1.316
