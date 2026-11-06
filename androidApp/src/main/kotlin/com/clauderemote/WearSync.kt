@@ -132,12 +132,17 @@ object WearSync {
     // stale answer forever.
     private val resolvedBodies = mutableMapOf<String, String>()
 
-    // sessionId -> the activity the previous push observed. Used to make the
-    // "session started working again" clear EDGE-triggered: the Stop hook
-    // resolves the body and calls pushNow() before sessionActivities has
+    // sessionId -> the activity the previous build observed (urgency.observe). Used
+    // to make the "session started working again" clear EDGE-triggered: the Stop
+    // hook resolves the body and calls pushNow() before sessionActivities has
     // necessarily flipped away from WORKING, so a level-triggered clear would
-    // wipe the body we were just handed.
-    private val lastObservedActivity = mutableMapOf<String, String>()
+    // wipe the body we were just handed. The same edges decide the urgent push a
+    // session ENTERING APPROVAL (or WAITING with a new message) earns, at most one
+    // per 10 s outside pushNow() (WatchPushUrgency).
+    private val urgency = com.clauderemote.session.wear.WatchUrgencyTracker()
+    // The tracker's clock: monotonic, so a wall clock step back cannot hold every write
+    // back (and the watch stale) until the clock catches up with the last urgent push.
+    private fun urgencyNow(): Long = android.os.SystemClock.elapsedRealtime()
 
     // sessionId -> count of screen-detected prompt events (see
     // [markPromptEvent]). Folded into the lastMessageAt change key so a
@@ -159,6 +164,11 @@ object WearSync {
     // independently, so N recreations mean N putDataItem writes and N LLM
     // calls per change, racing each other through the snapshot sequence.
     @Volatile private var collectorJob: kotlinx.coroutines.Job? = null
+
+    // The one write scheduled for when the urgent budget lets a held back edge go out
+    // (WatchUrgencyTracker.write puts nothing then): without it the change waited for the next
+    // change of tabs or activities. A write held back while it waits or runs makes it write again.
+    private val deferredWrite = com.clauderemote.session.wear.WatchDeferredWrite(scope, ::urgencyNow) { push(urgent = false) }
 
     // Serializes putDataItem and orders the snapshots. pushNow() and the
     // debounced collector run independently, so two push() bodies can be in
@@ -210,7 +220,11 @@ object WearSync {
                 // feature on a real watch. Routine list refreshes can ride
                 // Play Services' own opportunistic/batched delivery; only a
                 // message actually worth announcing (pushNow(), below) needs
-                // to arrive immediately.
+                // to arrive immediately — and a snapshot in which a session
+                // ENTERS APPROVAL, or WAITING with a new message, which the
+                // write escalates itself (one per 10 s, see WatchPushUrgency):
+                // as a routine item the "done" after a Stop hook reached the
+                // wrist 91 s late.
                 .collectLatest { (tabs, _) ->
                     // Tabs are the lifetime of everything keyed by session id
                     // here, so a closed tab's rows would otherwise sit in
@@ -259,7 +273,7 @@ object WearSync {
         }
         synchronized(summaryCache) { summaryCache.keys.retainAll(liveIds) }
         synchronized(resolvedBodies) { resolvedBodies.keys.retainAll(liveIds) }
-        synchronized(lastObservedActivity) { lastObservedActivity.keys.retainAll(liveIds) }
+        urgency.retain(liveIds)
         synchronized(promptEvents) { promptEvents.keys.retainAll(liveIds) }
         pruneHook?.let { hook -> runCatching { hook(liveIds) } }
     }
@@ -362,15 +376,14 @@ object WearSync {
         llmEnabled: Boolean,
     ): List<WearSessionInfo> {
         val activities = orch.sessionActivities.value
+        val rows = ArrayList<com.clauderemote.session.wear.WatchUrgencyRow>()
         return tm.tabs.value.map { tab ->
             val activity = (activities[tab.id] ?: com.clauderemote.model.SessionActivity.IDLE).name
             // A session that has just STARTED working again has moved past the
             // completion whose body we pinned. Edge, not level: at the moment
             // the Stop hook hands us a body the session is often still marked
             // WORKING, and a level test would throw that body straight away.
-            val previousActivity = synchronized(lastObservedActivity) {
-                lastObservedActivity.put(tab.id, activity)
-            }
+            val previousActivity = urgency.observe(tab.id, activity)
             if (activity == "WORKING" && previousActivity != "WORKING") clearResolved(tab.id)
             val live = orch.lastAssistantText(tab.id)
             val resolved = synchronized(resolvedBodies) { resolvedBodies[tab.id] }
@@ -399,6 +412,7 @@ object WearSync {
                 }
                 lastMessageAt.getOrPut(tab.id) { System.currentTimeMillis() }
             }
+            rows += com.clauderemote.session.wear.WatchUrgencyRow(tab.id, previousActivity, activity, changedAt)
             WearSessionInfo(
                 id = tab.id,
                 title = tab.tabTitle,
@@ -413,7 +427,7 @@ object WearSync {
                 // its own length in a payload with a hard 100 KB ceiling.
                 notifyBody = resolvedText?.takeIf { it != liveText },
             )
-        }
+        }.also { urgency.note(rows, urgencyNow()) }
     }
 
     private suspend fun writeSnapshot(
@@ -440,19 +454,36 @@ object WearSync {
                 return@withLock
             }
             lastWrittenSeq = seq
-            // No forced per-push timestamp field: letting the DataItem's bytes be
-            // identical when nothing actually changed lets putDataItem's own
-            // dedup skip the sync entirely — previously a timestamp was stamped
-            // on every push specifically to defeat that dedup, which meant an
-            // unrelated session's activity flapping forced a radio wake for
-            // every OTHER session's unchanged row too.
-            val request = PutDataMapRequest.create(PATH).apply {
-                dataMap.putString(KEY_JSON, payload)
-            }.asPutDataRequest()
-            if (urgent) request.setUrgent()
-            Wearable.getDataClient(ctx).putDataItem(request)
-                .addOnSuccessListener { FileLogger.log(TAG, "Pushed ${sessions.size} sessions to watch") }
-                .addOnFailureListener { e -> FileLogger.log(TAG, "putDataItem failed: ${e.message}") }
+            // The urgent edges this snapshot delivers are claimed here, after the stale check and
+            // with no suspension before the put: a push cancelled by collectLatest, or dropped as
+            // stale, leaves them pending for the next write.
+            val attention = sessions.filter { com.clauderemote.session.wear.WatchPushUrgency.isAttentionState(it.activity) }
+                .mapTo(HashSet()) { it.id }
+            // A write the budget holds an edge back from puts nothing (WatchUrgencyTracker.write):
+            // the scheduled write carries the change, urgent.
+            val heldBackUntil = urgency.write(attention, urgencyNow(), urgentAnyway = urgent) { urgentPut, edges ->
+                if (!urgent && edges.isNotEmpty()) FileLogger.log(TAG, "Urgent push: ${edges.joinToString(",")} entered WAITING/APPROVAL")
+                // No forced per-push timestamp field: letting the DataItem's bytes be
+                // identical when nothing actually changed lets putDataItem's own
+                // dedup skip the sync entirely — previously a timestamp was stamped
+                // on every push specifically to defeat that dedup, which meant an
+                // unrelated session's activity flapping forced a radio wake for
+                // every OTHER session's unchanged row too.
+                val request = PutDataMapRequest.create(PATH).apply {
+                    dataMap.putString(KEY_JSON, payload)
+                }.asPutDataRequest()
+                if (urgentPut) request.setUrgent()
+                Wearable.getDataClient(ctx).putDataItem(request)
+                    .addOnSuccessListener { FileLogger.log(TAG, "Pushed ${sessions.size} sessions to watch") }
+                    .addOnFailureListener { e -> FileLogger.log(TAG, "putDataItem failed: ${e.message}") }
+            }
+            heldBackUntil?.let { at ->
+                // Held back while the scheduled write waits or runs (itself, or another push while it
+                // waits on a summary): it writes once more when done (WatchDeferredWrite).
+                if (deferredWrite.heldBack(at)) {
+                    FileLogger.log(TAG, "Urgent push deferred by the budget: write held back, another in ${at - urgencyNow()} ms")
+                }
+            }
         }
     }
 

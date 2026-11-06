@@ -14,6 +14,13 @@ import kotlinx.coroutines.launch
 private const val TAG = "SessionOrchestrator"
 
 /**
+ * A bracketed paste (`ESC[200~` … `ESC[201~`, or to the very end when split across sends): its CR/LF
+ * are text, not Enter. `\z`, not `$`: `$` also matches before a final line terminator, which left the
+ * trailing CR of a split paste outside the match as a submit.
+ */
+private val BRACKETED_PASTE = Regex("\u001b\\[200~[\\s\\S]*?(?:\u001b\\[201~|\\z)")
+
+/**
  * User input delivery (mosh-first, ssh-fallback), the offline pending-input
  * queue, and the Claude slash-command control surface (model/effort switching,
  * /login flow, escape). A COORDINATOR service composing the already-extracted
@@ -44,57 +51,71 @@ internal class ClaudeControlService(
     fun sendInput(sessionId: String, data: String) {
         notifications.promptDetector.onUserInput(sessionId)
         // Try ET, then mosh, then SSH.
-        val et = registry.et(sessionId)
-        if (et != null && et.isConnected) {
-            status.updateActivity(sessionId, SessionActivity.WORKING)
-            et.sendInput(data)
-            return
-        }
-        val mosh = registry.mosh(sessionId)
-        if (mosh != null && mosh.isConnected) {
-            status.updateActivity(sessionId, SessionActivity.WORKING)
-            mosh.sendInput(data)
-            return
-        }
-        val conn = registry.ssh(sessionId)
-        if (conn == null || !conn.isConnected) {
+        val route = route(sessionId)
+        if (route == null) {
             queueInput(sessionId, data)
             return
         }
-        status.updateActivity(sessionId, SessionActivity.WORKING)
-        conn.sendInput(data)
+        noteSent(sessionId, data)
+        route.text(data)
     }
 
     fun sendBytes(sessionId: String, data: ByteArray) {
         notifications.promptDetector.onUserInput(sessionId)
-        val et = registry.et(sessionId)
-        if (et != null && et.isConnected) {
-            status.updateActivity(sessionId, SessionActivity.WORKING)
-            et.sendBytes(data)
-            return
-        }
-        val mosh = registry.mosh(sessionId)
-        if (mosh != null && mosh.isConnected) {
-            status.updateActivity(sessionId, SessionActivity.WORKING)
-            mosh.sendBytes(data)
-            return
-        }
-        val conn = registry.ssh(sessionId)
-        if (conn == null || !conn.isConnected) { warnNoConnection(sessionId); return }
-        status.updateActivity(sessionId, SessionActivity.WORKING)
-        conn.sendBytes(data)
+        val route = route(sessionId)
+        if (route == null) { warnNoConnection(sessionId); return }
+        noteSent(sessionId, String(data, Charsets.ISO_8859_1))
+        route.bytes(data)
     }
 
+    /**
+     * The optimistic WORKING of a send. Without hook events for the session every send sets it, as
+     * before (the statusline corrects it). With them (CAP=1) the statusline is out, so only a
+     * submitted prompt (Enter: a CR outside a bracketed paste, not Shift+Enter's `ESC CR`; a LF is
+     * a newline in the draft) starts work: Escape, arrows, digits and typing a draft do not, or the
+     * dot would stay "Working" until the next hook `stop`, which an interrupt never sends. The
+     * silence watch then ends a WORKING that no `stop` will end.
+     * At an APPROVAL a printable key or a lone Escape answers the dialog (a digit, `y`, Escape =
+     * deny); an escape SEQUENCE (arrows, terminal replies such as OSC or a focus report) does not.
+     * No hook reports that answer: it starts work too, ends the notification hold behind the
+     * dialog, and after a deny the silence watch brings the dot to ready.
+     */
+    private fun noteSent(sessionId: String, data: String) {
+        val typed = data.replace(BRACKETED_PASTE, "")
+        val answersDialog = status.currentActivity(sessionId) == SessionActivity.APPROVAL_NEEDED &&
+            (data == "\u001b" || (!data.startsWith("\u001b") && typed.any { it == '\r' || it >= ' ' }))
+        // Also without CAP=1 (a hook approval announced from an event too old for CAP, or CAP ended
+        // since): only a hold behind an announced hook approval reads it, so without hooks it is a no-op.
+        if (answersDialog) notifications.noteDialogAnswered(sessionId)
+        if (!notifications.promptDetector.hasHookEvents(sessionId)) {
+            status.updateActivity(sessionId, SessionActivity.WORKING)
+            return
+        }
+        val submitted = typed.replace("\u001b\r", "").indexOf('\r') >= 0
+        if (!submitted && !answersDialog) return
+        status.updateActivity(sessionId, SessionActivity.WORKING)
+        notifications.armSilenceWatch(sessionId)
+    }
+
+    /** Where a send for one session goes: both write paths of one transport. */
+    internal class InputRoute(val text: (String) -> Unit, val bytes: (ByteArray) -> Unit)
+
+    /** Test seam: replaces the transport lookup below (a unit test has no live ET/mosh/SSH). */
+    internal var routeOverride: ((String) -> InputRoute?)? = null
+
     /** The active input target for a session: ET, then mosh, then SSH (null if
-     *  none is connected). Keeps every send path routing to the same transport
-     *  as sendInput/sendBytes — an ET session's carrier SSH shell is idle, so a
-     *  send that goes there instead of to ET vanishes. */
-    private fun activeInput(sessionId: String): ((String) -> Unit)? {
-        registry.et(sessionId)?.let { if (it.isConnected) return it::sendInput }
-        registry.mosh(sessionId)?.let { if (it.isConnected) return it::sendInput }
-        registry.ssh(sessionId)?.let { if (it.isConnected) return it::sendInput }
+     *  none is connected). Keeps every send path routing to the same transport —
+     *  an ET session's carrier SSH shell is idle, so a send that goes there
+     *  instead of to ET vanishes. */
+    private fun route(sessionId: String): InputRoute? {
+        routeOverride?.let { return it(sessionId) }
+        registry.et(sessionId)?.let { if (it.isConnected) return InputRoute(it::sendInput, it::sendBytes) }
+        registry.mosh(sessionId)?.let { if (it.isConnected) return InputRoute(it::sendInput, it::sendBytes) }
+        registry.ssh(sessionId)?.let { if (it.isConnected) return InputRoute(it::sendInput, it::sendBytes) }
         return null
     }
+
+    private fun activeInput(sessionId: String): ((String) -> Unit)? = route(sessionId)?.text
 
     // ---- Offline input queue ----
 
@@ -134,7 +155,7 @@ internal class ClaudeControlService(
         }
         FileLogger.log(TAG, "sendClaudeCommand: ${command.length} bytes to $sessionId")
         notifications.promptDetector.onUserInput(sessionId)
-        status.updateActivity(sessionId, SessionActivity.WORKING)
+        noteSent(sessionId, command)
         send(command)
     }
 

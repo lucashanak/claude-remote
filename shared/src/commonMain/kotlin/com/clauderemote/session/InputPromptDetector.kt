@@ -1,6 +1,7 @@
 package com.clauderemote.session
 
 import com.clauderemote.model.LoginExpiryWarning
+import com.clauderemote.util.FileLogger
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -125,12 +126,63 @@ class InputPromptDetector(
     fun markHookInactive(sessionId: String) { hookActiveSessions.remove(sessionId) }
 
     /**
+     * CAP=1: sessions for which an applied, fresh v2 hook event (`claude-remote-ev`) was seen
+     * since they were attached in this process (set by the notify watcher, cleared by
+     * [removeSession], [clearHookEvents] and [hookCapVeto]); the value is the device time of
+     * the newest such event. For them the hooks drive working/ready and [parseClaudeWorking]
+     * stays out: OMC's `thinking` segment only means "a thinking block within 30 s of the
+     * render" and the HUD cache shows the PREVIOUS render, so it freezes at the end of a turn.
+     * NOT the same as [hookActiveSessions], which only says the legacy Stop-marker watcher is live.
+     */
+    private val hookEventSessions = java.util.concurrent.ConcurrentHashMap<String, Long>()
+
+    /** Device time of the last terminal output chunk per session (the silence drop of CAP=1). */
+    private val lastOutputAt = java.util.concurrent.ConcurrentHashMap<String, Long>()
+
+    /** Clock of [lastOutputAtMs]: the device clock; a test moves it with NotificationService's. */
+    internal var outputClock: () -> Long = { currentTimeMillis() }
+
+    /** A v2 hook event of [sessionId] that happened at device time [atMs]: CAP=1 (newest stamp kept). */
+    fun markHookEvents(sessionId: String, atMs: Long = currentTimeMillis()) {
+        hookEventSessions.merge(sessionId, atMs) { a, b -> maxOf(a, b) }
+    }
+
+    /** CAP=1 for [sessionId]; a [hookCapVeto] (hooks switched off on the server) ends it for good. */
+    fun hasHookEvents(sessionId: String): Boolean {
+        if (!hookEventSessions.containsKey(sessionId)) return false
+        if (hookCapVeto?.invoke(sessionId) == true) {
+            hookEventSessions.remove(sessionId)
+            return false
+        }
+        return true
+    }
+
+    /** Device time of the newest v2 hook event that set CAP=1 for [sessionId], or null. */
+    fun hookEventAtMs(sessionId: String): Long? = hookEventSessions[sessionId]
+
+    /** CAP=0 for [sessionId] until its next fresh v2 event. */
+    fun clearHookEvents(sessionId: String) { hookEventSessions.remove(sessionId) }
+
+    /** True for a session whose server reports its hooks switched off (`hookev.off`): no CAP=1 then. */
+    @Volatile var hookCapVeto: ((String) -> Boolean)? = null
+
+    /**
+     * Every screen classification of the quiescence check, also for hook-active sessions whose
+     * [onStateChange] only hears APPROVAL: that a dialog is gone ends the notification hold
+     * behind an announced hook approval.
+     */
+    @Volatile var onScreenSeen: ((sessionId: String, state: ClaudeState) -> Unit)? = null
+
+    fun lastOutputAtMs(sessionId: String): Long? = lastOutputAt[sessionId]
+
+    /**
      * Feed a chunk of terminal output. Always updates the recent-output buffer
      * (for context/usage parsing) and, unless the session uses hook-based
      * detection or is suppressed, resets the per-session quiescence timer.
      * Returns immediately; detection is async.
      */
     fun onOutput(sessionId: String, text: String) {
+        lastOutputAt[sessionId] = outputClock()
         feedRecentOutput(sessionId, text)
 
         // Hook-active sessions still run the quiescence screen check, but in
@@ -219,7 +271,12 @@ class InputPromptDetector(
         // so the screen check contributes ONLY the one state they can't see — a
         // selector awaiting the user. APPROVAL never gets stuck from here: a
         // working statusline overrides it (orchestrator FIX 3 allows WORKING
-        // over APPROVAL) and the Stop hook forces WAITING at end of turn.
+        // over APPROVAL) and the Stop hook forces WAITING at end of turn. For a
+        // CAP=1 session the statusline is out (parseClaudeWorking), so after an
+        // answer given in another client or on another device APPROVAL lasts
+        // until the next hook event (known limit); an answer sent from this app
+        // sets WORKING (ClaudeControlService.noteSent).
+        onScreenSeen?.invoke(sessionId, classified)
         if (sessionId in hookActiveSessions && classified != ClaudeState.APPROVAL) return
 
         onStateChange?.invoke(sessionId, classified)
@@ -251,7 +308,10 @@ class InputPromptDetector(
         // seq names THIS prompt. Two tool permissions inside one turn produce no
         // new assistant text between them, so a key built from the last message
         // id was identical for both and the second never notified.
-        onDetection?.invoke(PromptDetection(sessionId, promptType, state.detectionSeq.incrementAndGet()))
+        val seq = state.detectionSeq.incrementAndGet()
+        // Names the source, so a second alert can be traced to the screen detector in the device log.
+        FileLogger.log(TAG, "detection APPROVAL source=SCREEN seq=$seq for $sessionId")
+        onDetection?.invoke(PromptDetection(sessionId, promptType, seq))
     }
 
     /**
@@ -308,6 +368,8 @@ class InputPromptDetector(
         sessionStates.remove(sessionId)?.pendingCheck?.getAndSet(null)?.cancel()
         recentOutput.remove(sessionId)
         suppressUntil.remove(sessionId)
+        hookEventSessions.remove(sessionId)
+        lastOutputAt.remove(sessionId)
     }
 
     /** Feed a chunk to the rolling buffer used by context/usage parsers. */
@@ -411,9 +473,14 @@ class InputPromptDetector(
      *   idle:    `... wk:14%(6d10h) | session:6m | ctx:6% ...`
      * Any non-empty segment there (thinking / a skill / compacting / …) means
      * working; going straight to `session:` means idle. Returns null when no
-     * statusline is in the recent buffer (can't tell — leave activity as is).
+     * statusline is in the recent buffer (can't tell — leave activity as is),
+     * and always for a CAP=1 session ([markHookEvents]): there the segment is
+     * no evidence of work (`thinking` = a thinking block within 30 s of a render
+     * that the HUD cache shows one frame late), so the hooks decide.
      */
     fun parseClaudeWorking(sessionId: String): Boolean? {
+        // CAP=1: the hooks (and the optimistic WORKING of a submitted prompt) own the state.
+        if (hasHookEvents(sessionId)) return null
         val s = recentOutputText(sessionId) ?: return null
         // recentOutput is a rolling buffer holding MANY concatenated statusline
         // renders. Take the LAST (current/bottom) one, not the first — otherwise
@@ -447,6 +514,7 @@ class InputPromptDetector(
     }
 
     companion object {
+        private const val TAG = "InputPromptDetector"
         /** How long to wait after the last output chunk before running an idle check. */
         private const val QUIESCENCE_MS = 1000L
         /** Minimum time between two detections on the same session. */

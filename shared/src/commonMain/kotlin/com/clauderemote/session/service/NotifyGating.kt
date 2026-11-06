@@ -313,10 +313,30 @@ internal object NotifyKeys {
 /**
  * One dialog, one notification. With hooks installed a permission dialog or a question
  * on a background tab is reported twice: by the hook event and by the screen detector
- * (different keys, both exempt from the debounce). Whichever source notifies first wins;
- * the OTHER source is held back for [windowMs] after it. Repeats from the SAME source
- * pass (answering one dialog and getting the next is two things to act on), and a held
- * back notification does not count as one, so the next dialog is never swallowed.
+ * (different keys, both exempt from the debounce).
+ *
+ * - **Hook first (the common order):** while the hook approval that was ANNOUNCED is
+ *   still pending in the reducer ([pendingHookApprovalAt] = its `approvalSince`), the
+ *   screen detector's sighting of it is held back, however late it comes (the phone log
+ *   had it 35 s after the hook, past any sensible window). The next hook event of the
+ *   pane (`work` / `stop` / `askdone` / `end`, or a new `perm` / `ask`) ends the pending
+ *   approval and with it the hold. A pending approval nobody announced (the active tab in
+ *   the foreground, an old replayed event) holds nothing back: then the screen is the one
+ *   alert.
+ * - **Screen first:** the hook event is held back for [windowMs] after it; the dialog
+ *   counts as announced all the same, so a later screen re-sighting is held as above.
+ * - Otherwise the other source is held back for [windowMs] after one notified.
+ *
+ * The hold never silences a real new request (allow / deny emit no hook, so the reducer
+ * keeps an answered approval pending until the next hook event): it needs live hooks
+ * (`hooksLive`: the watcher's tail is connected and the bootstrap did not report
+ * `hookev.off`), lasts at most [HOLD_MAX_MS] after the announcement, and ends with
+ * [dialogGone] (an answer sent from this app) or [screenShowsNoDialog] (a screen that shows
+ * no dialog and is not older than the dialog).
+ *
+ * Repeats from the SAME source pass (answering one dialog and getting the next is two
+ * things to act on), and a held back notification does not count as one, so the next
+ * dialog is never swallowed.
  */
 internal class PromptDialogDedup(private val windowMs: Long = WINDOW_MS) {
     enum class Source { HOOK, SCREEN }
@@ -324,9 +344,31 @@ internal class PromptDialogDedup(private val windowMs: Long = WINDOW_MS) {
     private val lock = Any()
     private val lastHook = HashMap<String, Long>()
     private val lastScreen = HashMap<String, Long>()
+    /** Per session: the `approvalSince` of the hook approval announced last, and when (device ms). */
+    private val announcedHook = HashMap<String, Long>()
+    private val announcedAt = HashMap<String, Long>()
+    /** Sessions whose screen classifier has shown the dialog (APPROVAL) since its announcement. */
+    private val dialogSeen = HashSet<String>()
 
-    /** True when [source] may notify for [sessionId] now; records it then. */
-    fun allow(sessionId: String, source: Source, nowMs: Long): Boolean = synchronized(lock) {
+    /**
+     * True when [source] may notify for [sessionId] now; records it then. [pendingHookApprovalAt]
+     * is the reducer's pending hook approval of the session (null = none): for HOOK the one being
+     * announced, for SCREEN the one that may hold it back. [hooksLive] = false: no hold.
+     */
+    fun allow(
+        sessionId: String,
+        source: Source,
+        nowMs: Long,
+        pendingHookApprovalAt: Long? = null,
+        hooksLive: Boolean = true,
+    ): Boolean = synchronized(lock) {
+        if (source == Source.SCREEN && heldByHook(sessionId, pendingHookApprovalAt, nowMs, hooksLive)) return@synchronized false
+        // Announced either way: by this hook alert, or (held back below) by the screen alert just before it.
+        if (source == Source.HOOK && pendingHookApprovalAt != null && announcedHook[sessionId] != pendingHookApprovalAt) {
+            announcedHook[sessionId] = pendingHookApprovalAt
+            announcedAt[sessionId] = nowMs
+            dialogSeen.remove(sessionId)
+        }
         val (own, other) = if (source == Source.HOOK) lastHook to lastScreen else lastScreen to lastHook
         val o = other[sessionId]
         if (o != null && nowMs - o in 0 until windowMs) return@synchronized false
@@ -334,12 +376,53 @@ internal class PromptDialogDedup(private val windowMs: Long = WINDOW_MS) {
         true
     }
 
+    /** True when a SCREEN notification of [sessionId] is held back by the announced, still pending hook approval. */
+    fun isHeldByHook(sessionId: String, pendingHookApprovalAt: Long?, nowMs: Long, hooksLive: Boolean = true): Boolean =
+        synchronized(lock) { heldByHook(sessionId, pendingHookApprovalAt, nowMs, hooksLive) }
+
+    private fun heldByHook(sessionId: String, pendingHookApprovalAt: Long?, nowMs: Long, hooksLive: Boolean): Boolean =
+        hooksLive && pendingHookApprovalAt != null && announcedHook[sessionId] == pendingHookApprovalAt &&
+            nowMs - (announcedAt[sessionId] ?: nowMs) < HOLD_MAX_MS
+
+    /** The announced dialog is gone: answered from this app. */
+    fun dialogGone(sessionId: String) = synchronized(lock) {
+        announcedHook.remove(sessionId); announcedAt.remove(sessionId); dialogSeen.remove(sessionId)
+        Unit
+    }
+
+    /** The screen classifier shows the dialog (APPROVAL): a later screen without it means it was answered. */
+    fun dialogSeen(sessionId: String) = synchronized(lock) {
+        if (sessionId in announcedAt) dialogSeen.add(sessionId)
+        Unit
+    }
+
+    /**
+     * The screen classifier shows no dialog (input box or spinner); [lastOutputAtMs] = when the
+     * newest terminal output of the session arrived (null = none). It ends the hold only when that
+     * screen can show the dialog's fate: the classifier saw the dialog since the announcement, or
+     * output arrived [SCREEN_GONE_GRACE_MS] or more after it. Otherwise the screen may be older than
+     * the dialog (the hook can be read before the dialog is drawn, and a tab's stream can lag the
+     * hook by seconds): its spinner says nothing, and ending the hold on it would let the late
+     * sighting of the same dialog alert a second time.
+     */
+    fun screenShowsNoDialog(sessionId: String, lastOutputAtMs: Long?) = synchronized(lock) {
+        val at = announcedAt[sessionId] ?: return@synchronized
+        val fresh = lastOutputAtMs != null && lastOutputAtMs - at >= SCREEN_GONE_GRACE_MS
+        if (sessionId !in dialogSeen && !fresh) return@synchronized
+        announcedHook.remove(sessionId); announcedAt.remove(sessionId); dialogSeen.remove(sessionId)
+        Unit
+    }
+
     fun forget(sessionId: String) = synchronized(lock) {
-        lastHook.remove(sessionId); lastScreen.remove(sessionId)
+        lastHook.remove(sessionId); lastScreen.remove(sessionId); announcedHook.remove(sessionId); announcedAt.remove(sessionId)
+        dialogSeen.remove(sessionId)
         Unit
     }
 
     companion object {
         const val WINDOW_MS = 15_000L
+        /** Upper bound of the hold behind an announced hook approval (R6): a dialog still up then alerts once more. */
+        const val HOLD_MAX_MS = 120_000L
+        const val SCREEN_GONE_GRACE_MS = 5_000L
     }
 }

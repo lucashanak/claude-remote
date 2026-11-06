@@ -57,6 +57,9 @@ private fun shellQuote(path: String): String {
 /** `~/.claude-remote/forget.log`: one line per tombstone any device wrote (see ManifestCommands.tombstone). */
 private const val FORGET_LOG_PATH = "~/.claude-remote/forget.log"
 
+/** CAP=1: terminal silence after which a WORKING session without a hook `stop` counts as ready. */
+private const val SILENCE_DROP_MS = 10_000L
+
 /** Rotate the events file at most once per 24 h, so concurrent readers are not disturbed every few minutes. */
 private const val EVENTS_ROTATE_MIN_INTERVAL_MIN = 1440
 
@@ -241,6 +244,18 @@ internal class NotificationService(
                 ClaudeState.UNKNOWN -> {} // keep last known activity
             }
         }
+        // A screen that shows no dialog (input box or spinner) ends the hold behind an announced
+        // hook approval (PromptDialogDedup): the dialog was answered somewhere. Only a screen that
+        // showed the dialog before, or got output after it, can tell (screenShowsNoDialog).
+        onScreenSeen = { sid, st ->
+            when (st) {
+                ClaudeState.APPROVAL -> dialogDedup.dialogSeen(sid)
+                ClaudeState.IDLE, ClaudeState.WORKING -> dialogDedup.screenShowsNoDialog(sid, lastOutputAtMs(sid))
+                ClaudeState.UNKNOWN -> {}
+            }
+        }
+        // `hookev.off` reported by the bootstrap of the session's server: CAP=0.
+        hookCapVeto = { sid -> hooksSwitchedOff(sid) }
         onLoginDetected = { sid, url ->
             // SECURITY: never log the URL — it seams into the pasted auth code.
             _loginFlow.update { cur ->
@@ -279,6 +294,143 @@ internal class NotificationService(
 
     private val dialogDedup = PromptDialogDedup()
 
+    /** Device clock of the notify gates and the hook reducer; a test moves it. */
+    internal var clock: () -> Long = { System.currentTimeMillis() }
+
+    /**
+     * CAP=1 (see [InputPromptDetector.markHookEvents]): how long the terminal of a WORKING session
+     * may stay silent before the dot drops to ready. An interrupt (Escape) emits no hook event at all,
+     * and with the statusline out nothing else would end WORKING until the next `stop`; while Claude
+     * works its spinner and elapsed-time counter repaint continuously, so a quiet terminal means it
+     * stopped. Checked every [silenceTickMs].
+     */
+    internal var silenceDropMs = SILENCE_DROP_MS
+    internal var silenceTickMs = 1_000L
+
+    /** Whether output of the session can reach this device at all: silence on a dead transport says nothing. */
+    internal var outputLive: (String) -> Boolean = { sid ->
+        registry.et(sid)?.isConnected == true || registry.mosh(sid)?.isConnected == true || registry.ssh(sid)?.isConnected == true
+    }
+
+    internal companion object {
+        /** CAP=1 ends when the legacy Stop hook fires and no v2 event of the session arrived for this long. */
+        const val CAP_STALE_MS = 2L * 60 * 1000
+        /** Only an applied event at most this old sets CAP=1: not the hour-old backlog of a watcher's replay. */
+        const val CAP_FRESH_MAX_AGE_MS = HookEventReducer.FIRST_SIGHTING_MAX_AGE_MS
+    }
+
+    /** Longest wait between two silence ticks while no transport of the session is connected (backoff). */
+    internal var silenceDeadTickMaxMs = 30_000L
+
+    /** How long a legacy Stop marker waits for the v2 `stop` (another file of the same tail) before CAP=1 is judged. */
+    internal var capStopGraceMs = 5_000L
+
+    /** The bootstrap of [serverId] found `~/.claude-remote/hookev.off`: the hooks emit nothing. */
+    internal var hookOffSwitch: (String) -> Boolean = { serverId -> HookInstallControl.shared.status.value[serverId]?.offSwitch == true }
+
+    /** Test seam: the tail of [serverId] connected or lost (the rig has no exec channel). */
+    internal fun setWatcherLiveForTest(serverId: String, live: Boolean) {
+        serverNotifyWatchers[serverId]?.live = live
+    }
+
+    private fun hooksSwitchedOff(sessionId: String): Boolean {
+        for (w in serverNotifyWatchers.values) {
+            if (w.tmuxToSession.containsValue(sessionId)) return hookOffSwitch(w.serverId)
+        }
+        return false
+    }
+
+    /** A key sent from this app answered the dialog on screen (a digit, `y`, Escape): it is gone. */
+    fun noteDialogAnswered(sessionId: String) = dialogDedup.dialogGone(sessionId)
+
+    /**
+     * A live legacy Stop marker of [sessionId]: the Stop hook runs. When no v2 event of the session
+     * arrived for [CAP_STALE_MS] (the v2 `stop` of this same turn included, after [capStopGraceMs]),
+     * the v2 hooks are silent (hookev.off the bootstrap has not seen yet, settings rewritten): CAP=0.
+     * Checked only at a turn end, where an event is due: an idle session sends none for hours.
+     */
+    internal fun noteLegacyStop(sessionId: String) {
+        if (!promptDetector.hasHookEvents(sessionId)) return
+        scope.launch {
+            kotlinx.coroutines.delay(capStopGraceMs)
+            val at = promptDetector.hookEventAtMs(sessionId) ?: return@launch
+            val silentMs = System.currentTimeMillis() - at
+            if (silentMs > CAP_STALE_MS) {
+                FileLogger.log(TAG, "Stop hook of $sessionId without any v2 hook event for ${silentMs}ms: CAP=0")
+                promptDetector.clearHookEvents(sessionId)
+            }
+        }
+    }
+
+    private val silenceWatches = java.util.concurrent.ConcurrentHashMap<String, kotlinx.coroutines.Job>()
+    private val silenceArmedAt = java.util.concurrent.ConcurrentHashMap<String, Long>()
+
+    /**
+     * A CAP=1 session was just set WORKING (a prompt submitted from this app, a hook `work` /
+     * `askdone`): (re)start its silence watch. No-op for a session without hook events, whose
+     * statusline still drives the state (and the UI's 45 s stale-WORKING decay stays its only one).
+     */
+    fun armSilenceWatch(sessionId: String) {
+        if (!promptDetector.hasHookEvents(sessionId)) return
+        silenceArmedAt[sessionId] = System.currentTimeMillis()
+        val job = scope.launch(start = kotlinx.coroutines.CoroutineStart.LAZY) { runSilenceWatch(sessionId) }
+        silenceWatches.put(sessionId, job)?.cancel()
+        job.start()
+    }
+
+    private suspend fun runSilenceWatch(sessionId: String) {
+        val self = kotlin.coroutines.coroutineContext[kotlinx.coroutines.Job]
+        var tick = silenceTickMs
+        var lastTickAt = System.currentTimeMillis()
+        // Since when output can reach this device without a break: silence before it says nothing.
+        var liveFrom: Long? = lastTickAt
+        try {
+            while (true) {
+                kotlinx.coroutines.delay(tick)
+                if (!promptDetector.hasHookEvents(sessionId)) return
+                if (activityOf(sessionId) != SessionActivity.WORKING) return
+                val live = outputLive(sessionId)
+                val now = System.currentTimeMillis()
+                // A tick far later than asked: the process was frozen (Doze) and the transport may only say connected.
+                val woke = now - lastTickAt > tick + maxOf(silenceTickMs, silenceDropMs / 2)
+                lastTickAt = now
+                if (!live) {
+                    // Nothing can arrive: no silence is measured, and the watch backs off instead of waking every tick.
+                    liveFrom = null
+                    tick = minOf(tick * 2, maxOf(silenceTickMs, silenceDeadTickMaxMs))
+                    continue
+                }
+                tick = silenceTickMs
+                // Back after a reconnect or a freeze: the re-attach repaint has not arrived yet.
+                val from = if (liveFrom == null || woke) now.also { liveFrom = it } else liveFrom!!
+                val quietFrom = maxOf(promptDetector.lastOutputAtMs(sessionId) ?: 0L, silenceArmedAt[sessionId] ?: 0L, from)
+                val quietMs = now - quietFrom
+                if (quietMs >= silenceDropMs) {
+                    FileLogger.log(TAG, "No terminal output from $sessionId for ${quietMs}ms while WORKING and no hook stop: ready")
+                    updateActivity(sessionId, SessionActivity.WAITING_FOR_INPUT)
+                    return
+                }
+            }
+        } finally {
+            if (self != null) silenceWatches.remove(sessionId, self)
+        }
+    }
+
+    /**
+     * The reducer's pending hook approval of [sessionId] (server-clock start), whichever server watches
+     * it, and whether that server's hooks are live: its tail connected and no `hookev.off` reported.
+     */
+    private fun hookApprovalOf(sessionId: String): Pair<Long?, Boolean> {
+        for (w in serverNotifyWatchers.values) {
+            for ((tmux, sid) in w.tmuxToSession) {
+                if (sid == sessionId) {
+                    w.reducer.approvalSince(tmux)?.let { return it to (w.live && !hookOffSwitch(w.serverId)) }
+                }
+            }
+        }
+        return null to false
+    }
+
     private fun dialogSource(eventKey: String?): PromptDialogDedup.Source? = when {
         NotifyKeys.isHook(eventKey) -> PromptDialogDedup.Source.HOOK
         NotifyKeys.isDetection(eventKey) -> PromptDialogDedup.Source.SCREEN
@@ -301,7 +453,7 @@ internal class NotificationService(
         // callers, in which case the platform falls back to the generic hint.
         body: String? = null,
     ) {
-        val now = System.currentTimeMillis()
+        val now = clock()
         // Dedup by the explicit event key when given, else by (hint + last
         // assistant message). On reconnect the tmux buffer is replayed and the
         // screen looks idle/approval again, and a flapping
@@ -316,13 +468,20 @@ internal class NotificationService(
         // platform callback is invoked OUTSIDE the lock (never hold a lock
         // across a platform callback).
         val key = eventKey ?: lastAssistantEntry(sessionId)?.id?.let { "$hint#$it" }
+        val source = dialogSource(eventKey)
+        // Outside lastNotifiedKey's monitor: the reducer has its own lock and never takes this one.
+        val (pendingHookApproval, hooksLive) = if (source != null) hookApprovalOf(sessionId) else (null to false)
         val proceed = synchronized(lastNotifiedKey) {
             if (key != null && lastNotifiedKey[sessionId] == key) {
                 FileLogger.log(TAG, "Suppressed needs-input for $sessionId (same event)")
                 false
-            } else if (dialogSource(eventKey)?.let { !dialogDedup.allow(sessionId, it, now) } == true) {
+            } else if (source != null && !dialogDedup.allow(sessionId, source, now, pendingHookApproval, hooksLive)) {
                 // The same dialog was already announced by the other source (hook event vs screen).
-                FileLogger.log(TAG, "Suppressed needs-input for $sessionId (the same dialog was just announced by the other source)")
+                if (source == PromptDialogDedup.Source.SCREEN && dialogDedup.isHeldByHook(sessionId, pendingHookApproval, now, hooksLive)) {
+                    FileLogger.log(TAG, "Suppressed needs-input for $sessionId (the hook approval since $pendingHookApproval it announced is still pending)")
+                } else {
+                    FileLogger.log(TAG, "Suppressed needs-input for $sessionId (the same dialog was just announced by the other source)")
+                }
                 false
             } else {
                 // The debounce collapses repeats of one event, and a screen
@@ -681,75 +840,7 @@ internal class NotificationService(
                                 }
                             }
                             if (!line.startsWith("claude-remote-notify")) continue
-                            // EXACT tmux-session match. The marker line is
-                            // "claude-remote-notify <#S> <epoch>" and ALL sessions on a
-                            // server share one marker file, so a substring match cross-
-                            // fired between sessions whose names are prefixes of each
-                            // other (e.g. "cashy" matched "cashy-test"). Dispatch on the
-                            // second whitespace token exactly.
-                            val parts = line.trim().split(Regex("\\s+"))
-                            val markerTmux = parts.getOrNull(1) ?: continue
-                            val sessionId = w.tmuxToSession[markerTmux] ?: continue
-                            val markerEpochSec = parts.getOrNull(2)?.toLongOrNull()
-                            // Identity, not age. The marker file is append-only and we
-                            // replay its last 25 lines on every (re)connect, so a marker
-                            // we have already SEEN is a replay and is dropped; one we
-                            // have not seen is a completion the user is waiting on and
-                            // notifies however late it arrives — a frozen socket
-                            // flushing minutes of buffered bytes is indistinguishable
-                            // from a replay by age, which is how the old two-minute
-                            // filter killed exactly the notification that mattered.
-                            // Malformed lines (null epoch) fall through to
-                            // fireNeedsInput's own dedup unchanged.
-                            var claim: NotifyEpochTracker.Claim? = null
-                            if (markerEpochSec != null) {
-                                val ageMs = System.currentTimeMillis() - (markerEpochSec * 1000L + (clockSkewMs ?: 0L))
-                                // FIRST sighting for this session in this process. With
-                                // no baseline, "never seen" and "newer than anything
-                                // seen" are the same thing, so the replayed backlog of a
-                                // file shared by every session on the server would buzz
-                                // the user once per session for completions they
-                                // answered hours ago. Record it as seen, flip the dot,
-                                // stay quiet. From the second marker on, identity alone
-                                // decides — so a genuinely late marker still notifies,
-                                // which is the case the age filter used to break.
-                                when (val outcome = notifyEpochs.observe(
-                                    sessionId, markerEpochSec, ageMs, firstSightingGraceMs,
-                                )) {
-                                    is NotifyEpochTracker.Outcome.Primed -> {
-                                        FileLogger.log(TAG, "Priming Stop-hook baseline for $sessionId (epoch $markerEpochSec, age ${ageMs}ms) — activity only")
-                                        // Seed the message id too, so the first REAL
-                                        // notification for this session has the id gate
-                                        // behind it and not just the timestamp bounds.
-                                        lastAssistantEntry(sessionId)?.id
-                                            ?.let { lastNotifiedAssistantId.putIfAbsent(sessionId, it) }
-                                        flipToWaiting(sessionId)
-                                        continue
-                                    }
-                                    is NotifyEpochTracker.Outcome.Replay -> {
-                                        FileLogger.log(TAG, "Suppressed replayed Stop hook for $sessionId (epoch $markerEpochSec <= last seen)")
-                                        continue
-                                    }
-                                    is NotifyEpochTracker.Outcome.Claimed -> claim = outcome.claim
-                                }
-                                // Sanity bound only — see notifyAbsurdAgeMs. The session
-                                // really is idle, so still flip the dot; just don't buzz.
-                                if (ageMs > notifyAbsurdAgeMs) {
-                                    FileLogger.log(TAG, "Stop hook for $sessionId is ${ageMs}ms old — activity only, no notification")
-                                    flipToWaiting(sessionId)
-                                    continue
-                                }
-                            }
-                            FileLogger.log(TAG, "Stop hook fired for $sessionId: $line")
-                            // Hand the marker to its own coroutine: resolving the body
-                            // can take up to bodyPollMs, and doing that here stalled the
-                            // tail reader — markers for OTHER sessions on this server
-                            // queued behind it and their activity dots lagged by the
-                            // same amount.
-                            val claimForSession = claim
-                            onSessionLane(sessionId) {
-                                handleStopMarker(sessionId, markerTmux, markerEpochSec, claimForSession)
-                            }
+                            dispatchStopMarker(w, line, clockSkewMs)
                         }
                     } finally {
                         w.channel = null
@@ -780,6 +871,89 @@ internal class NotificationService(
     }
 
     /**
+     * One legacy Stop marker line (`claude-remote-notify <#S> <epoch>`) of the shared tail: dispatched
+     * to its session, deduplicated by epoch identity, then handled on the session's lane.
+     */
+    private fun dispatchStopMarker(w: ServerNotifyWatcher, line: String, clockSkewMs: Long?) {
+        // EXACT tmux-session match. The marker line is
+        // "claude-remote-notify <#S> <epoch>" and ALL sessions on a
+        // server share one marker file, so a substring match cross-
+        // fired between sessions whose names are prefixes of each
+        // other (e.g. "cashy" matched "cashy-test"). Dispatch on the
+        // second whitespace token exactly.
+        val parts = line.trim().split(Regex("\\s+"))
+        val markerTmux = parts.getOrNull(1) ?: return
+        val sessionId = w.tmuxToSession[markerTmux] ?: return
+        val markerEpochSec = parts.getOrNull(2)?.toLongOrNull()
+        // Identity, not age. The marker file is append-only and we
+        // replay its last 25 lines on every (re)connect, so a marker
+        // we have already SEEN is a replay and is dropped; one we
+        // have not seen is a completion the user is waiting on and
+        // notifies however late it arrives — a frozen socket
+        // flushing minutes of buffered bytes is indistinguishable
+        // from a replay by age, which is how the old two-minute
+        // filter killed exactly the notification that mattered.
+        // Malformed lines (null epoch) fall through to
+        // fireNeedsInput's own dedup unchanged.
+        var claim: NotifyEpochTracker.Claim? = null
+        if (markerEpochSec != null) {
+            val ageMs = System.currentTimeMillis() - (markerEpochSec * 1000L + (clockSkewMs ?: 0L))
+            // FIRST sighting for this session in this process. With
+            // no baseline, "never seen" and "newer than anything
+            // seen" are the same thing, so the replayed backlog of a
+            // file shared by every session on the server would buzz
+            // the user once per session for completions they
+            // answered hours ago. Record it as seen, flip the dot,
+            // stay quiet. From the second marker on, identity alone
+            // decides — so a genuinely late marker still notifies,
+            // which is the case the age filter used to break.
+            when (val outcome = notifyEpochs.observe(
+                sessionId, markerEpochSec, ageMs, firstSightingGraceMs,
+            )) {
+                is NotifyEpochTracker.Outcome.Primed -> {
+                    FileLogger.log(TAG, "Priming Stop-hook baseline for $sessionId (epoch $markerEpochSec, age ${ageMs}ms) — activity only")
+                    // Seed the message id too, so the first REAL
+                    // notification for this session has the id gate
+                    // behind it and not just the timestamp bounds.
+                    lastAssistantEntry(sessionId)?.id
+                        ?.let { lastNotifiedAssistantId.putIfAbsent(sessionId, it) }
+                    flipToWaiting(sessionId)
+                    return
+                }
+                is NotifyEpochTracker.Outcome.Replay -> {
+                    FileLogger.log(TAG, "Suppressed replayed Stop hook for $sessionId (epoch $markerEpochSec <= last seen)")
+                    return
+                }
+                is NotifyEpochTracker.Outcome.Claimed -> claim = outcome.claim
+            }
+            // Sanity bound only — see notifyAbsurdAgeMs. The session
+            // really is idle, so still flip the dot; just don't buzz.
+            if (ageMs > notifyAbsurdAgeMs) {
+                FileLogger.log(TAG, "Stop hook for $sessionId is ${ageMs}ms old — activity only, no notification")
+                flipToWaiting(sessionId)
+                return
+            }
+        }
+        FileLogger.log(TAG, "Stop hook fired for $sessionId: $line")
+        noteLegacyStop(sessionId)
+        // Hand the marker to its own coroutine: resolving the body
+        // can take up to bodyPollMs, and doing that here stalled the
+        // tail reader — markers for OTHER sessions on this server
+        // queued behind it and their activity dots lagged by the
+        // same amount.
+        val claimForSession = claim
+        onSessionLane(sessionId) {
+            handleStopMarker(sessionId, markerTmux, markerEpochSec, claimForSession)
+        }
+    }
+
+    /** Test seam: one legacy Stop marker line of [serverId] as if the tail had read it (the watcher must exist). */
+    internal fun dispatchStopMarkerLineForTest(serverId: String, line: String) {
+        val w = serverNotifyWatchers[serverId] ?: error("no watcher for $serverId")
+        dispatchStopMarker(w, line, 0L)
+    }
+
+    /**
      * One `claude-remote-ev` line: reduce it ([HookEventReducer]) and apply the result
      * on the session's lane (after everything already dispatched for it).
      * Background sessions only get a notification; the active tab in the foreground is
@@ -792,8 +966,11 @@ internal class NotificationService(
             return
         }
         val sessionId = w.tmuxToSession[e.tmux] ?: return
-        val r = w.reducer.reduce(e, System.currentTimeMillis(), skewMs, skewErrMs)
+        val r = w.reducer.reduce(e, clock(), skewMs, skewErrMs)
         if (r.ignored != null) return
+        // CAP=1 from now on: an applied, fresh v2 event of this pane proves its hooks run now. A
+        // replayed duplicate (ignored above) or the hour-old backlog of a cold start proves nothing.
+        if (r.ageMs <= CAP_FRESH_MAX_AGE_MS) promptDetector.markHookEvents(sessionId, System.currentTimeMillis() - maxOf(0L, r.ageMs))
         val isActive = tabManager.activeTabId.value == sessionId
         FileLogger.log(TAG, "Hook event ${e.ev} for $sessionId (${if (isActive) "fg" else "bg"}) age=${r.ageMs}")
         onSessionLane(sessionId) {
@@ -802,7 +979,10 @@ internal class NotificationService(
             if (r.checkUuid) hookSink.onCheckUuid(w.serverId, e.tmux)
             r.activity?.let { act ->
                 val onlyLeavesApproval = e.ev == "stop" && act == SessionActivity.WORKING
-                if (!onlyLeavesApproval || activityOf(sessionId) == SessionActivity.APPROVAL_NEEDED) updateActivity(sessionId, act)
+                if (!onlyLeavesApproval || activityOf(sessionId) == SessionActivity.APPROVAL_NEEDED) {
+                    updateActivity(sessionId, act)
+                    if (act == SessionActivity.WORKING) armSilenceWatch(sessionId)
+                }
             }
             val n = r.notify ?: return@onSessionLane
             kotlinx.coroutines.delay(hookSettleMs)
@@ -812,6 +992,12 @@ internal class NotificationService(
             fireNeedsInput(sessionId, hint, isActive, eventKey = n.key, body = n.text)
             hookSink.onNotify(w.serverId, e.tmux, n.kind, n.text)
         }
+    }
+
+    /** Test seam: one watcher line of [serverId] as if the tail had read it (the watcher must exist). */
+    internal fun dispatchHookLineForTest(serverId: String, line: String) {
+        val w = serverNotifyWatchers[serverId] ?: error("no watcher for $serverId")
+        dispatchHookEvent(w, line, 0L, 0L)
     }
 
     /**
@@ -1003,6 +1189,9 @@ internal class NotificationService(
         // a tail replay after reconnect would re-fire an already-notified epoch.
         notifyEpochs.clear(sessionId)
         lastNotifiedAssistantId.remove(sessionId)
+        dialogDedup.forget(sessionId)
+        silenceWatches.remove(sessionId)?.cancel()
+        silenceArmedAt.remove(sessionId)
         // Safe to drop even with a handler still in flight: that handler holds
         // its own Job, and this runs only on permanent forget — disconnectSession
         // has already unregistered the session from its watcher, so no further
