@@ -169,7 +169,7 @@ sg_log() {
     local st="${'$'}SG_DIR/.drift.sockguard.${'$'}SG_WHO.${'$'}1" now last
     now=${'$'}(date +%s); last=${'$'}(stat -c %Y "${'$'}st" 2>/dev/null || echo 0)
     if [ ${'$'}((now - last)) -lt 900 ]; then
-        [ -n "${'$'}{SG_QUIET:-}" ] && echo "${'$'}SG_QUIET[${'$'}(date -u +%FT%TZ)] sockguard(${'$'}SG_WHO): ${'$'}2"
+        [ -n "${'$'}{SG_QUIET:-}" ] && echo "${'$'}{SG_QUIET}[${'$'}(date -u +%FT%TZ)] sockguard(${'$'}SG_WHO): ${'$'}2"
         return 0
     fi
     touch "${'$'}st" 2>/dev/null || true
