@@ -51,6 +51,7 @@ class WearActionReceiver : BroadcastReceiver() {
             null
         }
         val answer = if (intent.action == ACTION_APPROVE) intent.getStringExtra(WearNotifier.EXTRA_ANSWER) else null
+        val prompt = intent.getStringExtra(WearNotifier.EXTRA_PROMPT)
 
         // Nic k odeslání — uzavři PendingResult hned, ať proces nedrží
         // foreground prioritu zbytečně.
@@ -81,7 +82,7 @@ class WearActionReceiver : BroadcastReceiver() {
         fun settle(result: String) {
             if (!done.compareAndSet(false, true)) return
             handler.removeCallbacks(timeout)
-            runCatching { finish(appContext, sessionId, result, replyText) }
+            runCatching { finish(appContext, sessionId, result, replyText, prompt) }
                 .onFailure { e -> WearLog.w(appContext, TAG, "finish failed for $sessionId: ${e.message}") }
             pending.finish()
         }
@@ -90,10 +91,10 @@ class WearActionReceiver : BroadcastReceiver() {
 
         if (intent.action == ACTION_APPROVE) {
             WearLog.i(appContext, TAG, "approve $sessionId answer=$answer")
-            sendApprove(appContext, sessionId, answer!!) { result -> settle(result) }
+            sendApprove(appContext, sessionId, answer!!, prompt) { result -> settle(result) }
         } else {
             WearLog.i(appContext, TAG, "reply $sessionId (${replyText!!.length} chars)")
-            sendReply(appContext, sessionId, replyText) { result -> settle(result) }
+            sendReply(appContext, sessionId, replyText, prompt) { result -> settle(result) }
         }
     }
 
@@ -104,7 +105,7 @@ class WearActionReceiver : BroadcastReceiver() {
      * pryč bez možnosti odeslat ho znovu. Při chybě ji proto vrátíme zpět
      * i s tím, co uživatel napsal.
      */
-    private fun finish(context: Context, sessionId: String, result: String, pendingText: String?) {
+    private fun finish(context: Context, sessionId: String, result: String, pendingText: String?, prompt: String?) {
         WearLog.i(context, TAG, "send result for $sessionId: $result")
         if (result == RESULT_SENT) {
             WearNotifier.cancelSession(context, sessionId)
@@ -118,7 +119,7 @@ class WearActionReceiver : BroadcastReceiver() {
         // (nebo aspoň přečíst) na skutečném selhání.
         val unconfirmed = result == RESULT_TIMEOUT
         val message = if (unconfirmed) "může už být na cestě, neposílejte hned znovu" else result
-        WearNotifier.notifySendFailure(context, sessionId, pendingText, message, unconfirmed)
+        WearNotifier.notifySendFailure(context, sessionId, pendingText, message, unconfirmed, prompt)
         WearHaptics.error(context)
     }
 

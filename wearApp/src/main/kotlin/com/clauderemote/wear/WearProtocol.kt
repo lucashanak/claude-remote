@@ -32,6 +32,11 @@ data class WearSessionInfo(
     // Trailing default + ignoreUnknownKeys drží kompatibilitu se staršími
     // phone buildy.
     val notifyBody: String? = null,
+    // Identita dotazu, který řádek ukazuje (PromptFingerprint.encode() na
+    // telefonu), nebo null, když není na co odpovídat. Hodinky ji neprůhledně
+    // vrací s /reply a /approve a telefon nic nenapíše, pokud session mezitím
+    // ukazuje jiný dotaz. Trailing default kvůli kompatibilitě.
+    val prompt: String? = null,
 )
 
 @Serializable

@@ -7,6 +7,8 @@ import android.content.Intent
 import android.os.Handler
 import android.os.Looper
 import com.clauderemote.session.SessionOrchestrator
+import com.clauderemote.session.service.PromptFingerprint
+import com.clauderemote.session.service.ReplyGuard
 import com.clauderemote.util.FileLogger
 
 /**
@@ -28,6 +30,11 @@ object OrchestratorHolder {
  * Mirrors the chat input path: sendClaudeCommand(text) followed by a CR a
  * beat later (same as voice mode), then reverts the alert notification —
  * which also clears the watch-side "sending…" spinner.
+ *
+ * Only while the session still shows the prompt the alert was raised for
+ * (SessionOrchestrator.checkReply): every session runs in yolo mode, so a
+ * text meant for one permission dialog must never answer the next one.
+ * Otherwise nothing is sent and the alert says the question has changed.
  */
 class ReplyReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
@@ -38,6 +45,13 @@ class ReplyReceiver : BroadcastReceiver() {
         val orchestrator = OrchestratorHolder.orchestrator
         if (orchestrator == null) {
             FileLogger.log(TAG, "Reply dropped — orchestrator not available")
+            return
+        }
+        val prompt = PromptFingerprint.decode(intent.getStringExtra(EXTRA_PROMPT))
+        val verdict = orchestrator.checkReply(sessionId, prompt, ReplyGuard.Reply.TEXT)
+        if (verdict is ReplyGuard.Verdict.Refuse) {
+            FileLogger.log(TAG, "Reply to $sessionId refused (${prompt?.key}): ${verdict.reason}")
+            AlertNotifier.postPromptChanged(context, sessionId, intent.getStringExtra(EXTRA_TITLE) ?: "Claude")
             return
         }
         FileLogger.log(TAG, "Reply to $sessionId: ${text.length} chars")
@@ -53,6 +67,9 @@ class ReplyReceiver : BroadcastReceiver() {
     companion object {
         const val KEY_REPLY = "reply_text"
         const val EXTRA_SESSION_ID = "session_id"
+        const val EXTRA_TITLE = "session_title"
+        // PromptFingerprint.encode() of the prompt the alert was raised for.
+        const val EXTRA_PROMPT = "prompt"
         private const val TAG = "ReplyReceiver"
     }
 }

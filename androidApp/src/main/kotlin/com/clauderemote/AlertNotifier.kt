@@ -72,6 +72,10 @@ object AlertNotifier {
      * Bridging to the watch is deliberately left at the platform default: the
      * watch app suppresses this bridged copy from its own side via the
      * NO_BRIDGING meta-data in the wearApp manifest, so nothing is needed here.
+     *
+     * [prompt] names the prompt this alert is for. The inline reply carries it back so
+     * [ReplyReceiver] types nothing once the session shows a different prompt; null makes every
+     * reply to this alert fail closed.
      */
     fun post(
         context: Context,
@@ -79,6 +83,7 @@ object AlertNotifier {
         sessionTitle: String,
         displayText: String,
         speakText: String = displayText,
+        prompt: com.clauderemote.session.service.PromptFingerprint?,
     ) {
         // POST_NOTIFICATIONS denied (33+) does NOT throw from notify() — it is
         // a silent no-op, which used to make the log claim "Alert posted" while
@@ -109,6 +114,10 @@ object AlertNotifier {
                 context, sessionId.hashCode(),
                 Intent(context, ReplyReceiver::class.java).apply {
                     putExtra(ReplyReceiver.EXTRA_SESSION_ID, sessionId)
+                    putExtra(ReplyReceiver.EXTRA_TITLE, sessionTitle)
+                    // FLAG_UPDATE_CURRENT replaces it on every re-post, so the reply always
+                    // names the prompt of the alert the user is looking at.
+                    putExtra(ReplyReceiver.EXTRA_PROMPT, prompt?.encode())
                 },
                 PendingIntent.FLAG_MUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
             )
@@ -164,6 +173,41 @@ object AlertNotifier {
             FileLogger.log(TAG, "Alert post FAILED for $sessionId: ${it.message}")
         }
     }
+
+    /**
+     * Replace the session's alert after a reply was refused because the session no longer shows
+     * the prompt it was written for. No reply action: the user has to see the new prompt in the
+     * app before answering it. Re-posting the same id also ends the RemoteInput spinner.
+     */
+    fun postPromptChanged(context: Context, sessionId: String, sessionTitle: String) {
+        runCatching {
+            ensureChannel(context)
+            val openIntent = PendingIntent.getActivity(
+                context, sessionId.hashCode(),
+                Intent(context, MainActivity::class.java).apply {
+                    flags = Intent.FLAG_ACTIVITY_SINGLE_TOP
+                    putExtra("switch_to_session", sessionId)
+                },
+                PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+            )
+            val notification = Notification.Builder(context, ALERT_CHANNEL_ID)
+                .setContentTitle(sessionTitle)
+                .setContentText(PROMPT_CHANGED_TEXT)
+                .setSmallIcon(android.R.drawable.ic_dialog_info)
+                .setContentIntent(openIntent)
+                .setAutoCancel(true)
+                .setOnlyAlertOnce(true)
+                .setCategory(Notification.CATEGORY_MESSAGE)
+                .build()
+            (context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager)
+                .notify(alertId(sessionId), notification)
+        }.onFailure {
+            FileLogger.log(TAG, "Prompt-changed post FAILED for $sessionId: ${it.message}")
+        }
+    }
+
+    /** What a refused reply tells the user, on the phone and on the watch. */
+    const val PROMPT_CHANGED_TEXT = "Dotaz se mezitím změnil – otevři aplikaci"
 
     /** Whether the user has notifications for this app switched on at OS level. */
     fun notificationsBlocked(context: Context): Boolean = runCatching {

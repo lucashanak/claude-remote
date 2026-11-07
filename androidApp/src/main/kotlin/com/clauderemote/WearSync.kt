@@ -51,6 +51,13 @@ data class WearSessionInfo(
     // the PREVIOUS turn's text when the activity flip beats the transcript.
     // New trailing field (defaulted) to stay wire-compatible with wearApp.
     val notifyBody: String? = null,
+    // PromptFingerprint.encode() of the prompt this row shows (the one last
+    // handed to the phone's alert path), or null when it offers nothing to
+    // answer. The watch
+    // sends it back with /reply and /approve, and the phone types nothing
+    // once the session shows a different prompt. New trailing field
+    // (defaulted) to stay wire-compatible with wearApp.
+    val prompt: String? = null,
 )
 
 @Serializable
@@ -140,6 +147,12 @@ object WearSync {
     // turn falls back to the live lastAssistantText rather than pinning a
     // stale answer forever.
     private val resolvedBodies = mutableMapOf<String, String>()
+    // sessionId -> the prompt the newest alert was raised for (setResolvedBody),
+    // guarded by resolvedBodies' monitor and dropped with it. The row offers a
+    // reply to THIS prompt, never to the session's live one: a dialog that
+    // replaced it without an alert of its own (the foreground tab, the hook's
+    // settle delay) would otherwise get approved under the old dialog's text.
+    private val notifiedPrompts = mutableMapOf<String, com.clauderemote.session.service.PromptFingerprint>()
 
     // sessionId -> the activity the previous build observed (urgency.observe). Used
     // to make the "session started working again" clear EDGE-triggered: the Stop
@@ -264,9 +277,10 @@ object WearSync {
      * actually resolved instead of whatever `lastAssistantText` happened to
      * hold when the activity flipped.
      */
-    fun setResolvedBody(sessionId: String, body: String?) {
+    fun setResolvedBody(sessionId: String, body: String?, prompt: com.clauderemote.session.service.PromptFingerprint?) {
         synchronized(resolvedBodies) {
             if (body.isNullOrBlank()) resolvedBodies.remove(sessionId) else resolvedBodies[sessionId] = body
+            if (prompt == null) notifiedPrompts.remove(sessionId) else notifiedPrompts[sessionId] = prompt
         }
     }
 
@@ -281,7 +295,10 @@ object WearSync {
             lastMessageAt.keys.retainAll(liveIds)
         }
         synchronized(summaryCache) { summaryCache.keys.retainAll(liveIds) }
-        synchronized(resolvedBodies) { resolvedBodies.keys.retainAll(liveIds) }
+        synchronized(resolvedBodies) {
+            resolvedBodies.keys.retainAll(liveIds)
+            notifiedPrompts.keys.retainAll(liveIds)
+        }
         urgency.retain(liveIds)
         synchronized(promptEvents) { promptEvents.keys.retainAll(liveIds) }
         pruneHook?.let { hook -> runCatching { hook(liveIds) } }
@@ -312,7 +329,10 @@ object WearSync {
 
     /** The session started a new turn — its pinned body and summary are spent. */
     private fun clearResolved(sessionId: String) {
-        synchronized(resolvedBodies) { resolvedBodies.remove(sessionId) }
+        synchronized(resolvedBodies) {
+            resolvedBodies.remove(sessionId)
+            notifiedPrompts.remove(sessionId)
+        }
         // Also drop the session's cached summaries: the cache is keyed on the
         // message text, so an answer byte-identical to the previous turn's
         // would otherwise hit and hand the watch the OLD turn's summary
@@ -395,7 +415,7 @@ object WearSync {
             val previousActivity = urgency.observe(tab.id, activity)
             if (activity == "WORKING" && previousActivity != "WORKING") clearResolved(tab.id)
             val live = orch.lastAssistantText(tab.id)
-            val resolved = synchronized(resolvedBodies) { resolvedBodies[tab.id] }
+            val (resolved, notifiedPrompt) = synchronized(resolvedBodies) { resolvedBodies[tab.id] to notifiedPrompts[tab.id] }
             // Capped BEFORE the duplicate check so two texts that differ only
             // past the cap don't ship two identical 2 KB strings.
             val liveText = live?.take(WATCH_TEXT_MAX)
@@ -435,6 +455,10 @@ object WearSync {
                 // identical copy changes nothing on the wrist and only costs
                 // its own length in a payload with a hard 100 KB ceiling.
                 notifyBody = resolvedText?.takeIf { it != liveText },
+                // Judged against the activity of THIS row, so the watch never
+                // offers Ano/Ne bound to a ready prompt or the reverse.
+                prompt = com.clauderemote.session.service.ReplyGuard
+                    .promptShown(notifiedPrompt, activities[tab.id])?.encode(),
             )
         }.also { urgency.note(rows, urgencyNow()) }
     }

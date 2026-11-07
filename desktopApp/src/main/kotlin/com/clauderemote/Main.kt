@@ -433,7 +433,7 @@ fun main() = application {
     // values when it fires, not the values at wiring time.
     LaunchedEffect(Unit) {
         DesktopPresence.install()
-        sessionOrchestrator.onClaudeNeedsInput = { sessionId, kind, hint, isActiveTab, body ->
+        sessionOrchestrator.onClaudeNeedsInput = { sessionId, kind, hint, isActiveTab, body, _ ->
             // Same suppression rule Android's MainActivity applies: don't notify
             // about a session the user is already looking at. A minimized window
             // counts as not-foreground even if it never lost AWT focus — and so

@@ -339,7 +339,7 @@ class MainActivity : FragmentActivity() {
             }
         }
 
-        sessionOrchestrator.onClaudeNeedsInput = { sessionId, kind, hint, isActiveTab, body ->
+        sessionOrchestrator.onClaudeNeedsInput = { sessionId, kind, hint, isActiveTab, body, prompt ->
             val tab = tabManager.getTab(sessionId)
             val title = tab?.tabTitle ?: "Session"
             val fg = isAppInForeground
@@ -363,7 +363,7 @@ class MainActivity : FragmentActivity() {
             // typically the PREVIOUS turn's answer, and permanently so.
             // Whether the wrist BUZZES for it is the watch's call, made from
             // the completion setting the payload carries (see WearSync).
-            WearSync.setResolvedBody(sessionId, notifBody)
+            WearSync.setResolvedBody(sessionId, notifBody, prompt)
             // No body means this came from the screen detector, not the Stop
             // hook, so nothing in the payload changes and the watch would read
             // the push as "nothing happened" — deterministically so for a
@@ -391,7 +391,7 @@ class MainActivity : FragmentActivity() {
                 // 12 s read, and waiting for it used to mean no alert at all
                 // for that whole window.
                 val seq = nextAlertSeq(sessionId)
-                AlertNotifier.post(applicationContext, sessionId, title, alertText, alertText)
+                AlertNotifier.post(applicationContext, sessionId, title, alertText, alertText, prompt = prompt)
                 // Only when a real body was resolved. With notifBody null the
                 // alert text is the generic hint ("Claude čeká na vstup"),
                 // which has nothing to summarize — and summarizing it would
@@ -408,7 +408,7 @@ class MainActivity : FragmentActivity() {
                         runCatching {
                             val summary = WearSync.summaryFor(sessionId, alertText)
                             if (summary != null && alertSeq[sessionId] == seq) {
-                                AlertNotifier.post(applicationContext, sessionId, title, summary, alertText)
+                                AlertNotifier.post(applicationContext, sessionId, title, summary, alertText, prompt = prompt)
                             }
                         }.onFailure {
                             FileLogger.log("Notify", "Summary post failed for $sessionId: ${it.message}")
@@ -518,6 +518,10 @@ class MainActivity : FragmentActivity() {
                     AlertNotifier.post(
                         applicationContext, sid, title,
                         "Toto je testovací notifikace. Zkus „Odpovědět“ a „Přehrát“.",
+                        // What the session shows now, so Reply goes through the same check as
+                        // a real alert: text into an idle session, nothing into a dialog it
+                        // did not name.
+                        prompt = sessionOrchestrator.currentPrompt(sid),
                     )
                 },
                 notificationsBlocked = { notificationsBlockedState.value },

@@ -6,13 +6,21 @@ import kotlinx.serialization.Serializable
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 
-/** Wire model for /reply — kept in sync with androidApp's copy by convention. */
+/**
+ * Wire model for /reply — kept in sync with androidApp's copy by convention.
+ * [prompt] is the [WearSessionInfo.prompt] the user answered; the phone
+ * sends nothing when the session shows a different prompt by then.
+ */
 @Serializable
-data class WearReplyRequest(val sessionId: String, val text: String)
+data class WearReplyRequest(val sessionId: String, val text: String, val prompt: String? = null)
 
 /** Wire model for /approve (answer is "y"/"n") — same convention. */
 @Serializable
-data class WearApproveRequest(val sessionId: String, val answer: String)
+data class WearApproveRequest(val sessionId: String, val answer: String, val prompt: String? = null)
+
+/** Phone -> watch on /reply-refused: the reply was not sent, and why. */
+@Serializable
+data class WearReplyRefused(val sessionId: String, val message: String)
 
 private val MESSAGING_JSON = Json { ignoreUnknownKeys = true }
 
@@ -35,13 +43,13 @@ private fun sendToPhone(context: Context, path: String, payload: ByteArray, onRe
         .addOnFailureListener { e -> onResult("Node lookup failed: ${e.message}") }
 }
 
-fun sendReply(context: Context, sessionId: String, text: String, onResult: (String) -> Unit = {}) {
-    val json = MESSAGING_JSON.encodeToString<WearReplyRequest>(WearReplyRequest(sessionId, text))
+fun sendReply(context: Context, sessionId: String, text: String, prompt: String?, onResult: (String) -> Unit = {}) {
+    val json = MESSAGING_JSON.encodeToString<WearReplyRequest>(WearReplyRequest(sessionId, text, prompt))
     sendToPhone(context, "/reply", json.toByteArray(Charsets.UTF_8), onResult)
 }
 
-fun sendApprove(context: Context, sessionId: String, answer: String, onResult: (String) -> Unit = {}) {
-    val json = MESSAGING_JSON.encodeToString<WearApproveRequest>(WearApproveRequest(sessionId, answer))
+fun sendApprove(context: Context, sessionId: String, answer: String, prompt: String?, onResult: (String) -> Unit = {}) {
+    val json = MESSAGING_JSON.encodeToString<WearApproveRequest>(WearApproveRequest(sessionId, answer, prompt))
     sendToPhone(context, "/approve", json.toByteArray(Charsets.UTF_8), onResult)
 }
 

@@ -223,6 +223,10 @@ object WearNotifier {
         pendingText: String?,
         error: String,
         unconfirmed: Boolean = false,
+        // Dotaz, na který se odpovídalo. Plnou notifikaci s akcemi vrátíme jen
+        // když ho session pořád ukazuje: jinak by "Odpovědět"/"Ano" pod
+        // chybovým textem odpovídaly na dotaz, který uživatel neviděl.
+        prompt: String? = null,
     ) {
         val body = buildString {
             // "Nepotvrzeno" ≠ "Neodesláno": po vypršení timeoutu může
@@ -237,7 +241,7 @@ object WearNotifier {
             }
         }
         val session = SessionRepository.sessions.value.firstOrNull { it.id == sessionId }
-        if (session != null) {
+        if (session != null && prompt != null && session.prompt == prompt) {
             notifySession(context, session, silentUpdate = false, bodyOverride = body)
             return
         }
@@ -248,7 +252,7 @@ object WearNotifier {
         }
         val builder = NotificationCompat.Builder(context, CHANNEL_WAITING)
             .setSmallIcon(R.mipmap.ic_launcher)
-            .setContentTitle("Claude Remote")
+            .setContentTitle(session?.title ?: "Claude Remote")
             .setContentText(body)
             .setStyle(NotificationCompat.BigTextStyle().bigText(body))
             .setContentIntent(
@@ -285,10 +289,10 @@ object WearNotifier {
 
         // Text labels (not just ✓/✗) so TalkBack announces them meaningfully.
         builder.addAction(
-            NotificationCompat.Action.Builder(0, "Ano", approvePending(context, session.id, "y")).build()
+            NotificationCompat.Action.Builder(0, "Ano", approvePending(context, session.id, "y", session.prompt)).build()
         )
         builder.addAction(
-            NotificationCompat.Action.Builder(0, "Ne", approvePending(context, session.id, "n")).build()
+            NotificationCompat.Action.Builder(0, "Ne", approvePending(context, session.id, "n", session.prompt)).build()
         )
 
         // Full-screen intent → WakeAndConfirmActivity trampoline wakes an
@@ -336,6 +340,7 @@ object WearNotifier {
         val replyIntent = Intent(context, WearActionReceiver::class.java).apply {
             action = WearActionReceiver.ACTION_REPLY
             putExtra(EXTRA_SESSION_ID, session.id)
+            putExtra(EXTRA_PROMPT, session.prompt)
         }
         // RemoteInput requires a MUTABLE PendingIntent — the system fills the
         // typed text into the intent before delivering it to the receiver.
@@ -374,11 +379,14 @@ object WearNotifier {
         )
     }
 
-    private fun approvePending(context: Context, sessionId: String, answer: String): PendingIntent {
+    private fun approvePending(context: Context, sessionId: String, answer: String, prompt: String?): PendingIntent {
         val intent = Intent(context, WearActionReceiver::class.java).apply {
             action = WearActionReceiver.ACTION_APPROVE
             putExtra(EXTRA_SESSION_ID, sessionId)
             putExtra(EXTRA_ANSWER, answer)
+            // FLAG_UPDATE_CURRENT přepíše i tohle při každém vyvěšení, takže
+            // akce vždy nese dotaz notifikace, kterou uživatel právě vidí.
+            putExtra(EXTRA_PROMPT, prompt)
         }
         return PendingIntent.getBroadcast(
             context,
@@ -417,6 +425,8 @@ object WearNotifier {
     // just opens the session without it).
     const val EXTRA_START_DICTATION = "start_dictation"
     const val EXTRA_ANSWER = "answer"
+    // WearSessionInfo.prompt vyvěšené notifikace — vrací se telefonu k ověření.
+    const val EXTRA_PROMPT = "prompt"
     const val KEY_REPLY_TEXT = "reply_text"
 
     private const val TAG = "WearNotifier"

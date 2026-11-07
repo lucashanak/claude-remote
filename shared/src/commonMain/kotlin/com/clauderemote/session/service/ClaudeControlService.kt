@@ -117,6 +117,9 @@ internal class ClaudeControlService(
 
     private fun activeInput(sessionId: String): ((String) -> Unit)? = route(sessionId)?.text
 
+    /** Whether a send reaches the session now instead of the offline queue. */
+    fun canDeliverNow(sessionId: String): Boolean = route(sessionId) != null
+
     // ---- Offline input queue ----
 
     private fun queueInput(sessionId: String, data: String) {

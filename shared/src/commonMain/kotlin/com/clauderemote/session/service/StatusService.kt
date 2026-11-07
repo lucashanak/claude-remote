@@ -38,12 +38,18 @@ internal class StatusService(
     // the detector's APPROVAL re-check while the dialog is on screen.
     private val lastApprovalAt = java.util.concurrent.ConcurrentHashMap<String, Long>()
 
+    // The newest prompt per session, for the check of a reply from a notification or the watch
+    // (ReplyGuard). Here because every activity change passes updateActivity, and leaving the
+    // prompt states must forget it.
+    internal val promptTokens = PromptTokens()
+
     fun updateActivity(sessionId: String, activity: SessionActivity) {
         if (activity == SessionActivity.WORKING) markWorkSeen(sessionId)
         if (activity == SessionActivity.APPROVAL_NEEDED) {
             lastApprovalAt[sessionId] = System.currentTimeMillis()
         }
         val previous = _sessionActivities.value[sessionId]
+        promptTokens.onActivity(sessionId, activity)
         _sessionActivities.update { it + (sessionId to activity) }
         // Refresh git status when the session goes idle (e.g. a command just
         // finished and may have changed the branch/dirty state). Debounced
@@ -94,5 +100,8 @@ internal class StatusService(
     }
 
     /** Drop a disconnected session's activity entry. */
-    fun clearActivity(sessionId: String) { _sessionActivities.update { it - sessionId } }
+    fun clearActivity(sessionId: String) {
+        promptTokens.forget(sessionId)
+        _sessionActivities.update { it - sessionId }
+    }
 }
