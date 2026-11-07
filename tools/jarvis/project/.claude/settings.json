@@ -32,6 +32,12 @@
       "ReportFindings",
       "TaskStop",
       "Monitor",
+      "EnterPlanMode",
+      "ExitPlanMode",
+      "ExitWorktree",
+      "CronList",
+      "EndConversation",
+      "mcp__*",
       "Bash(ssh:*)",
       "Bash(tmux:*)",
       "Bash(rm:*)",
@@ -82,6 +88,16 @@
       }
     ],
     "PreToolUse": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"@PY@\" -I \"@JARVIS@/.claude/hooks/gate.py\" --tools",
+            "timeout": 10
+          }
+        ]
+      },
       {
         "matcher": "Bash",
         "hooks": [

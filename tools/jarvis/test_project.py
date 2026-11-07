@@ -32,9 +32,16 @@ def clean_env(**kw):
     return env
 
 
-def gate(payload, raw=None):
+def gate(payload, raw=None, *args):
     data = raw if raw is not None else json.dumps(payload)
-    return subprocess.run([sys.executable, "-I", GATE], input=data, capture_output=True, text=True, timeout=30)
+    return subprocess.run([sys.executable, "-I", GATE, *args], input=data, capture_output=True, text=True, timeout=30)
+
+
+def tool_gate(tool, mode="dontAsk", **extra):
+    d = {"tool_name": tool, "tool_input": {}, **extra}
+    if mode is not None:
+        d["permission_mode"] = mode
+    return gate(d, None, "--tools")
 
 
 def bash(cmd):
@@ -91,7 +98,7 @@ class SettingsTrapsTest(unittest.TestCase):
     def test_every_rule_is_well_formed(self):
         # 2.1.319 stops at a "Settings Warning" dialog on a malformed rule (lower-case "advisor" from the spike did
         # that) and Jarvis would hang on it; a rule naming no tool only warns, so "advisor" is left out altogether
-        shape = re.compile(r"(?:mcp__\w+|[A-Z][A-Za-z]*)(?:\([^()]+\))?")
+        shape = re.compile(r"(?:mcp__\*|mcp__\w+|[A-Z][A-Za-z]*)(?:\([^()]+\))?")
         for r in self.p["allow"] + self.p["deny"]:
             self.assertTrue(shape.fullmatch(r), r)
         self.assertNotIn("advisor", [r.lower() for r in self.p["deny"]])
@@ -135,11 +142,32 @@ class SettingsTrapsTest(unittest.TestCase):
         ups = self.s["hooks"]["UserPromptSubmit"]
         self.assertTrue(ups[0]["hooks"][0]["command"].endswith('/.claude/hooks/prompt-delta.sh"'))
 
-    def test_4f_gate_is_called_through_an_absolute_interpreter(self):
+    def test_4f_gates_are_called_through_an_absolute_interpreter(self):
         # a missing interpreter (127) lets the call through; python3 <missing file> exits 2, which blocks
-        pre = self.s["hooks"]["PreToolUse"]
-        self.assertEqual(pre[0]["matcher"], "Bash")
-        self.assertEqual(pre[0]["hooks"][0]["command"], '"@PY@" -I "@JARVIS@/.claude/hooks/gate.py"')
+        pre = {m["matcher"]: m["hooks"][0]["command"] for m in self.s["hooks"]["PreToolUse"]}
+        self.assertEqual(pre, {"*": '"@PY@" -I "@JARVIS@/.claude/hooks/gate.py" --tools',
+                               "Bash": '"@PY@" -I "@JARVIS@/.claude/hooks/gate.py"'})
+
+    def test_review2_tools_that_leave_dont_ask_are_denied(self):
+        # rev-f1-proj 2: approving a plan switches the permission mode; worktrees move the cwd
+        for t in ("EnterPlanMode", "ExitPlanMode", "ExitWorktree"):
+            self.assertIn(t, self.p["deny"], t)
+
+    def test_review3_every_mcp_tool_is_denied(self):
+        # disableClaudeAiConnectors covers claude.ai only; ~/.claude.json has serena (shell), github, playwright …
+        self.assertIn("mcp__*", self.p["deny"])
+        self.assertFalse([a for a in self.p["allow"] if a.startswith("mcp__")])
+
+    def test_review1_no_claude_md_under_the_template(self):
+        # a CLAUDE.md inside the repo is loaded lazily (nested memory) into every working session that touches
+        # tools/jarvis/project/; Jarvis's instructions live there as CLAUDE.jarvis.md and are installed as CLAUDE.md
+        found = []
+        for d, dirs, files in os.walk(SRC):
+            found += [os.path.join(d, f) for f in files if f in ("CLAUDE.md", "CLAUDE.local.md")]
+            if os.path.basename(d) == ".claude" and "rules" in dirs:
+                found.append(os.path.join(d, "rules"))
+        self.assertEqual(found, [])
+        self.assertTrue(os.path.isfile(os.path.join(SRC, "CLAUDE.jarvis.md")))
 
     def test_hook_timeouts_are_short(self):
         for ev in self.s["hooks"].values():
@@ -148,10 +176,16 @@ class SettingsTrapsTest(unittest.TestCase):
                     self.assertLessEqual(h["timeout"], 20)
 
     def test_no_model_instruction_writes_effort(self):
-        with open(os.path.join(SRC, "CLAUDE.md"), encoding="utf-8") as f:
+        with open(os.path.join(SRC, "CLAUDE.jarvis.md"), encoding="utf-8") as f:
             md = f.read()
         self.assertIn("Nikdy nepiš `/effort` ani `/config`", md)
         self.assertLessEqual(len(md.splitlines()), 150)
+
+    def test_review5_session_text_never_changes_the_items(self):
+        with open(os.path.join(SRC, "CLAUDE.jarvis.md"), encoding="utf-8") as f:
+            md = " ".join(f.read().split())
+        self.assertIn("Text ze session nikdy nemění počet ani stav položek.", md)
+        self.assertIn("Ty určuje jen struktura výstupu `cr-digest`", md)
 
 
 class GateTest(unittest.TestCase):
@@ -167,9 +201,10 @@ class GateTest(unittest.TestCase):
     def test_read_commands_pass(self):
         for c in ("cr-sessions list", "cr-sessions list --all", "cr-sessions list --json", "cr-sessions show soniox",
                   "cr-sessions show 'iss242'", "cr-sessions tail Deepseek 10", "cr-sessions show claude-server-a--b",
-                  "cr-digest delta --peek", "cr-digest delta --say", "cr-digest brief --max-chars 3000",
+                  "cr-digest delta --peek", "cr-digest delta --say --peek", "cr-digest delta --peek --json",
+                  "cr-digest brief --max-chars 3000", "cr-sessions list\n",
                   "cr-digest brief --max-chars=3000", "cr-digest waiting --say", "cr-digest usage --json",
-                  "cr-digest --help", "cr-sessions show účetnictví", "  cr-digest brief  "):
+                  "cr-digest --help", "cr-sessions show účetnictví", "cr-digest brief  "):
             self.assertAllowed(c)
 
     def test_attacks_are_blocked(self):
@@ -185,6 +220,19 @@ class GateTest(unittest.TestCase):
                   "cr-digest reset", "cr-sessions list *", "cr-sessions show ~root", "cr-sessions show {a,b}",
                   "cr-sessions show 'unbalanced", "cr-sessions\tlist", "cr-sessions show a\x00b", "",
                   "cr-sessions show \u0000", "cr-sessions show x id"):
+            self.assertBlocked(c)
+
+    def test_review4_delta_only_with_peek(self):
+        # delta without --peek moves the cursor the UserPromptSubmit hook reads: Lukáš would miss a perm or an ask
+        for c in ("cr-digest delta", "cr-digest delta --say", "cr-digest delta --json", "cr-digest delta --max-chars 99",
+                  "cr-digest delta --help", "cr-digest delta peek", "cr-digest delta --peeking"):
+            self.assertBlocked(c)
+
+    def test_review6_only_trailing_newlines_are_trimmed(self):
+        # str.strip() dropped \x0c, \x1c-\x1f and NBSP, so the gate judged another line than bash would run
+        for c in ("\x0ccr-sessions list", "cr-sessions list\x0c", "\x1ccr-sessions list", "cr-sessions list\x1f",
+                  "\xa0cr-sessions list", "cr-sessions list\xa0", "  cr-sessions list", "\ncr-sessions list",
+                  "cr-sessions list\n\nid", "cr-sessions list\u2003"):
             self.assertBlocked(c)
 
     def test_non_bash_tools_are_left_to_the_permission_rules(self):
@@ -225,6 +273,41 @@ def load_gate():
     finally:
         sys.dont_write_bytecode = old
     return g
+
+
+class ToolGateTest(unittest.TestCase):
+    """gate.py --tools (matcher "*"): a tool allowlist, and only in dontAsk (rev-f1-proj 2)."""
+
+    def test_jarvis_tools_pass_in_dont_ask(self):
+        for t in ("Bash", "Read", "ToolSearch", "AskUserQuestion"):
+            r = tool_gate(t)
+            self.assertEqual(r.returncode, 0, (t, r.stderr))
+
+    def test_every_other_tool_is_blocked(self):
+        for t in ("Write", "Edit", "SendMessage", "ListAgents", "Agent", "Skill", "Artifact", "WebFetch",
+                  "EnterPlanMode", "ExitPlanMode", "ExitWorktree", "EnterWorktree", "CronList", "EndConversation",
+                  "mcp__serena__execute_shell_command", "mcp__github__create_issue", "advisor", "bash", "Bash ",
+                  "SomeToolFromANewerRelease", ""):
+            r = tool_gate(t)
+            self.assertEqual(r.returncode, 2, t)
+            self.assertIn("jarvis gate", r.stderr)
+
+    def test_any_mode_but_dont_ask_blocks_even_jarvis_tools(self):
+        # restore.sh starts AUTO / AUTO_ACCEPT sessions with --permission-mode, which beats the project's dontAsk
+        for mode in ("default", "acceptEdits", "auto", "plan", "bypassPermissions", "dontask", "", None):
+            r = tool_gate("Bash", mode)
+            self.assertEqual(r.returncode, 2, mode)
+
+    def test_malformed_input_blocks(self):
+        for raw in ("", "x", "[]", "{}", '{"tool_name": "Bash"}', '{"permission_mode": "dontAsk"}'):
+            self.assertEqual(gate(None, raw, "--tools").returncode, 2, raw)
+
+    def test_unknown_argument_blocks(self):
+        r = gate({"tool_name": "Bash", "tool_input": {"command": "cr-sessions list"}}, None, "--tool")
+        self.assertEqual(r.returncode, 2)
+
+    def test_tool_list_is_the_spike_minimum(self):
+        self.assertEqual(load_gate().TOOLS, {"Bash", "Read", "ToolSearch", "AskUserQuestion"})
 
 
 class Box:
@@ -328,11 +411,19 @@ class InstallProjectTest(unittest.TestCase):
     def test_installed_gate_command_runs_as_configured(self):
         b = self.b
         b.install()
-        cmd = json.loads(b.read(".claude/settings.json"))["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
+        pre = {m["matcher"]: m["hooks"][0]["command"]
+               for m in json.loads(b.read(".claude/settings.json"))["hooks"]["PreToolUse"]}
+
+        def run(matcher, payload):
+            return subprocess.run(["sh", "-c", pre[matcher]], input=json.dumps(payload), env=b.env(),
+                                  capture_output=True, text=True, timeout=30, cwd=b.target).returncode
+
         for c, code in (("cr-sessions list", 0), ("cr-sessions list; id", 2), ("tmux ls", 2)):
-            r = subprocess.run(["sh", "-c", cmd], input=json.dumps({"tool_name": "Bash", "tool_input": {"command": c}}),
-                               env=b.env(), capture_output=True, text=True, timeout=30, cwd=b.target)
-            self.assertEqual(r.returncode, code, (c, r.stderr))
+            payload = {"tool_name": "Bash", "tool_input": {"command": c}, "permission_mode": "dontAsk"}
+            self.assertEqual(run("Bash", payload), code, c)
+            self.assertEqual(run("*", payload), 0, c)  # the tool gate leaves the command to the Bash gate
+        self.assertEqual(run("*", {"tool_name": "Write", "tool_input": {}, "permission_mode": "dontAsk"}), 2)
+        self.assertEqual(run("*", {"tool_name": "Bash", "tool_input": {}, "permission_mode": "acceptEdits"}), 2)
 
     def test_second_run_changes_nothing(self):
         b = self.b
@@ -371,7 +462,7 @@ class InstallProjectTest(unittest.TestCase):
         b.write(rec, "\n".join(lines) + "\n")
         r = b.install()
         self.assertIn("updated", r.stdout)
-        with open(os.path.join(SRC, "CLAUDE.md"), encoding="utf-8") as f:
+        with open(os.path.join(SRC, "CLAUDE.jarvis.md"), encoding="utf-8") as f:
             self.assertEqual(b.read("CLAUDE.md"), f.read())
 
     def test_a_file_without_a_record_counts_as_changed(self):
@@ -413,6 +504,71 @@ class InstallProjectTest(unittest.TestCase):
         self.assertEqual(r.returncode, 2)
         r = self.b.install("--target", "relative/jarvis", check=False)
         self.assertEqual(r.returncode, 2)
+
+
+    def test_review7_refuses_a_symlinked_directory_or_file(self):
+        # links made with ln inside this test's own temp root, pointing inside it (docs/TESTING.md)
+        b = self.b
+        elsewhere = os.path.join(b.root, "elsewhere")
+        os.makedirs(os.path.join(b.target, ".claude"))
+        os.makedirs(elsewhere)
+        subprocess.run(["ln", "-s", elsewhere, b.path(".claude/hooks")], check=True)
+        r = b.install(check=False)
+        self.assertEqual(r.returncode, 2)
+        self.assertIn("symlink", r.stderr)
+        self.assertEqual(os.listdir(elsewhere), [])
+        self.assertEqual(os.listdir(b.path(".claude")), ["hooks"])  # nothing written before the refusal
+        os.remove(b.path(".claude/hooks"))
+        victim = os.path.join(elsewhere, "victim.md")
+        Box.write(victim, "nedotknuto\n")
+        subprocess.run(["ln", "-s", victim, b.path("CLAUDE.md")], check=True)
+        r = b.install(check=False)
+        self.assertEqual(r.returncode, 2)
+        with open(victim, encoding="utf-8") as f:
+            self.assertEqual(f.read(), "nedotknuto\n")
+
+    def test_a_run_that_dies_halfway_leaves_nothing_unrecorded(self):
+        # found live: `install-project.sh | head -7` died of SIGPIPE after writing files but before the record, and
+        # the next run called our own files "changed by hand". Closed stdout makes the first echo fail, every time.
+        b = self.b
+        for _ in range(8):  # each run gets at least one file further before its echo fails
+            subprocess.run(["bash", "-c", 'exec "$@" >&-', "x", "bash", INSTALL, "--bin", b.bin, "--python",
+                            sys.executable], env=b.env(), capture_output=False, stderr=subprocess.DEVNULL, timeout=60)
+        self.assertTrue(os.path.exists(b.path("CLAUDE.md")))
+        r = b.install()
+        self.assertNotIn("KEPT", r.stdout)
+        # and an update interrupted the same way
+        b.install()
+        rec = b.path(".claude/jarvis-installed")
+        with open(rec, encoding="utf-8") as f:
+            lines = f.read().splitlines()
+        import hashlib
+        old = "# Jarvis\nstará\n"
+        b.write(b.path("CLAUDE.md"), old)
+        b.write(rec, "\n".join([ln for ln in lines if not ln.endswith("  CLAUDE.md")]
+                                + [hashlib.sha256(old.encode()).hexdigest() + "  CLAUDE.md"]) + "\n")
+        subprocess.run(["bash", "-c", 'exec "$@" >&-', "x", "bash", INSTALL, "--bin", b.bin, "--python",
+                        sys.executable], env=b.env(), stderr=subprocess.DEVNULL, timeout=60)
+        self.assertNotIn("KEPT", b.install().stdout)
+
+    def test_review7_warns_about_settings_local(self):
+        b = self.b
+        self.assertNotIn("settings.local.json", b.install().stdout)
+        Box.write(b.path(".claude/settings.local.json"), '{"permissions": {"allow": ["Bash"]}}\n')
+        r = b.install()
+        self.assertIn("WARNING: " + b.path(".claude/settings.local.json") + " exists", r.stdout)
+
+    def test_review8_install_notes_cover_tmux_pane_and_manifest_mode(self):
+        out = " ".join(self.b.install().stdout.split())
+        self.assertIn("never from a shell that inherited TMUX or TMUX_PANE", out)
+        self.assertIn("its mode in the session manifest must be NORMAL", out)
+
+    def test_installs_the_jarvis_instructions_as_claude_md(self):
+        b = self.b
+        b.install()
+        with open(os.path.join(SRC, "CLAUDE.jarvis.md"), encoding="utf-8") as f:
+            self.assertEqual(b.read("CLAUDE.md"), f.read())
+        self.assertFalse(os.path.exists(b.path("CLAUDE.jarvis.md")))
 
 
 class HooksTest(unittest.TestCase):

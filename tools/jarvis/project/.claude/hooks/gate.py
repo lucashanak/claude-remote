@@ -1,7 +1,14 @@
 #!/usr/bin/env python3
-"""Jarvis PreToolUse gate for Bash: one allowlisted command, nothing else.
+"""Jarvis PreToolUse gates: which tools at all, and for Bash one allowlisted command, nothing else.
 
-Installed as  "<python3> -I ~/jarvis/.claude/hooks/gate.py"  (matcher "Bash").
+Installed twice:
+  "<python3> -I ~/jarvis/.claude/hooks/gate.py --tools"   matcher "*"     tool allowlist + permission mode
+  "<python3> -I ~/jarvis/.claude/hooks/gate.py"           matcher "Bash"  the command line
+
+Why the tool gate: the deny list names the tools we know of, and a new Claude Code release can add one that dontAsk
+lets through (spike 4i found five). An allowlist of tool names does not age that way. It also requires
+permission_mode == "dontAsk": a CLI --permission-mode (restore.sh adds one for the AUTO and AUTO_ACCEPT manifest
+modes) or a plan approval would otherwise take Jarvis out of dontAsk, and then every tool blocks instead.
 
 Why it exists next to `defaultMode: dontAsk` + `allow`: it is the second, independent layer. dontAsk already denies
 any Bash outside the allow rules, but a rule set is one typo away from `Bash(cr-:*)`; this gate checks the whole
@@ -21,11 +28,19 @@ import re
 import shlex
 import sys
 
+# Tools the model may call at all (f1-spike: with the deny list the model has AskUserQuestion, Bash, Read, ToolSearch
+# and the server-side advisor). Everything else, MCP included, exits 2.
+TOOLS = frozenset({"Bash", "Read", "ToolSearch", "AskUserQuestion"})
+MODE = "dontAsk"
+
 ALLOWED = {
     "cr-sessions": frozenset({"list", "show", "tail"}),
     "cr-digest": frozenset({"delta", "brief", "waiting", "usage"}),
 }
 HELP = frozenset({"-h", "--help"})
+# Options a subcommand cannot run without. `cr-digest delta` without --peek moves the cursor the UserPromptSubmit hook
+# reads from, so what changed (a perm, an ask) would never reach Lukáš's next delta.
+REQUIRED = {("cr-digest", "delta"): frozenset({"--peek"})}
 
 # The shape of the whole line: the command name, then one space and arguments without any shell metacharacter that
 # could chain, substitute or redirect (; & | $ ` < > ( ) \ and every control character, newline included).
@@ -39,7 +54,9 @@ def check(cmd):
     """None when the command may run, else the reason it may not."""
     if not isinstance(cmd, str):
         return "the command is not a string"
-    line = cmd.strip()
+    # only trailing newlines: str.strip() would also drop \x0c, \x1c-\x1f and NBSP, and then the gate would judge a
+    # different line than the one bash runs
+    line = cmd.rstrip("\n")
     if not LINE.fullmatch(line):
         return "only one cr-sessions or cr-digest command, without ; & | $ ` < > ( ) \\ or a line break"
     words = shlex.split(line)  # unbalanced quotes raise -> exit 2
@@ -51,11 +68,33 @@ def check(cmd):
     for a in args:
         if not ARG.fullmatch(a):
             return f"argument {a[:40]!r} has characters outside letters, digits and . , : @ % + = / -"
+    need = REQUIRED.get((name, args[0]), frozenset()) - set(args[1:])
+    if need:
+        return f"{name} {args[0]} needs {' '.join(sorted(need))}"
     return None
 
 
-def main():
+def check_tool(data):
+    """None when this tool may run in this permission mode, else the reason it may not."""
+    tool, mode = data["tool_name"], data["permission_mode"]
+    if tool not in TOOLS:
+        return f"tool {str(tool)[:60]} is not on Jarvis's tool list ({', '.join(sorted(TOOLS))})"
+    if mode != MODE:
+        return (f"permission mode is {str(mode)[:30]!r}, Jarvis runs only in {MODE}; restart it without "
+                f"--permission-mode (Shift+Tab never cycles back to {MODE})")
+    return None
+
+
+def main(argv):
     data = json.load(sys.stdin)
+    if argv == ["--tools"]:
+        why = check_tool(data)
+        if why is None:
+            return 0
+        print(f"jarvis gate: {why}.", file=sys.stderr)
+        return 2
+    if argv:
+        raise ValueError("unknown arguments")
     if data.get("tool_name") != "Bash":
         return 0  # the matcher only sends Bash; other tools are governed by the deny list and dontAsk
     why = check(data["tool_input"]["command"])
@@ -68,7 +107,7 @@ def main():
 
 if __name__ == "__main__":
     try:
-        code = main()
+        code = main(sys.argv[1:])
     except BaseException as e:  # noqa: BLE001 -- anything unexpected must block, never fall through
         print(f"jarvis gate: internal error, blocking ({type(e).__name__})", file=sys.stderr)
         code = 2

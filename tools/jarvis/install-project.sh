@@ -2,6 +2,10 @@
 # Install Jarvis's project (tools/jarvis/project/) into ~/jarvis: CLAUDE.md, pravidla.md, .claude/settings.json and the
 # hooks. Idempotent; safe to run again after a `git pull`.
 #
+# The template keeps Jarvis's instructions as project/CLAUDE.jarvis.md and installs them as CLAUDE.md: a file named
+# CLAUDE.md inside the repo would be loaded lazily (nested memory) into every working session that reads a file under
+# tools/jarvis/project/, and they would start taking Jarvis's rules as their own.
+#
 #   tools/jarvis/install-project.sh [--target DIR] [--bin DIR] [--python PATH] [--force] [--dry-run]
 #
 #   --target  where the project goes                      (default ~/jarvis)
@@ -58,11 +62,26 @@ for c in cr-digest cr-sessions; do
   [ -x "$bindir/$c" ] || echo "install-project.sh: warning: $bindir/$c missing; run tools/jarvis/install.sh first" >&2
 done
 
+# Never write through a symlink: a linked ~/jarvis/.claude/hooks would put the gate wherever the link points, and a
+# link left by anyone with this uid could redirect our writes. The real directories or nothing.
+for d in "$target" "$target/.claude" "$target/.claude/hooks"; do
+  if [ -L "$d" ]; then echo "install-project.sh: $d is a symlink, refusing to install through it" >&2; exit 2; fi
+done
+
+# installed path -> template path (only CLAUDE.md differs, see the header)
+srcof() { if [ "$1" = CLAUDE.md ]; then echo CLAUDE.jarvis.md; else echo "$1"; fi; }
+
 # relative path -> mode; pravidla.md handled apart
 FILES=(CLAUDE.md .claude/settings.json .claude/hooks/gate.py .claude/hooks/session-start.sh .claude/hooks/prompt-delta.sh)
 declare -A MODE=([CLAUDE.md]=644 [.claude/settings.json]=644 [.claude/hooks/gate.py]=755
                  [.claude/hooks/session-start.sh]=755 [.claude/hooks/prompt-delta.sh]=755 [pravidla.md]=644)
 record="$target/.claude/jarvis-installed"
+# checked before anything is written, so a refusal never leaves a half-installed project
+for rel in "${FILES[@]}" pravidla.md .claude/jarvis-installed; do
+  if [ -L "$target/$rel" ]; then
+    echo "install-project.sh: $target/$rel is a symlink, refusing to write through it" >&2; exit 2
+  fi
+done
 
 esc() { printf '%s' "$1" | sed -e 's/[\\&|]/\\&/g'; }
 render() {
@@ -85,15 +104,30 @@ put() {
   mv -f "$t" "$dst"
 }
 
+# record <rel> <sha>: set this file's line in the record right after the file is written, before anything is
+# printed. A run that dies halfway (Ctrl-C, or SIGPIPE when its output goes to `| head`) then never leaves a file
+# that we wrote but did not record, which the next run would wrongly report as changed by hand.
+rec() {
+  [ "$dry" = 1 ] && return 0
+  local t
+  mkdir -p "$(dirname "$record")"
+  t="$(mktemp "$(dirname "$record")/.jarvis-tmp.XXXXXX")"
+  { [ -f "$record" ] && awk -v p="$1" '$2 != p' "$record"; printf '%s  %s\n' "$2" "$1"; } >"$t"
+  chmod 644 "$t"
+  mv -f "$t" "$record"
+}
+
 kept=0
-declare -a newrec=()
 for rel in "${FILES[@]}" pravidla.md; do
   new="$tmpd/$(echo "$rel" | tr / _)"
-  render "$src/$rel" >"$new"
+  render "$src/$(srcof "$rel")" >"$new"
   dst="$target/$rel"
   if [ ! -e "$dst" ]; then
-    if [ "$dry" = 1 ]; then echo "would create $dst"; else put "$new" "$rel"; echo "created   $dst"; fi
-    [ "$rel" = pravidla.md ] || newrec+=("$(sha "$new")  $rel")
+    if [ "$dry" = 1 ]; then echo "would create $dst"; else
+      put "$new" "$rel"
+      [ "$rel" = pravidla.md ] || rec "$rel" "$(sha "$new")"
+      echo "created   $dst"
+    fi
     continue
   fi
   if [ "$rel" = pravidla.md ]; then
@@ -102,36 +136,39 @@ for rel in "${FILES[@]}" pravidla.md; do
   fi
   if cmp -s "$new" "$dst"; then
     if [ "$dry" = 0 ] && [ "$(stat -c %a "$dst")" != "${MODE[$rel]}" ]; then chmod "${MODE[$rel]}" "$dst"; fi
+    rec "$rel" "$(sha "$new")"
     echo "unchanged $dst"
-    newrec+=("$(sha "$new")  $rel")
     continue
   fi
   was="$(recorded "$record" "$rel" || true)"
   if [ -n "$was" ] && [ "$was" = "$(sha "$dst")" ]; then
-    if [ "$dry" = 1 ]; then echo "would update $dst"; else put "$new" "$rel"; echo "updated   $dst"; fi
-    newrec+=("$(sha "$new")  $rel")
+    if [ "$dry" = 1 ]; then echo "would update $dst"; else
+      put "$new" "$rel"
+      rec "$rel" "$(sha "$new")"
+      echo "updated   $dst"
+    fi
   elif [ "$force" = 1 ]; then
     if [ "$dry" = 1 ]; then echo "would replace $dst (changed by hand)"; else
       bak="$dst.bak.$(date -u +%Y%m%dT%H%M%SZ)"
       cp -p "$dst" "$bak"
       put "$new" "$rel"
+      rec "$rel" "$(sha "$new")"
       echo "replaced  $dst (changed by hand, old one in $bak)"
     fi
-    newrec+=("$(sha "$new")  $rel")
   else
     kept=$((kept + 1))
     echo "KEPT      $dst: changed by hand, not overwritten. Difference to the new template:"
     diff -u --label "$dst (installed)" --label "$rel (template)" "$dst" "$new" || true
-    # keep the old record: the file stays "changed by hand" until it is merged or --force is used
-    if [ -n "$was" ]; then newrec+=("$was  $rel"); fi
+    # the record keeps its old line: the file stays "changed by hand" until it is merged or --force is used
   fi
 done
 
-if [ "$dry" = 0 ]; then
-  rt="$(mktemp "$target/.claude/.jarvis-tmp.XXXXXX")"
-  printf '%s\n' "${newrec[@]}" >"$rt"
-  chmod 644 "$rt"
-  mv -f "$rt" "$record"
+# settings.local.json is merged over settings.json by Claude Code: one allow rule there widens Jarvis past dontAsk
+local_settings="$target/.claude/settings.local.json"
+if [ -e "$local_settings" ] || [ -L "$local_settings" ]; then
+  echo
+  echo "WARNING: $local_settings exists. Claude Code merges it over settings.json, so its allow rules,"
+  echo "         hooks or defaultMode weaken Jarvis's permissions. Remove it unless you mean it."
 fi
 
 if [ "$kept" -gt 0 ]; then
@@ -144,5 +181,9 @@ One-time steps that this script does not do:
 - start Claude in $target once and confirm the trust dialog: before that no project hook runs and the session hangs
   on the dialog (f1-spike 1c, 2d);
 - the session name must not end in -yolo (restore would start it with --dangerously-skip-permissions);
-- start it without --permission-mode; the project's dontAsk applies.
+- its mode in the session manifest must be NORMAL: restore.sh adds --permission-mode auto / acceptEdits for AUTO and
+  AUTO_ACCEPT, a CLI flag beats the project's dontAsk, and the tool gate then blocks every tool (safe, but useless);
+- start Claude directly in Jarvis's own tmux session (as the app does), never from a shell that inherited TMUX or
+  TMUX_PANE from another pane: the SessionStart hook writes the name of the session TMUX_PANE points at into
+  ~/.claude-remote/jarvis/self, and a stale pane would make the digest hide that other session instead of Jarvis.
 EOF

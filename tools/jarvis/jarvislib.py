@@ -240,6 +240,14 @@ _INJECTION = [re.compile(p, re.IGNORECASE) for p in (
     r"^\s*(system|assistant|user|human)\s*:",
     r"\byou are now\b|\bnew instructions?\b|\bnov[ée] pokyny\b",
     r"\bjarvis\w*\s*[,:;!]",
+    # paraphrases rev-f1-proj found: greeting or dative/vocative address, "Jarvis tell/say…", "forget the previous…",
+    # a message for Lukáš. Still a blacklist; the real defence is that text never changes the items (CLAUDE.md).
+    r"\b(hey|hi|hello|ok|okay|hej|ahoj|čau|nazdar)\s*,?\s+jarvis\b",
+    r"\bjarvis(i|ovi)\b",
+    r"\bjarvis\w*\s+(tell|say|please|ask|remind|řekni|vyřiď|pověz|oznam|připomeň|vzkaz\w*)\b",
+    r"\b(zapome[ňn]\w*|forget)\b.{0,30}\b(p[řr]edchoz\w*|zadání|pokyn\w*|instrukc\w*|v[šs]e|v[šs]echno|previous|prior|"
+    r"above|earlier|instructions?|everything)\b",
+    r"\b(tell|inform)\s+lukas\w*\b|\b(řekni|vyřiď|pověz|oznam|napiš)\s+luk[aá][šs]\w*\b",
     r"\b(cr-mail|cr-session|cr-task|send-keys|paste-buffer|kill-session)\b",
     r"\b(po[šs]li|odešli|send|spus[tť]|run|execute|vykonej|zavři|close)\b.{0,40}\b(session\w*|relac\w*|p[řr]íkaz\w*|command|tmux)\b",
     r"<\s*/?\s*(system|assistant|user|human|instructions?|system-reminder|tool)\b",
