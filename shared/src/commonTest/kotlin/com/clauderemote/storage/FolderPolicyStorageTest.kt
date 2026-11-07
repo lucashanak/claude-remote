@@ -237,6 +237,7 @@ class FolderPolicyStorageTest {
         val (storage, _) = storage()
         storage.importFromServer("dev", """{"~/nekrachni.plus":{"defaultAccountSlug":"np"}}""")
         assertEquals("np", storage.get("dev", "nekrachni_plus", home).defaultAccountSlug)
+        assertEquals("np", storage.get("dev", "nekrachni.plus", home).defaultAccountSlug, "a segment not yet in tmux's spelling")
     }
 
     @Test

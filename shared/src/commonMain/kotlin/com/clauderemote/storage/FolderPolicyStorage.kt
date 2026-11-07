@@ -86,8 +86,10 @@ class FolderPolicyStorage(private val prefs: KeyValueStore) {
      * the wrong one.
      */
     private fun lossyMatch(rules: List<PolicyRow>, segment: String): FolderPolicy {
+        // Both sides in tmux's spelling: the segment may still arrive unsanitized (`nekrachni.plus`).
+        val wanted = TmuxNameParser.sanitize(segment)
         val fits = rules.filter {
-            TmuxNameParser.sanitize(it.canonical.trimEnd('/').substringAfterLast('/')) == segment
+            TmuxNameParser.sanitize(it.canonical.trimEnd('/').substringAfterLast('/')) == wanted
         }
         val folders = fits.map { it.canonical }.distinct()
         if (folders.size != 1) return FolderPolicy()
