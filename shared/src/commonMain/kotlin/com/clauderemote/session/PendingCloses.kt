@@ -14,8 +14,8 @@ import kotlinx.coroutines.launch
 import kotlin.time.TimeSource
 
 /**
- * What the server says about closing a session right now (Jarvis R6 = 6d). Filled in by the server-side
- * `facts` check of the second wave; until then nothing produces it and every close goes through.
+ * What the server says about closing a session right now (Jarvis R6 = 6d), from its close facts
+ * (`service.CloseFactsCheck`, wired in by SessionOrchestrator).
  */
 sealed interface CloseCheck {
     /** Nothing in the way. */
@@ -49,6 +49,12 @@ data class PendingClosesState(
     /** Tabs the UI must not show: their close has not happened yet, but the user already asked for it. */
     val hiddenIds: Set<String> get() = pending.mapTo(HashSet()) { it.sessionId }
     val isEmpty: Boolean get() = pending.isEmpty() && blocked.isEmpty()
+
+    /** [tabs] without the hidden ones: what the tab bar, the Launcher and the watch show. */
+    fun visibleOf(tabs: List<ClaudeSession>): List<ClaudeSession> {
+        val hidden = hiddenIds
+        return if (hidden.isEmpty()) tabs else tabs.filter { it.id !in hidden }
+    }
 }
 
 /**
@@ -79,7 +85,7 @@ class PendingCloses(
     private val windowMs: Long = WINDOW_MS,
     private val now: () -> Long = monotonicMs(),
 ) {
-    /** Second wave sets this to the server `facts` check. A `null` answer means "unknown", which closes. */
+    /** The server's close facts (SessionOrchestrator wires them in). A `null` answer means "unknown", which closes. */
     @Volatile
     var closeCheck: suspend (ClaudeSession) -> CloseCheck? = closeCheck
 

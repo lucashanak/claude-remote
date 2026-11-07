@@ -47,6 +47,7 @@ class SessionOpsScriptTest {
         listOf(
             "script" to SessionOpsScript.SCRIPT,
             "install" to SessionOpsScript.INSTALL_COMMAND,
+            "check" to SessionOpsScript.CHECK_COMMAND,
             "tombstoneAndRecord" to ManifestCommands.tombstoneAndRecord(name, durable = true, by = "app:x"),
             "closeRecord" to ManifestCommands.closeRecord(name, "prune", durable = false, reason = "it's"),
             "readClosed" to ManifestCommands.readClosed(50),
@@ -190,14 +191,51 @@ class SessionOpsScriptTest {
         }
     }
 
-    /** The bootstrap carries the install and reports its line apart from the streamd one. */
-    @Test fun bootstrapInstallsAndReportsIt() {
+    /**
+     * The bootstrap carries only the check, not the 25 KB script (that goes in its own exec when the check says so),
+     * and reports the check's line apart from the streamd one.
+     */
+    @Test fun bootstrapCarriesTheCheckNotTheScript() {
         val b = BootstrapScript.build(installV2 = false)
-        assertContains(b, SessionOpsScript.INSTALL_COMMAND)
+        assertContains(b, SessionOpsScript.CHECK_COMMAND)
+        assertFalse(b.contains("CRSO_SH"), "no installer heredoc in the bootstrap")
+        assertFalse(b.contains(SessionOpsScript.SCRIPT.lines()[1]), "no script in the bootstrap")
+        assertTrue(SessionOpsScript.CHECK_COMMAND.length < 1_000, "the check is small: ${SessionOpsScript.CHECK_COMMAND.length} B")
+        assertTrue(SessionOpsScript.INSTALL_COMMAND.length > 10_000, "what stays out of it is not")
         val r = BootstrapScript.parse("===CRB flags===\n\n===CRB hooks===\nHOOK_EXISTS\n===CRB hooksv2===\nHOOKS_V2_STATE=ABSENT\n" +
-            "===CRB streamd===\nSTREAMD_PRESENT\n===CRB sessionops===\nSESSIONOPS_INSTALLED\n===CRB end===\n")
+            "===CRB streamd===\nSTREAMD_PRESENT\n===CRB sessionops===\nSESSIONOPS_NEEDED\n===CRB end===\n")
         assertEquals("STREAMD_PRESENT", r.streamd)
-        assertEquals("SESSIONOPS_INSTALLED", r.sessionOps)
-        assertTrue(r.ok)
+        assertEquals(SessionOpsScript.CHECK_NEEDED, r.sessionOps)
+        assertTrue(r.ok, "a missing cr-session is no failed bootstrap")
+    }
+
+    /** The check and the installer judge the file alike in every state: NEEDED exactly when the installer would write. */
+    @Test fun theCheckAgreesWithTheInstaller() {
+        val home = tempHome()
+        try {
+            val f = File(home, ".claude-remote/bin/cr-session")
+            fun check() = run("bash", "-c", SessionOpsScript.CHECK_COMMAND, home = home)
+            fun install() = run("bash", "-c", SessionOpsScript.INSTALL_COMMAND, home = home)
+            val needed = 0 to "${SessionOpsScript.CHECK_NEEDED}\n"
+            val present = 0 to "${SessionOpsScript.CHECK_PRESENT}\n"
+
+            assertEquals(needed, check(), "missing")
+            assertFalse(f.exists(), "the check writes no file")
+            assertEquals(0 to "SESSIONOPS_INSTALLED\n", install())
+            assertEquals(present, check(), "intact")
+            f.appendText("# damaged\n")
+            assertEquals(needed, check(), "damaged behind a valid header")
+            install()
+            f.writeText("#!/usr/bin/env bash\n# ${SessionOpsScript.MARKER}0\n")
+            assertEquals(needed, check(), "older")
+            install()
+            val newer = "#!/usr/bin/env bash\n# ${SessionOpsScript.MARKER}${SessionOpsScript.VERSION + 1}\n"
+            f.writeText(newer)
+            assertEquals(present, check(), "newer: never downgraded")
+            assertEquals(0 to "SESSIONOPS_PRESENT\n", install())
+            assertEquals(newer, f.readText())
+        } finally {
+            safeDeleteTree(home)
+        }
     }
 }

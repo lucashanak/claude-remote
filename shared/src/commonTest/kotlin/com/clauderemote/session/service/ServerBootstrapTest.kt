@@ -344,6 +344,51 @@ class ServerBootstrapTest {
         assertTrue(Regex("""\(\d+ms\)$""").containsMatchIn(line), line)
     }
 
+    private fun withSessionOps(line: String) = ok(end = false) + "===CRB sessionops===\n$line\n===CRB end===\n"
+
+    /** `cr-session` in place (the usual case): the bootstrap's small check is all that goes, no installer exec. */
+    @Test fun anIntactCrSessionCostsNoSecondExec() = runTest {
+        val exec = FakeExec { _, _ -> withSessionOps(SessionOpsScript.CHECK_PRESENT) }
+        val s = newBootstrap(exec)
+        s.bootstrap.ensure("a")
+        assertEquals(1, exec.calls.size)
+        assertTrue(exec.calls.single().second.contains(SessionOpsScript.CHECK_COMMAND))
+        assertFalse(exec.calls.single().second.contains(SessionOpsScript.INSTALL_COMMAND), "the 25 KB installer stays home")
+        assertTrue(logs.single { it.startsWith("Server bootstrap srv-a:") }.contains("sessionOps=SESSIONOPS_PRESENT"))
+    }
+
+    /** Missing, damaged or older: the installer follows in an exec of its own, once, and the result is logged. */
+    @Test fun aMissingCrSessionIsInstalledByASecondExec() = runTest {
+        val exec = FakeExec { _, cmd ->
+            if (cmd == SessionOpsScript.INSTALL_COMMAND) "SESSIONOPS_INSTALLED\n" else withSessionOps(SessionOpsScript.CHECK_NEEDED)
+        }
+        val s = newBootstrap(exec)
+        s.bootstrap.ensure("a")
+        assertEquals(2, exec.calls.size)
+        assertEquals(SessionOpsScript.INSTALL_COMMAND, exec.calls[1].second)
+        assertTrue(logs.single { it.startsWith("Server bootstrap srv-a:") }.contains("sessionOps=SESSIONOPS_INSTALLED"))
+        s.bootstrap.ensure("a")
+        assertEquals(2, exec.calls.size, "memoized like any good bootstrap")
+    }
+
+    /** A failed install is no failed bootstrap: memoized, no backoff; the next bootstrap's check tries again. */
+    @Test fun aFailedInstallDoesNotFailTheBootstrap() = runTest {
+        val exec = FakeExec { _, cmd ->
+            if (cmd == SessionOpsScript.INSTALL_COMMAND) throw ExecUnavailable(ExecUnavailableReason.TIMEOUT, "slow link")
+            withSessionOps(SessionOpsScript.CHECK_NEEDED)
+        }
+        val s = newBootstrap(exec)
+        s.bootstrap.ensure("a")
+        assertEquals(2, exec.calls.size)
+        assertTrue(logs.single { it.startsWith("Server bootstrap srv-a:") }.contains("sessionOps=SESSIONOPS_FAILED"))
+        assertFalse(logs.any { it.startsWith("Server bootstrap failed") }, "no backoff for the install")
+        s.bootstrap.ensure("a")
+        assertEquals(2, exec.calls.size, "memoized: the next 6 h re-ensure checks again")
+        advanceTimeBy(DefaultServerBootstrap.REENSURE_MS)
+        s.bootstrap.ensure("a")
+        assertEquals(4, exec.calls.size, "check, then the install again")
+    }
+
     @Test fun requestsWithoutAListenerAreDroppedAndReportFalse() {
         val c = HookInstallControl()
         assertFalse(c.requestRemove("a"), "nobody listens: the request is gone, not queued")

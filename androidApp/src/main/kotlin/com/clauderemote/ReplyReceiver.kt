@@ -55,6 +55,9 @@ class ReplyReceiver : BroadcastReceiver() {
         // (the exec is capped well inside the broadcast budget).
         val pending = goAsync()
         val appContext = context.applicationContext
+        // Answering a session whose close is still in its undo window means keeping it ("Vrátit"), not answering it
+        // and having it killed seconds later.
+        orchestrator.reclaimPendingClose(sessionId)
         orchestrator.sendReplyAsync(sessionId, prompt, reply, text) { why ->
             try {
                 // Cancelling also clears the RemoteInput progress indicator; a refusal replaces

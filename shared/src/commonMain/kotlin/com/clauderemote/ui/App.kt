@@ -130,7 +130,6 @@ fun App(
     // session must not take beyond the listed ones (see onConnectServer, ConnectListing)
     val connectListing = remember { ConnectListing() }
     var connectionError by remember { mutableStateOf<String?>(null) }
-    var tabCloseConfirmId by remember { mutableStateOf<String?>(null) }
     // Long-press session context menu (mobile): which session it's open for.
     var sessionMenuId by remember { mutableStateOf<String?>(null) }
     // Usage is reachable from the launcher AND from the chat's "..." menu, so
@@ -203,10 +202,7 @@ fun App(
     // hidden; everything the user sees and picks from uses visibleTabs (PendingCloses).
     val pendingCloses = sessionOrchestrator.pendingCloses
     val pendingCloseState by pendingCloses.state.collectAsState()
-    val visibleTabs = remember(tabs, pendingCloseState.pending) {
-        val hidden = pendingCloseState.hiddenIds
-        if (hidden.isEmpty()) tabs else tabs.filter { it.id !in hidden }
-    }
+    val visibleTabs = remember(tabs, pendingCloseState.pending) { pendingCloseState.visibleOf(tabs) }
     // A tab gone from tabManager behind the undo window's back (another device closed it, the dead-pane prune
     // forgot it): nothing left to close or bring back.
     LaunchedEffect(tabs) { pendingCloses.retain(tabs.mapTo(HashSet()) { it.id }) }
@@ -312,8 +308,9 @@ fun App(
         if (id != activeTabId) sessionOrchestrator.switchTab(id)
     }
 
-    // Closing a tab (Jarvis F0a): it leaves the bar at once, the real close (durable tombstone, kill) waits out
-    // the undo window in PendingCloses. Selection moves on as TabManager.removeTab moves it: to the last tab left.
+    // Closing a tab (Jarvis F0a, R6 = 6d): no question asked; it leaves the bar at once, the real close (durable
+    // tombstone, kill) waits out the undo window in PendingCloses while the server's close facts decide whether it
+    // may happen at all. Selection moves on as TabManager.removeTab moves it: to the last tab left.
     // Reads the flows' current values, not the composed ones, because shortcuts and menus may hold an older lambda.
     fun beginTabClose(id: String) {
         val tab = tabManager.getTab(id) ?: return
@@ -323,10 +320,6 @@ fun App(
         val rest = tabManager.tabs.value.filter { it.id !in hidden }
         if (wasActive) rest.lastOrNull()?.let { switchActiveSession(it.id) }
         if (rest.isEmpty()) currentScreen = Screen.LAUNCHER
-    }
-
-    fun requestTabClose(id: String) {
-        if (appSettings.confirmTabClose) tabCloseConfirmId = id else beginTabClose(id)
     }
 
     // "Vrátit": the tab is back where it was (it never left tabManager); if it was the one on screen, so is it again.
@@ -1490,7 +1483,7 @@ fun App(
                         onRestartClaude = { id ->
                             scope.launch { sessionOrchestrator.restartClaude(id) }
                         },
-                        onTabClose = { id -> requestTabClose(id) },
+                        onTabClose = { id -> beginTabClose(id) },
                         onSessionLongPress = { id -> sessionMenuId = id },
                         onNewTab = { currentScreen = Screen.LAUNCHER },
                         onMenuOpen = { currentScreen = Screen.LAUNCHER },
@@ -1913,8 +1906,10 @@ fun App(
                             sessionOrchestrator.probeServers(serverList, true)
                             scanRemoteSessions()
                         },
-                        // The same way the Launcher opens a session: it becomes the active tab.
+                        // The same way the Launcher opens a session: it becomes the active tab. Opening one whose close is
+                        // still in its undo window is "Vrátit".
                         onOpenSession = { session ->
+                            sessionOrchestrator.reclaimPendingClose(session.id)
                             switchActiveSession(session.id)
                             currentScreen = Screen.TERMINAL
                         },
@@ -2060,30 +2055,6 @@ fun App(
             )
         }
 
-        // Close tab confirmation. FloatingDialog (not a plain AlertDialog) so
-        // it renders above the SwingPanel-embedded terminal on desktop when
-        // triggered while Raw view is active.
-        com.clauderemote.ui.components.FloatingDialog(
-            visible = tabCloseConfirmId != null,
-            onDismiss = { tabCloseConfirmId = null },
-            theme = com.clauderemote.ui.theme.CRThemeSnapshot.current(),
-            title = { Text("Close Session") },
-            text = {
-                val session = tabCloseConfirmId?.let { tabManager.getTab(it) }
-                Text("Permanently close session on ${session?.server?.name ?: "server"}? The tmux pane will be killed and the conversation removed from your tab list.")
-            },
-            confirmButton = {
-                TextButton(onClick = {
-                    val id = tabCloseConfirmId ?: return@TextButton
-                    tabCloseConfirmId = null
-                    beginTabClose(id)
-                }) { Text("Close") }
-            },
-            dismissButton = {
-                TextButton(onClick = { tabCloseConfirmId = null }) { Text("Cancel") }
-            }
-        )
-
         RestoreOutcomeDialog(
             outcome = restoreOutcome,
             onDismiss = { restoreOutcome = null },
@@ -2127,7 +2098,7 @@ fun App(
                     sessionMenuId = null
                     scope.launch { sessionOrchestrator.reconnectSession(id) }
                 },
-                onClose = { sessionMenuId = null; requestTabClose(id) },
+                onClose = { sessionMenuId = null; beginTabClose(id) },
                 onDismiss = { sessionMenuId = null },
                 onHide = { sessionMenuId = null; hideTab(id) },
             )

@@ -860,6 +860,14 @@ class SessionOrchestrator(
     @Volatile private var deviceKey: String = "proc-" + Random.nextInt(1 shl 24).toString(16)
 
     /**
+     * This device's client marker for [tmuxName], the file [buildAttachCommand]'s preamble writes: the close facts
+     * read it to leave our own attached client out of "someone else is watching". Same [deviceKey] as the attach, so
+     * the two cannot disagree.
+     */
+    internal fun ownClientMarker(tmuxName: String): String =
+        com.clauderemote.session.service.CloseFactsCommands.selfMarkerFor(tmuxName, deviceKey)
+
+    /**
      * Start shipping FileLogger output to the server (one remote file per
      * install id, `~/.claude-remote/logs/<appId>.log`). Rides whatever live
      * pooled connection exists; buffers while offline. Called once from
@@ -3010,7 +3018,26 @@ class SessionOrchestrator(
             tabManager.getTab(id)?.let { suppressAdoption(it.server.id, it.tmuxSessionName) }
             persistence.forgetSession(id, userInitiated = true)?.join()
         },
+        // The server's close facts (R6 = 6d), read the way every read-only command is: exec transport first, a
+        // live tab of the server otherwise, null (= close) when neither is there.
+        closeCheck = com.clauderemote.session.service.CloseFactsCheck(
+            read = { serverId, cmd, totalMs -> connectionRegistry.execRead(serverId, cmd, totalMs) },
+            selfMarker = ::ownClientMarker,
+        )::check,
     )
+
+    /**
+     * The user asked for [sessionId] from outside the tab bar (a notification tap, Velín, an answer from the watch):
+     * if its close is still waiting out the undo window, that is "Vrátit". They want this session, and a tab hidden by
+     * a pending close would otherwise be switched straight away from by App's hidden-tab guard, then killed. Not done
+     * in [switchTab]: that also runs after a close went through, onto whatever tab [TabManager.removeTab] picked,
+     * which may be another pending one. True when a close was undone.
+     */
+    fun reclaimPendingClose(sessionId: String): Boolean {
+        val undone = pendingCloses.undo(sessionId) ?: return false
+        FileLogger.log(TAG, "Close of ${undone.sessionId} undone: the session was opened again within its undo window")
+        return true
+    }
 
     suspend fun renameTmuxSession(sessionId: String, oldName: String, newName: String) =
         persistence.renameTmuxSession(sessionId, oldName, newName)
