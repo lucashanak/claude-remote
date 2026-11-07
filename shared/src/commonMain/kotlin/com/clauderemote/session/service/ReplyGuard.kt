@@ -198,6 +198,10 @@ object ReplyGuard {
      * full events file counts as "no hooks". Prints `CR_REPLY SENDING` before the first key and
      * then `CR_REPLY SENT`, or one of `STALE|STALE_TYPED|NOHOOKS|NOPANE|FAILED`.
      */
+    // Spelled out at every call, not kept in a shell variable: an unquoted `$TM` is not
+    // word-split by zsh, and the login shell of the exec is the server's choice.
+    private const val TMUX_CAPPED = "timeout -k 1 2 tmux -u"
+
     fun serverCommand(tmux: String, expect: ServerExpectation, text: String, approve: Boolean = false): String {
         val decide = when (expect) {
             is ServerExpectation.Dialog -> {
@@ -217,16 +221,20 @@ object ReplyGuard {
         val name = sq(tmux)
         val keys = sq(tmuxLiteral(text))
         val send = if (approve) {
-            "if tmux -u send-keys -t \"\$P\" -l -- $keys \\; send-keys -t \"\$P\" Enter 2>/dev/null; " +
+            "if $TMUX_CAPPED send-keys -t \"\$P\" -l -- $keys \\; send-keys -t \"\$P\" Enter 2>/dev/null; " +
                 "then echo '$SERVER_TOKEN SENT'; else echo '$SERVER_TOKEN FAILED'; fi"
         } else {
-            "if tmux -u send-keys -t \"\$P\" -l -- $keys 2>/dev/null; then sleep 0.1; rd; " +
+            "if $TMUX_CAPPED send-keys -t \"\$P\" -l -- $keys 2>/dev/null; then sleep 0.1; rd; " +
                 "if [ \"\$L\" != \"\$L0\" ]; then echo '$SERVER_TOKEN STALE_TYPED'; " +
-                "elif tmux -u send-keys -t \"\$P\" Enter 2>/dev/null; then echo '$SERVER_TOKEN SENT'; " +
+                "elif $TMUX_CAPPED send-keys -t \"\$P\" Enter 2>/dev/null; then echo '$SERVER_TOKEN SENT'; " +
                 "else echo '$SERVER_TOKEN FAILED'; fi; else echo '$SERVER_TOKEN FAILED'; fi"
         }
         // tac reads the file from its end: the pane's newest line is found without scanning
         // 20 MB of other panes' history.
+        // Every tmux call is capped ([TMUX_CAPPED]): a hung tmux server would otherwise hold the
+        // exec until its 8 s budget ran out, read as "may have been sent", and the ledger would
+        // keep the prompt answered with nothing typed. A list-panes cut off (exit 124) leaves P
+        // empty: NOPANE, nothing sent.
         return "N=\$(printf '%s' $name | base64 -w0); " +
             "E=\"\$HOME/${HookCommands.EVENTS_PATH.removePrefix("~/")}\"; OK=0; W=STALE; " +
             "rd() { L=''; SZ=\$(stat -c %s \"\$E\" 2>/dev/null || echo 0); " +
@@ -238,7 +246,7 @@ object ReplyGuard {
             "awk -v n=$name '\$1==\"claude-remote-notify\" && \$2==n && \$3+0>m {m=\$3+0} END{if (m) print m}'); " +
             "$decide; " +
             "if [ \"\$OK\" = 1 ]; then " +
-            "P=\$(tmux -u list-panes -s -t ${sq("=$tmux")} -F '#{pane_id}' 2>/dev/null | head -n 1); " +
+            "P=\$($TMUX_CAPPED list-panes -s -t ${sq("=$tmux")} -F '#{pane_id}' 2>/dev/null | head -n 1); " +
             "if [ -z \"\$P\" ]; then echo '$SERVER_TOKEN NOPANE'; else echo '$SERVER_TOKEN SENDING'; $send; fi; " +
             "else echo \"$SERVER_TOKEN \$W\"; fi"
     }

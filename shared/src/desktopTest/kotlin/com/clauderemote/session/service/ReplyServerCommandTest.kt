@@ -153,6 +153,16 @@ class ReplyServerCommandTest {
         assertEquals("CR_REPLY NOPANE", run(ServerExpectation.Ready(0)))
     }
 
+    @Test fun aHungTmuxIsCutOffBeforeAnyKeyAndCountsAsNotSent() {
+        File(bin, "tmux").writeText("#!/bin/bash\nexec sleep 30\n")
+        events(ev("stop", 1_000))
+        val t0 = System.currentTimeMillis()
+        val out = run(ServerExpectation.Ready(0))
+        assertEquals("CR_REPLY NOPANE", out, "list-panes timed out (124): no pane, nothing sent")
+        assertTrue(System.currentTimeMillis() - t0 < 6_000, "capped at 2 s (+1 s kill), not the exec's 8 s")
+        assertEquals(RefuseReason.NOT_VERIFIABLE, ReplyGuard.serverResult(out))
+    }
+
     @Test fun aDialogThatOpensWhileTheTextIsTypedGetsNoEnter() {
         events(ev("work", 1_000))
         onType.writeText("printf '%s\\n' '${ev("perm", 2_000)}' >> '${File(home, ".cache/claude-remote/events").absolutePath}'\n")
