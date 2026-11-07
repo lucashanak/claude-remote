@@ -98,6 +98,12 @@ jobs:
         if: '!cancelled()'
         run: ./gradlew :shared:integrationTest
 
+      # Jarvis read layer (tools/jarvis): stdlib Python, hermetic (temp HOME, fake tmux and liveness), ~1 s.
+      # Last and `!cancelled()` so it runs and reports even when a Gradle lane above failed.
+      - name: Jarvis CLI tests
+        if: '!cancelled()'
+        run: python3 -m unittest discover -s tools/jarvis -v
+
       - name: Upload test reports
         if: always()
         uses: actions/upload-artifact@v4
