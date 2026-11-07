@@ -108,7 +108,9 @@ class WearActionReceiver : BroadcastReceiver() {
     private fun finish(context: Context, sessionId: String, result: String, pendingText: String?, prompt: String?) {
         WearLog.i(context, TAG, "send result for $sessionId: $result")
         if (result == RESULT_SENT) {
-            WearNotifier.cancelSession(context, sessionId)
+            // Odmítnutí od telefonu mohlo přijít dřív než tohle potvrzení
+            // doručení — pak zůstává viset, ať uživatel ví, že se nic neposlalo.
+            if (!WearNotifier.refusalShowing(sessionId)) WearNotifier.cancelSession(context, sessionId)
             WearHaptics.success(context)
             return
         }

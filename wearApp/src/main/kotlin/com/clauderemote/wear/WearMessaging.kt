@@ -9,7 +9,9 @@ import kotlinx.serialization.json.Json
 /**
  * Wire model for /reply — kept in sync with androidApp's copy by convention.
  * [prompt] is the [WearSessionInfo.prompt] the user answered; the phone
- * sends nothing when the session shows a different prompt by then.
+ * sends nothing when the session shows a different prompt by then. Sent as
+ * "" when the row offered none: null is what an OLD watch build sends, and
+ * the phone answers that with "update the watch app".
  */
 @Serializable
 data class WearReplyRequest(val sessionId: String, val text: String, val prompt: String? = null)
@@ -44,12 +46,12 @@ private fun sendToPhone(context: Context, path: String, payload: ByteArray, onRe
 }
 
 fun sendReply(context: Context, sessionId: String, text: String, prompt: String?, onResult: (String) -> Unit = {}) {
-    val json = MESSAGING_JSON.encodeToString<WearReplyRequest>(WearReplyRequest(sessionId, text, prompt))
+    val json = MESSAGING_JSON.encodeToString<WearReplyRequest>(WearReplyRequest(sessionId, text, prompt ?: ""))
     sendToPhone(context, "/reply", json.toByteArray(Charsets.UTF_8), onResult)
 }
 
 fun sendApprove(context: Context, sessionId: String, answer: String, prompt: String?, onResult: (String) -> Unit = {}) {
-    val json = MESSAGING_JSON.encodeToString<WearApproveRequest>(WearApproveRequest(sessionId, answer, prompt))
+    val json = MESSAGING_JSON.encodeToString<WearApproveRequest>(WearApproveRequest(sessionId, answer, prompt ?: ""))
     sendToPhone(context, "/approve", json.toByteArray(Charsets.UTF_8), onResult)
 }
 

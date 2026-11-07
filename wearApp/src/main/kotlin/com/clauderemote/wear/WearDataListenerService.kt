@@ -21,10 +21,10 @@ import kotlinx.serialization.json.Json
  */
 class WearDataListenerService : WearableListenerService() {
     /**
-     * Telefon odpověď z hodinek NEodeslal, protože session mezitím ukazuje
-     * jiný dotaz (PhoneWearService.refused). Akce už notifikaci zrušila jako
-     * odeslanou, takže to řekni znovu — bez akcí, nový dotaz je třeba nejdřív
-     * vidět.
+     * Telefon odpověď z hodinek NEodeslal (session mezitím ukazuje jiný dotaz,
+     * není připojená, stav nejde ověřit…) a v [WearReplyRefused.message] říká
+     * proč. Akce už notifikaci možná zrušila jako odeslanou, takže to řekni
+     * znovu — bez akcí, nový dotaz je třeba nejdřív vidět.
      */
     override fun onMessageReceived(messageEvent: MessageEvent) {
         if (messageEvent.path != PATH_REPLY_REFUSED) return
@@ -32,7 +32,8 @@ class WearDataListenerService : WearableListenerService() {
             WEAR_JSON.decodeFromString<WearReplyRefused>(String(messageEvent.data, Charsets.UTF_8))
         }.getOrNull() ?: return
         WearLog.i(this, TAG, "reply for ${refused.sessionId} refused by the phone: ${refused.message}")
-        WearNotifier.notifySendFailure(this, refused.sessionId, null, refused.message)
+        WearNotifier.notifySendFailure(this, refused.sessionId, null, refused.message, offerActions = false)
+        WearNotifier.markRefusalShown(refused.sessionId)
         WearHaptics.error(this)
     }
 

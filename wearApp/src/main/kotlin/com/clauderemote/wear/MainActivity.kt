@@ -370,6 +370,31 @@ private fun SessionDetailScreen(session: WearSessionInfo) {
     // activity), zahoď status, ať "Odesláno ✓" nezůstane viset po vyřešení.
     LaunchedEffect(session.activity) { status = "" }
 
+    // Dotaz, na který uživatel ODPOVÍDÁ: zachycený ve chvíli, kdy začal psát nebo
+    // diktovat, ne až při ✓. Diktát trvá klidně 15 s a mezitím může naskočit
+    // dialog oprávnění — odpověď by pak nesla jeho identitu, telefon by ji
+    // pustil a Enter by v selektoru vybral výchozí "Yes".
+    var answerPrompt by remember(session.id) { mutableStateOf<String?>(null) }
+    var answering by remember(session.id) { mutableStateOf(false) }
+    // Dotaz se během odpovídání změnil → koncept zahoď (diktát zastav), ať se
+    // nepošle k něčemu, co uživatel neviděl. Nový dotaz si přečte a odpoví znovu.
+    LaunchedEffect(session.prompt) {
+        if (answering && answerPrompt != session.prompt) {
+            cancelledDictation = true
+            stt?.stop(); stt = null
+            dictating = false
+            pendingDraft = null
+            answering = false
+            answerPrompt = null
+            status = "Dotaz se změnil – odpověď zahozena"
+            WearHaptics.error(context)
+        }
+    }
+    fun startAnswering() {
+        answerPrompt = session.prompt
+        answering = true
+    }
+
     // Lazy historie: posledních ~10 zpráv session si vyžádáme od telefonu až
     // při otevření detailu (NENÍ součástí /sessions pushe). Reply dorazí přes
     // MessageClient na /history-reply — viz listener níže.
@@ -428,20 +453,30 @@ private fun SessionDetailScreen(session: WearSessionInfo) {
         stt?.stop(); stt = null
         dictating = false
         pendingDraft = null
+        answering = false
     }
 
     val replyLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.StartActivityForResult()
     ) { result ->
         val text = RemoteInput.getResultsFromIntent(result.data)?.getCharSequence(KEY_REPLY)?.toString()?.trim()
+        val forPrompt = answerPrompt
+        val stillThere = answering && forPrompt == session.prompt
+        answering = false
         if (!text.isNullOrBlank() && !sending) {
-            sending = true
-            status = "Odesílám…"
-            sendReply(context, session.id, text, session.prompt) { onSendResult(it) }
+            if (!stillThere) {
+                status = "Dotaz se změnil – odpověď zahozena"
+                WearHaptics.error(context)
+            } else {
+                sending = true
+                status = "Odesílám…"
+                sendReply(context, session.id, text, forPrompt) { onSendResult(it) }
+            }
         }
     }
 
     fun startSonioxDictation() {
+        startAnswering()
         cancelledDictation = false
         pendingDraft = null
         draft = ""
@@ -496,6 +531,7 @@ private fun SessionDetailScreen(session: WearSessionInfo) {
 
     // Otevře systémový RemoteInput (klávesnice / hlas) pro textovou odpověď.
     fun openReply() {
+        startAnswering()
         val remoteInputs = listOf(RemoteInput.Builder(KEY_REPLY).setLabel("Odpověď pro Claude").build())
         val intent = RemoteInputIntentHelper.createActionRemoteInputIntent()
         RemoteInputIntentHelper.putRemoteInputsExtra(intent, remoteInputs)
@@ -612,15 +648,18 @@ private fun SessionDetailScreen(session: WearSessionInfo) {
                                     if (!sending) {
                                         sending = true
                                         status = "Odesílám…"
-                                        sendReply(context, session.id, pending, session.prompt) { onSendResult(it) }
+                                        // Identita zachycená při startu diktátu; změnu
+                                        // dotazu mezitím odchytí LaunchedEffect výš.
+                                        sendReply(context, session.id, pending, answerPrompt) { onSendResult(it) }
                                         pendingDraft = null
+                                        answering = false
                                     }
                                 },
                                 enabled = !sending,
                                 modifier = Modifier.weight(1f).semantics { contentDescription = "Odeslat odpověď" },
                             ) { Text("✓") }
                             CompactButton(
-                                onClick = { pendingDraft = null },
+                                onClick = { pendingDraft = null; answering = false },
                                 modifier = Modifier.weight(1f).semantics { contentDescription = "Zrušit" },
                             ) { Text("✗") }
                             CompactButton(

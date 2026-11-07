@@ -158,6 +158,8 @@ object WearNotifier {
         )
 
         val body = bodyOverride ?: bodyFor(session)
+        // Normální obsah přepisuje případné odmítnutí od telefonu.
+        if (bodyOverride == null) refusalShownAt.remove(session.id)
 
         val channel = channelFor(session.activity)
         val builder = NotificationCompat.Builder(context, channel)
@@ -227,6 +229,8 @@ object WearNotifier {
         // když ho session pořád ukazuje: jinak by "Odpovědět"/"Ano" pod
         // chybovým textem odpovídaly na dotaz, který uživatel neviděl.
         prompt: String? = null,
+        // false = jen holé oznámení bez akcí (odmítnutí od telefonu).
+        offerActions: Boolean = true,
     ) {
         val body = buildString {
             // "Nepotvrzeno" ≠ "Neodesláno": po vypršení timeoutu může
@@ -241,7 +245,9 @@ object WearNotifier {
             }
         }
         val session = SessionRepository.sessions.value.firstOrNull { it.id == sessionId }
-        if (session != null && prompt != null && session.prompt == prompt) {
+        // Rovnost i pro null: starý telefon prompt neposílá vůbec a tam se má
+        // notifikace s akcemi vrátit jako dřív.
+        if (offerActions && session != null && session.prompt == prompt) {
             notifySession(context, session, silentUpdate = false, bodyOverride = body)
             return
         }
@@ -267,6 +273,19 @@ object WearNotifier {
         NotificationManagerCompat.from(context).notify(notifIdFor(sessionId), builder.build())
         WearLog.i(context, TAG, "Posted send-failure notification for $sessionId: $error")
     }
+
+    // sessionId -> kdy (elapsedRealtime) se ukázalo odmítnutí od telefonu
+    // (/reply-refused). Odmítnutí může dorazit DŘÍV než potvrzení odeslání z
+    // MessageClientu a [WearActionReceiver] by ho pak "úspěchem" smazal.
+    private val refusalShownAt = java.util.concurrent.ConcurrentHashMap<String, Long>()
+    private const val REFUSAL_HOLD_MS = 30_000L
+
+    fun markRefusalShown(sessionId: String) {
+        refusalShownAt[sessionId] = android.os.SystemClock.elapsedRealtime()
+    }
+
+    fun refusalShowing(sessionId: String): Boolean =
+        refusalShownAt[sessionId]?.let { android.os.SystemClock.elapsedRealtime() - it < REFUSAL_HOLD_MS } == true
 
     fun cancelSession(context: Context, sessionId: String) {
         NotificationManagerCompat.from(context).cancel(notifIdFor(sessionId))
@@ -346,7 +365,10 @@ object WearNotifier {
         // typed text into the intent before delivering it to the receiver.
         val replyPending = PendingIntent.getBroadcast(
             context,
-            requestCode(session.id, "reply"),
+            // Kód nese i dotaz: s jedním kódem na session by pozdější notifikace
+            // přepsala extras PendingIntentu, na který se zrovna odpovídá, a text
+            // psaný pro A by odešel s identitou B.
+            requestCode(session.id, "reply#${session.prompt}"),
             replyIntent,
             PendingIntent.FLAG_UPDATE_CURRENT or mutableFlag(),
         )
@@ -390,7 +412,7 @@ object WearNotifier {
         }
         return PendingIntent.getBroadcast(
             context,
-            requestCode(sessionId, "approve_$answer"),
+            requestCode(sessionId, "approve_$answer#$prompt"),
             intent,
             PendingIntent.FLAG_UPDATE_CURRENT or immutableFlag(),
         )
