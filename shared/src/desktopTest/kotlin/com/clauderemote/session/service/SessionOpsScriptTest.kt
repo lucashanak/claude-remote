@@ -172,6 +172,59 @@ class SessionOpsScriptTest {
         }
     }
 
+    /**
+     * `has-session` that times out (rc 124: a tmux server that hangs) says nothing about the name: open must answer
+     * FAILED and leave the name's tombstone where it is, not take "no session" and lift it. The tmux here is a stand-in
+     * script first on PATH (not tmux), so nothing reaches a server.
+     */
+    @Test fun openTreatsATimedOutHasSessionAsAFailureNotAsAFreeName() {
+        val home = tempHome()
+        try {
+            val bin = File(home, "stubbin").apply { mkdirs() }
+            File(bin, "tmux").apply { writeText("#!/usr/bin/env bash\necho \"\$*\" >> \"\$HOME/tmux.log\"\nexit 124\n"); setExecutable(true) }
+            val d = File(home, ".claude-remote").apply { mkdirs() }
+            File(d, "forgotten.d").mkdirs(); File(d, "forgotten.d/claude-server-x").writeText("")
+            File(d, "forgotten").writeText("claude-server-x\n")
+            val f = file(SessionOpsScript.SCRIPT)
+            val pb = ProcessBuilder("bash", f.absolutePath, "open", "--name", "claude-server-x", "--folder", home.absolutePath)
+                .directory(home).redirectErrorStream(true)
+            pb.environment()["HOME"] = home.absolutePath
+            pb.environment()["PATH"] = bin.absolutePath + ":" + pb.environment()["PATH"]
+            val p = pb.start()
+            val out = p.inputStream.bufferedReader().readText()
+            assertTrue(p.waitFor(60, TimeUnit.SECONDS))
+            assertEquals(1 to "FAILED tmux-timeout\n", p.exitValue() to out)
+            assertTrue(File(d, "forgotten.d/claude-server-x").isFile, "the tombstone stays")
+            assertTrue(File(d, "forgotten").readLines().contains("claude-server-x"))
+            assertEquals(1, File(home, "tmux.log").readLines().size, "nothing after the has-session: ${File(home, "tmux.log").readText()}")
+        } finally {
+            safeDeleteTree(home)
+        }
+    }
+
+    /** `jarvis-ops.log` is cut to its last [SessionOpsScript.OPS_LOG_MAX_LINES] lines on every write, as closed.jsonl is. */
+    @Test fun theOpsLogIsCutToItsLastLines() {
+        val home = tempHome()
+        try {
+            val logFn = SessionOpsScript.SCRIPT.lines().let { l ->
+                val from = l.indexOfFirst { it.startsWith("log() {") }
+                l.subList(from, l.subList(from, l.size).indexOfFirst { it == "}" } + from + 1).joinToString("\n")
+            }
+            val d = File(home, ".claude-remote").apply { mkdirs() }
+            val max = SessionOpsScript.OPS_LOG_MAX_LINES
+            File(d, "jarvis-ops.log").writeText((1..max).joinToString("") { "old $it\n" })
+            val (rc, out) = run("bash", "-c", "D=\"\$HOME/.claude-remote\"\n$logFn\nlog newest; log newer", home = home)
+            assertEquals(0, rc, out)
+            val lines = File(d, "jarvis-ops.log").readLines()
+            assertEquals(max, lines.size)
+            assertEquals("old 3", lines.first())
+            assertTrue(lines.last().endsWith("] newer"), lines.last())
+            assertTrue(d.listFiles().orEmpty().none { it.name.startsWith("jarvis-ops.log.tmp") }, "no temp file left")
+        } finally {
+            safeDeleteTree(home)
+        }
+    }
+
     private fun versionsFile(): File {
         val rel = "src/desktopTest/resources/golden/cr-session-versions.txt"
         return listOf(File(rel), File("shared/$rel")).firstOrNull { it.parentFile.parentFile.isDirectory } ?: File(rel)

@@ -81,6 +81,39 @@ class PendingCloseReclaimTest {
         assertEquals(setOf("a"), o.pendingCloses.state.value.hiddenIds, "the close goes on")
     }
 
+    /**
+     * The other half: an answer whose keys reached the pane ("CR_REPLY SENT", or an exec that broke off after the keys
+     * may have gone: MAYBE_SENT) undoes the close — through the real [SessionOrchestrator.sendReply], only the route
+     * and the server exec faked.
+     */
+    @Test fun anAnswerThatReachedThePaneUndoesTheClose() {
+        for ((serverSays, expected) in listOf<Pair<String?, com.clauderemote.session.service.RefuseReason?>>(
+            "CR_REPLY SENT\n" to null,
+            "CR_REPLY SENDING\n" to com.clauderemote.session.service.RefuseReason.MAYBE_SENT,
+        )) withOrchestrator { o, tabs ->
+            val a = tab("a")
+            tabs.addTab(a)
+            o.claudeControlForTest.routeOverride = { com.clauderemote.session.service.ClaudeControlService.InputRoute({}, {}) }
+            o.claudeControlForTest.replyExecOverride = { _, _ -> serverSays }
+            o.statusService.updateActivity("a", com.clauderemote.model.SessionActivity.WAITING_FOR_INPUT)
+            assertTrue(o.pendingCloses.close(a))
+            val why = kotlinx.coroutines.runBlocking {
+                o.sendReply(
+                    "a",
+                    com.clauderemote.session.service.PromptFingerprint(
+                        com.clauderemote.session.service.ReplyGuard.INSTRUCTION_KEY,
+                        com.clauderemote.session.service.PromptKind.INSTRUCTION,
+                    ),
+                    com.clauderemote.session.service.ReplyGuard.Reply.TEXT,
+                    "pokračuj",
+                )
+            }
+            assertEquals(expected, why, "server said: $serverSays")
+            assertTrue(o.pendingCloses.state.value.hiddenIds.isEmpty(), "the tab is back ($serverSays)")
+            assertNull(o.pendingCloses.remainingMs("a"), "no countdown left: the close will not happen ($serverSays)")
+        }
+    }
+
     @Test fun onlyAnAnswerThatReachedThePaneKeepsTheSession() = withOrchestrator { o, _ ->
         val keeps = com.clauderemote.session.service.RefuseReason.entries.filter { o.replyReachedThePane(it) }.toSet()
         assertEquals(setOf(

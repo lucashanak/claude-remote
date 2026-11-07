@@ -228,6 +228,9 @@ class SessionOrchestrator(
         reconnectScope, connectionRegistry, tabManager, statusService, notificationService, terminalIO,
     ) { sid, data -> onTerminalOutput?.invoke(sid, data) }
 
+    /** Test seam: the reply path's own route and exec fakes (`routeOverride`, `replyExecOverride`). */
+    internal val claudeControlForTest get() = claudeControl
+
     private val remoteOps = com.clauderemote.session.service.RemoteOpsService(
         reconnectScope, connectionRegistry, tabManager,
     )
