@@ -173,6 +173,38 @@ class ParkedTabOpsTest {
         assertTrue(cmds.size >= 3)
     }
 
+    @Test fun forgetHandsBackTheServerSideSoAnExitCanWaitForIt() = runTest {
+        val exec = FakeExec()
+        val w = wire(exec)
+        val cleanup = persistence(w, transcript(w)).forgetSession("t1", userInitiated = true)
+        assertTrue(cleanup != null && !cleanup.isCompleted, "the server side runs after forgetSession returns")
+        cleanup!!.join()
+        assertEquals("tmux kill-session -t '=claude-server-old'", exec.calls[1].cmd)
+    }
+
+    @Test fun aDelayedCloseTouchesNothingUntilItsWindowEndsThenTombstonesDurably() = runTest {
+        val exec = FakeExec()
+        val w = wire(exec)
+        val p = persistence(w, transcript(w))
+        val closes = com.clauderemote.session.PendingCloses(
+            w.scope, forget = { id -> p.forgetSession(id, userInitiated = true)?.join() },
+            now = { testScheduler.currentTime },
+        )
+        closes.close(tab)
+        advanceTimeBy(9_999)
+        testScheduler.runCurrent()
+        // a process killed now loses nothing: the server was not told, the tab is still stored and listed
+        assertTrue(exec.calls.isEmpty(), exec.calls.map { it.cmd }.toString())
+        assertEquals(listOf("t1"), w.storage.load().map { it.id })
+        assertEquals(listOf("t1"), w.tabs.tabs.value.map { it.id })
+        advanceTimeBy(2)
+        testScheduler.runCurrent()
+        val cmds = exec.calls.map { it.cmd }
+        assertTrue("durable=1" in cmds[0], "durable tombstone first: ${cmds[0]}")
+        assertEquals("tmux kill-session -t '=claude-server-old'", cmds[1])
+        assertTrue(w.storage.load().isEmpty())
+    }
+
     @Test fun gitStatusOfAParkedTabIsProbedOverTheExecTransport() = runTest {
         val exec = FakeExec(out = "feature/x\n M file\n2\t3\n")
         val w = wire(exec)

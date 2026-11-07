@@ -191,6 +191,17 @@ fun App(
     var serverList by remember { mutableStateOf(serverStorage.loadServers()) }
     val tabs by tabManager.tabs.collectAsState()
     val activeTabId by tabManager.activeTabId.collectAsState()
+    // A closed tab waits out its undo window still in tabManager (connected, persisted, in the manifest), only
+    // hidden; everything the user sees and picks from uses visibleTabs (PendingCloses).
+    val pendingCloses = sessionOrchestrator.pendingCloses
+    val pendingCloseState by pendingCloses.state.collectAsState()
+    val visibleTabs = remember(tabs, pendingCloseState.pending) {
+        val hidden = pendingCloseState.hiddenIds
+        if (hidden.isEmpty()) tabs else tabs.filter { it.id !in hidden }
+    }
+    // A tab gone from tabManager behind the undo window's back (another device closed it, the dead-pane prune
+    // forgot it): nothing left to close or bring back.
+    LaunchedEffect(tabs) { pendingCloses.retain(tabs.mapTo(HashSet()) { it.id }) }
     // Server of the active tab — usage chips (5h/wk) are keyed by server.
     val activeServerId = tabs.firstOrNull { it.id == activeTabId }?.server?.id
 
@@ -249,15 +260,15 @@ fun App(
     var focusedPaneIndex by remember { mutableStateOf(0) }
 
     // FIX 3: Purge dead session ids when tabs change.
-    LaunchedEffect(tabs) {
-        val validIds = tabs.map { it.id }.toSet()
+    LaunchedEffect(visibleTabs) {
+        val validIds = visibleTabs.map { it.id }.toSet()
         paneSessions = paneSessions.map { sid -> if (sid != null && sid !in validIds) null else sid }
         // focusedPaneIndex is left wherever it is; that cell will show the picker.
     }
     // FIX 4: Reset grid entirely when tab count drops to 1 (can't split a
     // single session) — prevents stale TWO/QUAD resurfacing on next open.
-    LaunchedEffect(tabs.size) {
-        if (tabs.size <= 1) {
+    LaunchedEffect(visibleTabs.size) {
+        if (visibleTabs.size <= 1) {
             gridLayout = GridLayout.ONE
             paneSessions = listOf(null, null, null, null)
             focusedPaneIndex = 0
@@ -291,6 +302,41 @@ fun App(
         // re-subscribe and a 2 KB tail replay. onFocusPane already guards this;
         // match that here so switching to what's already active doesn't churn.
         if (id != activeTabId) sessionOrchestrator.switchTab(id)
+    }
+
+    // Closing a tab (Jarvis F0a): it leaves the bar at once, the real close (durable tombstone, kill) waits out
+    // the undo window in PendingCloses. Selection moves on as TabManager.removeTab moves it: to the last tab left.
+    // Reads the flows' current values, not the composed ones, because shortcuts and menus may hold an older lambda.
+    fun beginTabClose(id: String) {
+        val tab = tabManager.getTab(id) ?: return
+        val wasActive = id == tabManager.activeTabId.value
+        if (!pendingCloses.close(tab, wasActive)) return
+        val hidden = pendingCloses.state.value.hiddenIds
+        val rest = tabManager.tabs.value.filter { it.id !in hidden }
+        if (wasActive) rest.lastOrNull()?.let { switchActiveSession(it.id) }
+        if (rest.isEmpty()) currentScreen = Screen.LAUNCHER
+    }
+
+    fun requestTabClose(id: String) {
+        if (appSettings.confirmTabClose) tabCloseConfirmId = id else beginTabClose(id)
+    }
+
+    // "Vrátit": the tab is back where it was (it never left tabManager); if it was the one on screen, so is it again.
+    fun afterUndo(undone: List<com.clauderemote.session.PendingClose>) {
+        val reselect = undone.lastOrNull { it.wasActive } ?: return
+        if (tabManager.getTab(reselect.sessionId) == null) return
+        switchActiveSession(reselect.sessionId)
+        currentScreen = Screen.TERMINAL
+    }
+
+    // The selection can land on a hidden tab behind beginTabClose's back: TabManager.removeTab (a close that went
+    // through, a forget from elsewhere) picks the last tab in the list, hidden or not. Never leave a terminal on
+    // screen that has no tab in the bar.
+    LaunchedEffect(activeTabId, pendingCloseState.pending, currentScreen) {
+        val id = activeTabId ?: return@LaunchedEffect
+        if (id !in pendingCloseState.hiddenIds || currentScreen != Screen.TERMINAL) return@LaunchedEffect
+        val next = visibleTabs.lastOrNull()
+        if (next != null) switchActiveSession(next.id) else currentScreen = Screen.LAUNCHER
     }
 
     // FIX 2: Per-pane transcript collection keyed on BOTH sid AND claudeSessionId
@@ -758,7 +804,7 @@ fun App(
                         servers = serverList,
                         serverHealth = serverHealth,
                         onProbeServers = { force -> sessionOrchestrator.probeServers(serverList, force) },
-                        activeSessions = tabs,
+                        activeSessions = visibleTabs,
                         sessionActivities = sessionActivities,
                         remoteSessions = remoteSessions,
                         remoteSessionsLoading = remoteSessionsLoading,
@@ -769,7 +815,7 @@ fun App(
                             // app restart. Sequential to avoid a connection storm.
                             scope.launch {
                                 // 1) Reconnect restored-but-disconnected tabs.
-                                tabs.filter { it.status != SessionStatus.ACTIVE }
+                                visibleTabs.filter { it.status != SessionStatus.ACTIVE }
                                     .forEach { tab ->
                                         try {
                                             sessionOrchestrator.reconnectSession(tab.id)
@@ -1145,7 +1191,7 @@ fun App(
                         }
                     }
                     TerminalScreen(
-                        tabs = tabs,
+                        tabs = visibleTabs,
                         activeTabId = activeTabId,
                         appSettings = appSettings,
                         onUsage = {
@@ -1202,13 +1248,7 @@ fun App(
                         onRestartClaude = { id ->
                             scope.launch { sessionOrchestrator.restartClaude(id) }
                         },
-                        onTabClose = { id ->
-                            // Always confirm — closing forgets the persisted
-                            // session and kills the remote tmux pane, which
-                            // is destructive enough that we don't want a
-                            // single misclick to lose the conversation.
-                            tabCloseConfirmId = id
-                        },
+                        onTabClose = { id -> requestTabClose(id) },
                         onSessionLongPress = { id -> sessionMenuId = id },
                         onNewTab = { currentScreen = Screen.LAUNCHER },
                         onMenuOpen = { currentScreen = Screen.LAUNCHER },
@@ -1472,7 +1512,7 @@ fun App(
                                 // Auto-fill: pane 0 = active tab, remaining from
                                 // the first other tabs, extra slots stay empty.
                                 val active = activeTabId
-                                val others = tabs.map { it.id }.filter { it != active }
+                                val others = visibleTabs.map { it.id }.filter { it != active }
                                 val filled = mutableListOf<String?>(active)
                                 for (i in 1 until 4) filled.add(others.getOrNull(i - 1))
                                 paneSessions = filled
@@ -1590,7 +1630,7 @@ fun App(
                 Screen.USAGE_DASHBOARD -> {
                     val usageTokensState by sessionOrchestrator.usageTokens.collectAsState()
                     UsageDashboardScreen(
-                        sessions = tabs,
+                        sessions = visibleTabs,
                         sessionActivities = sessionActivities,
                         contextPercents = contextPercents,
                         sessionUsagePercent = activeServerId?.let { sessionUsagePercents[it] },
@@ -1745,13 +1785,7 @@ fun App(
                 TextButton(onClick = {
                     val id = tabCloseConfirmId ?: return@TextButton
                     tabCloseConfirmId = null
-                    scope.launch {
-                        // userInitiated: the user pressed Close in this dialog, so
-                        // the close is recorded durably and propagates to every
-                        // other device even if one of them is asleep right now.
-                        sessionOrchestrator.forgetSession(id, userInitiated = true)
-                        if (tabManager.tabs.value.isEmpty()) currentScreen = Screen.LAUNCHER
-                    }
+                    beginTabClose(id)
                 }) { Text("Close") }
             },
             dismissButton = {
@@ -1777,7 +1811,7 @@ fun App(
                     sessionMenuId = null
                     scope.launch { sessionOrchestrator.reconnectSession(id) }
                 },
-                onClose = { sessionMenuId = null; tabCloseConfirmId = id },
+                onClose = { sessionMenuId = null; requestTabClose(id) },
                 onDismiss = { sessionMenuId = null },
             )
         }
@@ -1875,6 +1909,29 @@ fun App(
                 confirmButton = {
                     TextButton(onClick = { connectionError = null }) { Text("OK") }
                 }
+            )
+        }
+
+        // Undo snackbar for closed tabs, bottom left, on every screen. FloatingSnackbar for the same reason the
+        // dialogs use FloatingDialog: on desktop an in-window overlay would draw under the Raw-view terminal.
+        val snackbarTheme = com.clauderemote.ui.theme.CRThemeSnapshot.current()
+        com.clauderemote.ui.components.FloatingSnackbar(
+            visible = !pendingCloseState.isEmpty,
+            theme = snackbarTheme,
+        ) {
+            PendingCloseSnackbar(
+                state = pendingCloseState,
+                remainingMs = pendingCloses::remainingMs,
+                windowMs = pendingCloses.windowMillis,
+                onUndo = { id -> afterUndo(listOfNotNull(pendingCloses.undo(id))) },
+                onUndoAll = { afterUndo(pendingCloses.undoAll()) },
+                onForceClose = { id ->
+                    pendingCloses.forceClose(id)
+                    val left = tabManager.tabs.value.filter { it.id != id && it.id !in pendingCloses.state.value.hiddenIds }
+                    if (left.isEmpty() && currentScreen == Screen.TERMINAL) currentScreen = Screen.LAUNCHER
+                },
+                onDismissBlocked = pendingCloses::dismissBlocked,
+                onHover = pendingCloses::setPaused,
             )
         }
         } // end Box
