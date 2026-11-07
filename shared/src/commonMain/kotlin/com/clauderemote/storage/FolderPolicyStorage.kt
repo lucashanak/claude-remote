@@ -1,6 +1,7 @@
 package com.clauderemote.storage
 
 import com.clauderemote.model.FolderPolicy
+import com.clauderemote.model.TmuxNameParser
 import com.clauderemote.model.canonicalPolicyFolder
 import com.clauderemote.model.policyCoversFolder
 import kotlinx.serialization.Serializable
@@ -53,27 +54,57 @@ class FolderPolicyStorage(private val prefs: KeyValueStore) {
     fun get(serverId: String, folder: String, home: String? = null): FolderPolicy {
         val target = canonicalPolicyFolder(folder, home)
         val prefix = "$serverId$SEPARATOR"
-        return load()
-            .filterKeys { it.startsWith(prefix) }
-            .mapNotNull { (key, dto) ->
-                val policyKey = canonicalPolicyFolder(key.removePrefix(prefix), home)
-                if (policyCoversFolder(policyKey, target)) policyKey to dto else null
-            }
-            // Most specific wins: a rule on `~/repo/sub` overrides one on `~/repo`.
-            .maxByOrNull { it.first.length }
-            ?.second?.toDomain() ?: FolderPolicy()
+        val rules = load().filterKeys { it.startsWith(prefix) }
+            .map { (key, dto) -> PolicyRow(key.removePrefix(prefix), canonicalPolicyFolder(key.removePrefix(prefix), home), dto) }
+        tmuxSegment(folder)?.let { return lossyMatch(rules, it) }
+        return rules
+            .filter { policyCoversFolder(it.canonical, target) }
+            // Most specific wins: a rule on `~/repo/sub` overrides one on `~/repo`. Two
+            // spellings of one folder tie on length: the canonical spelling first, then the
+            // stored text, so the answer never depends on the map's order.
+            .sortedWith(ROW_ORDER)
+            .firstOrNull()?.dto?.toDomain() ?: FolderPolicy()
+    }
+
+    private class PolicyRow(val stored: String, val canonical: String, val dto: FolderPolicyDto)
+
+    /**
+     * The folder of a tab attached from a tmux name is a bare last segment (TmuxNameParser:
+     * `.` rewritten to `_`, possibly cut short), not a path: `~/work/kontexta` arrives as
+     * `kontexta`, and reading it as home-relative applied `~/kontexta`'s rule. null for a path.
+     * (A STORED bare key is the user's own spelling of `~/<key>` and stays home-relative.)
+     */
+    private fun tmuxSegment(folder: String): String? {
+        val p = folder.trim().trimEnd('/')
+        return p.takeIf { it.isNotEmpty() && '/' !in it && !it.startsWith("~") && it != "." }
     }
 
     /**
-     * Stores [policy] for [folder]. An existing key that already names the same
-     * folder in another spelling is reused rather than joined by a second key,
-     * so the file never holds two rules for one folder; a new folder is stored
-     * canonically.
+     * A tmux-derived [segment]: the rule whose folder ends in that segment (as tmux spells it),
+     * but only when exactly one folder does. Two candidates (`~/kontexta` and
+     * `~/work/kontexta`) cannot be told apart from the segment, so neither applies rather than
+     * the wrong one.
+     */
+    private fun lossyMatch(rules: List<PolicyRow>, segment: String): FolderPolicy {
+        val fits = rules.filter {
+            TmuxNameParser.sanitize(it.canonical.trimEnd('/').substringAfterLast('/')) == segment
+        }
+        val folders = fits.map { it.canonical }.distinct()
+        if (folders.size != 1) return FolderPolicy()
+        return fits.sortedWith(ROW_ORDER).first().dto.toDomain()
+    }
+
+    /**
+     * Stores [policy] for [folder] under its canonical spelling. Keys that name
+     * the same folder in another spelling are removed, so the file never holds
+     * two rules for one folder.
      */
     fun set(serverId: String, folder: String, policy: FolderPolicy, home: String? = null) {
         val map = load().toMutableMap()
         val same = sameFolderKeys(map.keys, serverId, folder, home)
-        val key = same.firstOrNull() ?: "$serverId$SEPARATOR${canonicalPolicyFolder(folder, home)}"
+        // Every spelling of the folder collapses into the canonical one: the rule just set
+        // replaces them all, and which spelling survived used to depend on the map's order.
+        val key = "$serverId$SEPARATOR${canonicalPolicyFolder(folder, home)}"
         same.forEach { map.remove(it) }
         if (!policy.isEmpty) map[key] = FolderPolicyDto.fromDomain(policy)
         save(map)
@@ -93,6 +124,18 @@ class FolderPolicyStorage(private val prefs: KeyValueStore) {
         val target = canonicalPolicyFolder(folder, home)
         val prefix = "$serverId$SEPARATOR"
         return keys.filter { it.startsWith(prefix) && canonicalPolicyFolder(it.removePrefix(prefix), home) == target }
+    }
+
+    /**
+     * Every folder configured for [serverId], one row per folder in canonical form: the rule
+     * [get] would use for it (the canonical spelling first when two spellings are stored).
+     */
+    fun forServerCanonical(serverId: String, home: String?): Map<String, FolderPolicy> {
+        val prefix = "$serverId$SEPARATOR"
+        return load().filterKeys { it.startsWith(prefix) }
+            .map { (key, dto) -> PolicyRow(key.removePrefix(prefix), canonicalPolicyFolder(key.removePrefix(prefix), home), dto) }
+            .groupBy { it.canonical }
+            .mapValues { (_, rows) -> rows.sortedWith(ROW_ORDER).first().dto.toDomain() }
     }
 
     /** Every folder configured for [serverId], keyed as stored (any spelling, see [get]). */
@@ -145,6 +188,11 @@ class FolderPolicyStorage(private val prefs: KeyValueStore) {
     }
 
     companion object {
+        /** Longest folder first; then the canonical spelling, then the stored text. */
+        private val ROW_ORDER: Comparator<PolicyRow> = compareByDescending<PolicyRow> { it.canonical.length }
+            .thenByDescending { it.stored == it.canonical }
+            .thenBy { it.stored }
+
         private const val KEY_POLICIES = "folder_policies"
         private const val SEPARATOR = "::"
     }

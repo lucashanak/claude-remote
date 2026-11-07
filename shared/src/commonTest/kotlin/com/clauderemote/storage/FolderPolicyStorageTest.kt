@@ -207,13 +207,48 @@ class FolderPolicyStorageTest {
     }
 
     @Test
-    fun set_inAnotherSpelling_reusesTheExistingKeyInsteadOfAddingASecond() {
+    fun set_inAnotherSpelling_collapsesIntoTheCanonicalKey() {
         val storage = withServerFile()
         val updated = FolderPolicy(defaultAccountSlug = "lukas-kontexta-cz")
         storage.set("dev", "/home/lucas/kontexta", updated, home)
-        assertEquals(mapOf("kontexta" to updated), storage.forServer("dev"))
-        assertEquals("""{"kontexta":{"defaultAccountSlug":"lukas-kontexta-cz","allowedAccountSlugs":[]}}""",
+        assertEquals(mapOf("~/kontexta" to updated), storage.forServer("dev"))
+        assertEquals("""{"~/kontexta":{"defaultAccountSlug":"lukas-kontexta-cz","allowedAccountSlugs":[]}}""",
             storage.exportForServer("dev"))
+    }
+
+    // --- review 2026-11-07: tmux-derived folders and tied spellings ---
+
+    @Test
+    fun aTmuxDerivedSegmentIsNotReadAsHomeRelative() {
+        val (storage, _) = storage()
+        storage.importFromServer("dev", """{"~/work/kontexta":{"defaultAccountSlug":"work"}}""")
+        // a tab attached from `claude-dev-kontexta` carries only `kontexta`
+        assertEquals("work", storage.get("dev", "kontexta", home).defaultAccountSlug, "the one folder ending in it")
+        storage.importFromServer(
+            "dev",
+            """{"~/work/kontexta":{"defaultAccountSlug":"work"},"~/kontexta":{"defaultAccountSlug":"home"}}""",
+        )
+        assertEquals(FolderPolicy(), storage.get("dev", "kontexta", home), "two folders end in it: neither rule, rather than the wrong one")
+        assertEquals("home", storage.get("dev", "~/kontexta", home).defaultAccountSlug, "a real path still resolves")
+    }
+
+    @Test
+    fun aTmuxDerivedSegmentMatchesTheTmuxSpellingOfTheFolder() {
+        val (storage, _) = storage()
+        storage.importFromServer("dev", """{"~/nekrachni.plus":{"defaultAccountSlug":"np"}}""")
+        assertEquals("np", storage.get("dev", "nekrachni_plus", home).defaultAccountSlug)
+    }
+
+    @Test
+    fun twoStoredSpellingsOfOneFolderResolveDeterministically() {
+        val a = """"/home/lucas/kontexta":{"defaultAccountSlug":"abs"}"""
+        val t = """"~/kontexta":{"defaultAccountSlug":"tilde"}"""
+        for (blob in listOf("{$a,$t}", "{$t,$a}")) {
+            val (storage, _) = storage()
+            storage.importFromServer("dev", blob)
+            assertEquals("tilde", storage.get("dev", "~/kontexta/web", home).defaultAccountSlug, blob)
+            assertEquals(mapOf("~/kontexta" to FolderPolicy(defaultAccountSlug = "tilde")), storage.forServerCanonical("dev", home), blob)
+        }
     }
 
     @Test

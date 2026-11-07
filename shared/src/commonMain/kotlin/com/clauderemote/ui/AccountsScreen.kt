@@ -83,10 +83,11 @@ fun AccountsScreen(
     // reactive store — we re-snapshot it ourselves after every edit rather
     // than collecting a flow.
     var policies by remember(selectedServerId) {
-        mutableStateOf(selectedServer?.let { folderPolicyStorage.forServer(it.id) } ?: emptyMap())
+        // One row per folder: two stored spellings of one folder used to show (and edit) as two.
+        mutableStateOf(selectedServer?.let { folderPolicyStorage.forServerCanonical(it.id, policyHomeFor(it.username)) } ?: emptyMap())
     }
     fun refreshPolicies() {
-        policies = selectedServer?.let { folderPolicyStorage.forServer(it.id) } ?: emptyMap()
+        policies = selectedServer?.let { folderPolicyStorage.forServerCanonical(it.id, policyHomeFor(it.username)) } ?: emptyMap()
     }
     // Folders picked for editing that don't have a saved policy yet — an
     // empty policy is never persisted (see FolderPolicyStorage.set), so a
