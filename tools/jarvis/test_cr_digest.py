@@ -154,6 +154,37 @@ class DigestTest(unittest.TestCase):
         self.assertLessEqual(len(b), 600)
         self.assertRegex(b.splitlines()[-1], r"^… \+\d+ dalších$")
 
+    def test_fit_never_exceeds_the_cap_with_a_tail(self):
+        # the "… +N dalších" note used to be left out of the budget, so delta's tail could push it over the cap
+        import random
+        rnd = random.Random(7)
+        for _ in range(3000):
+            lines = ["x" * rnd.randint(1, 60) for _ in range(rnd.randint(2, 30))]
+            cap = rnd.randint(80, 400)
+            out = G.fit(lines, cap, f"+{rnd.randint(0, 99)} beze změny")
+            self.assertLessEqual(len(out), cap, (cap, out))
+
+    def test_hook_size_cap_keeps_what_waits_first(self):
+        # Jarvis's hooks call brief/delta with --max-chars 8000: over 10 000 characters Claude Code moves hook output
+        # to a file and the model sees a ~2 000-character preview (f1-spike 2c). With far more sessions than fit,
+        # the output must stay under the cap, cut on whole lines, count the rest, and keep what waits on top.
+        fx = self.fx
+        for i in range(300):
+            fx.session(f"{P}velmi-dlouhe-jmeno-session-cislo-{i:03d}", 2000 + i * 2, f"%{200 + i}", status="waiting",
+                       waiting_for="input needed", status_at=fx.clock.ms)
+        self.tick()
+        for cmd in ("brief", "delta"):
+            out = run(fx, cmd, "--max-chars", "8000")
+            self.assertLessEqual(len(out), 8000, cmd)
+            self.assertGreater(len(out), 7000, cmd)  # the cap is used, not a much smaller default
+            lines = out.splitlines()
+            if cmd == "delta" and lines[-1].endswith("beze změny"):
+                lines = lines[:-1]  # delta's own tail, kept when it fits next to the note
+            self.assertRegex(lines[-1], r"^… \+\d+ dalších$", cmd)
+            body = lines[1:-1]
+            self.assertTrue(body and all("čeká" in ln or ln.startswith(("Limity", "Čeká na")) for ln in body[:5]),
+                            (cmd, body[:5]))
+
     def test_usage_say(self):
         fx = self.fx
         fx.usage("hanakl@nekrachni.cz", 1, 2)

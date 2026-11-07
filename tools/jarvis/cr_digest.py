@@ -101,7 +101,9 @@ def fit(lines, max_chars, tail=None):
         rest = len(lines) - i
         reserve = len(f"… +{rest} dalších") + 1
         if used + len(ln) + 1 > max_chars - (reserve if i < len(lines) - 1 else 0):
-            out.append(f"… +{rest} dalších")
+            more = f"… +{rest} dalších"
+            out.append(more)
+            used += len(more) + 1  # the tail below must fit next to this note, not instead of it
             break
         out.append(ln)
         used += len(ln) + 1
