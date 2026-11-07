@@ -57,6 +57,8 @@ enum class RefuseReason(val message: String) {
     ALREADY_ANSWERED("Už odpovězeno"),
     /** The exec broke off after the keys may have gone out: saying "not sent" would invite a second one. */
     MAYBE_SENT("Možná odesláno – zkontroluj v aplikaci"),
+    /** The text went in, but the prompt moved before Enter: it waits in the input, unsent. */
+    TYPED_NOT_SENT("Text je napsaný, ale neodeslaný – dokonči v aplikaci"),
 }
 
 /**
@@ -272,7 +274,8 @@ object ReplyGuard {
         return when (token) {
             "SENT" -> null
             "SENDING" -> RefuseReason.MAYBE_SENT
-            "STALE", "STALE_TYPED" -> RefuseReason.PROMPT_CHANGED
+            "STALE" -> RefuseReason.PROMPT_CHANGED
+            "STALE_TYPED" -> RefuseReason.TYPED_NOT_SENT
             "NOHOOKS" -> RefuseReason.NO_HOOKS
             else -> RefuseReason.NOT_VERIFIABLE
         }
@@ -370,11 +373,14 @@ internal class ReplyLedger(private val capacity: Int = 256) {
         if (key in inFlight || answered.containsKey(key)) false else inFlight.add(key)
     }
 
-    /** [why]: the outcome of the send that [begin] allowed (null = sent). */
+    /**
+     * [why]: the outcome of the send that [begin] allowed (null = sent). Text left typed in the
+     * input stays taken too: another try would type it a second time.
+     */
     fun finish(key: String, why: RefuseReason?) {
         synchronized(lock) {
             inFlight.remove(key)
-            if (why == null || why == RefuseReason.MAYBE_SENT) answered[key] = Unit
+            if (why == null || why == RefuseReason.MAYBE_SENT || why == RefuseReason.TYPED_NOT_SENT) answered[key] = Unit
         }
     }
 }

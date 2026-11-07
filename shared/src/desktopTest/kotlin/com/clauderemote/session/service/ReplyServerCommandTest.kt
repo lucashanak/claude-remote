@@ -168,7 +168,7 @@ class ReplyServerCommandTest {
         onType.writeText("printf '%s\\n' '${ev("perm", 2_000)}' >> '${File(home, ".cache/claude-remote/events").absolutePath}'\n")
         assertEquals("CR_REPLY STALE_TYPED", run(ServerExpectation.Working, "a pak tohle"))
         assertEquals("send-keys -t %3 -l -- a pak tohle\n", keys(), "typed, but Enter would have picked the dialog's default")
-        assertEquals(RefuseReason.PROMPT_CHANGED, ReplyGuard.serverResult("CR_REPLY SENDING\nCR_REPLY STALE_TYPED"))
+        assertEquals(RefuseReason.TYPED_NOT_SENT, ReplyGuard.serverResult("CR_REPLY SENDING\nCR_REPLY STALE_TYPED"))
     }
 
     @Test fun anEndedSessionHoldsAShellAndTakesNoInstruction() {

@@ -210,6 +210,8 @@ class ReplyGuardTest {
         val l = ReplyLedger()
         l.begin("maybe"); l.finish("maybe", RefuseReason.MAYBE_SENT)
         assertEquals(false, l.begin("maybe"), "after Nepotvrzeno a second Ano must not go out")
+        l.begin("typed"); l.finish("typed", RefuseReason.TYPED_NOT_SENT)
+        assertEquals(false, l.begin("typed"), "the text waits in the input: a retry would type it twice")
         l.begin("stale"); l.finish("stale", RefuseReason.NOT_VERIFIABLE)
         assertEquals(true, l.begin("stale"), "nothing was sent: try again")
         val small = ReplyLedger(capacity = 2)
