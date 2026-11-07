@@ -36,7 +36,7 @@ class WearDataListenerService : WearableListenerService() {
                 SessionRepository.update(payload.sessions)
                 WearLog.i(this, TAG, "Updated repository with ${payload.sessions.size} sessions")
                 requestTileUpdate()
-                handleTransitions(payload.sessions, previousById)
+                handleTransitions(payload.sessions, previousById, payload.completionAlerts)
             }.onFailure { e -> WearLog.w(this, TAG, "Failed to parse /sessions payload: ${e.message}") }
         }
         dataEvents.release()
@@ -45,6 +45,7 @@ class WearDataListenerService : WearableListenerService() {
     private fun handleTransitions(
         sessions: List<WearSessionInfo>,
         previousById: Map<String, WearSessionInfo>,
+        completionAlerts: Boolean?,
     ) {
         WearNotifier.ensureChannels(this)
         // TTS stays gated behind the read-aloud toggle + Do Not Disturb.
@@ -241,6 +242,38 @@ class WearDataListenerService : WearableListenerService() {
             val alerts = !wasNotifyWorthy || isNewRequest ||
                 (session.activity == "APPROVAL_NEEDED" && activityChanged)
 
+            // Dokončení tahu, když uživatel na telefonu nechce hlásit dokončení
+            // (jen schválení a otázky): žádné bzučení a žádná NOVÁ notifikace.
+            // Zápěstí se přesto drží čerstvé — už visící notifikace se tiše
+            // přepíše (třeba schvalovací, ze které se tah dokončil). Baseline
+            // se posouvá, jako by se upozornilo: jinak by pozdější push téže
+            // zprávy (třeba po zapnutí volby) vypadal jako nové dokončení a
+            // zabzučel se starým textem. Nepředčítá se — hlasité čtení každého
+            // dokončení je tatáž záplava, jen do ucha.
+            if (isQuietCompletion(completionAlerts, session.activity)) {
+                val showing = WearNotifier.isShowing(this, session.id)
+                WearLog.i(
+                    this, TAG,
+                    "quiet completion for ${session.id}: ${previous.activity} -> ${session.activity} " +
+                        "showing=$showing (completion alerts off on the phone)",
+                )
+                if (showing) {
+                    WearNotifier.notifySession(
+                        this,
+                        session,
+                        silentUpdate = true,
+                        replacesActivity = previous.activity.takeIf { wasNotifyWorthy },
+                    )
+                }
+                nextBaseline[session.id] = NotifyBaseline(
+                    activity = session.activity,
+                    notifiedMessageAt = session.lastMessageAt,
+                    notifiedBodyHash = bodyNow.hashCode(),
+                    spokenHash = spokenText?.hashCode() ?: previous.spokenHash,
+                )
+                continue
+            }
+
             // Logs the PREVIOUS activity too — a session reported as acting
             // on a message that "hadn't moved in days" needs this to tell
             // apart a genuine (if surprising) phone-side activity flip from
@@ -306,6 +339,15 @@ class WearDataListenerService : WearableListenerService() {
     }
 
     private fun String?.isNotifyWorthy() = this == "WAITING_FOR_INPUT" || this == "APPROVAL_NEEDED"
+
+    /**
+     * Konec tahu, o kterém telefon říká "nehlásit". WAITING_FOR_INPUT je na
+     * zápěstí vždycky dokončení: schválení i otázka (hook `perm`/`ask`, výběr
+     * na obrazovce) chodí jako APPROVAL_NEEDED a bzučí dál. Null = starší
+     * telefon bez té volby, chová se jako dřív.
+     */
+    private fun isQuietCompletion(completionAlerts: Boolean?, activity: String) =
+        completionAlerts == false && activity == "WAITING_FOR_INPUT"
 
     /**
      * Tichý režim pro předčítání. Záměrně JEN "nic"/"jen budíky" — ne každý

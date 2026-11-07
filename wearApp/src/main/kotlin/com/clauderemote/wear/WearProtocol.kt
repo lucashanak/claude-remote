@@ -46,6 +46,11 @@ data class WearSessionsPayload(
     // Silence tolerance (ms) for on-watch dictation, mirrored from the phone.
     // Trailing default keeps compat with older phone builds (ignoreUnknownKeys).
     val dictationSilenceMs: Int = 4000,
+    // Phone setting "hlásit i dokončení práce". False = a finished turn
+    // (WAITING_FOR_INPUT) must not post a new buzzing notification; null =
+    // an older phone without the setting, alert as before. See
+    // [WearDataListenerService.isQuietCompletion].
+    val completionAlerts: Boolean? = null,
 )
 
 /**

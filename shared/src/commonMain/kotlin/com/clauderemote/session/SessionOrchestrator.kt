@@ -211,7 +211,7 @@ class SessionOrchestrator(
         { id -> transcriptService.lastAssistantEntry(id) },
         { id -> transcriptService.entries(id) },
         { id -> transcriptService.streamOrNull(id) },
-        { sid, hint, active, body -> onClaudeNeedsInput?.invoke(sid, hint, active, body) },
+        { sid, kind, hint, active, body -> onClaudeNeedsInput?.invoke(sid, kind, hint, active, body) },
         { id -> statusService.sessionActivities.value[id] },
     )
 
@@ -344,7 +344,13 @@ class SessionOrchestrator(
     var onSessionActive: ((ClaudeSession) -> Unit)? = null
 
     // Notification callback when Claude needs attention
-    var onClaudeNeedsInput: ((sessionId: String, hint: String, isActiveTab: Boolean, body: String?) -> Unit)? = null
+    var onClaudeNeedsInput: ((
+        sessionId: String,
+        kind: com.clauderemote.session.service.NotifyKind,
+        hint: String,
+        isActiveTab: Boolean,
+        body: String?,
+    ) -> Unit)? = null
 
     // Context window usage callback (0-100 percent)
     var onContextUpdate: ((sessionId: String, percent: Int) -> Unit)? = null

@@ -189,9 +189,14 @@ class AppSettings(private val prefs: KeyValueStore) {
         get() = prefs.getString("custom_shortcuts", "")
         set(value) = prefs.putString("custom_shortcuts", value)
 
-    // Notifications - task complete
+    // Notifications - task complete. Whether a finished turn alerts too, not only a
+    // permission dialog or a question (NotificationPolicy). Off by default: with
+    // ~50 sessions every turn end alerting was a flood. The stored key is kept, and
+    // getBoolean's default is exactly the migration: the switch writes only on a
+    // toggle, so a stored `true` is a user who turned it on and keeps it, while a
+    // never-touched switch has no key and now reads the new default.
     var notifyOnTaskComplete: Boolean
-        get() = prefs.getBoolean("notify_on_task_complete", true)
+        get() = prefs.getBoolean("notify_on_task_complete", false)
         set(value) = prefs.putBoolean("notify_on_task_complete", value)
 
     // Security

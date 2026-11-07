@@ -211,7 +211,7 @@ internal class NotificationService(
     // Bridge to transcriptService.streamOrNull — the notify watcher polls it.
     private val streamOrNull: (String) -> TranscriptStream?,
     // Bridge to the facade's public `var onClaudeNeedsInput`.
-    private val onNeedsInput: (String, String, Boolean, String?) -> Unit,
+    private val onNeedsInput: (String, NotifyKind, String, Boolean, String?) -> Unit,
     // The session's current activity: a live v2 `stop` may only LEAVE an approval, never overwrite
     // the ready state the legacy Stop marker (which lands first) has already set.
     private val activityOf: (String) -> SessionActivity? = { null },
@@ -225,7 +225,7 @@ internal class NotificationService(
             // message, so the old key made every prompt after the first look
             // like a duplicate and the user was never told.
             fireNeedsInput(
-                det.sessionId, det.type.displayHint, isActive,
+                det.sessionId, NotifyKind.ofPrompt(det.type), det.type.displayHint, isActive,
                 eventKey = NotifyKeys.detection(det.type, det.seq),
             )
             // Bridge prompt types that require explicit user approval to the
@@ -442,6 +442,9 @@ internal class NotificationService(
      *  and from the screen-state fallback firing on transient quiescence. */
     private fun fireNeedsInput(
         sessionId: String,
+        // What the event asks of the user, from the source that knows it — the
+        // platform policy alerts on a completion only when the user asked for it.
+        kind: NotifyKind,
         hint: String,
         isActive: Boolean,
         // Precise identity of the triggering event when the caller has one —
@@ -503,7 +506,7 @@ internal class NotificationService(
             }
         }
         if (!proceed) return
-        onNeedsInput(sessionId, hint, isActive, body)
+        onNeedsInput(sessionId, kind, hint, isActive, body)
     }
 
     /**
@@ -996,7 +999,7 @@ internal class NotificationService(
             if (w.reducer.isSuperseded(e.tmux, e.atMs)) return@onSessionLane
             if (isActive && !isBackground()) return@onSessionLane
             val hint = if (n.kind == "ask") PromptType.INPUT_PROMPT.displayHint else PromptType.PERMISSION_PROMPT.displayHint
-            fireNeedsInput(sessionId, hint, isActive, eventKey = n.key, body = n.text)
+            fireNeedsInput(sessionId, NotifyKind.ofHook(n.kind), hint, isActive, eventKey = n.key, body = n.text)
             hookSink.onNotify(w.serverId, e.tmux, n.kind, n.text)
         }
     }
@@ -1126,7 +1129,7 @@ internal class NotificationService(
             }
             val isActiveTab = tabManager.activeTabId.value == sessionId
             fireNeedsInput(
-                sessionId, READY_HINT, isActiveTab,
+                sessionId, NotifyKind.COMPLETION, READY_HINT, isActiveTab,
                 eventKey = markerEpochSec?.let { NotifyKeys.stop(markerTmux, it) },
                 body = body,
             )

@@ -339,11 +339,11 @@ class MainActivity : FragmentActivity() {
             }
         }
 
-        sessionOrchestrator.onClaudeNeedsInput = { sessionId, hint, isActiveTab, body ->
+        sessionOrchestrator.onClaudeNeedsInput = { sessionId, kind, hint, isActiveTab, body ->
             val tab = tabManager.getTab(sessionId)
             val title = tab?.tabTitle ?: "Session"
             val fg = isAppInForeground
-            FileLogger.log("Notify", "Claude needs input: '$hint' fg=$fg activeTab=$isActiveTab keepAlive=${KeepAliveService.isRunning} notif=${appSettings.notificationsEnabled}")
+            FileLogger.log("Notify", "Claude needs input: $kind '$hint' fg=$fg activeTab=$isActiveTab keepAlive=${KeepAliveService.isRunning} notif=${appSettings.notificationsEnabled} taskComplete=${appSettings.notifyOnTaskComplete}")
             // Use the body the orchestrator resolved for THIS completion
             // (cleaned of markdown) so the notification — and the watch —
             // show what Claude actually said, not just the generic hint. It
@@ -361,6 +361,8 @@ class MainActivity : FragmentActivity() {
             // must still refresh the wrist, which otherwise keeps whatever
             // text the debounced activity-change push happened to capture —
             // typically the PREVIOUS turn's answer, and permanently so.
+            // Whether the wrist BUZZES for it is the watch's call, made from
+            // the completion setting the payload carries (see WearSync).
             WearSync.setResolvedBody(sessionId, notifBody)
             // No body means this came from the screen detector, not the Stop
             // hook, so nothing in the payload changes and the watch would read
@@ -372,9 +374,11 @@ class MainActivity : FragmentActivity() {
             WearSync.pushNow()
 
             if (com.clauderemote.session.service.NotificationPolicy.shouldNotify(
+                    kind = kind,
                     appForeground = fg,
                     isActiveTab = isActiveTab,
                     notificationsEnabled = appSettings.notificationsEnabled,
+                    notifyOnTaskComplete = appSettings.notifyOnTaskComplete,
                 )
             ) {
                 FileLogger.log("Notify", "Sending alert for '$title'")

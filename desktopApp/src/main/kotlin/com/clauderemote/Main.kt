@@ -433,7 +433,7 @@ fun main() = application {
     // values when it fires, not the values at wiring time.
     LaunchedEffect(Unit) {
         DesktopPresence.install()
-        sessionOrchestrator.onClaudeNeedsInput = { sessionId, hint, isActiveTab, body ->
+        sessionOrchestrator.onClaudeNeedsInput = { sessionId, kind, hint, isActiveTab, body ->
             // Same suppression rule Android's MainActivity applies: don't notify
             // about a session the user is already looking at. A minimized window
             // counts as not-foreground even if it never lost AWT focus — and so
@@ -441,7 +441,11 @@ fun main() = application {
             // never delivers a focus-lost event at all (see DesktopPresence).
             val appForeground =
                 windowFocused && !windowState.isMinimized && DesktopPresence.userPresent
-            if (NotificationPolicy.shouldNotify(appForeground, isActiveTab, appSettings.notificationsEnabled)) {
+            if (NotificationPolicy.shouldNotify(
+                    kind, appForeground, isActiveTab,
+                    appSettings.notificationsEnabled, appSettings.notifyOnTaskComplete,
+                )
+            ) {
                 // Say WHICH session finished and WHAT it said — the phone has
                 // done both since MainActivity:264; the desktop used to show a
                 // fixed "Claude Remote" title and the generic hint, which on a

@@ -474,7 +474,7 @@ fun SettingsScreen(
                     )
                     var notifyTaskComplete by remember { mutableStateOf(settings.notifyOnTaskComplete) }
                     SettingsSwitch(
-                        label = "Notify on task complete",
+                        label = "Hlásit i dokončení práce (nejen schválení a otázky)",
                         checked = notifyTaskComplete,
                         onCheckedChange = { notifyTaskComplete = it; settings.notifyOnTaskComplete = it }
                     )

@@ -52,7 +52,7 @@ class AppSettingsTest {
         assertEquals("system", s.themeMode)
         assertEquals(true, s.notificationsEnabled)
         assertEquals("", s.customShortcuts)
-        assertEquals(true, s.notifyOnTaskComplete)
+        assertEquals(false, s.notifyOnTaskComplete)
         assertEquals(false, s.biometricLockEnabled)
         assertEquals(false, s.invertColors)
         assertEquals(220, s.sidePanelWidthDp)
@@ -113,6 +113,15 @@ class AppSettingsTest {
         s.dictationSilenceMs = 2500; assertEquals(2500, s.dictationSilenceMs)
     }
 
+    // The default flipped to off to stop the completion flood. The key is unchanged, so a user
+    // who turned the switch on keeps it on, and one who never touched it gets the new default.
+    @Test
+    fun notifyOnTaskComplete_keepsAnExplicitChoiceAndDefaultsAnUntouchedSwitchToOff() {
+        assertEquals(true, settings("notify_on_task_complete" to "true").first.notifyOnTaskComplete)
+        assertEquals(false, settings("notify_on_task_complete" to "false").first.notifyOnTaskComplete)
+        assertEquals(false, settings().first.notifyOnTaskComplete)
+    }
+
     @Test
     fun everyBooleanSetting_roundTrips() {
         val (s, _) = settings()
@@ -122,7 +131,7 @@ class AppSettingsTest {
         s.autoOpenTerminalOnPrompt = false; assertEquals(false, s.autoOpenTerminalOnPrompt)
         s.keepAliveEnabled = false; assertEquals(false, s.keepAliveEnabled)
         s.notificationsEnabled = false; assertEquals(false, s.notificationsEnabled)
-        s.notifyOnTaskComplete = false; assertEquals(false, s.notifyOnTaskComplete)
+        s.notifyOnTaskComplete = true; assertEquals(true, s.notifyOnTaskComplete)
         s.biometricLockEnabled = true; assertEquals(true, s.biometricLockEnabled)
         s.invertColors = true; assertEquals(true, s.invertColors)
         s.wakeWordEnabled = true; assertEquals(true, s.wakeWordEnabled)

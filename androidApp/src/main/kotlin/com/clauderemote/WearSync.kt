@@ -66,6 +66,15 @@ data class WearSessionsPayload(
     // Silence tolerance (ms) for on-watch dictation — mirrored from the phone's
     // Voice settings. New trailing field (defaulted) to stay wire-compatible.
     val dictationSilenceMs: Int = 4000,
+    // The phone's "notify on task complete" setting (NotificationPolicy). The
+    // watch decides its alerts from activity transitions of its own, not from
+    // the phone's alert, so it needs the rule rather than a per-alert flag: a
+    // turn end reaches it as a plain WAITING_FOR_INPUT push too. False = a
+    // completion only updates a notification already showing, no new buzz;
+    // approvals and questions still alert. Null = a phone without the
+    // setting, i.e. alert as before. New trailing field (defaulted) to stay
+    // wire-compatible with the wearApp copy.
+    val completionAlerts: Boolean? = null,
 )
 
 /**
@@ -441,8 +450,13 @@ object WearSync {
         val sonioxVoice = prefs.getString("soniox_tts_voice", "Adrian").orEmpty().ifBlank { "Adrian" }
         val ttsSpeedPct = prefs.getInt("tts_speech_rate_pct", 100)
         val dictationSilenceMs = prefs.getInt("dictation_silence_ms", 4000).coerceIn(1000, 10000)
+        // Through AppSettings, not a raw key: its default is the one the phone's
+        // own policy uses, and the two must agree on an untouched switch.
+        val completionAlerts = com.clauderemote.storage.AppSettings(
+            com.clauderemote.storage.PlatformPreferences(ctx),
+        ).notifyOnTaskComplete
         val payload = json.encodeToString<WearSessionsPayload>(
-            WearSessionsPayload(sessions, sonioxKey, sonioxVoice, ttsSpeedPct, dictationSilenceMs),
+            WearSessionsPayload(sessions, sonioxKey, sonioxVoice, ttsSpeedPct, dictationSilenceMs, completionAlerts),
         )
         // NOTE: the mutex orders the putDataItem ENQUEUE, not the delivery —
         // the Task is not awaited. Play Services processes a client's calls in

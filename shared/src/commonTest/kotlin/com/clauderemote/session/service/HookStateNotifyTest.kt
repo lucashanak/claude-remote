@@ -49,12 +49,13 @@ class HookStateNotifyTest {
         @Volatile var now = 0L
         @Volatile var offSwitch = false
         val needs = Collections.synchronizedList(mutableListOf<Pair<String, String>>())
+        val kinds = Collections.synchronizedList(mutableListOf<NotifyKind>())
         val status = StatusService(scope, registry, tabs, { background }, {}, {})
         val service = NotificationService(
             scope = scope, registry = registry, tabManager = tabs, isBackground = { background },
             updateActivity = { id, a -> status.updateActivity(id, a) },
             lastAssistantEntry = { null }, entriesOf = { emptyList() }, streamOrNull = { null },
-            onNeedsInput = { id, hint, _, _ -> needs += id to hint },
+            onNeedsInput = { id, kind, hint, _, _ -> kinds += kind; needs += id to hint },
             activityOf = { id -> status.currentActivity(id) },
         )
         val sent = Collections.synchronizedList(mutableListOf<String>())
@@ -381,6 +382,37 @@ class HookStateNotifyTest {
         Thread.sleep(100)
         assertEquals(1, r.needs.size, "the screen detector's sighting of the pending hook dialog is the same dialog: ${r.needs}")
         assertEquals(SessionActivity.APPROVAL_NEEDED, r.status.currentActivity(sid), "the dot still says approval")
+    }
+
+    // The kind is typed at the source: the hook `ask` and the screen INPUT_PROMPT share one hint,
+    // so a policy reading the hint could not tell a question from a finished turn.
+    @Test fun eachSourceHandsThePlatformItsKind() = rig { r ->
+        r.fakeClock(t0)
+        r.hook("perm", t0, "Bash: one")
+        waitUntil(3_000, "the perm alert") { r.kinds.size == 1 }
+        assertEquals(NotifyKind.PERMISSION, r.kinds[0])
+        r.now = t0 + 10_000
+        r.hook("work", t0 + 10_000)
+        r.now = t0 + 20_000
+        r.hook("ask", t0 + 20_000, "Which one?")
+        waitUntil(3_000, "the ask alert") { r.kinds.size == 2 }
+        assertEquals(NotifyKind.QUESTION, r.kinds[1])
+        assertEquals(PromptType.INPUT_PROMPT.displayHint, r.needs[1].second, "the same hint a finished turn carries")
+        r.now = t0 + 30_000
+        r.hook("askdone", t0 + 30_000)
+        r.now = t0 + 60_000
+        r.screenApproval(1)
+        assertEquals(3, r.kinds.size, "${r.needs}")
+        assertEquals(NotifyKind.PERMISSION, r.kinds[2])
+        // The Stop marker: a finished turn. The first marker of a process may only prime the
+        // baseline, so send two and require that whatever fires is a completion. Past the debounce.
+        r.now = t0 + 300_000
+        val nowSec = System.currentTimeMillis() / 1000
+        r.service.dispatchStopMarkerLineForTest(server.id, "claude-remote-notify $tmux ${nowSec - 1}")
+        r.service.dispatchStopMarkerLineForTest(server.id, "claude-remote-notify $tmux $nowSec")
+        waitUntil(5_000, "the Stop alert") { r.kinds.size >= 4 }
+        Thread.sleep(300)
+        assertEquals(listOf(NotifyKind.COMPLETION), r.kinds.drop(3).distinct(), "${r.needs}")
     }
 
     @Test fun theNextHookEventReleasesTheSuppression() = rig { r ->
