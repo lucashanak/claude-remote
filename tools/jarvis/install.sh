@@ -43,8 +43,10 @@ if [ "$run_tests" = 1 ]; then
     || { echo "install.sh: tests failed, nothing installed (run: python3 -m unittest discover -s $here -v)" >&2; exit 1; }
 fi
 
-sha="$(git -C "$here" rev-parse --short HEAD 2>/dev/null || echo nogit)"
-stamp="$(date -u +%Y%m%dT%H%M%SZ)-${sha}"
+# --dirty: a release built from uncommitted files must say so in its name
+sha="$(git -C "$here" describe --always --dirty 2>/dev/null || echo nogit)"
+# JARVIS_INSTALL_STAMP: tests only (two installs within one second would otherwise share a name)
+stamp="${JARVIS_INSTALL_STAMP:-$(date -u +%Y%m%dT%H%M%SZ)-${sha}}"
 lib="$prefix/lib/jarvis"
 rel="$lib/$stamp"
 bin="$prefix/bin"
@@ -54,15 +56,24 @@ if [ "$dry" = 1 ]; then
   echo "would point $lib/current -> $stamp"
   for b in "${!BIN[@]}"; do echo "would link $bin/$b -> $lib/current/${BIN[$b]}"; done
 else
-  mkdir -p "$rel" "$bin"
+  # a release is never rewritten in place: `current` may point at it and a running jarvis-d imports from it
+  if [ -e "$rel" ]; then echo "install.sh: $rel already exists, nothing installed" >&2; exit 1; fi
+  mkdir -p "$lib" "$bin"
+  mkdir "$rel"
   for f in "${FILES[@]}"; do install -m 0644 "$here/$f" "$rel/$f"; done
   for b in "${!BIN[@]}"; do chmod 0755 "$rel/${BIN[$b]}"; done
   ln -sfn "$stamp" "$lib/current.tmp.$$"
   mv -T "$lib/current.tmp.$$" "$lib/current"
   for b in "${!BIN[@]}"; do
     t="$bin/$b"
-    # never replace something that is not ours
-    if [ -e "$t" ] && [ ! -L "$t" ]; then echo "install.sh: $t exists and is not a link, left alone" >&2; continue; fi
+    # never replace something that is not ours: only a missing name, or a link that points into $lib/
+    if [ -e "$t" ] || [ -L "$t" ]; then
+      cur="$(readlink "$t" 2>/dev/null || true)"
+      case "$cur" in
+        "$lib"/*) ;;
+        *) echo "install.sh: $t exists and is not our link, left alone" >&2; continue ;;
+      esac
+    fi
     ln -sfn "$lib/current/${BIN[$b]}" "$t.tmp.$$" && mv -T "$t.tmp.$$" "$t"
   done
   echo "installed $stamp into $lib (current), commands in $bin"

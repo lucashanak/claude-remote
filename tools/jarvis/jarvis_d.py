@@ -38,6 +38,10 @@ PANES_EVERY_MS = 15000
 USAGE_EVERY_MS = 30000
 GONE_KEEP_MS = 3600 * 1000
 LOG_MAX = 256 * 1024
+# One failed `list-panes` (timeout under load) must not make every session without a live registry record vanish
+# and come back as "zmizela" and "nová": the last good answer stands in for this long, and when there is none,
+# sessions that drop out are carried over unchanged instead of being called gone.
+PANES_STALE_OK_MS = 60000
 
 
 class Daemon:
@@ -59,26 +63,33 @@ class Daemon:
                     "_key": s["trKey"], "title": s.get("title"), "lastPrompt": s.get("lastPrompt"),
                     "lastPromptMs": s.get("lastPromptMs"), "lastAssistantMs": s.get("lastAssistantMs"),
                     "endsWithQuestion": s.get("endsWithQuestion")})
-        self.panes, self.panes_at, self.live_key = None, 0, None
+        self.fetched, self.panes_at, self.live_key = None, 0, None
+        self.good_panes, self.good_at = None, 0
         self.usage, self.usage_at = {}, 0
         self.errors = []
 
     def tick(self):
         env = self.env
         now = env.now_ms()
-        self_name = J.read_self(env)
+        regs = J.read_registry(env)
+        live_key = sorted((r.pid, r.proc_start) for r in regs if r.alive)
+        # a failed answer is retried on the next tick (fetched stays None)
+        if self.fetched is None or live_key != self.live_key or now - self.panes_at >= PANES_EVERY_MS:
+            self.fetched, self.panes_at, self.live_key = env.tmux_panes(), now, live_key
+            if self.fetched is not None:
+                self.good_panes, self.good_at = self.fetched, now
+        tmux_ok = self.fetched is not None
+        panes = self.fetched if tmux_ok else (
+            self.good_panes if self.good_panes is not None and now - self.good_at <= PANES_STALE_OK_MS else None)
+        self_name = J.resolve_self(env, regs, panes, ancestor=False)
         for e in self.reader.read(env.events_path):
             self.fold.apply(e, ignore=self_name)
         self.fold.prune(now)
-        regs = J.read_registry(env)
-        live_key = sorted((r.pid, r.proc_start) for r in regs if r.alive)
-        if self.panes is None or live_key != self.live_key or now - self.panes_at >= PANES_EVERY_MS:
-            self.panes, self.panes_at, self.live_key = env.tmux_panes(), now, live_key
         if now - self.usage_at >= USAGE_EVERY_MS:
             self.usage, self.usage_at = J.read_usage(env, now), now
-        sessions = J.build_sessions(env, regs, self.panes, J.read_manifest(env), self.fold, self_name,
+        sessions = J.build_sessions(env, regs, panes, J.read_manifest(env), self.fold, self_name,
                                     self.tr_cache, now)
-        changed = self._diff(sessions, now)
+        changed = self._diff(sessions, now, tmux_ok)
         if changed:
             self.gen += 1
             for name in changed:
@@ -90,7 +101,8 @@ class Daemon:
             c["title"] = J.safe_text(c.get("title"), 100) or None
         status = {
             "v": 1, "gen": self.gen, "at": now, "d_heartbeat": now, "d_pid": os.getpid(), "d_started": self.started,
-            "self": self_name, "tmuxOk": self.panes is not None,
+            "self": self_name, "tmuxOk": tmux_ok,
+            "tmuxAgeMs": (now - self.good_at) if self.good_panes is not None else None,
             "registryRecords": len(regs), "registryLive": sum(1 for r in regs if r.alive),
             "eventsRotations": self.reader.rotations,
             "counts": _counts(sessions),
@@ -103,7 +115,7 @@ class Daemon:
             {"v": 1, "gen": self.gen, "reader": self.reader.state(), "fold": self.fold.s}, separators=(",", ":")))
         return status
 
-    def _diff(self, sessions, now):
+    def _diff(self, sessions, now, tmux_ok=True):
         """Names whose significant fields changed since the last tick; carries prevState/changedGen forward."""
         changed = []
         for name, s in sessions.items():
@@ -122,7 +134,9 @@ class Daemon:
         for name, p in self.prev.items():
             if name in sessions or not isinstance(p, dict):
                 continue
-            if p.get("state") != "gone":
+            if not tmux_ok and p.get("state") != "gone":
+                sessions[name] = p  # tmux did not answer: not seeing a session is not seeing it vanish
+            elif p.get("state") != "gone":
                 g = dict(p, prevState=p.get("state"), state="gone", attention=None, changedAt=now, new=False)
                 sessions[name] = g
                 changed.append(name)
@@ -169,6 +183,15 @@ def main(argv=None, env=None, sleep=time.sleep, monotonic=time.monotonic):
     ap.add_argument("--tick", type=float, default=TICK_S, help="seconds between ticks (default 5)")
     a = ap.parse_args(argv)
     env = env or J.Env()
+    # the log and the lock are created with open(); without this they come out 644 under cron's umask
+    old_umask = os.umask(0o077)
+    try:
+        return _run(a, env, sleep, monotonic)
+    finally:
+        os.umask(old_umask)
+
+
+def _run(a, env, sleep, monotonic):
     os.makedirs(env.state_dir, mode=0o700, exist_ok=True)
     lock = open(env.path("jarvis-d.lock"), "a+")
     try:

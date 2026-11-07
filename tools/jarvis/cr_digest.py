@@ -39,6 +39,11 @@ def load(env, now):
     """(sessions, status-or-None, warning). Falls back to a direct snapshot when the daemon's file is stale."""
     st = J.read_json(env.path("status.json"))
     if isinstance(st, dict) and isinstance(st.get("sessions"), dict) and now - _i(st.get("d_heartbeat")) <= STALE_MS:
+        # jarvis-d runs from cron and knows Jarvis only from the self file or the alias; here we may be running
+        # INSIDE Jarvis (its hook), where the claude above us names it for sure (I8)
+        me = J.resolve_self(env, J.read_registry(env))
+        if me in st["sessions"] and isinstance(st["sessions"][me], dict):
+            st["sessions"][me]["self"] = True
         return st["sessions"], st, None
     snap = J.snapshot(env, now_ms=now)
     return snap["sessions"], None, "jarvis-d neběží, stav je spočítaný přímo"
@@ -85,7 +90,7 @@ def line_of(it):
     t = f"«{it['text']}»" if it["text"] else ""
     age = f" · {J.ago_short(it['ageMs'])}" if it["ageMs"] is not None else ""
     body = {
-        "perm": f"chce povolení {t}", "ask": f"se ptá {t}", "waiting": f"čeká ({it['text'] or 'dialog'})",
+        "perm": f"chce povolení {t}", "ask": f"se ptá {t}", "waiting": f"čeká «{it['text'] or 'dialog'}»",
         "question": "odpověď končí otázkou", "done": "doběhl" + (" (na pozadí ještě běží úloha)" if it["bg"] else ""),
         "dead": "claude v ní neběží", "missing": "chybí v tmux", "closed": "zavřená", "gone": "zmizela",
         "back": "je zpět", "new": "nová", "cleared": "vyřízeno", "busy": "pracuje", "idle": "nečinná",
@@ -123,13 +128,12 @@ def works_cz(n):
 def say_item(it):
     n = J.spoken_name(it["short"])
     k = it["kind"]
-    age = J.minutes_cz(it["ageMs"]) if it["ageMs"] is not None else None
+    # Never the text of the perm or the question: it is written by the session (customer names, paths, anything)
+    # and --say goes to the cloud TTS. The text stays in the non-say output, inside «».
     if k == "perm":
-        return f"{n} chce povolení" + (f", čeká {age}." if age and age != "chvíli" else ".")
+        return f"{n} chce povolení."
     if k == "ask":
-        q = J.spoken_text(it["text"], 80)
-        s = f"{n} se ptá" + (f": {q}" if q else "")
-        return s if s[-1] in ".?!…" else s + "."
+        return f"{n} se ptá."
     if k == "waiting":
         return f"{n} čeká na dialog." if "dialog" in (it["text"] or "") else f"{n} čeká na tebe."
     if k == "question":
@@ -140,8 +144,11 @@ def say_item(it):
         return f"V {n} neběží claude."
     if k == "missing":
         return f"{n} chybí."
-    if k in ("closed", "gone"):
+    if k == "closed":
         return f"{n} je zavřená."
+    if k == "gone":
+        # gone = no longer seen; only a closed.jsonl record says it was closed
+        return f"{n} zmizela."
     if k == "back":
         return f"{n} je zpátky."
     if k == "new":

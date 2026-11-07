@@ -10,6 +10,7 @@ from jarvis_fixtures import Fx, T0, ev_line
 
 NAME = "claude-server-p-yolo--alpha"
 SELF = "claude-server-~-yolo--jarvis"
+P_DEAD = "claude-server-p-yolo--shell"
 
 
 class DaemonTest(unittest.TestCase):
@@ -140,6 +141,61 @@ class DaemonTest(unittest.TestCase):
         self.assertEqual(D.main(["--once"], env=env), 0)
         with open(os.path.join(fx.state, "jarvis-d.log")) as f:
             self.assertIn("ZeroDivisionError", f.read())
+
+    # rev M1: one failed list-panes must not turn sessions into "zmizela"
+    def test_tmux_outage_does_not_make_sessions_vanish(self):
+        fx = self.fx
+        fx.pane("%9", 900, P_DEAD)  # a session without claude exists only through tmux
+        d = D.Daemon(fx.env())
+        self.assertEqual(d.tick()["sessions"][P_DEAD]["state"], "dead")
+        good = list(fx.panes)
+        fx.panes = None
+        fx.clock.advance(20)  # list-panes is due again (every 15 s) and fails
+        st = d.tick()
+        self.assertEqual((st["gen"], st["tmuxOk"], st["sessions"][P_DEAD]["state"]), (1, False, "dead"))
+        self.assertTrue(st["sessions"][NAME]["verified"])  # the last good answer stands in (60 s)
+        fx.clock.advance(120)  # past the stale window: still not "gone", just carried
+        st = d.tick()
+        self.assertEqual((st["gen"], st["sessions"][P_DEAD]["state"]), (1, "dead"))
+        self.assertFalse(st["sessions"][NAME]["verified"])
+        fx.panes = good
+        fx.clock.advance(5)  # a failed answer is retried on the very next tick
+        st = d.tick()
+        self.assertEqual((st["gen"], st["tmuxOk"]), (1, True))
+
+    # rev M3: without a self file the session with alias `jarvis` is Jarvis (cron has no claude above it)
+    def test_alias_self_without_file(self):
+        fx = self.fx
+        fx.session(SELF, 300, "%3", status="idle")
+        fx.append_events(ev_line("perm", SELF, T0, 300, "Bash: cr-sessions list"))
+        st = D.Daemon(fx.env()).tick()
+        self.assertEqual(st["self"], SELF)
+        self.assertEqual(st["inbox"], [])
+        self.assertIsNone(st["sessions"][SELF]["lastEvent"])
+
+    # rev L5: the log and the lock are private like the rest of the state
+    def test_log_and_lock_are_private(self):
+        fx = self.fx
+        env = fx.env()
+        env.tmux_panes = lambda: 1 / 0
+        old = os.umask(0o022)
+        self.addCleanup(os.umask, old)
+        D.main(["--once"], env=env)
+        for f in ("jarvis-d.log", "jarvis-d.lock", "status.json"):
+            p = os.path.join(fx.state, f)
+            if os.path.exists(p):
+                self.assertEqual(os.stat(p).st_mode & 0o777, 0o600, f)
+        self.assertTrue(os.path.exists(os.path.join(fx.state, "jarvis-d.log")))
+        self.assertEqual(os.umask(0o022), 0o022)  # main() gave the caller its umask back
+
+    # rev M3: the daemon never takes the claude above it for Jarvis (run by hand from a work session)
+    def test_daemon_ignores_its_own_ancestry(self):
+        fx = self.fx
+        fx.ppids.update({7000: 100})  # started from inside NAME's claude
+        fx.append_events(ev_line("perm", NAME, T0, 100, "Bash: x"))
+        st = D.Daemon(fx.env(my_pid=7000)).tick()
+        self.assertIsNone(st["self"])
+        self.assertEqual(st["sessions"][NAME]["lastEvent"]["ev"], "perm")
 
 
 if __name__ == "__main__":
