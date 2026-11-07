@@ -49,8 +49,14 @@ enum class RefuseReason(val message: String) {
     PROMPT_CHANGED("Dotaz se mezitím změnil – otevři aplikaci"),
     /** Free text for a permission dialog: Enter would pick its default "Yes". */
     YES_NO_ONLY("Na schválení odpověz Ano/Ne"),
-    /** The server could not confirm the prompt (no hooks, exec failed, hooks switched off). */
+    /** The server could not confirm the prompt: the exec never ran, or nothing names a Stop marker. */
     NOT_VERIFIABLE("Stav session nejde ověřit – otevři aplikaci"),
+    /** No hook event can vouch for it: a server without hooks (or switched off), a dialog only the screen saw. */
+    NO_HOOKS("Bez hooků nejde ověřit – odpověz v aplikaci"),
+    /** This prompt already got an answer from here (a repeated Ano, phone and watch at once). */
+    ALREADY_ANSWERED("Už odpovězeno"),
+    /** The exec broke off after the keys may have gone out: saying "not sent" would invite a second one. */
+    MAYBE_SENT("Možná odesláno – zkontroluj v aplikaci"),
 }
 
 /**
@@ -124,7 +130,7 @@ object ReplyGuard {
                     refuse(RefuseReason.PROMPT_CHANGED, "another prompt is open now (${current?.prompt?.key})")
                 else -> current.hookEvent()?.let { (ev, at) -> Verdict.Send(ServerExpectation.Dialog(ev, at)) }
                     // A dialog only the screen saw: the server log cannot confirm it.
-                    ?: refuse(RefuseReason.NOT_VERIFIABLE, "no hook event names this dialog")
+                    ?: refuse(RefuseReason.NO_HOOKS, "no hook event names this dialog")
             }
             PromptKind.READY -> when {
                 reply != Reply.TEXT -> refuse(RefuseReason.PROMPT_CHANGED, "a dialog answer for a finished turn")
@@ -168,18 +174,31 @@ object ReplyGuard {
     const val SERVER_TOKEN = "CR_REPLY"
 
     /**
+     * tmux reads an argument ending in `;` as a command separator (the `;` is dropped and the
+     * rest of the argv runs as a new command); `\;` keeps it literal. Only the LAST character
+     * matters, and the rule also covers a text that already ends in `\;`.
+     */
+    internal fun tmuxLiteral(text: String): String = if (text.endsWith(";")) text.dropLast(1) + "\\;" else text
+
+    /**
      * One shell command that checks the pane's newest hook event against [expect] and, only if
-     * it matches, types [text] into tmux session [tmux] and presses Enter. Check and send run in
-     * the same shell on the server, so the gap between them is a few milliseconds instead of a
-     * round trip; what remains is a dialog drawn in those milliseconds, or one the hooks never
-     * report (see the lane notes).
+     * it matches, types [text] into the MAIN pane of tmux session [tmux] (the first pane of
+     * `list-panes -s`: the one whose Claude writes the events; a split or a teammate pane is
+     * never the target) and presses Enter. Check and keys run in the same shell on the server,
+     * so the gap between them is milliseconds instead of a round trip.
+     *
+     * [approve] (`y` / `n`): text and Enter in ONE tmux call, no gap at all. Free text is typed
+     * first and Enter follows 0.1 s later (a paste needs to settle); the newest line is read
+     * again right before Enter, and if it moved (a dialog opened meanwhile) Enter is not sent —
+     * the typed text stays in the input, but no selector default gets picked.
      *
      * `claude-remote-ev <EV> <name_b64> <epoch_ms> <pid> <extra_b64>` lines come from
      * [HookCommands.EVENTS_PATH]; legacy Stop markers (`claude-remote-notify <name> <epoch_s>`)
-     * from both marker files the notify watcher tails (the newest epoch wins). A switched-off or full events file counts as "no hooks".
-     * Prints `CR_REPLY SENT`, or `CR_REPLY STALE|NOHOOKS|FAILED`.
+     * from both marker files the notify watcher tails (the newest epoch wins). A switched-off or
+     * full events file counts as "no hooks". Prints `CR_REPLY SENDING` before the first key and
+     * then `CR_REPLY SENT`, or one of `STALE|STALE_TYPED|NOHOOKS|NOPANE|FAILED`.
      */
-    fun serverCommand(tmux: String, expect: ServerExpectation, text: String): String {
+    fun serverCommand(tmux: String, expect: ServerExpectation, text: String, approve: Boolean = false): String {
         val decide = when (expect) {
             is ServerExpectation.Dialog -> {
                 val want = sq("${expect.ev} ${expect.atMs}")
@@ -189,24 +208,38 @@ object ReplyGuard {
                 "case \"\$L\" in 'stop '*) OK=1;; '') " +
                     "if [ -n \"\$M\" ] && [ \"\$M\" -ge ${expect.stopEpochSec} ] 2>/dev/null; then OK=1; else W=STALE; fi;; " +
                     "*) W=STALE;; esac"
-            ServerExpectation.Idle -> "case \"\$L\" in 'stop '*) OK=1;; '') W=NOHOOKS;; *) W=STALE;; esac"
-            ServerExpectation.Working -> "case \"\$L\" in '') W=NOHOOKS;; 'perm '*|'ask '*) W=STALE;; *) OK=1;; esac"
+            // A `start` is a fresh, cleared or resumed session at its prompt (a drift relaunch too).
+            ServerExpectation.Idle -> "case \"\$L\" in 'stop '*|'start '*) OK=1;; '') W=NOHOOKS;; *) W=STALE;; esac"
+            // After `end` the pane holds a shell: the text would run in bash.
+            ServerExpectation.Working ->
+                "case \"\$L\" in '') W=NOHOOKS;; 'perm '*|'ask '*|'end '*) W=STALE;; *) OK=1;; esac"
         }
         val name = sq(tmux)
+        val keys = sq(tmuxLiteral(text))
+        val send = if (approve) {
+            "if tmux -u send-keys -t \"\$P\" -l -- $keys \\; send-keys -t \"\$P\" Enter 2>/dev/null; " +
+                "then echo '$SERVER_TOKEN SENT'; else echo '$SERVER_TOKEN FAILED'; fi"
+        } else {
+            "if tmux -u send-keys -t \"\$P\" -l -- $keys 2>/dev/null; then sleep 0.1; rd; " +
+                "if [ \"\$L\" != \"\$L0\" ]; then echo '$SERVER_TOKEN STALE_TYPED'; " +
+                "elif tmux -u send-keys -t \"\$P\" Enter 2>/dev/null; then echo '$SERVER_TOKEN SENT'; " +
+                "else echo '$SERVER_TOKEN FAILED'; fi; else echo '$SERVER_TOKEN FAILED'; fi"
+        }
         // tac reads the file from its end: the pane's newest line is found without scanning
         // 20 MB of other panes' history.
-        return "N=\$(printf '%s' $name | base64 -w0); T=${sq("=$tmux:")}; " +
-            "E=\"\$HOME/${HookCommands.EVENTS_PATH.removePrefix("~/")}\"; L=''; OK=0; W=STALE; " +
-            "SZ=\$(stat -c %s \"\$E\" 2>/dev/null || echo 0); " +
+        return "N=\$(printf '%s' $name | base64 -w0); " +
+            "E=\"\$HOME/${HookCommands.EVENTS_PATH.removePrefix("~/")}\"; OK=0; W=STALE; " +
+            "rd() { L=''; SZ=\$(stat -c %s \"\$E\" 2>/dev/null || echo 0); " +
             "if [ ! -f \"\$HOME/${HookCommands.OFF_SWITCH_PATH.removePrefix("~/")}\" ] && " +
             "[ \"\$SZ\" -lt ${HookCommands.EVENTS_MAX_BYTES - 2048} ]; then " +
-            "L=\$(tac \"\$E\" 2>/dev/null | awk -v n=\"\$N\" '\$1==\"claude-remote-ev\" && \$3==n {print \$2\" \"\$4; exit}'); fi; " +
+            "L=\$(tac \"\$E\" 2>/dev/null | awk -v n=\"\$N\" '\$1==\"claude-remote-ev\" && \$3==n {print \$2\" \"\$4; exit}'); fi; }; " +
+            "rd; L0=\$L; " +
             "M=\$(cat \"\$HOME/${MARKER_PATH.removePrefix("~/")}\" ${sq(LEGACY_MARKER_PATH)} 2>/dev/null | " +
             "awk -v n=$name '\$1==\"claude-remote-notify\" && \$2==n && \$3+0>m {m=\$3+0} END{if (m) print m}'); " +
             "$decide; " +
             "if [ \"\$OK\" = 1 ]; then " +
-            "if tmux send-keys -t \"\$T\" -l -- ${sq(text)} 2>/dev/null && sleep 0.1 && " +
-            "tmux send-keys -t \"\$T\" Enter 2>/dev/null; then echo '$SERVER_TOKEN SENT'; else echo '$SERVER_TOKEN FAILED'; fi; " +
+            "P=\$(tmux -u list-panes -s -t ${sq("=$tmux")} -F '#{pane_id}' 2>/dev/null | head -n 1); " +
+            "if [ -z \"\$P\" ]; then echo '$SERVER_TOKEN NOPANE'; else echo '$SERVER_TOKEN SENDING'; $send; fi; " +
             "else echo \"$SERVER_TOKEN \$W\"; fi"
     }
 
@@ -221,13 +254,18 @@ object ReplyGuard {
         else -> null
     }
 
-    /** null = sent; otherwise why not. Anything unexpected (no output, a failed exec) fails closed. */
+    /**
+     * null = sent; otherwise why not. Anything unexpected (no output, a failed exec) fails
+     * closed; output that stops after SENDING (the exec broke off mid-way) may have been sent.
+     */
     fun serverResult(output: String?): RefuseReason? {
         val token = output?.lineSequence()?.map { it.trim() }?.lastOrNull { it.startsWith("$SERVER_TOKEN ") }
             ?.removePrefix("$SERVER_TOKEN ")
         return when (token) {
             "SENT" -> null
-            "STALE" -> RefuseReason.PROMPT_CHANGED
+            "SENDING" -> RefuseReason.MAYBE_SENT
+            "STALE", "STALE_TYPED" -> RefuseReason.PROMPT_CHANGED
+            "NOHOOKS" -> RefuseReason.NO_HOOKS
             else -> RefuseReason.NOT_VERIFIABLE
         }
     }
@@ -302,5 +340,33 @@ internal class PromptTokens(private val clock: () -> Long = { System.currentTime
          * went quiet, so the true order is always hook first; this only absorbs clock-skew error.
          */
         const val SAME_DIALOG_SLACK_MS = 1_000L
+    }
+}
+
+/**
+ * One answer per prompt from outside the app. The server cannot tell an answered permission
+ * from an open one (approving writes no event), so a second "Ano" with the same identity — a
+ * repeat after "Nepotvrzeno", or the phone and the watch at once — would pass its check and
+ * land in whatever comes next. A prompt is taken before the exec and stays taken when the keys
+ * went out (or may have); any other outcome releases it for another try.
+ */
+internal class ReplyLedger(private val capacity: Int = 256) {
+    private val lock = Any()
+    private val inFlight = HashSet<String>()
+    private val answered = object : LinkedHashMap<String, Unit>(64, 0.75f, false) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, Unit>): Boolean = size > capacity
+    }
+
+    /** false when [key] is being answered right now or already was. */
+    fun begin(key: String): Boolean = synchronized(lock) {
+        if (key in inFlight || answered.containsKey(key)) false else inFlight.add(key)
+    }
+
+    /** [why]: the outcome of the send that [begin] allowed (null = sent). */
+    fun finish(key: String, why: RefuseReason?) {
+        synchronized(lock) {
+            inFlight.remove(key)
+            if (why == null || why == RefuseReason.MAYBE_SENT) answered[key] = Unit
+        }
     }
 }

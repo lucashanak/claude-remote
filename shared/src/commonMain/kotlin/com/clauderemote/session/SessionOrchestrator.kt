@@ -2783,14 +2783,32 @@ class SessionOrchestrator(
                 FileLogger.log(TAG, "Reply $reply to $sessionId refused (${notified?.key}): ${verdict.detail}")
                 verdict.reason
             }
-            is com.clauderemote.session.service.ReplyGuard.Verdict.Send ->
-                claudeControl.sendCheckedReply(sessionId, verdict.expect, text)?.also {
+            is com.clauderemote.session.service.ReplyGuard.Verdict.Send -> {
+                // An instruction names no prompt, so there is nothing to answer twice.
+                val key = notified?.takeIf { it.kind != com.clauderemote.session.service.PromptKind.INSTRUCTION }?.key
+                if (key != null && !replyLedger.begin(key)) {
+                    FileLogger.log(TAG, "Reply $reply to $sessionId refused: $key already answered or in flight")
+                    return com.clauderemote.session.service.RefuseReason.ALREADY_ANSWERED
+                }
+                var outcome: com.clauderemote.session.service.RefuseReason? = com.clauderemote.session.service.RefuseReason.NOT_VERIFIABLE
+                try {
+                    outcome = claudeControl.sendCheckedReply(
+                        sessionId, verdict.expect, text, approve = reply == com.clauderemote.session.service.ReplyGuard.Reply.APPROVE,
+                    )
+                } finally {
+                    if (key != null) replyLedger.finish(key, outcome)
+                }
+                outcome?.also {
                     FileLogger.log(TAG, "Reply $reply to $sessionId refused by the server check (${notified?.key}, ${verdict.expect}): $it")
                 }
+            }
         }
         if (why == null) FileLogger.log(TAG, "Reply $reply to $sessionId sent (${notified?.key}): ${text.length} chars")
         return why
     }
+
+    // One answer per prompt from outside the app (ReplyLedger).
+    private val replyLedger = com.clauderemote.session.service.ReplyLedger()
 
     /** The tab title of [sessionId], for a notification about it. */
     fun tabTitle(sessionId: String): String? = tabManager.getTab(sessionId)?.tabTitle

@@ -128,20 +128,29 @@ internal class ClaudeControlService(
     /**
      * Type a reply into the session through one exec that first checks the server's hook event
      * log against [expect] ([ReplyGuard.serverCommand]). Not through the PTY: the check and the
-     * keys must run in the same shell on the server. Returns null when sent, else why not; a
-     * failed exec fails closed.
+     * keys must run in the same shell on the server. [approve]: a `y` / `n` dialog answer, sent
+     * with its Enter in one tmux call. Returns null when sent, else why not: an exec that never
+     * ran fails closed, one that broke off after it started may have sent the keys.
      */
-    suspend fun sendCheckedReply(sessionId: String, expect: ServerExpectation, text: String): RefuseReason? {
+    suspend fun sendCheckedReply(sessionId: String, expect: ServerExpectation, text: String, approve: Boolean = false): RefuseReason? {
         val tab = tabManager.getTab(sessionId) ?: return RefuseReason.NOT_CONNECTED
-        val cmd = ReplyGuard.serverCommand(tab.tmuxSessionName, expect, text)
+        val cmd = ReplyGuard.serverCommand(tab.tmuxSessionName, expect, text, approve)
         val exec = replyExecOverride
         val out = try {
             if (exec != null) exec(tab.server.id, cmd) else registry.execRead(tab.server.id, cmd, totalMs = REPLY_EXEC_MS)
         } catch (e: kotlinx.coroutines.CancellationException) {
             throw e
+        } catch (e: ExecUnavailable) {
+            FileLogger.log(TAG, "checked reply exec failed for $sessionId: ${e.reason}")
+            return when (e.reason) {
+                // the command never started
+                ExecUnavailableReason.NOT_UP, ExecUnavailableReason.GATE_TIMEOUT, ExecUnavailableReason.REFUSED ->
+                    RefuseReason.NOT_VERIFIABLE
+                ExecUnavailableReason.TIMEOUT, ExecUnavailableReason.IO -> RefuseReason.MAYBE_SENT
+            }
         } catch (e: Exception) {
             FileLogger.log(TAG, "checked reply exec failed for $sessionId: ${e.message}")
-            null
+            return RefuseReason.MAYBE_SENT
         }
         val why = ReplyGuard.serverResult(out)
         if (why == null) {

@@ -202,6 +202,21 @@ class ReplyPromptTrackingTest {
         assertNull(runBlocking { r.control.sendCheckedReply(sid, ServerExpectation.Idle, "ahoj") })
         assertEquals(SessionActivity.WORKING, r.status.currentActivity(sid), "a submitted reply starts work")
         assertEquals(3, r.execs.size)
-        assertTrue(r.execs.all { "'=$tmux:'" in it && "'ahoj'" in it }, "one exec carries both the check and the keys")
+        assertTrue(r.execs.all { "'=$tmux'" in it && "'ahoj'" in it }, "one exec carries both the check and the keys")
+    }
+
+    @Test fun anExecThatNeverRanFailsClosedButOneThatBrokeOffMayHaveSent() = rig { r ->
+        r.status.updateActivity(sid, SessionActivity.WAITING_FOR_INPUT)
+        fun failWith(reason: ExecUnavailableReason): RefuseReason? {
+            r.control.replyExecOverride = { _, _ -> throw ExecUnavailable(reason) }
+            return runBlocking { r.control.sendCheckedReply(sid, ServerExpectation.Idle, "ahoj") }
+        }
+        assertEquals(RefuseReason.NOT_VERIFIABLE, failWith(ExecUnavailableReason.NOT_UP))
+        assertEquals(RefuseReason.NOT_VERIFIABLE, failWith(ExecUnavailableReason.GATE_TIMEOUT))
+        assertEquals(RefuseReason.NOT_VERIFIABLE, failWith(ExecUnavailableReason.REFUSED))
+        assertEquals(RefuseReason.MAYBE_SENT, failWith(ExecUnavailableReason.TIMEOUT))
+        assertEquals(RefuseReason.MAYBE_SENT, failWith(ExecUnavailableReason.IO))
+        r.control.replyExecOverride = { _, _ -> "CR_REPLY SENDING\n" }
+        assertEquals(RefuseReason.MAYBE_SENT, runBlocking { r.control.sendCheckedReply(sid, ServerExpectation.Idle, "ahoj") }, "the watchdog cut it after SENDING")
     }
 }

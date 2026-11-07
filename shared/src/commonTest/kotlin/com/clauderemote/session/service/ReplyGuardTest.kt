@@ -65,7 +65,7 @@ class ReplyGuardTest {
     }
 
     @Test fun aDialogTheScreenAloneSawCannotBeConfirmedByTheServer() {
-        assertEquals(RefuseReason.NOT_VERIFIABLE, check(screenD, screenD, SessionActivity.APPROVAL_NEEDED, Reply.APPROVE).reason())
+        assertEquals(RefuseReason.NO_HOOKS, check(screenD, screenD, SessionActivity.APPROVAL_NEEDED, Reply.APPROVE).reason())
     }
 
     @Test fun anAliasAnswersForTheSameDialogAndTheServerChecksTheHookEvent() {
@@ -189,11 +189,32 @@ class ReplyGuardTest {
         assertNull(ReplyGuard.serverResult("CR_REPLY SENT\n"))
         assertNull(ReplyGuard.serverResult("motd noise\nCR_REPLY SENT"))
         assertEquals(RefuseReason.PROMPT_CHANGED, ReplyGuard.serverResult("CR_REPLY STALE"))
-        assertEquals(RefuseReason.NOT_VERIFIABLE, ReplyGuard.serverResult("CR_REPLY NOHOOKS"))
+        assertEquals(RefuseReason.NO_HOOKS, ReplyGuard.serverResult("CR_REPLY NOHOOKS"))
         assertEquals(RefuseReason.NOT_VERIFIABLE, ReplyGuard.serverResult("CR_REPLY FAILED"))
         assertEquals(RefuseReason.NOT_VERIFIABLE, ReplyGuard.serverResult(""))
         assertEquals(RefuseReason.NOT_VERIFIABLE, ReplyGuard.serverResult(null), "the exec failed")
         assertEquals(RefuseReason.NOT_VERIFIABLE, ReplyGuard.serverResult("SENT"))
+    }
+
+    // ---------------------------------------------------------------- one answer per prompt
+
+    @Test fun aPromptIsAnsweredOnceFromOutsideTheApp() {
+        val l = ReplyLedger()
+        assertEquals(true, l.begin("k"))
+        assertEquals(false, l.begin("k"), "phone and watch at once: the second waits for nothing, it is refused")
+        l.finish("k", null)
+        assertEquals(false, l.begin("k"), "sent: a repeated Ano would approve whatever comes next")
+    }
+
+    @Test fun aPromptThatMayHaveBeenAnsweredStaysTakenAndARefusalReleasesIt() {
+        val l = ReplyLedger()
+        l.begin("maybe"); l.finish("maybe", RefuseReason.MAYBE_SENT)
+        assertEquals(false, l.begin("maybe"), "after Nepotvrzeno a second Ano must not go out")
+        l.begin("stale"); l.finish("stale", RefuseReason.NOT_VERIFIABLE)
+        assertEquals(true, l.begin("stale"), "nothing was sent: try again")
+        val small = ReplyLedger(capacity = 2)
+        for (k in listOf("a", "b", "c")) { small.begin(k); small.finish(k, null) }
+        assertEquals(true, small.begin("a"), "bounded: the oldest answer is forgotten")
     }
 
     // ---------------------------------------------------------------- tokens
