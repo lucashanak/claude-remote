@@ -16,6 +16,7 @@ import com.clauderemote.storage.FakeKeyValueStore
 import com.clauderemote.storage.ServerStorage
 import com.clauderemote.storage.SessionStorage
 import com.clauderemote.util.FileLogger
+import kotlinx.coroutines.async
 import kotlinx.coroutines.runBlocking
 import java.util.concurrent.CopyOnWriteArrayList
 import kotlin.test.AfterTest
@@ -157,6 +158,44 @@ class OpenedAdoptionWiringTest {
         logLines.clear()
         o.reconnectDeadTabs("test")
         assertTrue(logLines.none { "Reconnect sweep" in it }, "the parked tab was swept: $logLines")
+    }
+
+    /**
+     * A restore of this device writes the name's marker itself and gets its tab from the restore: a reconcile round in
+     * the meantime must not adopt the same name as a second, parked tab. Once the restore is over, the marker is fair game.
+     */
+    @Test fun aNameBeingRestoredHereIsNeverAdopted() {
+        val (o, exec, _) = setUpOrchestrator()
+        val entered = kotlinx.coroutines.CompletableDeferred<Unit>()
+        val gate = kotlinx.coroutines.CompletableDeferred<Unit>()
+        // the restore's exec: held open until the test lets it fail (no server here)
+        SshSessionHelper.execChannelsProvider = {
+            object : com.clauderemote.session.service.ExecChannels {
+                override suspend fun <T> use(serverId: String, kind: ExecKind, acquireTimeoutMs: Long, block: suspend (com.jcraft.jsch.Channel) -> T): T =
+                    throw UnsupportedOperationException()
+                override suspend fun <T> withPermit(serverId: String, kind: ExecKind, acquireTimeoutMs: Long, block: suspend (com.jcraft.jsch.Session) -> T): T {
+                    entered.complete(Unit)
+                    gate.await()
+                    throw IllegalStateException("test: no server")
+                }
+            }
+        }
+        val rec = com.clauderemote.session.service.ClosedRecord(
+            1, "2026-11-06T17:20:03Z", "claude-box-r", sid, null, null, "/home/u/w", "/home/u/w", null, null, null,
+            emptyList(), null, null, null, null, "app:x", true, null,
+        )
+        val restore = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.Default).async { o.restoreClosed(server, rec) }
+        runBlocking { kotlinx.coroutines.withTimeout(5_000) { entered.await() } }
+
+        exec.reconcileOut = reconcile(listOf("claude-box-mine", "claude-box-r"), listOf("claude-box-r"), listOf("claude-box-r" to nowS))
+        round(o, exec)
+        assertTrue(tabs.tabs.value.none { it.tmuxSessionName == "claude-box-r" }, "adopted while its restore ran here")
+
+        gate.complete(Unit)
+        runBlocking { kotlinx.coroutines.withTimeout(5_000) { restore.await() } }
+        // the control: with the restore over, the same round adopts it
+        round(o, exec)
+        assertEquals(1, tabs.tabs.value.count { it.tmuxSessionName == "claude-box-r" })
     }
 
     @Test fun nothingIsAdoptedWhileTheHideListIsNotWired() {

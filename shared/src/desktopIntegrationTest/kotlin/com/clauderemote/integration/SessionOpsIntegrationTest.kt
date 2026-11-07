@@ -103,6 +103,10 @@ class SessionOpsIntegrationTest {
         return Regex("\"tmuxSessionName\"\\s*:\\s*\"([^\"]*)\"").findAll(f.readText()).map { it.groupValues[1] }.toList()
     }
 
+    /** drift's tick logged "self-heal — relaunching missing: … [name] …". */
+    private fun relaunchLogged(name: String): Boolean =
+        fixture.driftLog().lines().any { "relaunching missing:" in it && it.substringAfter("relaunching missing:").split(' ').contains(name) }
+
     private fun folder(name: String): File = File(fixture.home, name).apply { mkdirs() }
 
     /** The transcript of [sid] under [dir], with an `ai-title`. */
@@ -175,10 +179,13 @@ class SessionOpsIntegrationTest {
         val close = SessionOpsScript.SCRIPT.substringAfter("cmd_close() {").substringBefore("cmd_restore() {")
         assertTrue(close.indexOf("cr_tombstone ") < close.indexOf("cr_record ") && close.indexOf("cr_record ") < close.indexOf("kill-session"), close)
 
-        repeat(2) { assertEquals(0, drift().exit, fixture.driftLog()) }
-        Thread.sleep(1_500) // let a (wrong) self-heal land before looking
-        assertFalse(nameA in manifestNames(), "drift must drop the closed session. log:\n${fixture.driftLog()}")
-        assertFalse(nameA in fixture.tmuxSessions(), "self-heal resurrected a closed session. log:\n${fixture.driftLog()}")
+        // drift decides a self-heal inside its tick and logs it before relaunching: every tick is looked at, no sleep
+        repeat(3) { tick ->
+            assertEquals(0, drift().exit, fixture.driftLog())
+            assertFalse(relaunchLogged(nameA), "tick ${tick + 1} chose to resurrect a closed session. log:\n${fixture.driftLog()}")
+            assertFalse(nameA in manifestNames(), "drift must drop the closed session. log:\n${fixture.driftLog()}")
+            assertFalse(nameA in fixture.tmuxSessions(), "self-heal resurrected a closed session. log:\n${fixture.driftLog()}")
+        }
         assertTrue(nameB in fixture.tmuxSessions())
     }
 
@@ -191,6 +198,8 @@ class SessionOpsIntegrationTest {
         waitUntil(10_000, "drift to adopt both") { manifestNames().containsAll(listOf(nameA, nameB)) }
         assertEquals(0, fixture.tmux("kill-session", "-t", "=$nameA").exit)
         assertEquals(0, drift().exit)
+        // the signal the closed-session test relies on: the tick logs its decision before it relaunches
+        assertTrue(relaunchLogged(nameA), "no self-heal line for $nameA. log:\n${fixture.driftLog()}")
         waitUntil(25_000, "self-heal to relaunch $nameA. log:\n${fixture.driftLog()}") { nameA in fixture.tmuxSessions() }
     }
 

@@ -483,9 +483,10 @@ private fun InboxCard(
                 InboxKind.PERMISSION -> PromptText(glyph, item.text.ifBlank { "Povolení (text neznámý)" })
                 InboxKind.STOP_QUESTION -> PromptText(glyph, item.text)
             }
-            val risky = item.kind == InboxKind.PERMISSION && item.risk?.risky == true
+            val approval = Velin.approvalMode(item)
+            val risky = item.kind == InboxKind.PERMISSION && item.risk?.risky != false
             if (risky) {
-                Text("⚠ RIZIKOVÉ — ${item.risk?.reason}", style = CRType.monoTiny, color = c.approval)
+                Text("⚠ RIZIKOVÉ — ${item.risk?.reason ?: "neznámý příkaz"}", style = CRType.monoTiny, color = c.approval)
             }
             when (outcome) {
                 ReplyOutcome.Sending -> Text("odesílám…", style = CRType.bodyDim, color = c.textDim)
@@ -497,19 +498,16 @@ private fun InboxCard(
                 Text("Odpověď jen v aplikaci — dialog nepotvrdil žádný hook.", style = CRType.bodyDim, color = c.textDim)
             }
             FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                if (item.prompt != null) {
-                    when (item.kind) {
-                        InboxKind.PERMISSION -> {
-                            OutlinedButton(enabled = !busy, onClick = { onAnswer(item, ReplyGuard.Reply.APPROVE, "n") }) {
-                                Text(if (risky) "Zamítnout" else "Ne")
-                            }
-                            if (risky) {
-                                HoldToConfirmButton("Podržet pro schválení", enabled = !busy) { onAnswer(item, ReplyGuard.Reply.APPROVE, "y") }
-                            } else {
-                                Button(enabled = !busy, onClick = { onAnswer(item, ReplyGuard.Reply.APPROVE, "y") }) { Text("Ano") }
-                            }
-                        }
-                        InboxKind.QUESTION, InboxKind.STOP_QUESTION -> {}
+                if (approval != ApprovalMode.NONE) {
+                    OutlinedButton(enabled = !busy, onClick = { onAnswer(item, ReplyGuard.Reply.APPROVE, "n") }) {
+                        Text(if (approval == ApprovalMode.HOLD) "Zamítnout" else "Ne")
+                    }
+                    when (approval) {
+                        ApprovalMode.HOLD ->
+                            HoldToConfirmButton("Podržet pro schválení", enabled = !busy) { onAnswer(item, ReplyGuard.Reply.APPROVE, "y") }
+                        ApprovalMode.TAP ->
+                            Button(enabled = !busy, onClick = { onAnswer(item, ReplyGuard.Reply.APPROVE, "y") }) { Text("Ano") }
+                        ApprovalMode.NONE -> {}
                     }
                 }
                 TextButton(onClick = { onOpen(item.sessionId) }) { Text("Otevřít ›", color = c.accent) }

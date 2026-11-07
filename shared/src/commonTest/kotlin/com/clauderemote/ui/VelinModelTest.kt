@@ -285,4 +285,26 @@ class VelinModelTest {
         assertEquals("git push --force", PermRisk.classify("Bash: git push --force").reason)
         assertEquals(PermRisk.Verdict(false, null), PermRisk.classify("Bash: ls"))
     }
+
+    /**
+     * What the Velín draws for "Ano": a tap only for a permission classified harmless; risky AND unclassified ones
+     * (no verdict at all) need the hold; no Ano/Ne without a prompt to check against, nor for a question.
+     */
+    @Test fun aTapApprovesOnlyAPermissionKnownToBeHarmless() {
+        val p = PromptFingerprint("k", PromptKind.PERMISSION)
+        fun item(risk: PermRisk.Verdict?, kind: InboxKind = InboxKind.PERMISSION, prompt: PromptFingerprint? = p) =
+            InboxItem("s", "s", kind, "Bash: x", null, prompt, risk)
+        assertEquals(ApprovalMode.TAP, Velin.approvalMode(item(PermRisk.classify("Bash: ls"))))
+        assertEquals(ApprovalMode.HOLD, Velin.approvalMode(item(PermRisk.classify("Bash: git push"))))
+        assertEquals(ApprovalMode.HOLD, Velin.approvalMode(item(PermRisk.classify(null))))
+        assertEquals(ApprovalMode.HOLD, Velin.approvalMode(item(null)), "no verdict is never a one-tap approval")
+        assertEquals(ApprovalMode.NONE, Velin.approvalMode(item(PermRisk.classify("Bash: ls"), prompt = null)))
+        assertEquals(ApprovalMode.NONE, Velin.approvalMode(item(null, kind = InboxKind.QUESTION, prompt = PromptFingerprint("q", PromptKind.QUESTION))))
+        // what the model builds for a permission with no text at all
+        val built = Velin.inboxItemFor(
+            "s", "s", VelinState.APPROVAL, p, promptText = null, promptAtMs = null, hookNamed = true,
+            lastAssistantText = null, readyPrompt = null, sinceMs = null,
+        )
+        assertEquals(ApprovalMode.HOLD, Velin.approvalMode(built!!))
+    }
 }

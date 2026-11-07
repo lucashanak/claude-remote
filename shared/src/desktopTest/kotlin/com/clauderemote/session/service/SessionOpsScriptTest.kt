@@ -173,6 +173,99 @@ class SessionOpsScriptTest {
     }
 
     /**
+     * A `tmux` stand-in for [home] (a script first on PATH, not tmux: nothing reaches a server, and `list-sessions`
+     * answers 0 so the prelude never reaches for systemd-run). Every call goes to `~/tmux.log` as
+     * `<1 if $STUB_NAME is tombstoned right now, else 0> <args>`; `has-session` says "no such session".
+     */
+    private fun tmuxRecorder(home: File): File {
+        val bin = File(home, "stubbin").apply { mkdirs() }
+        File(bin, "tmux").apply {
+            writeText(
+                "#!/usr/bin/env bash\n" +
+                    "D=\"\$HOME/.claude-remote\"; t=0\n" +
+                    "grep -qxF \"\$STUB_NAME\" \"\$D/forgotten\" 2>/dev/null && t=1\n" +
+                    "[ -e \"\$D/forgotten.d/\$STUB_NAME\" ] && t=1\n" +
+                    "echo \"\$t \$*\" >> \"\$HOME/tmux.log\"\n" +
+                    "case \"\$*\" in *has-session*) exit 1 ;; esac\n" +
+                    "exit 0\n",
+            )
+            setExecutable(true)
+        }
+        return bin
+    }
+
+    private fun runStubbed(home: File, name: String, vararg argv: String): Pair<Int, String> {
+        val pb = ProcessBuilder(*argv).directory(home).redirectErrorStream(true)
+        pb.environment()["HOME"] = home.absolutePath
+        pb.environment()["STUB_NAME"] = name
+        pb.environment()["PATH"] = tmuxRecorder(home).absolutePath + ":" + pb.environment()["PATH"]
+        val p = pb.start()
+        val out = p.inputStream.bufferedReader().readText()
+        if (!p.waitFor(60, TimeUnit.SECONDS)) { p.destroyForcibly(); fail("timeout: ${argv.toList()}") }
+        return p.exitValue() to out
+    }
+
+    private fun tombstone(home: File, name: String) {
+        val d = File(home, ".claude-remote").apply { mkdirs() }
+        File(d, "forgotten.d").mkdirs(); File(d, "forgotten.d/$name").writeText("")
+        File(d, "forgotten").writeText("$name\n")
+    }
+
+    /**
+     * open and restore over a tombstoned name (§15.15, rozpor 15): the tombstone is lifted BEFORE the pane is created
+     * (else drift subtracts the new name and peers forget its tab), and neither ever runs `kill-session`.
+     */
+    @Test fun openAndRestoreLiftTheTombstoneFirstAndNeverKill() {
+        val home = tempHome()
+        try {
+            fun calls() = File(home, "tmux.log").readLines().also { File(home, "tmux.log").delete() }
+            fun checkCalls(what: String, calls: List<String>) {
+                val creates = calls.filter { "new-session" in it && "__anchor__" !in it }
+                assertTrue(creates.isNotEmpty(), "$what created nothing: $calls")
+                assertTrue(creates.all { it.startsWith("0 ") }, "$what created the pane while the name was still tombstoned: $creates")
+                assertTrue(calls.none { "kill-session" in it }, "$what killed: $calls")
+            }
+
+            val o = "claude-server-o"
+            tombstone(home, o)
+            val f = file(SessionOpsScript.SCRIPT)
+            val (rc, out) = runStubbed(home, o, "bash", f.absolutePath, "open", "--name", o, "--folder", home.absolutePath, "--wait", "1")
+            assertEquals(0, rc, out)
+            checkCalls("open", calls())
+
+            val r = "claude-server-r"
+            tombstone(home, r)
+            val sid = "77777777-2222-3333-4444-555555555555"
+            File(home, ".claude/projects/x").mkdirs(); File(home, ".claude/projects/x/$sid.jsonl").writeText("{}\n")
+            File(home, ".claude/.credentials.json").writeText("{}")
+            val rec = ClosedRecord(1, "2026-11-06T17:20:03Z", r, sid, null, null, home.absolutePath, home.absolutePath, null, "SONNET", "AUTO",
+                emptyList(), null, null, null, null, "app:x", true, null)
+            val (rc2, out2) = runStubbed(home, r, "bash", "-c", SessionRestore.restoreCommand(rec, waitS = 1))
+            assertEquals(0, rc2, out2)
+            assertEquals(RestoreResult.Restored(null, null, registry = false, resumedId = sid), SessionRestore.parse(out2), out2)
+            checkCalls("restore", calls())
+        } finally {
+            safeDeleteTree(home)
+        }
+    }
+
+    /** `~/.claude-remote/jarvis/off` stops open and restore as it stops close, before anything else happens. */
+    @Test fun theOffSwitchStopsOpenAndRestore() {
+        val home = tempHome()
+        try {
+            File(home, ".claude-remote/jarvis").mkdirs()
+            File(home, ".claude-remote/jarvis/off").writeText("")
+            val f = file(SessionOpsScript.SCRIPT)
+            val n = "claude-server-off"
+            assertEquals(1 to "REFUSED_OFF\n", runStubbed(home, n, "bash", f.absolutePath, "open", "--name", n, "--folder", home.absolutePath, "--wait", "1"))
+            assertEquals(1 to "REFUSED_OFF\n", runStubbed(home, n, "bash", f.absolutePath, "restore", n))
+            assertFalse(File(home, "tmux.log").exists(), "tmux was asked: ${File(home, "tmux.log").takeIf { it.exists() }?.readText()}")
+        } finally {
+            safeDeleteTree(home)
+        }
+    }
+
+    /**
      * `has-session` that times out (rc 124: a tmux server that hangs) says nothing about the name: open must answer
      * FAILED and leave the name's tombstone where it is, not take "no session" and lift it. The tmux here is a stand-in
      * script first on PATH (not tmux), so nothing reaches a server.

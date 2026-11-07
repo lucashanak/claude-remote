@@ -86,7 +86,28 @@ internal data class InboxItem(
     val key: String get() = prompt?.key ?: "$sessionId#${kind.name}"
 }
 
+/** How the Velín lets a [InboxItem] be approved ([Velin.approvalMode]). */
+internal enum class ApprovalMode {
+    /** No Ano/Ne here: not a permission, or nothing to check a reply against (answer in the app). */
+    NONE,
+    /** A plain tap: a permission whose command is known and not risky. */
+    TAP,
+    /** Only a hold approves: risky, or nobody knows what it runs. */
+    HOLD,
+}
+
 internal object Velin {
+    /**
+     * Tap or hold for the "Ano" of [item]. A tap only for a permission whose risk was classified and found harmless;
+     * a risky one and one with no verdict at all (risk unknown) need the hold — a missing verdict must never fall
+     * through to the one-tap approval. The screen draws exactly what this says.
+     */
+    fun approvalMode(item: InboxItem): ApprovalMode = when {
+        item.prompt == null || item.kind != InboxKind.PERMISSION -> ApprovalMode.NONE
+        item.risk?.risky == false -> ApprovalMode.TAP
+        else -> ApprovalMode.HOLD
+    }
+
     /**
      * A `/clear` is an `end` followed by a `start` within milliseconds: the session counts as
      * crashed only once the `end` has stood alone this long, so the row does not flash.

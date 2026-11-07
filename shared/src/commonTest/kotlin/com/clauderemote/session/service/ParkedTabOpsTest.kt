@@ -174,6 +174,21 @@ class ParkedTabOpsTest {
         assertTrue(cmds.size >= 2)
     }
 
+    /**
+     * A tombstone that fails (full disk, a lock) must not cost the kill or the manifest push: the kill rides in the
+     * same exec whatever the tombstone did, and the push follows the exec's non-zero exit as well.
+     */
+    @Test fun aFailingTombstoneStillKillsAndPushes() = runTest {
+        val exec = FakeExec(exit = 1)
+        val w = wire(exec)
+        val cleanup = persistence(w, transcript(w)).forgetSession("t1", userInitiated = true)
+        cleanup!!.join()
+        val cmds = exec.calls.map { it.cmd }
+        assertEquals(ManifestCommands.closeCommand("claude-server-old", durable = true, by = "app"), cmds[0])
+        assertTrue("tmux kill-session -t '=claude-server-old'" in cmds[0], cmds[0])
+        assertTrue(cmds.drop(1).any { "sessions.json" in it }, "the manifest push still went out: $cmds")
+    }
+
     @Test fun aPruneIsRecordedAsPruneAndTransient() = runTest {
         val exec = FakeExec()
         val w = wire(exec)

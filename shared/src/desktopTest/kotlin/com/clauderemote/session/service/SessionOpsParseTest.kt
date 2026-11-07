@@ -193,6 +193,29 @@ class SessionOpsParseTest {
     }
 
     /**
+     * The app reads the tombstone's own status from the close: a tombstone that could not be written (here: a
+     * read-only `~/.claude-remote` of the temp HOME) is a non-zero exit even though the record and the kill after it
+     * ran, so the failure is logged instead of hidden behind the last command's 0.
+     */
+    @Test fun theCloseExitsWithTheTombstonesStatus() {
+        val h = home()
+        val d = File(h, ".claude-remote").apply { mkdirs() }
+        try {
+            assertTrue(d.setWritable(false, false))
+            val (rc, out) = bashEnv(ManifestCommands.tombstoneAndRecord("claude-server-ro", durable = true, by = "app:x"), h, stubTmux = true)
+            assertTrue(rc != 0, "tombstoneAndRecord hid the failed tombstone: $out")
+            val (rc2, out2) = bashEnv(ManifestCommands.closeCommand("claude-server-ro", durable = true, by = "app:x"), h, stubTmux = true)
+            assertTrue(rc2 != 0, "closeCommand hid the failed tombstone: $out2")
+            assertEquals(0, ManifestCommands.closeKillStatus(out2), "the kill ran anyway: $out2")
+            d.setWritable(true, false)
+            assertEquals(0, bashEnv(ManifestCommands.closeCommand("claude-server-ro", durable = true, by = "app:x"), h, stubTmux = true).first)
+        } finally {
+            d.setWritable(true, false)
+            safeDeleteTree(h)
+        }
+    }
+
+    /**
      * claude-local exports its own config dir and execs plain `claude`: the record says LOCAL, finds the transcript
      * there. A pane whose claude is gone takes account, model, mode and conversation from the manifest.
      */
