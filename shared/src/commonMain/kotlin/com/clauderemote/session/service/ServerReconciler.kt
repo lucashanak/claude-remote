@@ -128,6 +128,11 @@ internal class ExecServerReconciler(
     /** A round younger than this answers [capability] and [checkUuid] without a new exec. */
     private val capTtlMs: Long = 30_000,
     private val clock: () -> Long = { System.currentTimeMillis() },
+    /**
+     * Every complete round of a server, under its single-flight lock (so two rounds of one server never overlap
+     * here): the app adopts `opened.d` markers from it (§15.4). Must be quick and must not call back into this class.
+     */
+    private val onRound: (serverId: String, snapshot: ReconcileSnapshot) -> Unit = { _, _ -> },
 ) : ServerReconciler {
     private class Round(val at: Long, val names: Set<String>, val snapshot: ReconcileSnapshot)
 
@@ -200,7 +205,14 @@ internal class ExecServerReconciler(
             val snapshot = ReconcileParse.parse(out, json)
             // Names that tmux no longer has (renamed or closed tabs) would otherwise stay in the pane filter forever.
             snapshot.tmuxNames?.let { present -> extraNames[serverId]?.retainAll { it in present } }
-            Round(clock(), names, snapshot).also { last[serverId] = it }
+            Round(clock(), names, snapshot).also {
+                last[serverId] = it
+                try {
+                    onRound(serverId, snapshot)
+                } catch (e: Exception) {
+                    FileLogger.log(TAG, "onRound for $serverId failed: ${e.javaClass.simpleName}: ${e.message}")
+                }
+            }
         }
     }
 

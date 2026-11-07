@@ -57,6 +57,8 @@ fun HistoryScreen(
     onRefresh: () -> Unit,
     onResume: (ClaudeHistorySession) -> Unit,
     onAttachLive: (ClaudeHistorySession) -> Unit,
+    /** "Nedávno zavřené" above the transcripts (§3.9); null = not shown. */
+    recentlyClosed: (@Composable () -> Unit)? = null,
 ) {
     val c = CRTheme.colors
     val m = CRTheme.metrics
@@ -100,6 +102,7 @@ fun HistoryScreen(
             contentPadding = PaddingValues(start = m.sectionPad, end = m.sectionPad, top = 8.dp, bottom = 24.dp),
             verticalArrangement = Arrangement.spacedBy(m.cardGap),
         ) {
+            if (recentlyClosed != null) item(key = "recently_closed") { recentlyClosed() }
             if (loading && sessions.isEmpty()) {
                 item(key = "loading") {
                     Row(

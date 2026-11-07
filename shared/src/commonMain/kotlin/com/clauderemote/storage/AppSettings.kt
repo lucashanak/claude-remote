@@ -189,6 +189,14 @@ class AppSettings(private val prefs: KeyValueStore) {
         get() = prefs.getBoolean("velin_start_offered", false)
         set(value) = prefs.putBoolean("velin_start_offered", value)
 
+    /**
+     * Sessions hidden from (or closed on) this device that must not come back as adopted tabs from the server's
+     * `opened.d` (§15.4): `serverId<TAB>tmuxName<TAB>epochS` per line, see `HiddenAdoptions`. Per device on purpose.
+     */
+    var hiddenAdoptions: String
+        get() = prefs.getString("hidden_adoptions", "")
+        set(value) = prefs.putString("hidden_adoptions", value)
+
     companion object {
         const val START_LAUNCHER = "launcher"
         const val START_VELIN = "velin"

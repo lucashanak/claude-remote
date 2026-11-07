@@ -1361,7 +1361,9 @@ DTIMER_EOF
      * The exec-routed reconciler, bound to this service and the tab/transcript state.
      * The wiring step installs it into `ConnectionRegistry.reconciler`.
      */
-    fun newExecReconciler(): ServerReconciler = ExecServerReconciler(
+    fun newExecReconciler(
+        onRound: (serverId: String, snapshot: ReconcileSnapshot) -> Unit = { _, _ -> },
+    ): ServerReconciler = ExecServerReconciler(
         scope = scope,
         run = { serverId, cmd, totalMs -> registry.execRead(serverId, cmd, totalMs) },
         serverIdOf = { registry.serverIdOf(it) },
@@ -1373,6 +1375,7 @@ DTIMER_EOF
             if (name != null) forgetClosedElsewhere(sid, name)
         },
         isBackground = isBackground,
+        onRound = onRound,
     )
 
     /**

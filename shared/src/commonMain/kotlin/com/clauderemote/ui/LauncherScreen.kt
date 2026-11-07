@@ -88,6 +88,10 @@ fun LauncherScreen(
     onCheckUpdate: (() -> Unit)? = null,
     serverHealth: Map<String, ServerHealth> = emptyMap(),
     onProbeServers: (Boolean) -> Unit = {},
+    /** A small badge per tab id ("od Jarvise", "obnoveno": a parked tab adopted from the server, §15.4). */
+    sessionBadges: Map<String, String> = emptyMap(),
+    /** "Nedávno zavřené" between Sessions and Servers (§3.9); null = not shown. */
+    recentlyClosed: (@Composable () -> Unit)? = null,
 ) {
     val c = CRTheme.colors
     val m = CRTheme.metrics
@@ -275,6 +279,7 @@ fun LauncherScreen(
                             // Passed through unconditionally: SessionRow itself
                             // decides mobile long-press vs desktop right-click.
                             onLongPress = onSessionLongPress?.let { lp -> { lp(s) } },
+                            badge = sessionBadges[s.id],
                         )
                     }
                 }
@@ -413,6 +418,10 @@ fun LauncherScreen(
                     }
                 }
 
+                if (recentlyClosed != null) {
+                    item(key = "recently_closed") { recentlyClosed() }
+                }
+
                 // ── Servers section ──────────────────────────────────
                 item(key = "header_servers") {
                     LauncherSectionHeader(
@@ -524,6 +533,7 @@ private fun SessionLauncherCard(
     session: ClaudeSession,
     onClick: () -> Unit,
     onLongPress: (() -> Unit)? = null,
+    badge: String? = null,
 ) {
     val c = CRTheme.colors
     val m = CRTheme.metrics
@@ -535,7 +545,10 @@ private fun SessionLauncherCard(
         serverName = session.server.name,
         folderBasename = folderBasename,
         alias = sessionAlias,
-        pill = { ModePillSmall(mode = session.mode) },
+        pill = {
+            ModePillSmall(mode = session.mode)
+            badge?.let { Pill(text = it) }
+        },
         statusDot = { mod -> StatusIndicator(status = session.status.toCRStatus(), modifier = mod) },
         trailingTime = session.durationText,
         onClick = onClick,

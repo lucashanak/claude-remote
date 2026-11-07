@@ -18,7 +18,11 @@ class TabManager {
     val activeTab: ClaudeSession?
         get() = _tabs.value.find { it.id == _activeTabId.value }
 
-    fun addTab(session: ClaudeSession) {
+    /**
+     * [activate] = false adds the tab behind the user's back without taking the screen (a parked tab adopted from
+     * the server's `opened.d`); it still becomes active when there was no active tab at all.
+     */
+    fun addTab(session: ClaudeSession, activate: Boolean = true) {
         // Idempotent on id: replacing in place (rather than appending) avoids
         // a phantom duplicate tab that every id-keyed lookup (getTab,
         // updateTabStatus, updateAlias, updateClaudeSessionId — all
@@ -30,7 +34,7 @@ class TabManager {
                 tabs + session
             }
         }
-        _activeTabId.value = session.id
+        if (activate || _activeTabId.value == null) _activeTabId.value = session.id
     }
 
     fun removeTab(id: String) {
