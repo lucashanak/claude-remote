@@ -725,6 +725,10 @@ class MainActivity : FragmentActivity() {
                 tabManager.tabs.first { tabs -> tabs.any { it.id == sessionId } }
             } != null
             if (appeared) {
+                // A tap on the notification of a tab whose close is still in its undo window (app in front, the
+                // shade pulled down) is "Vrátit": the user wants that session, not a terminal the hidden-tab guard
+                // switches straight away from before the close kills it.
+                sessionOrchestrator.reclaimPendingClose(sessionId)
                 sessionOrchestrator.switchTab(sessionId)
             } else {
                 FileLogger.log("MainActivity", "Notification switch to $sessionId gave up — tab never restored")

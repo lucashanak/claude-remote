@@ -18,8 +18,9 @@ import com.clauderemote.session.ClaudeConfig
  * script refuses to close the name in `~/.claude-remote/jarvis/self` and anything outside `claude-server-*`, and
  * `~/.claude-remote/jarvis/off` stops open, close and restore.
  *
- * The app does not call it (yet): a broken file on a server must never break closing tabs. It installs it in
- * [DefaultServerBootstrap] ([INSTALL_COMMAND]): no unit, no daemon-reload, just a file.
+ * The app does not call it (yet): a broken file on a server must never break closing tabs. It installs it from
+ * [DefaultServerBootstrap]: the bootstrap carries [CHECK_COMMAND], and [INSTALL_COMMAND] follows in its own exec only
+ * when that says so. No unit, no daemon-reload, just a file.
  */
 internal object SessionOpsScript {
 
@@ -302,12 +303,12 @@ internal object SessionOpsScript {
     }
 
     /**
-     * Writes [PATH] (temp + chmod 755 + mv), the pattern of `hook-ev.sh` (`HookCommands`): a file of a NEWER version
-     * is left alone; one of this version only when it is intact (size and, where `sha256sum` exists, SHA-256 match),
-     * so a damaged file with a valid header is rewritten instead of trusted forever. Prints `SESSIONOPS_PRESENT`,
-     * `SESSIONOPS_INSTALLED` or `SESSIONOPS_FAILED`. Never exits the shell it runs in.
+     * Sets `KEEP=1` when [PATH] needs no rewrite: a file of a NEWER version is left alone; one of this version only
+     * when it is intact (size and, where `sha256sum` exists, SHA-256 match), so a damaged file with a valid header is
+     * rewritten instead of trusted forever. Shared by [CHECK_COMMAND] and [INSTALL_COMMAND], so the two cannot
+     * disagree on what "present" means.
      */
-    val INSTALL_COMMAND: String by lazy {
+    private val KEEP_CHECK: String by lazy {
         sh(
             "F=\"§HOME/.claude-remote/bin/cr-session\"; mkdir -p \"§HOME/.claude-remote/bin\"; " +
                 "CUR=§(head -c 300 \"§F\" 2>/dev/null | grep -o '$MARKER[0-9][0-9]*' | sed 's/.*-v//' | sort -n | tail -n1); " +
@@ -315,8 +316,31 @@ internal object SessionOpsScript {
                 "if [ \"§CUR\" -gt $VERSION ]; then KEEP=1; " +
                 "elif [ \"§CUR\" -eq $VERSION ]; then " +
                 "SZ=§(wc -c < \"§F\" 2>/dev/null | tr -d ' '); HS=§(sha256sum < \"§F\" 2>/dev/null | cut -d' ' -f1); " +
-                "[ \"§SZ\" = ${SCRIPT_BYTES.size} ] && { [ -z \"§HS\" ] || [ \"§HS\" = $SCRIPT_SHA256 ]; } && KEEP=1; fi; fi; " +
-                "if [ \"§KEEP\" = 1 ]; then echo SESSIONOPS_PRESENT; else " +
+                "[ \"§SZ\" = ${SCRIPT_BYTES.size} ] && { [ -z \"§HS\" ] || [ \"§HS\" = $SCRIPT_SHA256 ]; } && KEEP=1; fi; fi; ",
+        )
+    }
+
+    /**
+     * The bootstrap's step (a few hundred bytes instead of the whole script): prints `SESSIONOPS_PRESENT` or
+     * `SESSIONOPS_NEEDED`; only the latter makes [DefaultServerBootstrap] send [INSTALL_COMMAND]. Writes nothing but
+     * the (empty) bin directory. Never exits the shell it runs in.
+     */
+    val CHECK_COMMAND: String by lazy {
+        KEEP_CHECK + sh("if [ \"§KEEP\" = 1 ]; then echo $CHECK_PRESENT; else echo $CHECK_NEEDED; fi")
+    }
+
+    const val CHECK_PRESENT = "SESSIONOPS_PRESENT"
+    const val CHECK_NEEDED = "SESSIONOPS_NEEDED"
+
+    /**
+     * Writes [PATH] (temp + chmod 755 + mv), the pattern of `hook-ev.sh` (`HookCommands`), unless [KEEP_CHECK] says
+     * the file is fine — checked again here, so two devices installing at once, or a check that is out of date by
+     * now, cannot write over a newer or an intact file. Prints `SESSIONOPS_PRESENT`, `SESSIONOPS_INSTALLED` or
+     * `SESSIONOPS_FAILED`. Never exits the shell it runs in.
+     */
+    val INSTALL_COMMAND: String by lazy {
+        KEEP_CHECK + sh(
+            "if [ \"§KEEP\" = 1 ]; then echo SESSIONOPS_PRESENT; else " +
                 "T=\"§F.tmp.§§\"; cat > \"§T\" <<'CRSO_SH'\n",
         ) + SCRIPT + "\nCRSO_SH\n" +
             sh("if chmod 755 \"§T\" && mv -f \"§T\" \"§F\"; then echo SESSIONOPS_INSTALLED; else echo SESSIONOPS_FAILED; fi; fi")

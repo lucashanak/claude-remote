@@ -169,13 +169,6 @@ class AppSettings(private val prefs: KeyValueStore) {
         get() = prefs.getBoolean("auto_open_terminal_on_prompt", true)
         set(value) = prefs.putBoolean("auto_open_terminal_on_prompt", value)
 
-    // Closing a tab asks "Permanently close session…?" first; the close itself then waits out the undo snackbar
-    // either way. Default on until the server-side close check (Jarvis F0a, second wave) can stand in for the
-    // question; off = the tab goes at once and only the snackbar's "Vrátit" is left.
-    var confirmTabClose: Boolean
-        get() = prefs.getBoolean("confirm_tab_close", true)
-        set(value) = prefs.putBoolean("confirm_tab_close", value)
-
     /**
      * Which screen the app opens on: [START_LAUNCHER] (the default, nothing changes without a
      * choice) or [START_VELIN]. Read once, when the app's navigation state is created.
