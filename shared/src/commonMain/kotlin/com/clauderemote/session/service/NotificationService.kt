@@ -218,6 +218,8 @@ internal class NotificationService(
     private val activityOf: (String) -> SessionActivity? = { null },
     // statusService.promptTokens: the newest prompt of each session (ReplyGuard).
     private val promptTokens: PromptTokens = PromptTokens(),
+    // The hook reducer saw a pending perm/ask answered (the pane's next work/askdone/stop/end).
+    private val onApprovalAnswered: (String) -> Unit = {},
 ) {
     // Prompt detection for notifications — quiescence-based, reads rendered screen state.
     internal val promptDetector = InputPromptDetector().apply {
@@ -1005,6 +1007,7 @@ internal class NotificationService(
             }
             // A new dialog replaces the prompt a pending reply was written for NOW, not after the
             // settle delay, and also when no alert follows (the foreground tab, an old event).
+            if (r.clearedApproval) onApprovalAnswered(sessionId)
             // Stamped with when the hook FIRED (device clock, skew-corrected): that is what tells a
             // late hook of the dialog the screen already saw from the next dialog (PromptTokens.sameDialog).
             if (e.ev == "perm" || e.ev == "ask") {

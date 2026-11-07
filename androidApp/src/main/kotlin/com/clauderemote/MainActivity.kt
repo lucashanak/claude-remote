@@ -307,10 +307,16 @@ class MainActivity : FragmentActivity() {
         // maps; ride that signal so the alert counters don't outlive their
         // tabs either.
         WearSync.setPruneHook { liveIds -> alertSeq.keys.retainAll(liveIds); dialogAlerts.retain(liveIds) }
+        sessionOrchestrator.onDialogAnswered = { id ->
+            if (dialogAlerts.answered(id)) {
+                FileLogger.log("Notify", "Dialog alert for $id cleared: the hooks report it answered")
+                AlertNotifier.clear(applicationContext, id)
+            }
+        }
         dialogAlertJob?.cancel()
         dialogAlertJob = notifyScope.launch {
             sessionOrchestrator.sessionActivities.collect { activities ->
-                dialogAlerts.staleAfter(activities).forEach { id ->
+                dialogAlerts.staleAfter(activities) { sessionOrchestrator.hasHookEvents(it) }.forEach { id ->
                     FileLogger.log("Notify", "Dialog alert for $id cleared: the session left the dialog")
                     AlertNotifier.clear(applicationContext, id)
                 }

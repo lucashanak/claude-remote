@@ -214,6 +214,7 @@ class SessionOrchestrator(
         { sid, kind, hint, active, body, prompt -> onClaudeNeedsInput?.invoke(sid, kind, hint, active, body, prompt) },
         { id -> statusService.sessionActivities.value[id] },
         statusService.promptTokens,
+        { sid -> onDialogAnswered?.invoke(sid) },
     )
 
     // Per-session terminal output buffer (ring buffer) + pty size tracking.
@@ -355,6 +356,13 @@ class SessionOrchestrator(
         body: String?,
         prompt: com.clauderemote.session.service.PromptFingerprint?,
     ) -> Unit)? = null
+
+    // The hooks report a pending permission/question of the session answered (from anywhere):
+    // the platform takes its alert down (DialogAlertTracker).
+    var onDialogAnswered: ((sessionId: String) -> Unit)? = null
+
+    /** Whether v2 hook events drive this session (CAP=1): its activity edges are then the hooks' word. */
+    fun hasHookEvents(sessionId: String): Boolean = notificationService.promptDetector.hasHookEvents(sessionId)
 
     // Context window usage callback (0-100 percent)
     var onContextUpdate: ((sessionId: String, percent: Int) -> Unit)? = null

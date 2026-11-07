@@ -63,11 +63,13 @@ object NotificationPolicy {
 }
 
 /**
- * Takes down a permission/question alert once its session left the dialog. With completion
- * alerts off, a dialog answered elsewhere leaves its alert on the phone after the turn ended,
- * because no completion alert replaces it any more.
+ * Takes down a permission/question alert once its dialog was answered elsewhere. With
+ * completion alerts off, nothing else replaces it after the turn ended.
  *
- * Edge-triggered on APPROVAL_NEEDED -> WORKING / WAITING_FOR_INPUT, and only while the alert on
+ * With live hooks only the hook reducer decides ([answered]: the pane's next work/askdone/
+ * stop/end after the perm/ask); an activity edge is not proof — a tab switch downgrades an
+ * approval to WAITING, the statusline flaps. Without hooks only APPROVAL_NEEDED -> WORKING
+ * counts; the WAITING edge is ignored for the same reasons. Either way only while the alert on
  * screen is a dialog one: a completion alert posted for the turn that ended the dialog (the Stop
  * path alerts BEFORE it flips the activity) must stay.
  */
@@ -79,20 +81,29 @@ class DialogAlertTracker {
     /** An alert of [kind] is now showing for [sessionId]. */
     fun posted(sessionId: String, kind: NotifyKind) { synchronized(lock) { postedKinds[sessionId] = kind } }
 
-    /** The sessions whose dialog alert is stale under [activities] (each reported once). */
-    fun staleAfter(activities: Map<String, com.clauderemote.model.SessionActivity>): List<String> = synchronized(lock) {
+    /** The hooks report the dialog of [sessionId] answered: true when its dialog alert is to go. */
+    fun answered(sessionId: String): Boolean = synchronized(lock) { takeDialog(sessionId) }
+
+    /** The hookless sessions whose dialog alert is stale under [activities] (each reported once). */
+    fun staleAfter(
+        activities: Map<String, com.clauderemote.model.SessionActivity>,
+        hooksLive: (String) -> Boolean,
+    ): List<String> = synchronized(lock) {
         val stale = ArrayList<String>()
         for ((id, now) in activities) {
             val before = previous.put(id, now)
             val left = before == com.clauderemote.model.SessionActivity.APPROVAL_NEEDED &&
-                (now == com.clauderemote.model.SessionActivity.WORKING || now == com.clauderemote.model.SessionActivity.WAITING_FOR_INPUT)
-            val kind = postedKinds[id]
-            if (left && (kind == NotifyKind.PERMISSION || kind == NotifyKind.QUESTION)) {
-                postedKinds.remove(id)
-                stale += id
-            }
+                now == com.clauderemote.model.SessionActivity.WORKING
+            if (left && !hooksLive(id) && takeDialog(id)) stale += id
         }
         stale
+    }
+
+    private fun takeDialog(id: String): Boolean {
+        val kind = postedKinds[id]
+        if (kind != NotifyKind.PERMISSION && kind != NotifyKind.QUESTION) return false
+        postedKinds.remove(id)
+        return true
     }
 
     fun retain(liveIds: Set<String>) {
