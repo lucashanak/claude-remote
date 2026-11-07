@@ -376,10 +376,19 @@ private fun SessionDetailScreen(session: WearSessionInfo) {
     // pustil a Enter by v selektoru vybral výchozí "Yes".
     var answerPrompt by remember(session.id) { mutableStateOf<String?>(null) }
     var answering by remember(session.id) { mutableStateOf(false) }
+    // Instrukce pro pracující session, která mezitím dopracovala: to není nový
+    // dotaz, jen klidný vstup. Koncept zůstává, ale odeslat ho jde až po novém ✓.
+    var reconfirm by remember(session.id) { mutableStateOf(false) }
     // Dotaz se během odpovídání změnil → koncept zahoď (diktát zastav), ať se
     // nepošle k něčemu, co uživatel neviděl. Nový dotaz si přečte a odpoví znovu.
     LaunchedEffect(session.prompt) {
-        if (answering && answerPrompt != session.prompt) {
+        if (answering && answerPrompt != session.prompt &&
+            answerPrompt?.startsWith("INSTRUCTION:") == true && session.prompt?.startsWith("READY:") == true
+        ) {
+            answerPrompt = session.prompt
+            reconfirm = true
+            status = "Session dopracovala – potvrď odeslání"
+        } else if (answering && answerPrompt != session.prompt) {
             cancelledDictation = true
             stt?.stop(); stt = null
             dictating = false
@@ -393,6 +402,7 @@ private fun SessionDetailScreen(session: WearSessionInfo) {
     fun startAnswering() {
         answerPrompt = session.prompt
         answering = true
+        reconfirm = false
     }
 
     // Lazy historie: posledních ~10 zpráv session si vyžádáme od telefonu až
@@ -467,6 +477,10 @@ private fun SessionDetailScreen(session: WearSessionInfo) {
             if (!stillThere) {
                 status = "Dotaz se změnil – odpověď zahozena"
                 WearHaptics.error(context)
+            } else if (reconfirm) {
+                // Napsáno pro pracující session, ta mezitím dopracovala: do potvrzení.
+                pendingDraft = text
+                answering = true
             } else {
                 sending = true
                 status = "Odesílám…"
