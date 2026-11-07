@@ -83,40 +83,73 @@ class PendingCloseWiringTest {
         assertTrue(cond(), "timed out waiting for $what")
     }
 
-    @Test fun aCloseCarriesThisDevicesMarkerAndByAndAFlushWaitsForTheKill() {
+    private val name = "claude-box-a"
+
+    private class Wired(val o: SessionOrchestrator, val exec: FakeExec, val store: MemStore, val tab: ClaudeSession)
+
+    /** The real orchestrator with one tab of [name], its exec faked, the hide list wired. */
+    private fun wire(): Wired {
         val o = SessionOrchestrator(servers, tabs, sessions).also { orchestrator = it }
         val exec = FakeExec()
         o.connectionRegistry.remoteExec = exec
         val store = MemStore()
         o.hiddenAdoptionsStore = store
-        val name = "claude-box-a"
         val tab = ClaudeSession(
             id = "t1", server = server, folder = "/work", mode = ClaudeMode.NORMAL, model = ClaudeModel.DEFAULT,
             tmuxSessionName = name, connectionType = ConnectionType.SSH,
         )
         tabs.addTab(tab)
         sessions.upsert(SessionStorage.fromClaudeSession(tab))
+        return Wired(o, exec, store, tab)
+    }
 
-        assertTrue(o.pendingCloses.close(tab))
-        eventually("the facts check") { exec.commands.any { CloseFactsCommands.END in it } }
-        // the facts leave out this device's own client: the marker the attach preamble writes, not none
-        val marker = o.ownClientMarker(name)
-        assertContains(exec.commands.first { CloseFactsCommands.END in it }, "SELF=${ManifestCommands.sq(marker)}")
-        assertContains(o.buildAttachCommand(name), "/$marker\"")
+    /** Close [w]'s tab and flush; the close's exec is let through at once, the flush waited for. */
+    private fun closeNow(w: Wired) {
+        assertTrue(w.o.pendingCloses.close(w.tab))
+        w.exec.closeGate.complete(Unit)
+        val flush = w.o.pendingCloses.flush()
+        runBlocking { withTimeout(10_000) { flush.join() } }
+    }
 
-        val flush = o.pendingCloses.flush()
-        eventually("the close's exec") { exec.commands.any { ManifestCommands.CLOSE_KILL_PREFIX in it } }
+    /** rev-tests 30: an exit waits for the flush, so the flush must wait for the close's one exec (tombstone, record, kill). */
+    @Test fun flushWaitsForTheServerSide() {
+        val w = wire()
+        assertTrue(w.o.pendingCloses.close(w.tab))
+        val flush = w.o.pendingCloses.flush()
+        eventually("the close's exec") { w.exec.commands.any { ManifestCommands.CLOSE_KILL_PREFIX in it } }
         Thread.sleep(200)
-        assertFalse(flush.isCompleted, "an exit waiting for the flush must wait for tombstone, record and kill")
-        exec.closeGate.complete(Unit)
+        assertFalse(flush.isCompleted, "the flush ended before the server side")
+        w.exec.closeGate.complete(Unit)
         runBlocking { withTimeout(5_000) { flush.join() } }
-
-        // the record says this device closed it (what "zavřeno tady" and Ctrl+Shift+T go by)
-        val close = exec.commands.first { ManifestCommands.CLOSE_KILL_PREFIX in it }
-        assertTrue(o.ownCloseBy.startsWith("app:") && o.ownCloseBy.length > "app:".length, o.ownCloseBy)
-        assertContains(close, "BY=${ManifestCommands.sq(o.ownCloseBy)};")
-        // closed here: the name's marker is never adopted back as a parked tab
-        assertTrue("srv-1\t$name\t" in store.value, store.value)
         assertEquals(emptyList(), sessions.load().map { it.id })
+    }
+
+    /** rev-tests 30: closed here = the name's opened.d marker (as it is now) is never adopted back as a parked tab. */
+    @Test fun aClosedNameIsNeverAdoptedAgain() {
+        val w = wire()
+        closeNow(w)
+        val hidden = HiddenAdoptions.parse(w.store.value)
+        val now = System.currentTimeMillis() / 1000
+        assertTrue(hidden.isSuppressed(server.id, name, now - 5), "a marker from before the close: ${w.store.value}")
+        assertFalse(hidden.isSuppressed(server.id, name, now + 3600), "a later open or restore is a new event")
+    }
+
+    /** rev-tests 31: the facts leave out this device's own client — the marker the attach preamble writes, not none. */
+    @Test fun factsCarryTheAttachMarker() {
+        val w = wire()
+        assertTrue(w.o.pendingCloses.close(w.tab))
+        eventually("the facts check") { w.exec.commands.any { CloseFactsCommands.END in it } }
+        val marker = w.o.ownClientMarker(name)
+        assertContains(w.exec.commands.first { CloseFactsCommands.END in it }, "SELF=${ManifestCommands.sq(marker)}")
+        assertContains(w.o.buildAttachCommand(name), "/$marker\"")
+    }
+
+    /** rev-tests 31: the record says THIS device closed it (what "zavřeno tady" and Ctrl+Shift+T go by). */
+    @Test fun recordByIsOwnCloseBy() {
+        val w = wire()
+        closeNow(w)
+        val close = w.exec.commands.first { ManifestCommands.CLOSE_KILL_PREFIX in it }
+        assertTrue(w.o.ownCloseBy.startsWith("app:") && w.o.ownCloseBy.length > "app:".length, w.o.ownCloseBy)
+        assertContains(close, "BY=${ManifestCommands.sq(w.o.ownCloseBy)};")
     }
 }

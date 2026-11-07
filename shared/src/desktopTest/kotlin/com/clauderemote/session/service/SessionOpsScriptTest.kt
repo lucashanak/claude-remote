@@ -211,39 +211,67 @@ class SessionOpsScriptTest {
         File(d, "forgotten").writeText("$name\n")
     }
 
-    /**
-     * open and restore over a tombstoned name (§15.15, rozpor 15): the tombstone is lifted BEFORE the pane is created
-     * (else drift subtracts the new name and peers forget its tab), and neither ever runs `kill-session`.
-     */
-    @Test fun openAndRestoreLiftTheTombstoneFirstAndNeverKill() {
+    private fun calls(home: File): List<String> = File(home, "tmux.log").readLines().also { File(home, "tmux.log").delete() }
+
+    /** The pane's `new-session` calls (the prelude's anchor would be systemd-run's, never reached here). */
+    private fun creates(calls: List<String>) = calls.filter { "new-session" in it && "__anchor__" !in it }
+
+    /** `cr-session open` of a tombstoned name, every tmux call recorded. */
+    private fun openOverATombstone(home: File): List<String> {
+        val o = "claude-server-o"
+        tombstone(home, o)
+        val (rc, out) = runStubbed(home, o, "bash", file(SessionOpsScript.SCRIPT).absolutePath, "open", "--name", o, "--folder", home.absolutePath, "--wait", "1")
+        assertEquals(0, rc, out)
+        return calls(home).also { assertTrue(creates(it).isNotEmpty(), "open created nothing: $it") }
+    }
+
+    /** The app's inline restore of a tombstoned name, every tmux call recorded. */
+    private fun restoreOverATombstone(home: File): List<String> {
+        val r = "claude-server-r"
+        tombstone(home, r)
+        val sid = "77777777-2222-3333-4444-555555555555"
+        File(home, ".claude/projects/x").mkdirs(); File(home, ".claude/projects/x/$sid.jsonl").writeText("{}\n")
+        File(home, ".claude/.credentials.json").writeText("{}")
+        val rec = ClosedRecord(1, "2026-11-06T17:20:03Z", r, sid, null, null, home.absolutePath, home.absolutePath, null, "SONNET", "AUTO",
+            emptyList(), null, null, null, null, "app:x", true, null)
+        val (rc, out) = runStubbed(home, r, "bash", "-c", SessionRestore.restoreCommand(rec, waitS = 1))
+        assertEquals(0, rc, out)
+        assertEquals(RestoreResult.Restored(null, null, registry = false, resumedId = sid), SessionRestore.parse(out), out)
+        return calls(home).also { assertTrue(creates(it).isNotEmpty(), "restore created nothing: $it") }
+    }
+
+    /** rev-tests 26 (§15.15): open never runs `kill-session` — a taken name is EXISTS, never replaced. */
+    @Test fun openNeverKills() {
         val home = tempHome()
         try {
-            fun calls() = File(home, "tmux.log").readLines().also { File(home, "tmux.log").delete() }
-            fun checkCalls(what: String, calls: List<String>) {
-                val creates = calls.filter { "new-session" in it && "__anchor__" !in it }
-                assertTrue(creates.isNotEmpty(), "$what created nothing: $calls")
-                assertTrue(creates.all { it.startsWith("0 ") }, "$what created the pane while the name was still tombstoned: $creates")
-                assertTrue(calls.none { "kill-session" in it }, "$what killed: $calls")
-            }
+            val calls = openOverATombstone(home)
+            assertTrue(calls.none { "kill-session" in it }, "open killed: $calls")
+        } finally {
+            safeDeleteTree(home)
+        }
+    }
 
-            val o = "claude-server-o"
-            tombstone(home, o)
-            val f = file(SessionOpsScript.SCRIPT)
-            val (rc, out) = runStubbed(home, o, "bash", f.absolutePath, "open", "--name", o, "--folder", home.absolutePath, "--wait", "1")
-            assertEquals(0, rc, out)
-            checkCalls("open", calls())
+    /**
+     * rev-tests 27 (rozpor 15): open lifts the tombstone BEFORE the pane exists — else drift subtracts the new name
+     * and peers forget its tab.
+     */
+    @Test fun openClearsTombstoneBeforeSpawn() {
+        val home = tempHome()
+        try {
+            val c = creates(openOverATombstone(home))
+            assertTrue(c.all { it.startsWith("0 ") }, "open created the pane while the name was still tombstoned: $c")
+        } finally {
+            safeDeleteTree(home)
+        }
+    }
 
-            val r = "claude-server-r"
-            tombstone(home, r)
-            val sid = "77777777-2222-3333-4444-555555555555"
-            File(home, ".claude/projects/x").mkdirs(); File(home, ".claude/projects/x/$sid.jsonl").writeText("{}\n")
-            File(home, ".claude/.credentials.json").writeText("{}")
-            val rec = ClosedRecord(1, "2026-11-06T17:20:03Z", r, sid, null, null, home.absolutePath, home.absolutePath, null, "SONNET", "AUTO",
-                emptyList(), null, null, null, null, "app:x", true, null)
-            val (rc2, out2) = runStubbed(home, r, "bash", "-c", SessionRestore.restoreCommand(rec, waitS = 1))
-            assertEquals(0, rc2, out2)
-            assertEquals(RestoreResult.Restored(null, null, registry = false, resumedId = sid), SessionRestore.parse(out2), out2)
-            checkCalls("restore", calls())
+    /** rev-tests 28: the same for a restore (the app's inline body, which `cr-session restore` holds too), and no kill. */
+    @Test fun restoreClearsTombstoneBeforeSpawn() {
+        val home = tempHome()
+        try {
+            val calls = restoreOverATombstone(home)
+            assertTrue(creates(calls).all { it.startsWith("0 ") }, "restore created the pane while the name was still tombstoned: $calls")
+            assertTrue(calls.none { "kill-session" in it }, "restore killed: $calls")
         } finally {
             safeDeleteTree(home)
         }

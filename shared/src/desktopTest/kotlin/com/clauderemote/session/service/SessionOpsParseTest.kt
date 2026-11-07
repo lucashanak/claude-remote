@@ -216,6 +216,30 @@ class SessionOpsParseTest {
     }
 
     /**
+     * rev-tests 22: the kill does not depend on what came before it in the one exec. Tombstone AND record both fail
+     * (a read-only `~/.claude-remote`, `closed.jsonl` a directory) over a live pane: the kill still runs and says 0,
+     * and the exit status reports the failed tombstone.
+     */
+    @Test fun closeCommandKillsEvenWhenTombstoneAndRecordFail() {
+        val h = home()
+        val d = File(h, ".claude-remote").apply { mkdirs() }
+        val pane = ProcessBuilder("sleep", "300").start()
+        try {
+            File(d, "closed.jsonl").mkdirs()
+            assertTrue(d.setWritable(false, false))
+            val (rc, out) = bashEnv(ManifestCommands.closeCommand("claude-server-ro", durable = true, by = "app:x"), h,
+                mapOf("STUB_PANE" to pane.pid().toString()), stubTmux = true)
+            assertTrue(rc != 0, "the failed tombstone is the exit status: $out")
+            assertEquals(0, ManifestCommands.closeKillStatus(out), out)
+            assertEquals("kill tomb=0 rec=0", File(h, "stub.log").readText().trim(), "killed, though neither tombstone nor record landed")
+        } finally {
+            d.setWritable(true, false)
+            pane.destroyForcibly()
+            safeDeleteTree(h)
+        }
+    }
+
+    /**
      * claude-local exports its own config dir and execs plain `claude`: the record says LOCAL, finds the transcript
      * there. A pane whose claude is gone takes account, model, mode and conversation from the manifest.
      */

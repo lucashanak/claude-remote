@@ -174,19 +174,47 @@ class ParkedTabOpsTest {
         assertTrue(cmds.size >= 2)
     }
 
+    /** Runs [block] with every FileLogger message collected (restored afterwards). */
+    private inline fun <T> logging(block: (MutableList<String>) -> T): T {
+        val logged = java.util.Collections.synchronizedList(mutableListOf<String>())
+        val before = com.clauderemote.util.FileLogger.platformLog
+        com.clauderemote.util.FileLogger.platformLog = { _, _, m, _ -> logged += m }
+        try { return block(logged) } finally { com.clauderemote.util.FileLogger.platformLog = before }
+    }
+
     /**
      * A tombstone that fails (full disk, a lock) must not cost the kill or the manifest push: the kill rides in the
-     * same exec whatever the tombstone did, and the push follows the exec's non-zero exit as well.
+     * same exec whatever the tombstone did (rev-tests 22), the push follows the non-zero exit, and the failure is logged.
      */
-    @Test fun aFailingTombstoneStillKillsAndPushes() = runTest {
-        val exec = FakeExec(exit = 1)
-        val w = wire(exec)
-        val cleanup = persistence(w, transcript(w)).forgetSession("t1", userInitiated = true)
-        cleanup!!.join()
-        val cmds = exec.calls.map { it.cmd }
-        assertEquals(ManifestCommands.closeCommand("claude-server-old", durable = true, by = "app"), cmds[0])
-        assertTrue("tmux kill-session -t '=claude-server-old'" in cmds[0], cmds[0])
-        assertTrue(cmds.drop(1).any { "sessions.json" in it }, "the manifest push still went out: $cmds")
+    @Test fun aFailingTombstoneExitStillPushesAndLogs() = runTest {
+        logging { logged ->
+            val exec = FakeExec(exit = 1, out = "${ManifestCommands.CLOSE_KILL_PREFIX}0\n")
+            val w = wire(exec)
+            persistence(w, transcript(w)).forgetSession("t1", userInitiated = true)!!.join()
+            val cmds = exec.calls.map { it.cmd }
+            assertEquals(ManifestCommands.closeCommand("claude-server-old", durable = true, by = "app"), cmds[0])
+            assertTrue("tmux kill-session -t '=claude-server-old'" in cmds[0], cmds[0])
+            assertTrue(cmds.drop(1).any { "sessions.json" in it }, "the manifest push still went out: $cmds")
+            assertTrue(logged.any { "tombstone(claude-server-old) exited with 1" in it }, "$logged")
+            assertTrue(logged.none { "Tmux kill returned failure" in it }, "the kill itself went fine: $logged")
+        }
+    }
+
+    /**
+     * A kill that failed (the exec says `CR_KILL=1`) is logged and left at that: the close's exec RAN, so no second
+     * close over a fresh connection (it would write the tombstone and try the record again), and the push still goes.
+     */
+    @Test fun aFailedKillIsLoggedNotRetried() = runTest {
+        logging { logged ->
+            val exec = FakeExec(exit = 0, out = "${ManifestCommands.CLOSE_KILL_PREFIX}1\n")
+            val w = wire(exec)
+            persistence(w, transcript(w)).forgetSession("t1", userInitiated = true)!!.join()
+            val cmds = exec.calls.map { it.cmd }
+            assertEquals(1, cmds.count { ManifestCommands.CLOSE_KILL_PREFIX in it }, "one close exec: $cmds")
+            assertTrue(logged.any { "Tmux kill returned failure" in it }, "$logged")
+            assertTrue(logged.none { "Cleanup SSH connect" in it || "using a fresh connection" in it }, "no fallback close: $logged")
+            assertTrue(cmds.drop(1).any { "sessions.json" in it }, "push: $cmds")
+        }
     }
 
     @Test fun aPruneIsRecordedAsPruneAndTransient() = runTest {
