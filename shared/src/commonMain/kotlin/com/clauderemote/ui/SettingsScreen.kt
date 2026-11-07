@@ -306,6 +306,13 @@ fun SettingsScreen(
                         onCheckedChange = { autoOpenTerminalOnPrompt = it; settings.autoOpenTerminalOnPrompt = it }
                     )
 
+                    var confirmTabClose by remember { mutableStateOf(settings.confirmTabClose) }
+                    SettingsSwitch(
+                        label = "Potvrzovat zavření session",
+                        checked = confirmTabClose,
+                        onCheckedChange = { confirmTabClose = it; settings.confirmTabClose = it }
+                    )
+
                     SettingsSlider(
                         label = "Connect timeout (s)",
                         value = connectTimeout,

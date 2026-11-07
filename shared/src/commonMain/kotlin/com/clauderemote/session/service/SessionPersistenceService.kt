@@ -1725,8 +1725,11 @@ DTIMER_EOF
      * not just disconnects). Removes the persisted record so it won't be
      * resurrected on next app start, and re-syncs the server-side
      * sessions.json so systemd doesn't try to restore it after reboot.
+     *
+     * Returns the background server-side cleanup (null when there was no tab to clean up), so a caller that is
+     * about to end the process — the desktop exit flushing pending closes — can wait for the tombstone and kill.
      */
-    suspend fun forgetSession(sessionId: String, userInitiated: Boolean = false) {
+    suspend fun forgetSession(sessionId: String, userInitiated: Boolean = false): kotlinx.coroutines.Job? {
         val session = tabManager.getTab(sessionId)
         // Capture identity up front so we can prune the UI's stale remote-tmux
         // snapshot even after the tab is torn down below.
@@ -1753,9 +1756,10 @@ DTIMER_EOF
         //    its own short-lived connection — the tab's live connection was
         //    already torn down above, and reusing it would keep its read loop
         //    (and onConnectionLost → autoReconnect) alive for a dead tab.
+        var cleanup: kotlinx.coroutines.Job? = null
         if (session != null) {
             noteClosedLocally(session.server.id, session.tmuxSessionName)
-            scope.launch {
+            cleanup = scope.launch {
                 if (registry.execActive(session.server.id) && cleanupViaExec(session, userInitiated)) return@launch
                 val cleanupConn: SshManager? = try {
                     val tmp = SshManager(serverStorage)
@@ -1802,6 +1806,7 @@ DTIMER_EOF
                 }
             }
         }
+        return cleanup
     }
 
     suspend fun renameTmuxSession(sessionId: String, oldName: String, newName: String) {

@@ -29,7 +29,7 @@ import androidx.compose.ui.input.key.type
 enum class AppShortcut(val keys: String, val label: String) {
     PALETTE("Ctrl+Shift+K", "Command palette"),
     NEW_SESSION("Ctrl+Shift+N", "Nová session"),
-    CLOSE_SESSION("Ctrl+Shift+W", "Zavřít session (s potvrzením)"),
+    CLOSE_SESSION("Ctrl+Shift+W", "Zavřít session (10 s jde vrátit)"),
     NEXT_SESSION("Ctrl+Tab", "Další session"),
     PREV_SESSION("Ctrl+Shift+Tab", "Předchozí session"),
     TOGGLE_SIDEBAR("Ctrl+Shift+B", "Skrýt / ukázat seznam sessions"),

@@ -2981,6 +2981,18 @@ class SessionOrchestrator(
     suspend fun forgetSession(sessionId: String, userInitiated: Boolean = false) =
         persistence.forgetSession(sessionId, userInitiated)
 
+    /**
+     * The user's tab closes, held for the undo window before [forgetSession] runs (Jarvis F0a). Lives here, not in
+     * the UI, because the platform has to reach it when the user leaves the app (Android `onStop`, desktop window
+     * close) to run the pending closes at once. Its timers run in [reconnectScope]: when [shutdown] cancels that
+     * scope the pending closes simply never happen, the same outcome as the process dying in the window.
+     */
+    val pendingCloses = PendingCloses(
+        reconnectScope,
+        // join(): the job behind it is the server side (tombstone, kill); flush() waits on it before an exit.
+        forget = { id -> persistence.forgetSession(id, userInitiated = true)?.join() },
+    )
+
     suspend fun renameTmuxSession(sessionId: String, oldName: String, newName: String) =
         persistence.renameTmuxSession(sessionId, oldName, newName)
 
