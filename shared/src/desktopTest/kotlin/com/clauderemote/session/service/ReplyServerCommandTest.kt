@@ -198,17 +198,26 @@ class ReplyServerCommandTest {
     }
 
     /**
-     * The real tmux, on a PRIVATE socket (its own TMUX_TMPDIR inside this test's temp root; `tmux`
-     * resolves through the Gradle test shim first on PATH, which refuses the live socket anyway): Czech text ending in `;` arrives
-     * literally in the main pane, Enter included.
+     * The real tmux, on a PRIVATE socket: its own TMUX_TMPDIR inside this test's temp root AND
+     * `-L cr-reply-test` on every call, the ones [ReplyGuard.serverCommand] makes included — a
+     * `tmux` wrapper first on PATH adds it and execs the Gradle test shim, which refuses the live
+     * socket anyway. Czech text ending in `;` arrives literally in the main pane, Enter included.
      */
     @Test fun realTmuxReceivesCzechTextWithATrailingSemicolonLiterally() {
         if (listOf("/usr/bin/tmux", "/usr/local/bin/tmux").none { File(it).canExecute() }) return
         val tmuxDir = File(root, "t").apply { mkdirs() }
         if (tmuxDir.absolutePath.length > 70) return // the socket path must stay under the 108-byte limit
-        File(bin, "tmux").delete() // the stub; the gradle shim (first on PATH) execs the real one
+        val shim = System.getProperty("clauderemote.test.shimDir")?.let { File(it, "tmux") }?.takeIf { it.canExecute() } ?: return
+        // Replaces the recording stub: every tmux call of this test goes to the private named socket.
+        // The shim runs with the PATH Gradle gave it (without this wrapper's directory), or its
+        // "next tmux on PATH" would be this wrapper again — an endless exec loop.
+        val gradlePath = System.getenv("PATH") ?: "/usr/bin:/bin"
+        File(bin, "tmux").writeText(
+            "#!/bin/bash\nPATH='$gradlePath' exec '${shim.absolutePath}' -L cr-reply-test \"\$@\"\n",
+        )
         val out = File(root, "pane-out")
         fun tmuxEnv(pb: ProcessBuilder) = pb.apply {
+            environment()["PATH"] = bin.absolutePath + ":" + System.getenv("PATH")
             environment()["HOME"] = home.absolutePath
             environment()["TMUX_TMPDIR"] = tmuxDir.absolutePath
             environment().remove("TMUX")
@@ -217,19 +226,22 @@ class ReplyServerCommandTest {
         }
         val start = tmuxEnv(ProcessBuilder("tmux", "-u", "new-session", "-d", "-s", tmux, "-x", "80", "-y", "10", "cat > '${out.absolutePath}'"))
             .start()
-        assertEquals(0, start.waitFor(), start.inputStream.bufferedReader().readText())
+        val started = start.waitFor(20, java.util.concurrent.TimeUnit.SECONDS)
+        if (!started) start.destroyForcibly()
+        assertTrue(started && start.exitValue() == 0, "tmux new-session on the private socket failed")
         try {
             events(ev("stop", 1_000))
             val pb = tmuxEnv(ProcessBuilder("bash", "-c", ReplyGuard.serverCommand(tmux, ServerExpectation.Ready(0), "přidej test; pak commitni;")))
             val p = pb.start()
             val res = p.inputStream.bufferedReader().readText()
-            p.waitFor()
+            assertTrue(p.waitFor(20, java.util.concurrent.TimeUnit.SECONDS), "the reply command hung")
             assertTrue("CR_REPLY SENT" in res, res)
             val end = System.currentTimeMillis() + 5_000
             while (System.currentTimeMillis() < end && !(out.exists() && out.readText().endsWith("\n"))) Thread.sleep(50)
             assertEquals("přidej test; pak commitni;\n", out.readText(Charsets.UTF_8))
         } finally {
-            tmuxEnv(ProcessBuilder("tmux", "kill-server")).start().waitFor()
+            // the private named socket only (wrapper adds -L cr-reply-test, TMUX_TMPDIR is ours)
+            tmuxEnv(ProcessBuilder("tmux", "kill-server")).start().waitFor(20, java.util.concurrent.TimeUnit.SECONDS)
         }
     }
 }
