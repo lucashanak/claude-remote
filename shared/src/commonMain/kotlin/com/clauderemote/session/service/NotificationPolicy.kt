@@ -61,3 +61,44 @@ object NotificationPolicy {
         (kind != NotifyKind.COMPLETION || notifyOnTaskComplete) &&
         (!appForeground || !isActiveTab)
 }
+
+/**
+ * Takes down a permission/question alert once its session left the dialog. With completion
+ * alerts off, a dialog answered elsewhere leaves its alert on the phone after the turn ended,
+ * because no completion alert replaces it any more.
+ *
+ * Edge-triggered on APPROVAL_NEEDED -> WORKING / WAITING_FOR_INPUT, and only while the alert on
+ * screen is a dialog one: a completion alert posted for the turn that ended the dialog (the Stop
+ * path alerts BEFORE it flips the activity) must stay.
+ */
+class DialogAlertTracker {
+    private val lock = Any()
+    private val postedKinds = HashMap<String, NotifyKind>()
+    private val previous = HashMap<String, com.clauderemote.model.SessionActivity>()
+
+    /** An alert of [kind] is now showing for [sessionId]. */
+    fun posted(sessionId: String, kind: NotifyKind) { synchronized(lock) { postedKinds[sessionId] = kind } }
+
+    /** The sessions whose dialog alert is stale under [activities] (each reported once). */
+    fun staleAfter(activities: Map<String, com.clauderemote.model.SessionActivity>): List<String> = synchronized(lock) {
+        val stale = ArrayList<String>()
+        for ((id, now) in activities) {
+            val before = previous.put(id, now)
+            val left = before == com.clauderemote.model.SessionActivity.APPROVAL_NEEDED &&
+                (now == com.clauderemote.model.SessionActivity.WORKING || now == com.clauderemote.model.SessionActivity.WAITING_FOR_INPUT)
+            val kind = postedKinds[id]
+            if (left && (kind == NotifyKind.PERMISSION || kind == NotifyKind.QUESTION)) {
+                postedKinds.remove(id)
+                stale += id
+            }
+        }
+        stale
+    }
+
+    fun retain(liveIds: Set<String>) {
+        synchronized(lock) {
+            postedKinds.keys.retainAll(liveIds)
+            previous.keys.retainAll(liveIds)
+        }
+    }
+}

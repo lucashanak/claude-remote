@@ -77,6 +77,9 @@ fun App(
     // Whether the OS has notifications for this app switched off — surfaced as
     // a warning row in Settings. Android wires this; desktop keeps the default.
     notificationsBlocked: () -> Boolean = { false },
+    // A notification setting changed. Android pushes it to the watch at once,
+    // which otherwise learns it only from the next routine session push.
+    onNotificationSettingsChange: () -> Unit = {},
     onTerminalScreenVisible: (() -> Unit)? = null,
     onPickKeyFile: ((callback: (String) -> Unit) -> Unit)? = null,
     onImportServers: (() -> Unit)? = null,
@@ -1554,6 +1557,7 @@ fun App(
                         onViewLog = { currentScreen = Screen.LOG_VIEWER },
                         onTestNotification = onTestNotification,
                         notificationsBlocked = notificationsBlocked,
+                        onNotificationSettingsChange = onNotificationSettingsChange,
                         onFontSizeChange = applyTerminalFontSize,
                         onTranscriptFontChange = applyTranscriptFontPercent,
                         // the install / remove buttons of hooks v2 are per server

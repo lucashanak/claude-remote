@@ -65,6 +65,8 @@ fun SettingsScreen(
      * the row stays hidden.
      */
     notificationsBlocked: () -> Boolean = { false },
+    /** Called after a notification switch was written (Android pushes the completion setting to the watch). */
+    onNotificationSettingsChange: () -> Unit = {},
     /** (server id, display name) of the saved servers, for the per-server hook buttons. Empty hides them. */
     hookServers: List<Pair<String, String>> = emptyList(),
 ) {
@@ -470,13 +472,13 @@ fun SettingsScreen(
                     SettingsSwitch(
                         label = "Notifikace",
                         checked = notifications,
-                        onCheckedChange = { notifications = it; settings.notificationsEnabled = it }
+                        onCheckedChange = { notifications = it; settings.notificationsEnabled = it; onNotificationSettingsChange() }
                     )
                     var notifyTaskComplete by remember { mutableStateOf(settings.notifyOnTaskComplete) }
                     SettingsSwitch(
                         label = "Hlásit i dokončení práce (nejen schválení a otázky)",
                         checked = notifyTaskComplete,
-                        onCheckedChange = { notifyTaskComplete = it; settings.notifyOnTaskComplete = it }
+                        onCheckedChange = { notifyTaskComplete = it; settings.notifyOnTaskComplete = it; onNotificationSettingsChange() }
                     )
                     if (notificationsBlocked()) {
                         Text(

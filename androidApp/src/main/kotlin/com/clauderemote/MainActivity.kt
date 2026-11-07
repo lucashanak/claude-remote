@@ -62,6 +62,15 @@ private val alertSeq = java.util.concurrent.ConcurrentHashMap<String, Long>()
 private fun nextAlertSeq(sessionId: String): Long =
     alertSeq.compute(sessionId) { _, v -> (v ?: 0L) + 1L }!!
 
+/**
+ * Which alert each session shows, so a permission/question alert can be taken down once the
+ * session left the dialog: with completion alerts off, nothing else replaces it after the turn.
+ */
+private val dialogAlerts = com.clauderemote.session.service.DialogAlertTracker()
+
+/** The activity collector feeding [dialogAlerts]; replaced (not stacked) on Activity recreation. */
+@Volatile private var dialogAlertJob: kotlinx.coroutines.Job? = null
+
 class MainActivity : FragmentActivity() {
 
     private lateinit var serverStorage: ServerStorage
@@ -297,7 +306,16 @@ class MainActivity : FragmentActivity() {
         // WearSync already observes the tab list to prune its own per-session
         // maps; ride that signal so the alert counters don't outlive their
         // tabs either.
-        WearSync.setPruneHook { liveIds -> alertSeq.keys.retainAll(liveIds) }
+        WearSync.setPruneHook { liveIds -> alertSeq.keys.retainAll(liveIds); dialogAlerts.retain(liveIds) }
+        dialogAlertJob?.cancel()
+        dialogAlertJob = notifyScope.launch {
+            sessionOrchestrator.sessionActivities.collect { activities ->
+                dialogAlerts.staleAfter(activities).forEach { id ->
+                    FileLogger.log("Notify", "Dialog alert for $id cleared: the session left the dialog")
+                    AlertNotifier.clear(applicationContext, id)
+                }
+            }
+        }
         refreshNotificationsBlocked()
         com.clauderemote.connection.MoshManager.init(this)
         com.clauderemote.connection.EtManager.init(this)
@@ -392,6 +410,7 @@ class MainActivity : FragmentActivity() {
                 // for that whole window.
                 val seq = nextAlertSeq(sessionId)
                 AlertNotifier.post(applicationContext, sessionId, title, alertText, alertText, prompt = prompt)
+                dialogAlerts.posted(sessionId, kind)
                 // Only when a real body was resolved. With notifBody null the
                 // alert text is the generic hint ("Claude čeká na vstup"),
                 // which has nothing to summarize — and summarizing it would
@@ -525,6 +544,9 @@ class MainActivity : FragmentActivity() {
                     )
                 },
                 notificationsBlocked = { notificationsBlockedState.value },
+                // The watch decides itself whether a completion buzzes, from the setting the
+                // /sessions payload carries: push it now rather than with the next routine push.
+                onNotificationSettingsChange = { WearSync.pushNow() },
                 onPickKeyFile = { callback ->
                     keyFileCallback = callback
                     keyFilePicker.launch("*/*")
