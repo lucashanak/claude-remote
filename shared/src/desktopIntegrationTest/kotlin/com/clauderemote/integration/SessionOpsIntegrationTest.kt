@@ -345,7 +345,12 @@ class SessionOpsIntegrationTest {
         val n = "claude-server-typed"
         assertEquals(0, fixture.tmux("new-session", "-d", "-s", n, "bash ${script.absolutePath}").exit)
         waitUntil(5_000, "$n drawn") { fixture.tmux("capture-pane", "-p", "-t", "=$n:").out.contains("status") }
-        val tok = assertNotNull(CloseFactsCommands.token(cr("facts", n, "--self", "android-1-x").out))
+        // a process younger than CloseFactsCommands.PROC_MIN_AGE_S is not counted (statusline, hooks): wait it out
+        var facts = ""
+        waitUntil(15_000, "the shell's sleep counted as a process") {
+            facts = cr("facts", n, "--self", "android-1-x").out; Regex("FACT procs [1-9]").containsMatchIn(facts)
+        }
+        val tok = assertNotNull(CloseFactsCommands.token(facts))
         val r = cr("close", n, "--token", tok, "--self", "android-1-x")
         // the shell's `sleep` child is a foreign process too. Not `exec sleep`: then the pane's own pid becomes the
         // sleep, and whether that counts depends on how the CI's tmux/shell starts the pane command
