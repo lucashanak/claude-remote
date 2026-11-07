@@ -11,6 +11,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.joinAll
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlin.time.TimeSource
 
 /**
@@ -204,18 +205,36 @@ class PendingCloses(
     /**
      * The user is leaving the app (Android `onStop`, desktop window close): run every pending close now instead of
      * leaving it to a timer that may never fire. Blocked notices are dropped (their tabs are back, nothing to do).
+     *
+     * A close whose facts check is still running waits for it up to [checkWaitMs]: leaving the app must not get a
+     * close past a BLOCK (a running turn, an open prompt) the check is about to report. A BLOCK that arrives in that
+     * time keeps the tab, as it would inside the window; a check that has not answered by then closes, the same
+     * "unknown closes" rule as at the deadline. Never blocks the caller: the waiting happens in the returned job.
+     *
      * The returned job completes when every close started here AND every close already running has finished, so
      * the desktop exit can wait for the server side (tombstone, kill) before the JVM goes.
      */
-    fun flush(): Job {
-        val (ids, running) = synchronized(lock) {
+    fun flush(checkWaitMs: Long = FLUSH_CHECK_WAIT_MS): Job {
+        val (due, checks) = synchronized(lock) {
+            entries.values.filter { it.isBlocked }.forEach { drop(it) }
             val due = entries.values.toList()
-            due.forEach { drop(it) }
+            // flush decides from here on: no timer may fire one of these meanwhile (and fire it a second time)
+            due.forEach { it.timer?.cancel(); it.timer = null }
             publish()
-            due.filter { !it.isBlocked }.map { it.session.id } to inFlight.toList()
+            due to due.mapNotNull { e -> e.check?.takeIf { it.isActive } }
         }
-        val started = runForget(ids)
-        return scope.launch { (running + listOfNotNull(started)).joinAll() }
+        return scope.launch {
+            if (checks.isNotEmpty()) withTimeoutOrNull(checkWaitMs) { checks.joinAll() }
+            val (ids, running) = synchronized(lock) {
+                // still the same entry: not undone, and not replaced by a BLOCK notice while we waited
+                val fire = due.filter { entries[it.session.id] === it }
+                fire.forEach { drop(it) }
+                publish()
+                fire.map { it.session.id } to inFlight.toList()
+            }
+            val started = runForget(ids)
+            (running + listOfNotNull(started)).joinAll()
+        }
     }
 
     /**
@@ -322,6 +341,16 @@ class PendingCloses(
 
         /** R7 = 7b. */
         const val WINDOW_MS = 10_000L
+
+        /** How long [flush] waits for a facts check still under way. */
+        const val FLUSH_CHECK_WAIT_MS = 3_000L
+
+        /**
+         * How long the desktop exit waits for [flush]: the checks, then the close's one exec (tombstone, record,
+         * kill), with a second to spare. Cut later than that, the JVM goes; the close is then half done at worst
+         * on the slowest server, and never killed without its tombstone.
+         */
+        const val EXIT_WAIT_MS = FLUSH_CHECK_WAIT_MS + com.clauderemote.session.service.SessionPersistenceService.CLOSE_EXEC_MS + 1_000L
 
         private fun monotonicMs(): () -> Long {
             val origin = TimeSource.Monotonic.markNow()

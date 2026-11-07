@@ -107,13 +107,21 @@ internal object ClosedRecords {
 
 /** The outcome of a restore ([SessionRestore.restoreCommand], `cr-session restore`). */
 internal sealed interface RestoreResult {
-    /** Started; [registry] = claude reported itself ([pid], [sessionId] — a new id after the `--resume` fork). */
-    data class Restored(val pid: Int?, val sessionId: String?, val registry: Boolean) : RestoreResult
+    /**
+     * Started; [registry] = claude reported itself ([pid], [sessionId] = its registry's id). [resumedId] = the
+     * conversation the pane was launched with (the record's id, or the launch id when only that one had a transcript);
+     * null from an older script.
+     */
+    data class Restored(val pid: Int?, val sessionId: String?, val registry: Boolean, val resumedId: String? = null) : RestoreResult
     /** The name is taken (a live session): nothing was touched. [suggestedName] = the first free `…-2`, `…-3`. */
     data class Exists(val suggestedName: String?) : RestoreResult
     /** The manifest still holds the name untombstoned: drift's self-heal will start it within a minute. */
     data object PendingSelfHeal : RestoreResult
-    /** The conversation runs in another pane already ([tmuxName], when its registry says). */
+    /**
+     * The conversation runs in a live claude already (its registry entry, or `--resume`/`--session-id` of it in a
+     * process's argv). [tmuxName] = the `claude-server-*` session on the same tmux socket whose pane holds that
+     * process; null when it runs somewhere else (another socket, outside tmux, not one of ours).
+     */
     data class RunningElsewhere(val tmuxName: String?) : RestoreResult
     /** Neither id has a transcript. [candidateSessionId] = the newest transcript of the folder ±10 min around the close (a guess, for the user to confirm). */
     data class NoTranscript(val candidateSessionId: String?) : RestoreResult
@@ -131,11 +139,12 @@ internal sealed interface RestoreResult {
 /**
  * Restore a closed session under its name, account and conversation (§15.13, §15.14), shared by the app (inline over
  * exec) and `cr-session restore`. The steps, in this order, each refusing with its own [RestoreResult]:
- *  1. the name is free (`has-session`; taken → [RestoreResult.Exists] with `…--<alias>-2`, rising — the builder would
+ *  1. the conversation runs nowhere ([RUNNING_SH]: a live registry entry or a claude argv of either id) — before the
+ *     name, so restoring the same record twice (two taps, two devices) is [RestoreResult.RunningElsewhere], never a
+ *     second process under `…-2`;
+ *  2. the name is free (`has-session`; taken → [RestoreResult.Exists] with `…--<alias>-2`, rising — the builder would
  *     otherwise kill the session there) and no manifest entry of it waits for self-heal;
- *  2. the conversation runs nowhere (a live registry file of either id);
- *  3. its transcript exists (the record's id, else the launch's: claude forks on `--resume` and writes the new
- *     transcript lazily);
+ *  3. its transcript exists (the record's id, else the launch's, which an older record may name alone);
  *  4. the account is logged in (`test -s .credentials.json`, never read);
  *  5. the tombstones are lifted BEFORE the start (§15.7, rozpor 15);
  *  6. the pane is created detached from the builder's own pieces — never `kill-session` (§15.15);
@@ -179,6 +188,62 @@ internal object SessionRestore {
     )
 
     /**
+     * `running_where S [S2]`: does conversation `S` (or `S2`) run in a live claude right now? Two witnesses, because
+     * either alone misses a case: claude's registry entry `sessions/<pid>.json` of any config dir (default, accounts,
+     * claude-local) whose process still lives with the same `procStart`; and the argv `--resume S` / `--session-id S`
+     * of a process named `claude` or `claude-local` (bash running the wrapper counts too), which is there from the
+     * first moment, before claude writes its registry. Returns 1 when neither finds it; else prints where: the
+     * `claude-server-*` session on THIS tmux socket whose pane is an ancestor of the process, or `-` (it runs, but
+     * not in one of ours on this socket — nothing to switch to). Needs [ManifestCommands.JSON_SH] and `$D`.
+     */
+    internal val RUNNING_SH: String = sh(
+        """
+        cr_pane_of() {
+          LP=§(timeout 3 tmux -u list-panes -a -F '#{pane_pid} #{session_name}' 2>/dev/null)
+          q=§1; k=0
+          while [ -n "§q" ] && [ "§q" -gt 1 ] 2>/dev/null && [ §k -lt 64 ]; do
+            s=§(printf '%s\n' "§LP" | awk -v p="§q" '§1 == p { print §2; exit }')
+            if [ -n "§s" ]; then case "§s" in claude-server-*) printf '%s' "§s"; return 0 ;; esac; return 1; fi
+            q=§(sed 's/^.*) //' "/proc/§q/stat" 2>/dev/null | cut -d' ' -f2); k=§((k+1))
+          done
+          return 1
+        }
+        running_where() {
+          RW_S=§1; RW_S2=§{2:-}; RW_P=""
+          case "§RW_S" in ''|*[!0-9a-f-]*) return 1 ;; esac
+          case "§RW_S2" in *[!0-9a-f-]*) RW_S2="" ;; esac
+          for f in "§HOME"/.claude/sessions/*.json "§HOME"/claude-local/cc-config/sessions/*.json "§D"/accounts/*/sessions/*.json; do
+            [ -f "§f" ] || continue
+            J=§(head -c 65536 "§f" 2>/dev/null | tr '\n' ' '); v=§(jget sessionId "§J")
+            [ -n "§v" ] && { [ "§v" = "§RW_S" ] || [ "§v" = "§RW_S2" ]; } || continue
+            p=§{f##*/}; p=§{p%.json}; [ -d "/proc/§p" ] || continue
+            ps0=§(jget procStart "§J"); ps1=§(sed 's/^.*) //' "/proc/§p/stat" 2>/dev/null | cut -d' ' -f20)
+            [ -n "§ps0" ] && [ "§ps0" != "§ps1" ] && continue
+            RW_P=§p; break
+          done
+          if [ -z "§RW_P" ]; then
+            for c in §(grep -lsaF -e "§RW_S" §{RW_S2:+-e "§RW_S2"} /proc/[0-9]*/cmdline 2>/dev/null); do
+              p=§{c#/proc/}; p=§{p%/cmdline}
+              [ "§p" = "§§" ] && continue
+              # stderr first: a process that ended since grep saw it fails the redirection itself
+              A=§(tr '\0' '\n' 2>/dev/null < "§c")
+              a0=§(printf '%s\n' "§A" | sed -n 1p); a1=§(printf '%s\n' "§A" | sed -n 2p)
+              case "§{a0##*/} §{a1##*/}" in "claude "*|"claude-local "*|*" claude-local") ;; *) continue ;; esac
+              printf '%s\n' "§A" | awk -v s="§RW_S" -v s2="§RW_S2" '
+                p && (§0 == s || (s2 != "" && §0 == s2)) { f = 1 }
+                { p = (§0 == "--resume" || §0 == "-r" || §0 == "--session-id") }
+                §0 == ("--resume=" s) || §0 == ("--session-id=" s) || (s2 != "" && (§0 == ("--resume=" s2) || §0 == ("--session-id=" s2))) { f = 1 }
+                END { exit !f }' || continue
+              RW_P=§p; break
+            done
+          fi
+          [ -n "§RW_P" ] || return 1
+          RW_T=§(cr_pane_of "§RW_P"); printf '%s' "§{RW_T:--}"; return 0
+        }
+        """.trimIndent(),
+    )
+
+    /**
      * Inputs: `$N` (the name to restore under), `$S` (session id), `$S2` (fallback id, may be empty), `$F` (folder, for
      * the marker and the candidate search), `$A` (account slug, empty = default), `$CMD` / `$CMD2` (the pane's launch
      * command resuming `$S` / `$S2`), `$FRESH` (1 = a new conversation: no transcript checks), `$AT_EPOCH` (close
@@ -187,6 +252,7 @@ internal object SessionRestore {
     fun restoreBody(): String = RESTORE
         .replace("@@JSON@@", ManifestCommands.JSON_SH)
         .replace("@@MANIFEST@@", ManifestCommands.MANIFEST_SH)
+        .replace("@@RUNNING@@", RUNNING_SH)
         .replace("@@CLEAR@@", ManifestCommands.clearTombstoneBody())
         .replace("@@SPAWN@@", ClaudeConfig.detachedCreateBody())
         .replace("@@MARKER@@", ManifestCommands.openedMarkerBody())
@@ -221,11 +287,11 @@ internal object SessionRestore {
     /** The [RestoreResult] of a restore's output (the last `CR_RESTORE` line). */
     fun parse(out: String): RestoreResult {
         val line = out.lines().map { it.trim() }.lastOrNull { it.startsWith("$RESULT_PREFIX ") } ?: return RestoreResult.Unknown
-        val t = line.removePrefix("$RESULT_PREFIX ").split(Regex("\\s+"), limit = 3)
+        val t = line.removePrefix("$RESULT_PREFIX ").split(Regex("\\s+"), limit = 4)
         fun arg(i: Int): String? = t.getOrNull(i)?.trim()?.takeUnless { it.isEmpty() || it == "-" }
         return when (t[0]) {
-            "RESTORED" -> RestoreResult.Restored(arg(1)?.toIntOrNull(), arg(2), registry = true)
-            "RESTORED_NO_REGISTRY" -> RestoreResult.Restored(null, null, registry = false)
+            "RESTORED" -> RestoreResult.Restored(arg(1)?.toIntOrNull(), arg(2), registry = true, resumedId = arg(3))
+            "RESTORED_NO_REGISTRY" -> RestoreResult.Restored(null, null, registry = false, resumedId = arg(1))
             "EXISTS" -> RestoreResult.Exists(arg(1))
             "PENDING_SELF_HEAL" -> RestoreResult.PendingSelfHeal
             "RUNNING_ELSEWHERE" -> RestoreResult.RunningElsewhere(arg(1))
@@ -250,8 +316,10 @@ internal object SessionRestore {
         case "§{A:-}" in ''|default) ACFG="§HOME/.claude" ;; */*|.*) out INVALID account; exit 0 ;; *) ACFG="§D/accounts/§A" ;; esac
         case "§{S:-}" in ''|*[!0-9a-f-]*) out INVALID session; exit 0 ;; esac
         case "§{S2:-}" in *[!0-9a-f-]*) S2="" ;; esac
-        tr_of() { case "§1" in ''|*[!0-9a-f-]*) return 0 ;; esac; ls "§HOME"/.claude/projects/*/"§1".jsonl "§ACFG"/projects/*/"§1".jsonl 2>/dev/null | head -n 1; }
+        LC="§HOME/claude-local/cc-config"
+        tr_of() { case "§1" in ''|*[!0-9a-f-]*) return 0 ;; esac; ls "§HOME"/.claude/projects/*/"§1".jsonl "§ACFG"/projects/*/"§1".jsonl "§LC"/projects/*/"§1".jsonl 2>/dev/null | head -n 1; }
         @@MANIFEST@@
+        @@RUNNING@@
         has() { timeout 3 tmux has-session -t "=§1" 2>/dev/null; }
         suggest() {
           case "§N" in *--*) B="§N-" ;; *) B="§N--" ;; esac
@@ -261,29 +329,27 @@ internal object SessionRestore {
           done
           printf '%s' "§B§i"
         }
-        # 1. the name is free, and no manifest entry of it waits for drift's self-heal
         has "§N"; R=§?
         [ §R -eq 124 ] && { out FAILED tmux-timeout; exit 0; }
+        # 1. the conversation runs nowhere — checked before the name, so a taken name that holds this very
+        #    conversation (restored twice, from two devices at once) says so instead of offering "…-2"
+        if [ "§{FRESH:-0}" != 1 ]; then
+          W=§(running_where "§S" "§{S2:-}") && { out RUNNING_ELSEWHERE "§W"; exit 0; }
+        fi
+        # 2. the name is free, and no manifest entry of it waits for drift's self-heal
         [ §R -eq 0 ] && { out EXISTS "§(suggest)"; exit 0; }
         if in_manifest "§N" && ! tombstoned "§N"; then out PENDING_SELF_HEAL; exit 0; fi
         if [ "§{FRESH:-0}" != 1 ]; then
-          # 2. the conversation runs nowhere (a registry file of a live process, the same process: procStart)
-          for f in "§HOME"/.claude/sessions/*.json "§D"/accounts/*/sessions/*.json; do
-            [ -f "§f" ] || continue
-            J=§(head -c 65536 "§f" 2>/dev/null | tr '\n' ' '); v=§(jget sessionId "§J")
-            [ -n "§v" ] && { [ "§v" = "§S" ] || [ "§v" = "§{S2:-}" ]; } || continue
-            p=§{f##*/}; p=§{p%.json}; [ -d "/proc/§p" ] || continue
-            ps0=§(jget procStart "§J"); ps1=§(sed 's/^.*) //' "/proc/§p/stat" 2>/dev/null | cut -d' ' -f20)
-            [ -n "§ps0" ] && [ "§ps0" != "§ps1" ] && continue
-            t=§(jget tmux "§J"); t=§{t%%:*}; out RUNNING_ELSEWHERE "§{t:--}"; exit 0
-          done
-          # 3. a transcript exists: the record's id, else the launch's (claude forks on --resume, the new one is lazy)
+          # 3. a transcript exists: the record's id, else the launch's
           if [ -z "§(tr_of "§S")" ]; then
             if [ -n "§{S2:-}" ] && [ -n "§(tr_of "§S2")" ]; then S=§S2; CMD=§CMD2
             else
-              PD="§HOME/.claude/projects/§(printf '%s' "§F" | sed 's/[^A-Za-z0-9]/-/g')"; CAND=""
+              # the folder's newest transcript around the close, in the record's account first (its projects dir)
+              SLUG=§(printf '%s' "§F" | sed 's/[^A-Za-z0-9]/-/g'); CAND=""
               case "§{AT_EPOCH:-}" in ''|*[!0-9]*) ;; *)
-                [ -d "§PD" ] && CAND=§(find "§PD" -maxdepth 1 -name '*.jsonl' -newermt "@§((AT_EPOCH-600))" ! -newermt "@§((AT_EPOCH+600))" -printf '%T@ %f\n' 2>/dev/null | sort -n | tail -n 1 | sed 's/^[^ ]* //; s/\.jsonl§//') ;;
+                CAND=§(for PD in "§ACFG/projects/§SLUG" "§HOME/.claude/projects/§SLUG" "§LC/projects/§SLUG"; do
+                  [ -d "§PD" ] && find "§PD" -maxdepth 1 -name '*.jsonl' -newermt "@§((AT_EPOCH-600))" ! -newermt "@§((AT_EPOCH+600))" -printf '%T@ %f\n'
+                done 2>/dev/null | sort -n | tail -n 1 | sed 's/^[^ ]* //; s/\.jsonl§//') ;;
               esac
               out NO_TRANSCRIPT "§{CAND:--}"; exit 0
             fi
@@ -309,9 +375,9 @@ internal object SessionRestore {
         # 8. claude's registry entry
         @@WAIT@@
         case "§RSTATE" in
-          ok) out RESTORED "§{RPID:--}" "§{RSID:--}" ;;
+          ok) out RESTORED "§{RPID:--}" "§{RSID:--}" "§S" ;;
           login) out OPENED_LOGIN_REQUIRED ;;
-          *) out RESTORED_NO_REGISTRY ;;
+          *) out RESTORED_NO_REGISTRY "§S" ;;
         esac
         )
         """.trimIndent(),

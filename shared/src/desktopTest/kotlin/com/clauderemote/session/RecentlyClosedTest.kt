@@ -129,10 +129,43 @@ class RecentlyClosedTest {
             listOf(("s1" to "box") to listOf(rec(name = "claude-box-n", at = now - 10, cwd = null), rec(name = "claude-box-r", at = now - 20))),
             emptySet(), now,
         )
-        assertEquals(ReopenTarget.Undo("t2"), RecentlyClosed.reopenTarget(listOf("t1", "t2"), rows))
-        val r = assertIs<ReopenTarget.Restore>(RecentlyClosed.reopenTarget(emptyList(), rows))
+        assertEquals(ReopenTarget.Undo("t2"), RecentlyClosed.reopenTarget(listOf("t1", "t2"), rows, own))
+        val r = assertIs<ReopenTarget.Restore>(RecentlyClosed.reopenTarget(emptyList(), rows, own))
         assertEquals("claude-box-r", r.entry.record.tmuxName, "a row that cannot be restored is skipped")
-        assertEquals(ReopenTarget.Nothing, RecentlyClosed.reopenTarget(emptyList(), emptyList()))
+        assertEquals(ReopenTarget.Nothing, RecentlyClosed.reopenTarget(emptyList(), emptyList(), own))
+    }
+
+    /** The shortcut reopens what THIS device closed; another device's or Jarvis's closes come from the list only. */
+    @Test fun reopenTakesOnlyThisDevicesOwnCloses() {
+        val rows = RecentlyClosed.merge(
+            listOf(("s1" to "box") to listOf(
+                rec(name = "claude-box-j", at = now - 5, by = "jarvis"),
+                rec(name = "claude-box-p", at = now - 6, by = "app:phone-9"),
+                rec(name = "claude-box-mine", at = now - 30),
+            )),
+            emptySet(), now,
+        )
+        assertEquals("claude-box-j", rows.first().record.tmuxName, "the list still shows every close, newest first")
+        val r = assertIs<ReopenTarget.Restore>(RecentlyClosed.reopenTarget(emptyList(), rows, own))
+        assertEquals("claude-box-mine", r.entry.record.tmuxName)
+        assertEquals(ReopenTarget.Nothing, RecentlyClosed.reopenTarget(emptyList(), rows.filter { it.record.by != own }, own))
+    }
+
+    /**
+     * An empty record (written by an older build over a pane already gone) must not shadow the restorable one of the
+     * same name before it; with no restorable one the newest is shown.
+     */
+    @Test fun mergePrefersTheRestorableRecordOfAName() {
+        val real = rec(name = "claude-box-a", at = now - 300)
+        val empty = rec(name = "claude-box-a", at = now - 10, sessionId = null, cwd = null, by = "prune")
+        val rows = RecentlyClosed.merge(listOf(("s1" to "box") to listOf(empty, real)), emptySet(), now)
+        assertEquals(listOf(real), rows.map { it.record })
+        val onlyEmpty = RecentlyClosed.merge(listOf(("s1" to "box") to listOf(empty)), emptySet(), now)
+        assertEquals(listOf(empty), onlyEmpty.map { it.record })
+        // the order of the section follows the record shown
+        val b = rec(name = "claude-box-b", at = now - 100)
+        assertEquals(listOf("claude-box-b", "claude-box-a"),
+            RecentlyClosed.merge(listOf(("s1" to "box") to listOf(empty, b, real)), emptySet(), now).map { it.record.tmuxName })
     }
 
     // ---- every restore result has its reaction ------------------------------------------------------
@@ -145,7 +178,9 @@ class RecentlyClosedTest {
         assertEquals(RestoreAction.OpenTab(true), act(RestoreResult.LoginRequired))
         assertEquals(RestoreAction.OfferName("claude-box-kontexta--pdf-sloupce-2"), act(RestoreResult.Exists("claude-box-kontexta--pdf-sloupce-2")))
         assertIs<RestoreAction.Message>(act(RestoreResult.Exists(null)))
-        assertEquals(RestoreAction.GoTo("claude-box-other"), act(RestoreResult.RunningElsewhere("claude-box-other")))
+        assertEquals(RestoreAction.GoTo("claude-server-other"), act(RestoreResult.RunningElsewhere("claude-server-other")))
+        // not one of ours: no "Přejít na ni" (a tab there would push it into the manifest, its close would kill it)
+        assertEquals(RestoreAction.GoTo(null), act(RestoreResult.RunningElsewhere("claude-box-other")))
         assertEquals(RestoreAction.GoTo(null), act(RestoreResult.RunningElsewhere(null)))
         assertEquals(RestoreAction.OfferCandidate(sid2), act(RestoreResult.NoTranscript(sid2)))
         assertEquals(RestoreAction.OfferCandidate(null), act(RestoreResult.NoTranscript(null)))

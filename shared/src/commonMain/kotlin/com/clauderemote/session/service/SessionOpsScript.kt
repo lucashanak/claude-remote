@@ -13,8 +13,10 @@ import com.clauderemote.session.ClaudeConfig
  * [CloseFactsCommands.closeFactsBody], [SessionRestore.restoreBody]), so the two cannot drift apart; the tests check
  * the script holds each body byte for byte.
  *
- * Invariants (§15.15): open and restore never run `kill-session` (a taken name is EXISTS); a close writes the durable
- * tombstone, then the record, then kills; nothing here pushes the manifest (drift adopts and drops within 60 s). The
+ * Invariants (§15.15): open and restore never run `kill-session` (a taken name is EXISTS) and never start a second
+ * claude over a conversation that already runs ([SessionRestore.RUNNING_SH] → RUNNING_ELSEWHERE); a close writes the
+ * durable tombstone, then the record, then kills, and refuses what the app's snackbar refuses (the BLOCK facts,
+ * REFUSED_BLOCKED) unless `--force`; nothing here pushes the manifest (drift adopts and drops within 60 s). The
  * script refuses to close the name in `~/.claude-remote/jarvis/self` and anything outside `claude-server-*`, and
  * `~/.claude-remote/jarvis/off` stops open, close and restore.
  *
@@ -24,7 +26,12 @@ import com.clauderemote.session.ClaudeConfig
  */
 internal object SessionOpsScript {
 
-    const val VERSION = 1
+    /**
+     * Bumped with every change of [SCRIPT]'s content: a server keeps a file of the same version that is intact, so
+     * two builds with one version and different scripts would rewrite each other's copy forever. A test binds the
+     * script's SHA-256 to this number (`SessionOpsScriptTest`, `golden/cr-session-versions.txt`).
+     */
+    const val VERSION = 2
     const val PATH = "~/.claude-remote/bin/cr-session"
     /** How old a `facts` token `close` still accepts. */
     const val TOKEN_MAX_AGE_S = 120
@@ -74,11 +81,17 @@ internal object SessionOpsScript {
             .replace("@@RECORD@@", ManifestCommands.closeRecordBody())
             .replace("@@MARKER@@", ManifestCommands.openedMarkerBody())
             .replace("@@FACTS@@", CloseFactsCommands.closeFactsBody())
+            .replace("@@BLOCKS@@", CloseFactsCommands.BLOCKS_SH)
+            .replace("@@RUNNING@@", SessionRestore.RUNNING_SH)
             .replace("@@RESTORE@@", SessionRestore.restoreBody())
             .replace("@@SPAWN@@", ClaudeConfig.detachedCreateBody())
             .replace("@@WAIT@@", SessionRestore.WAIT_REGISTRY)
             .replace("@@MAXAGE@@", TOKEN_MAX_AGE_S.toString())
+            .replace("@@LOGMAX@@", OPS_LOG_MAX_LINES.toString())
     }
+
+    /** `jarvis-ops.log` is cut to its last this many lines (as `closed.jsonl` is). */
+    const val OPS_LOG_MAX_LINES = 2000
 
     private val TEMPLATE = sh(
         """
@@ -93,18 +106,25 @@ internal object SessionOpsScript {
         @@JSON@@
         @@CMD@@
         @@MANIFEST@@
+        @@RUNNING@@
+        @@BLOCKS@@
         usage() {
           cat <<'CR_USAGE'
         usage: cr-session version
                cr-session open --name N --folder F [--account SLUG|default] [--model M] [--mode yolo|normal|auto|accept|plan]
                                [--session-id UUID | --resume UUID] [--by WHO] [--task T] [--wait S]
                cr-session facts N [--self MARKER]
-               cr-session close N --token T [--reason R] [--by WHO]
+               cr-session close N --token T [--self MARKER] [--force] [--reason R] [--by WHO]
                cr-session restore <tmuxName|at> [--name N] [--session-id UUID | --fresh] [--wait S] [--by WHO]
                cr-session closed [COUNT]
         CR_USAGE
         }
-        log() { printf '[%s] %s\n' "§(date -u +%FT%TZ)" "§*" >> "§D/jarvis-ops.log" 2>/dev/null; }
+        log() {
+          printf '[%s] %s\n' "§(date -u +%FT%TZ)" "§*" >> "§D/jarvis-ops.log" 2>/dev/null
+          L=§(wc -l < "§D/jarvis-ops.log" 2>/dev/null)
+          if [ "§{L:-0}" -gt @@LOGMAX@@ ]; then tail -n @@LOGMAX@@ "§D/jarvis-ops.log" > "§D/jarvis-ops.log.tmp.§§" && mv -f "§D/jarvis-ops.log.tmp.§§" "§D/jarvis-ops.log"; fi
+          return 0
+        }
         refuse_off() { [ -e "§D/jarvis/off" ] && { echo REFUSED_OFF; exit 1; }; return 0; }
         need() { [ "§1" -ge 2 ] || { echo "INVALID missing value for §2"; exit 2; }; }
         # a new name: ours, and one drift's word-split listing reads back whole
@@ -144,7 +164,7 @@ internal object SessionOpsScript {
         }
 
         cmd_open() {
-          NAME=""; FOLDER=""; ACCT=default; MODEL=DEFAULT; MODE=YOLO; SID=""; RESUME=0; BY=jarvis; TASK=""; WAIT=15
+          NAME=""; FOLDER=""; ACCT=default; MODEL=DEFAULT; MODE=YOLO; SID=""; RESUME=0; BY=jarvis; TASK=""; WAIT=15; SIDGIVEN=0
           while [ §# -gt 0 ]; do
             case "§1" in
               --name) need §# "§1"; NAME=§2 ;;
@@ -152,8 +172,8 @@ internal object SessionOpsScript {
               --account) need §# "§1"; ACCT=§2 ;;
               --model) need §# "§1"; MODEL=§(upper "§2") ;;
               --mode) need §# "§1"; MODE=§(mode_of "§2") ;;
-              --session-id) need §# "§1"; SID=§2; RESUME=0 ;;
-              --resume) need §# "§1"; SID=§2; RESUME=1 ;;
+              --session-id) need §# "§1"; SID=§2; RESUME=0; SIDGIVEN=1 ;;
+              --resume) need §# "§1"; SID=§2; RESUME=1; SIDGIVEN=1 ;;
               --by) need §# "§1"; BY=§2 ;;
               --task) need §# "§1"; TASK=§2 ;;
               --wait) need §# "§1"; WAIT=§2 ;;
@@ -175,7 +195,12 @@ internal object SessionOpsScript {
           case "§SID" in '') SID=§(cat /proc/sys/kernel/random/uuid 2>/dev/null) ;; *[!0-9a-f-]*) echo "INVALID session id"; exit 2 ;; esac
           case "§WAIT" in ''|*[!0-9]*) WAIT=15 ;; esac
           refuse_off
-          has "§NAME" && { echo EXISTS; exit 1; }
+          has "§NAME"; HR=§?
+          # a timed-out has-session says nothing about the name: never lift a tombstone on that
+          [ §HR -eq 124 ] && { echo "FAILED tmux-timeout"; exit 1; }
+          # a conversation already running in a claude must not get a second process (two writers, one transcript)
+          if [ "§SIDGIVEN" = 1 ]; then W=§(running_where "§SID") && { echo "RUNNING_ELSEWHERE §W"; exit 1; }; fi
+          [ §HR -eq 0 ] && { echo EXISTS; exit 1; }
           # a manifest entry of the name that is not tombstoned: drift's self-heal is about to start it (§15.15)
           if in_manifest "§NAME" && ! tombstoned "§NAME"; then echo PENDING_SELF_HEAL; exit 1; fi
           CMD=§(cr_cmd "§FD" "§MODE" "§MODEL" "§SID" "§RESUME" "§AS") || { echo "INVALID model or mode"; exit 2; }
@@ -206,15 +231,16 @@ internal object SessionOpsScript {
 
         cmd_close() {
           [ §# -ge 1 ] || { echo "INVALID name"; exit 2; }
-          N=§1; shift; TOKEN=""; REASON=""; BY=jarvis
+          N=§1; shift; TOKEN=""; REASON=""; BY=jarvis; SELFM=""; FORCE=0
           while [ §# -gt 0 ]; do
             case "§1" in
-              --token) need §# "§1"; TOKEN=§2 ;;
-              --reason) need §# "§1"; REASON=§2 ;;
-              --by) need §# "§1"; BY=§2 ;;
+              --token) need §# "§1"; TOKEN=§2; shift 2 ;;
+              --self) need §# "§1"; SELFM=§2; shift 2 ;;
+              --force) FORCE=1; shift ;;
+              --reason) need §# "§1"; REASON=§2; shift 2 ;;
+              --by) need §# "§1"; BY=§2; shift 2 ;;
               *) echo "INVALID unknown option §1"; exit 2 ;;
             esac
-            shift 2
           done
           case "§N" in claude-server-*) ;; *) echo REFUSED_NAME; exit 1 ;; esac
           case "§N" in */*|*'
@@ -226,14 +252,19 @@ internal object SessionOpsScript {
           TE=§{TOKEN%%.*}; TH=§{TOKEN#*.}; NOW=§(date +%s)
           case "§TE" in ''|*[!0-9]*) echo REFUSED_STALE; exit 1 ;; esac
           if [ §((NOW - TE)) -gt @@MAXAGE@@ ] || [ §((TE - NOW)) -gt 5 ]; then echo REFUSED_STALE; exit 1; fi
-          CUR=§(cr_facts "§N" "" | sed -n 's/^TOKEN //p')
+          # the same facts as the token's (with the same --self, or the hash differs), read again now
+          FO=§(cr_facts "§N" "§SELFM")
+          CUR=§(printf '%s\n' "§FO" | sed -n 's/^TOKEN //p')
           [ -n "§CUR" ] && [ "§{CUR#*.}" = "§TH" ] || { echo REFUSED_STALE; exit 1; }
+          # what the app's snackbar would refuse with ("Neuzavřeno: …"); only --force closes over it
+          BL=§(printf '%s\n' "§FO" | cr_blocks)
+          if [ -n "§BL" ] && [ "§FORCE" != 1 ]; then echo "REFUSED_BLOCKED §BL"; exit 1; fi
           # the app's order: tombstone, record (the pane still lives), kill (§15.15)
           cr_tombstone "§N" >/dev/null 2>&1
           cr_record "§N" "§BY" "§REASON"
           timeout 5 tmux kill-session -t "=§N" 2>/dev/null; KR=§?
           rm -f "§{D:?}/opened.d/§{N:?}"
-          log "close §N by=§BY kill=§KR reason=§REASON"
+          log "close §N by=§BY kill=§KR force=§FORCE reason=§REASON"
           echo CLOSED
         }
 
@@ -253,7 +284,8 @@ internal object SessionOpsScript {
           case "§WAIT" in ''|*[!0-9]*) WAIT=15 ;; esac
           refuse_off
           command -v jq >/dev/null 2>&1 || { echo "FAILED jq missing"; exit 1; }
-          REC=§(tail -n 500 "§D/closed.jsonl" 2>/dev/null | jq -c -R --arg k "§KEY" 'fromjson? | select(.tmuxName == §k or .at == §k)' 2>/dev/null | tail -n 1)
+          # the newest record of the key that can be restored (has a folder), else the newest: RecentlyClosed.merge
+          REC=§(tail -n 500 "§D/closed.jsonl" 2>/dev/null | jq -c -R -s --arg k "§KEY" '[split("\n")[] | fromjson? | select(.tmuxName == §k or .at == §k)] | ((map(select((.cwd // .folder) != null)) | last) // last) // empty' 2>/dev/null)
           [ -n "§REC" ] || { echo NOT_FOUND; exit 1; }
           f() { printf '%s' "§REC" | jq -r "§1 // empty" 2>/dev/null; }
           N=§(f .tmuxName); S=§(f .sessionId); S2=§(f .launchSessionId); F=§(f '.cwd // .folder'); A=§(f .account)

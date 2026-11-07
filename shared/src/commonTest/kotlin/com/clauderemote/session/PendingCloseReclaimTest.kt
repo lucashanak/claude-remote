@@ -66,6 +66,30 @@ class PendingCloseReclaimTest {
         assertEquals(setOf("a"), o.pendingCloses.state.value.hiddenIds)
     }
 
+    /**
+     * An answer undoes a pending close only once its keys reached the pane: a refused one (the session is not even
+     * connected here) leaves the close running.
+     */
+    @Test fun aRefusedAnswerDoesNotUndoTheClose() = withOrchestrator { o, tabs ->
+        val a = tab("a")
+        tabs.addTab(a)
+        o.pendingCloses.close(a)
+        val why = kotlinx.coroutines.runBlocking {
+            o.sendReply("a", null, com.clauderemote.session.service.ReplyGuard.Reply.TEXT, "ahoj")
+        }
+        assertTrue(why != null && !o.replyReachedThePane(why), "refused: $why")
+        assertEquals(setOf("a"), o.pendingCloses.state.value.hiddenIds, "the close goes on")
+    }
+
+    @Test fun onlyAnAnswerThatReachedThePaneKeepsTheSession() = withOrchestrator { o, _ ->
+        val keeps = com.clauderemote.session.service.RefuseReason.entries.filter { o.replyReachedThePane(it) }.toSet()
+        assertEquals(setOf(
+            com.clauderemote.session.service.RefuseReason.MAYBE_SENT,
+            com.clauderemote.session.service.RefuseReason.TYPED_NOT_SENT,
+        ), keeps)
+        assertTrue(o.replyReachedThePane(null), "sent")
+    }
+
     @Test fun visibleTabsLeaveThePendingOnesOut() {
         val all = listOf(tab("a"), tab("b"), tab("c"))
         val none = PendingClosesState()

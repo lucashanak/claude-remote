@@ -49,6 +49,9 @@ class SessionOpsScriptTest {
             "install" to SessionOpsScript.INSTALL_COMMAND,
             "check" to SessionOpsScript.CHECK_COMMAND,
             "tombstoneAndRecord" to ManifestCommands.tombstoneAndRecord(name, durable = true, by = "app:x"),
+            "close" to ManifestCommands.closeCommand(name, durable = true, by = "app:x"),
+            "blocks" to CloseFactsCommands.BLOCKS_SH,
+            "running" to "D=\"\$HOME/.claude-remote\"\n" + ManifestCommands.JSON_SH + "\n" + SessionRestore.RUNNING_SH,
             "closeRecord" to ManifestCommands.closeRecord(name, "prune", durable = false, reason = "it's"),
             "readClosed" to ManifestCommands.readClosed(50),
             "openedMarker" to "N=x; BY=jarvis; F=/w; A=; S=; TASK=\n" + ManifestCommands.openedMarkerBody(),
@@ -167,6 +170,32 @@ class SessionOpsScriptTest {
         } finally {
             safeDeleteTree(home)
         }
+    }
+
+    private fun versionsFile(): File {
+        val rel = "src/desktopTest/resources/golden/cr-session-versions.txt"
+        return listOf(File(rel), File("shared/$rel")).firstOrNull { it.parentFile.parentFile.isDirectory } ?: File(rel)
+    }
+
+    /**
+     * Every content of the script has its own VERSION: a server keeps an intact file of the same version, so two
+     * builds with one VERSION and different scripts would rewrite each other's copy on every bootstrap (and a newer
+     * script with an unchanged number would never reach a server that has the old one). The file lists every
+     * released `<VERSION> <SHA-256>`; a changed script fails here until VERSION is raised and its line added.
+     */
+    @Test fun everyScriptContentHasItsOwnVersion() {
+        val f = versionsFile()
+        val pairs = f.readLines().map { it.trim() }.filter { it.isNotEmpty() && !it.startsWith("#") }.map {
+            val t = it.split(Regex("\\s+")); t[0].toInt() to t[1]
+        }
+        assertEquals(pairs.size, pairs.map { it.first }.toSet().size, "one line per version: ${f.absolutePath}")
+        val mine = pairs.firstOrNull { it.first == SessionOpsScript.VERSION }
+        if (mine == null) fail("add the line `${SessionOpsScript.VERSION} ${SessionOpsScript.SCRIPT_SHA256}` to ${f.absolutePath}")
+        assertEquals(
+            mine.second, SessionOpsScript.SCRIPT_SHA256,
+            "cr-session changed but VERSION is still ${SessionOpsScript.VERSION}: raise SessionOpsScript.VERSION and add its line to ${f.absolutePath}",
+        )
+        assertEquals(pairs.maxOf { it.first }, SessionOpsScript.VERSION, "VERSION never goes back")
     }
 
     /** The installer: writes, then leaves an intact copy alone, rewrites a damaged one, never downgrades a newer one. */

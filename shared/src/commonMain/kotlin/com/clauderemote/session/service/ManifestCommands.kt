@@ -222,13 +222,39 @@ internal object ManifestCommands {
         "N=${sq(tmuxName)}; BY=${sq(by)}; DUR=${if (durable) 1 else 0}; REASON=${sq(reason.orEmpty())}\n" + closeRecordBody()
 
     /**
-     * The app's close, server half before the kill: [tombstone] then [closeRecordBody], one exec (§15.12). The exit
-     * status is the tombstone's, whatever the record did.
+     * The app's close, server half before the kill: [tombstone] then [closeRecordBody], one exec (§15.12), then the
+     * name's `opened.d` marker goes (a later launch of the same name must not be adopted elsewhere as "od Jarvise";
+     * `cr-session close` drops it the same way). The exit status is the tombstone's, whatever the record did.
      */
     fun tombstoneAndRecord(tmuxName: String, durable: Boolean, by: String): String =
+        tombstoneAndRecordSteps(tmuxName, durable, by) + "\n[ \"\$CR_TS\" = 0 ]"
+
+    private fun tombstoneAndRecordSteps(tmuxName: String, durable: Boolean, by: String): String =
         tombstone(tmuxName, durable) + "; CR_TS=\$?\n" +
             "BY=${sq(by)}; DUR=${if (durable) 1 else 0}; REASON=''\n" +
-            closeRecordBody() + "\n[ \"\$CR_TS\" = 0 ]"
+            closeRecordBody() + "\n" +
+            (if (isMarkerSafe(tmuxName)) "rm -f \"\$HOME/.claude-remote/opened.d/\$N\" 2>/dev/null\n" else "")
+
+    /** Printed by [closeCommand]: `CR_KILL=<exit status of kill-session>`. */
+    const val CLOSE_KILL_PREFIX = "CR_KILL="
+
+    /** How long [closeCommand]'s kill may take on the server: it has to end well inside the exec's own limit. */
+    const val CLOSE_KILL_TIMEOUT_S = 3
+
+    /**
+     * The app's whole server-side close in ONE exec: [tombstoneAndRecord], then `kill-session` (exact name), in that
+     * order (§15.15). One exec instead of two, because a second one may never start: the desktop exit waits only so
+     * long, and a close cut between the two left the session running with a tombstone, no tab and no manifest entry.
+     * Prints [CLOSE_KILL_PREFIX] with the kill's status; the exit status is the tombstone's.
+     */
+    fun closeCommand(tmuxName: String, durable: Boolean, by: String): String =
+        tombstoneAndRecordSteps(tmuxName, durable, by) +
+            "timeout $CLOSE_KILL_TIMEOUT_S tmux kill-session -t ${sq("=$tmuxName")} 2>/dev/null; echo \"$CLOSE_KILL_PREFIX\$?\"\n" +
+            "[ \"\$CR_TS\" = 0 ]"
+
+    /** The kill's status from [closeCommand]'s output; null when it never got that far. */
+    fun closeKillStatus(out: String): Int? =
+        out.lineSequence().map { it.trim() }.lastOrNull { it.startsWith(CLOSE_KILL_PREFIX) }?.removePrefix(CLOSE_KILL_PREFIX)?.toIntOrNull()
 
     /** The last [limit] records of [CLOSED_PATH] (oldest first), then [CLOSED_END]. Read-only. */
     fun readClosed(limit: Int = 50): String {
@@ -244,6 +270,9 @@ internal object ManifestCommands {
         CJ="§D/closed.jsonl"
         AT=§(date -u +%FT%TZ)
         PP=§(timeout 2 tmux -u list-panes -t "=§N:" -F '#{pane_pid}' 2>/dev/null | head -n 1)
+        # no pane, no record: a repeated close or a prune of a dead pane would only write an empty line, and the
+        # newest line of a name is the one a restore takes
+        [ -n "§PP" ] || exit 0
         PC=§(timeout 2 tmux -u display-message -p -t "=§N:" '#{pane_current_path}' 2>/dev/null)
         CP=""; CFG=""
         cfg_of() { tr '\0' '\n' < "/proc/§1/environ" 2>/dev/null | sed -n 's|^CLAUDE_CONFIG_DIR=||p' | head -n 1; }
@@ -287,6 +316,19 @@ internal object ManifestCommands {
             "") case "§BIN" in *@@LOCAL@@) MODEL=LOCAL ;; *) MODEL=DEFAULT ;; esac ;;
           esac
           if [ "§YO" = 1 ]; then MODE=YOLO; else case "§PM" in @@MODES@@ *) MODE=NORMAL ;; esac; fi
+          # claude-local exports its own config dir and then execs plain `claude`: the argv says DEFAULT, the dir LOCAL
+          case "§CFG" in */claude-local/cc-config|*/claude-local/cc-config/) MODEL=LOCAL ;; esac
+        fi
+        # claude is gone (the pane's shell outlived it): what the manifest says of the name, so a restore does not
+        # start the conversation under the default account and model
+        MACCT=""
+        if [ -z "§CP" ] && [ -f "§D/sessions.restore.json" ] && command -v jq >/dev/null 2>&1; then
+          ME=§(timeout 2 jq -c --arg n "§N" 'first(.[] | select(.tmuxSessionName == §n)) // empty' "§D/sessions.restore.json" 2>/dev/null)
+          if [ -n "§ME" ]; then
+            mf() { printf '%s' "§ME" | jq -r "§1 // empty" 2>/dev/null; }
+            MACCT=§(mf .accountSlug); LSID=§(mf .claudeSessionId); MODEL=§(mf .model); MODE=§(mf .mode)
+            case "§LSID" in *[!0-9a-f-]*) LSID="" ;; esac
+          fi
         fi
         tr_of() { case "§1" in ''|*[!0-9a-f-]*) return 0 ;; esac; ls "§HOME"/.claude/projects/*/"§1".jsonl "§C"/projects/*/"§1".jsonl 2>/dev/null | head -n 1; }
         SID=§LSID
@@ -294,7 +336,7 @@ internal object ManifestCommands {
         [ -n "§SID" ] || SID=§RSID
         TR=§(tr_of "§SID")
         TITLE=""; [ -n "§TR" ] && TITLE=§(jget aiTitle "§(tail -c 1048576 "§TR" 2>/dev/null | grep '"type":"ai-title"' | tail -n 1)")
-        ACCT=§(printf '%s' "§CFG" | sed -n 's|.*/accounts/\([^/]*\)/*§|\1|p')
+        ACCT=§(printf '%s' "§CFG" | sed -n 's|.*/accounts/\([^/]*\)/*§|\1|p'); [ -n "§ACCT" ] || ACCT=§MACCT
         if [ -n "§CWD" ]; then CWDJ=§(je "§CWD"); else CWDJ=§(jn "§PC"); fi
         if [ "§DUR" = 1 ]; then DJ=true; else DJ=false; fi
         LINE="{\"v\":1,\"at\":§(js "§AT"),\"tmuxName\":§(js "§N"),\"sessionId\":§(jn "§SID"),\"launchSessionId\":§(jn "§LSID"),\"transcript\":§(jn "§TR"),\"cwd\":§CWDJ,\"folder\":§(jn "§PC"),\"account\":§(jn "§ACCT"),\"model\":§(jn "§MODEL"),\"mode\":§(jn "§MODE"),\"flags\":[§{FL#,}],\"effort\":§(jn "§EFF"),\"claudeVersion\":§(je "§VER"),\"title\":§(je "§TITLE"),\"pid\":§{CP:-null},\"by\":§(js "§BY"),\"durable\":§DJ,\"reason\":§(jn "§{REASON:-}")}"
@@ -327,6 +369,9 @@ internal object ManifestCommands {
     )
 
     // ------------------------------------------------------------------ opened.d (Jarvis F0c, §15.4)
+
+    /** A marker older than this is not adopted (`OpenedAdoption`), so [reconcileAll] does not send it. */
+    const val OPENED_MAX_AGE_S = 24L * 3600
 
     /**
      * `~/.claude-remote/opened.d/$N`: a session opened (or restored) by someone other than this device's own launch
@@ -380,10 +425,13 @@ internal object ManifestCommands {
      *    the transcript does not exist yet — claude forks on --resume and reports the new
      *    id before writing its jsonl);
      *  - `opened`: one `OPENED <mtime epoch> <base64 name> <marker json>` line per file of
-     *    `~/.claude-remote/opened.d` ([openedMarkerBody]); a parser that predates it ignores the section.
+     *    `~/.claude-remote/opened.d` ([openedMarkerBody]) younger than [OPENED_MAX_AGE_S] (an older one is never
+     *    adopted, and the files live 7 days: no reason to send them every round); a parser that predates it ignores
+     *    the section.
      */
     fun reconcileAll(names: Collection<String>): String =
         RECONCILE_ALL.replace("@@TD@@", TOMBSTONE_DAYS.toString())
+            .replace("@@OPENED_S@@", OPENED_MAX_AGE_S.toString())
             .replace("@@NAMES@@", if (names.isEmpty()) "''" else names.joinToString(" ") { sq(it) })
 
     private val RECONCILE_ALL = """set +e
@@ -413,7 +461,7 @@ echo "CAPF ${'$'}p ${'$'}M ${'$'}X ${'$'}OFF"
 f="${'$'}C/sessions/${'$'}p.json"
 if [ -f "${'$'}f" ]; then v=${'$'}(jq -r '.sessionId // empty' "${'$'}f" 2>/dev/null); ok=-; [ -n "${'$'}v" ] && { ls "${'$'}HOME"/.claude/projects/*/"${'$'}v".jsonl >/dev/null 2>&1 || ls "${'$'}C"/projects/*/"${'$'}v".jsonl >/dev/null 2>&1; } && ok=${'$'}v; echo "SID ${'$'}p ${'$'}ok"; fi
 done; true; echo "__END_claude__ rc=${'$'}?"
-for f in "${'$'}D"/opened.d/*; do [ -f "${'$'}f" ] || continue; printf 'OPENED %s %s ' "${'$'}(stat -c %Y "${'$'}f" 2>/dev/null || echo 0)" "${'$'}(printf '%s' "${'$'}{f##*/}" | base64 -w0)"; head -c 2048 "${'$'}f" 2>/dev/null | tr '\n\r\t' '   '; echo; done; echo "__END_opened__ rc=0""""
+ONOW=${'$'}(date +%s); for f in "${'$'}D"/opened.d/*; do [ -f "${'$'}f" ] || continue; OM=${'$'}(stat -c %Y "${'$'}f" 2>/dev/null || echo 0); [ ${'$'}(( ONOW - OM )) -lt @@OPENED_S@@ ] || continue; printf 'OPENED %s %s ' "${'$'}OM" "${'$'}(printf '%s' "${'$'}{f##*/}" | base64 -w0)"; head -c 2048 "${'$'}f" 2>/dev/null | tr '\n\r\t' '   '; echo; done; echo "__END_opened__ rc=0""""
 
     /**
      * The pid-pinned UUID probe of one tmux session (what `readRealSessionId` runs): the

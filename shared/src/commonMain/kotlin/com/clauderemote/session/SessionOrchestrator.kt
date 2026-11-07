@@ -2835,6 +2835,10 @@ class SessionOrchestrator(
             }
         }
         if (why == null) FileLogger.log(TAG, "Reply $reply to $sessionId sent (${notified?.key}): ${text.length} chars")
+        // Answering a session whose close is still in its undo window means keeping it ("Vrátit"), not answering it
+        // and having it killed seconds later. Only once the keys reached the pane: a refused answer (another
+        // prompt by now, nothing to verify against) must not bring back a session the user closed.
+        if (replyReachedThePane(why)) reclaimPendingClose(sessionId)
         return why
     }
 
@@ -3027,12 +3031,17 @@ class SessionOrchestrator(
     )
 
     /**
-     * The user asked for [sessionId] from outside the tab bar (a notification tap, Velín, an answer from the watch):
+     * The user asked for [sessionId] from outside the tab bar (a notification tap, Velín, History, an answer that
+     * reached the pane — [sendReply] calls it):
      * if its close is still waiting out the undo window, that is "Vrátit". They want this session, and a tab hidden by
      * a pending close would otherwise be switched straight away from by App's hidden-tab guard, then killed. Not done
      * in [switchTab]: that also runs after a close went through, onto whatever tab [TabManager.removeTab] picked,
      * which may be another pending one. True when a close was undone.
      */
+    internal fun replyReachedThePane(why: com.clauderemote.session.service.RefuseReason?): Boolean =
+        why == null || why == com.clauderemote.session.service.RefuseReason.MAYBE_SENT ||
+            why == com.clauderemote.session.service.RefuseReason.TYPED_NOT_SENT
+
     fun reclaimPendingClose(sessionId: String): Boolean {
         val undone = pendingCloses.undo(sessionId) ?: return false
         FileLogger.log(TAG, "Close of ${undone.sessionId} undone: the session was opened again within its undo window")
@@ -3146,8 +3155,12 @@ class SessionOrchestrator(
                 result == com.clauderemote.session.service.RestoreResult.LoginRequired
             if (!running) return@withContext result to null
             val folder = record.restoreFolder ?: return@withContext result to null
-            val resumeId = (result as? com.clauderemote.session.service.RestoreResult.Restored)?.sessionId
-                ?: freshSessionId ?: sessionId ?: record.sessionId ?: record.launchSessionId
+            // The conversation the pane resumed, not the registry's id from the answer: the tab's Restart and rebuild
+            // resume this id, so it must be one with a transcript (the script says which one it took when it fell
+            // back to the launch id).
+            val resumeId = freshSessionId
+                ?: (result as? com.clauderemote.session.service.RestoreResult.Restored)?.resumedId
+                ?: sessionId ?: record.sessionId ?: record.launchSessionId
             val tab = try {
                 launchSession(
                     server = server,

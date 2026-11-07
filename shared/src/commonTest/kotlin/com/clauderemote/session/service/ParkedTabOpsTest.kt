@@ -166,13 +166,12 @@ class ParkedTabOpsTest {
         assertEquals(false, p.recentlyClosedLocally("s2", "claude-server-old", 60_000)) // names are only unique per server
         assertEquals(false, p.recentlyClosedLocally("s1", "claude-server-other", 60_000))
         assertEquals(false, p.recentlyClosedLocally("s1", "claude-server-old", -1))
-        // server side went over the exec transport: tombstone FIRST, then the kill, then the manifest
+        // server side went over the exec transport: tombstone, record and kill in ONE exec, then the manifest
         val cmds = exec.calls.map { it.cmd }
         assertTrue("forgotten" in cmds[0], cmds[0])
-        // the close record rides in the tombstone's exec, after it and before the kill (Jarvis F0b)
-        assertEquals(ManifestCommands.tombstoneAndRecord("claude-server-old", durable = true, by = "app"), cmds[0])
-        assertEquals("tmux kill-session -t '=claude-server-old'", cmds[1])
-        assertTrue(cmds.size >= 3)
+        assertEquals(ManifestCommands.closeCommand("claude-server-old", durable = true, by = "app"), cmds[0])
+        assertTrue(cmds.drop(1).none { "kill-session" in it }, "no second exec for the kill: $cmds")
+        assertTrue(cmds.size >= 2)
     }
 
     @Test fun aPruneIsRecordedAsPruneAndTransient() = runTest {
@@ -181,7 +180,7 @@ class ParkedTabOpsTest {
         val p = persistence(w, transcript(w))
         p.forgetSession("t1", userInitiated = false)
         testScheduler.runCurrent()
-        assertEquals(ManifestCommands.tombstoneAndRecord("claude-server-old", durable = false, by = "prune"), exec.calls.first().cmd)
+        assertEquals(ManifestCommands.closeCommand("claude-server-old", durable = false, by = "prune"), exec.calls.first().cmd)
     }
 
     @Test fun forgetHandsBackTheServerSideSoAnExitCanWaitForIt() = runTest {
@@ -190,7 +189,8 @@ class ParkedTabOpsTest {
         val cleanup = persistence(w, transcript(w)).forgetSession("t1", userInitiated = true)
         assertTrue(cleanup != null && !cleanup.isCompleted, "the server side runs after forgetSession returns")
         cleanup!!.join()
-        assertEquals("tmux kill-session -t '=claude-server-old'", exec.calls[1].cmd)
+        // the kill is part of the first (and only) close exec: an exit that waits for this job waits for the kill
+        assertTrue("tmux kill-session -t '=claude-server-old'" in exec.calls[0].cmd, exec.calls[0].cmd)
     }
 
     @Test fun aDelayedCloseTouchesNothingUntilItsWindowEndsThenTombstonesDurably() = runTest {
@@ -212,7 +212,7 @@ class ParkedTabOpsTest {
         testScheduler.runCurrent()
         val cmds = exec.calls.map { it.cmd }
         assertTrue("durable=1" in cmds[0], "durable tombstone first: ${cmds[0]}")
-        assertEquals("tmux kill-session -t '=claude-server-old'", cmds[1])
+        assertTrue(cmds[0].indexOf("durable=1") < cmds[0].indexOf("kill-session"), "then the kill, in the same exec")
         assertTrue(w.storage.load().isEmpty())
     }
 

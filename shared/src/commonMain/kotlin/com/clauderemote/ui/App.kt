@@ -786,6 +786,7 @@ fun App(
     // "Ta konverzace běží v X": its tab here, else attach to it the way a remote row is opened.
     fun goToRunning(entry: com.clauderemote.session.ClosedEntry, tmuxName: String) {
         restoreOutcome = null
+        if (!com.clauderemote.session.RecentlyClosed.canGoTo(tmuxName)) return
         closedListDialog = false
         tabManager.tabs.value.firstOrNull { it.server.id == entry.serverId && it.tmuxSessionName == tmuxName }?.let {
             switchActiveSession(it.id)
@@ -815,16 +816,17 @@ fun App(
     }
 
     // Ctrl/Cmd+Shift+T: a close still in its undo window is undone (free: the pane never died); else the newest
-    // recently closed session is restored, read fresh. Nothing to restore → the list says why.
+    // session THIS device closed is restored, read fresh. Nothing of ours to restore → the list (with the others').
     fun reopenLastClosed() {
-        val undo = com.clauderemote.session.RecentlyClosed.reopenTarget(pendingCloses.state.value.pending.map { it.sessionId }, emptyList())
+        val ownBy = sessionOrchestrator.ownCloseBy
+        val undo = com.clauderemote.session.RecentlyClosed.reopenTarget(pendingCloses.state.value.pending.map { it.sessionId }, emptyList(), ownBy)
         if (undo is com.clauderemote.session.ReopenTarget.Undo) {
             afterUndo(listOfNotNull(pendingCloses.undo(undo.sessionId)))
             return
         }
         scope.launch {
             if (!closedLoading) readRecentlyClosed(full = true)
-            when (val t = com.clauderemote.session.RecentlyClosed.reopenTarget(emptyList(), currentClosedEntries())) {
+            when (val t = com.clauderemote.session.RecentlyClosed.reopenTarget(emptyList(), currentClosedEntries(), ownBy)) {
                 is com.clauderemote.session.ReopenTarget.Restore -> startRestore(t.entry)
                 else -> closedListDialog = true
             }
@@ -2008,9 +2010,11 @@ fun App(
                             }
                         },
                         onAttachLive = { hist ->
-                            // Switch to the already-open tab (uuid matched).
+                            // Switch to the already-open tab (uuid matched). Opening one whose close is still in its
+                            // undo window is "Vrátit", as from Velín and a notification.
                             val tab = tabs.firstOrNull { it.claudeSessionId == hist.uuid }
                             if (tab != null) {
+                                sessionOrchestrator.reclaimPendingClose(tab.id)
                                 switchActiveSession(tab.id)
                                 currentScreen = Screen.TERMINAL
                             }

@@ -127,9 +127,11 @@ internal object RecentlyClosed {
     private val UUIDISH = Regex("^[0-9a-f-]{8,64}$")
 
     /**
-     * The rows of the section, newest first: per server and tmux name only the newest close; nothing older than
-     * [MAX_AGE_S]; nothing whose name is [live] now (it runs, it is in the session list, a restore would only say
-     * "taken"). [perServer] holds what each server answered; a null read is not a server with nothing closed.
+     * The rows of the section, newest first: per server and tmux name one close — the newest that can be restored,
+     * else the newest (an empty record, written by an older build over a pane that was already gone, must not hide
+     * the real one before it); nothing older than [MAX_AGE_S]; nothing whose name is [live] now (it runs, it is in
+     * the session list, a restore would only say "taken"). [perServer] holds what each server answered; a null read
+     * is not a server with nothing closed. `cr-session restore` picks the same way.
      */
     fun merge(
         perServer: List<Pair<Pair<String, String>, List<ClosedRecord>>>,
@@ -141,21 +143,29 @@ internal object RecentlyClosed {
         return all
             .filter { e -> e.record.atEpochSeconds?.let { nowEpochS - it <= MAX_AGE_S } ?: true }
             .sortedByDescending { it.record.atEpochSeconds ?: Long.MIN_VALUE }
-            .distinctBy { it.serverId to it.record.tmuxName }
+            .groupBy { it.serverId to it.record.tmuxName }
+            .values
+            .map { same -> same.firstOrNull { canStartFresh(it.record) } ?: same.first() }
+            .sortedByDescending { it.record.atEpochSeconds ?: Long.MIN_VALUE }
             .filter { (it.serverId to it.record.tmuxName) !in live }
             .take(limit)
     }
 
     /**
      * Ctrl/Cmd+Shift+T: a close still inside its undo window wins (it has no record yet, and undoing it is free:
-     * the pane never died); else the newest row that can be restored. [pendingInOrder] = PendingCloses' pending
-     * ids in the order that state lists them (newest LAST).
+     * the pane never died); else the newest row that can be restored and that THIS device closed ([ownBy]): the
+     * shortcut undoes my own close, another device's or Jarvis's closes are restored from the list only.
+     * [pendingInOrder] = PendingCloses' pending ids in the order that state lists them (newest LAST).
      */
-    fun reopenTarget(pendingInOrder: List<String>, entries: List<ClosedEntry>): ReopenTarget {
+    fun reopenTarget(pendingInOrder: List<String>, entries: List<ClosedEntry>, ownBy: String): ReopenTarget {
         pendingInOrder.lastOrNull()?.let { return ReopenTarget.Undo(it) }
-        return entries.firstOrNull { canResume(it.record) || canStartFresh(it.record) }?.let { ReopenTarget.Restore(it) }
+        return entries.firstOrNull { it.record.by == ownBy && (canResume(it.record) || canStartFresh(it.record)) }
+            ?.let { ReopenTarget.Restore(it) }
             ?: ReopenTarget.Nothing
     }
+
+    /** "Přejít na ni" is offered only for the app's own sessions (the script names one on its own tmux socket only). */
+    fun canGoTo(tmuxName: String): Boolean = tmuxName.startsWith("claude-server-")
 
     /** The UI's reaction to [result] of restoring [record]. */
     fun actionFor(result: RestoreResult, record: ClosedRecord, serverName: String): RestoreAction {
@@ -164,12 +174,14 @@ internal object RecentlyClosed {
             is RestoreResult.Restored -> RestoreAction.OpenTab(loginRequired = false)
             RestoreResult.LoginRequired -> RestoreAction.OpenTab(loginRequired = true)
             is RestoreResult.Exists -> result.suggestedName?.takeIf { it.isNotBlank() }?.let { RestoreAction.OfferName(it) }
-                ?: RestoreAction.Message("Jméno je obsazené", "Pod jménem „$name“ už běží jiná session a volné náhradní jméno se nenašlo.")
+                ?: RestoreAction.Message("Jméno je obsazené", "Jméno „$name“ je obsazené a volné náhradní jméno se nenašlo.")
             RestoreResult.PendingSelfHeal -> RestoreAction.Message(
                 "Čeká na self-heal",
                 "Server ještě drží „$name“ v manifestu a do minuty ji sám spustí. Zkus to za minutu.",
             )
-            is RestoreResult.RunningElsewhere -> RestoreAction.GoTo(result.tmuxName)
+            // only one of ours can be switched to: a tab on another name would push it into the manifest, and a
+            // later close of that tab would kill a session that was never the app's
+            is RestoreResult.RunningElsewhere -> RestoreAction.GoTo(result.tmuxName?.takeIf { canGoTo(it) })
             is RestoreResult.NoTranscript -> RestoreAction.OfferCandidate(result.candidateSessionId)
             is RestoreResult.LoggedOut -> RestoreAction.Message(
                 "Účet není přihlášený",
@@ -199,7 +211,7 @@ internal data class Adoption(val marker: OpenedMarker, val entry: PersistedSessi
  * `pushSessionsToServer` harmless (pushMerge: incoming wins) — a guessed mode or model would overwrite the truth.
  */
 internal object OpenedAdoption {
-    const val MAX_AGE_S = 24L * 3600
+    const val MAX_AGE_S = com.clauderemote.session.service.ManifestCommands.OPENED_MAX_AGE_S
 
     /**
      * Unknown (null) markers, live names or manifest = nothing. A marker is adopted when it is younger than

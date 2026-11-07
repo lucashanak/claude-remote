@@ -222,7 +222,8 @@ internal fun RestoreOutcomeDialog(
         is com.clauderemote.session.RestoreAction.OfferName -> {
             val alias = com.clauderemote.model.TmuxNameParser.parse(a.suggestedName, e!!.serverName).alias.ifBlank { a.suggestedName }
             title = "Jméno je obsazené"
-            text = "Pod jménem „$name“ už běží jiná session. Obnovit tuhle konverzaci jako „$alias“?"
+            // EXISTS comes only after the server found this conversation running nowhere: the name holds another one
+            text = "Jméno „$name“ je obsazené jinou session (tahle konverzace nikde neběží). Obnovit ji jako „$alias“?"
             confirm = { TextButton(onClick = { onRestoreAs(e, a.suggestedName) }) { Text("Obnovit jako „$alias“", color = c.accent) } }
             dismiss = { TextButton(onClick = onDismiss) { Text("Zrušit", color = c.textDim) } }
         }

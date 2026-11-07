@@ -161,6 +161,53 @@ class PendingClosesTest {
         assertEquals(listOf("a"), h.forgotten)
     }
 
+    /**
+     * Leaving the app while a facts check still runs: flush waits for it (up to its limit), so a BLOCK about to arrive
+     * still keeps the tab; a check that does not answer in time closes, as at the deadline. Nothing blocks the caller.
+     */
+    @Test fun flushWaitsBrieflyForARunningCheckAndHonoursItsBlock() = runTest {
+        val answers = mutableMapOf<String, CompletableDeferred<CloseCheck?>>()
+        val h = harness(check = { s -> answers.getOrPut(s.id) { CompletableDeferred() }.await() })
+        h.closes.close(tab("busy"))
+        h.closes.close(tab("clear"))
+        h.closes.close(tab("silent"))
+        runCurrent()
+        val flush = h.closes.flush()
+        runCurrent()
+        assertEquals(emptyList(), h.forgotten, "no close before the checks have had their chance")
+        assertEquals(setOf("busy", "clear", "silent"), h.closes.state.value.hiddenIds, "still hidden meanwhile")
+        answers.getValue("busy").complete(CloseCheck.Block("běží tah"))
+        answers.getValue("clear").complete(CloseCheck.Clear)
+        advance(PendingCloses.FLUSH_CHECK_WAIT_MS - 1)
+        assertEquals(emptyList(), h.forgotten)
+        advance(1)
+        assertEquals(setOf("clear", "silent"), h.forgotten.toSet(), "a BLOCK keeps its tab, an unanswered check closes")
+        assertEquals(listOf("busy"), h.closes.state.value.blocked.map { it.sessionId })
+        assertTrue(flush.isCompleted)
+        advance(60_000)
+        assertEquals(2, h.forgotten.size, "no timer fires one of them again")
+    }
+
+    @Test fun flushDoesNotWaitWhenEveryCheckHasAnswered() = runTest {
+        val h = harness(check = { CloseCheck.Warn("1 necommitnutý soubor") })
+        h.closes.close(tab("a"))
+        runCurrent()
+        h.closes.flush()
+        runCurrent()
+        assertEquals(listOf("a"), h.forgotten)
+    }
+
+    @Test fun anUndoDuringTheFlushWaitKeepsTheTab() = runTest {
+        val h = harness(check = { awaitCancellation() })
+        h.closes.close(tab("a"))
+        runCurrent()
+        h.closes.flush()
+        runCurrent()
+        assertEquals("a", h.closes.undo("a")?.sessionId, "the user is back within the wait")
+        advance(PendingCloses.FLUSH_CHECK_WAIT_MS)
+        assertEquals(emptyList(), h.forgotten)
+    }
+
     @Test fun flushWithNothingPendingIsImmediate() = runTest {
         val h = harness()
         val flush = h.closes.flush()

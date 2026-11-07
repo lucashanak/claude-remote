@@ -74,8 +74,11 @@ class SessionOpsIntegrationTest {
             cfg="${'$'}{CLAUDE_CONFIG_DIR:-${'$'}HOME/.claude}"
             case "${'$'}cfg" in "${'$'}HOME"/*) ;; *) echo "stand-in: config dir outside HOME" >&2; exit 9 ;; esac
             sid=""; prev=""; for a in "${'$'}@"; do case "${'$'}prev" in --session-id|--resume) sid=${'$'}a ;; esac; prev=${'$'}a; done
-            mkdir -p "${'$'}cfg/sessions"
-            printf '{"pid":%s,"sessionId":"%s","cwd":"%s","version":"9.9.9","status":"idle"}\n' "${'$'}${'$'}" "${'$'}sid" "${'$'}PWD" > "${'$'}cfg/sessions/${'$'}${'$'}.json"
+            # STANDIN_NO_REGISTRY: a claude that has not written its registry yet (only its argv names the conversation)
+            if [ -z "${'$'}{STANDIN_NO_REGISTRY:-}" ]; then
+              mkdir -p "${'$'}cfg/sessions"
+              printf '{"pid":%s,"sessionId":"%s","cwd":"%s","version":"9.9.9","status":"idle"}\n' "${'$'}${'$'}" "${'$'}sid" "${'$'}PWD" > "${'$'}cfg/sessions/${'$'}${'$'}.json"
+            fi
             exec '${copy.absolutePath}' '${body.absolutePath}' "${'$'}@"
 
             """.trimIndent(),
@@ -251,15 +254,19 @@ class SessionOpsIntegrationTest {
         assertEquals("$nameA-2", (SessionRestore.parse(r.out) as RestoreResult.Exists).suggestedName, r.out)
         assertEquals(pid, panePid(nameA), "the session under the taken name must be untouched")
         val ok = SessionRestore.parse(cr("restore", nameA, "--name", "$nameA-2", "--wait", "10").out)
-        assertTrue(ok is RestoreResult.Restored && ok.registry && ok.sessionId == sidA, "restored: $ok")
+        assertTrue(ok is RestoreResult.Restored && ok.registry && ok.sessionId == sidA && ok.resumedId == sidA, "restored: $ok")
+        // the same record once more, under the next free name: the conversation runs in …-2 now, no second process
+        assertEquals(RestoreResult.RunningElsewhere("$nameA-2"), SessionRestore.parse(cr("restore", nameA, "--name", "$nameA-3", "--wait", "5").out))
+        assertFalse("$nameA-3" in fixture.tmuxSessions())
         assertEquals(0, drift().exit)
         waitUntil(10_000, "drift to adopt both. log:\n${fixture.driftLog()}") { manifestNames().containsAll(listOf(nameA, "$nameA-2")) }
         assertTrue(File(fixture.home, ".claude-remote/forgotten.d/$nameA").exists().not(), "the open of $nameA lifted its tombstone")
     }
 
     /**
-     * The app's path: tombstone + record in one exec, kill, restore with the app's inline command; the restored
-     * session survives drift ticks and its marker says `restore`.
+     * The app's path: tombstone + record + kill in ONE exec, restore with the app's inline command; the restored
+     * session survives drift ticks and its marker says `restore`. Restoring the same record again — under its name or
+     * under the offered `…-2`, as two taps or two devices would — is refused: the conversation already runs.
      */
     @Test
     fun theAppsCloseRecordAndInlineRestoreRoundTrip() {
@@ -268,9 +275,15 @@ class SessionOpsIntegrationTest {
         open(nameA, dir, sidA)
         open(nameB, folder("projB"), sidB)
         assertEquals(0, drift().exit)
-        val t = sh(ManifestCommands.tombstoneAndRecord(nameA, durable = true, by = "app:android-test"))
+        File(fixture.home, ".claude-remote/opened.d").mkdirs(); File(fixture.home, ".claude-remote/opened.d/$nameA").writeText("{}")
+        val t = sh(ManifestCommands.closeCommand(nameA, durable = true, by = "app:android-test"))
         assertEquals(0, t.exit, t.out)
-        assertEquals(0, sh("tmux kill-session -t '=$nameA'").exit)
+        assertEquals(0, ManifestCommands.closeKillStatus(t.out), t.out)
+        assertFalse(nameA in fixture.tmuxSessions(), "the one exec killed the pane")
+        assertFalse(File(fixture.home, ".claude-remote/opened.d/$nameA").exists(), "and dropped its marker")
+        // a second close of the gone pane (a retried exec): tombstone again, but no empty record over the real one
+        assertEquals(0, sh(ManifestCommands.closeCommand(nameA, durable = true, by = "app:android-test")).exit)
+        assertEquals(1, assertNotNull(ClosedRecords.parseRead(sh(ManifestCommands.readClosed()).out)).count { it.tmuxName == nameA })
         val rec = assertNotNull(ClosedRecords.parseRead(sh(ManifestCommands.readClosed()).out)).first()
         assertEquals("app:android-test", rec.by); assertNotNull(rec.pid); assertEquals(sidA, rec.sessionId)
         assertEquals(0, drift().exit)
@@ -283,8 +296,54 @@ class SessionOpsIntegrationTest {
         assertTrue(nameA in manifestNames() && nameA in fixture.tmuxSessions(), "restored session in the manifest. log:\n${fixture.driftLog()}")
         val m = assertNotNull(ReconcileParse.parseOpened(sh(ManifestCommands.reconcileAll(listOf(nameA))).out)).single { it.tmuxName == nameA }
         assertEquals("restore", m.by)
-        // a second restore of the same record: the name is live now
-        assertTrue(SessionRestore.parse(sh(SessionRestore.restoreCommand(rec)).out) is RestoreResult.Exists)
+        // a second restore of the same record: the conversation runs under its name now
+        assertEquals(RestoreResult.RunningElsewhere(nameA), SessionRestore.parse(sh(SessionRestore.restoreCommand(rec)).out))
+        assertEquals(RestoreResult.RunningElsewhere(nameA), SessionRestore.parse(sh(SessionRestore.restoreCommand(rec, tmuxName = "$nameA-2")).out))
+        assertFalse("$nameA-2" in fixture.tmuxSessions(), "never a second claude over one transcript")
+    }
+
+    /**
+     * A claude that has not written its registry yet (it is still starting, or `--resume` of a big transcript): only
+     * its argv names the conversation. Restore and `cr-session open --resume` see it there and say where it runs.
+     */
+    @Test
+    fun aConversationRunningWithoutARegistryIsFoundByItsArgv() {
+        val dir = folder("projA")
+        transcript(dir, sidA)
+        open(nameA, dir, sidA)
+        assertEquals("CLOSED", cr("close", nameA, "--token", token(nameA)).out.trim())
+        val claude = File(fixture.shims, "claude").absolutePath
+        assertEquals(0, fixture.tmux("new-session", "-d", "-s", nameB, "cd '${dir.absolutePath}' && STANDIN_NO_REGISTRY=1 $claude --resume $sidA").exit)
+        waitUntil(10_000, "the registry-less claude") { sh("ps -eo comm=,args= | awk '\$1 == \"claude\" && /--resume $sidA/'").out.isNotBlank() }
+
+        assertEquals(RestoreResult.RunningElsewhere(nameB), SessionRestore.parse(cr("restore", nameA, "--wait", "5").out))
+        assertFalse(nameA in fixture.tmuxSessions(), "nothing started")
+        val o = cr("open", "--name", "claude-server-projA-yolo--again", "--folder", dir.absolutePath, "--resume", sidA)
+        assertEquals("RUNNING_ELSEWHERE $nameB", o.out.trim()); assertEquals(1, o.exit)
+        assertFalse("claude-server-projA-yolo--again" in fixture.tmuxSessions())
+    }
+
+    /**
+     * `cr-session close` takes the `--self` its `facts` was asked with (the token then matches) and refuses what the
+     * app's snackbar refuses — a draft in the input box here — unless `--force`.
+     */
+    @Test
+    fun closeRefusesABlockedSessionUnlessForced() {
+        val rule = "\\342\\224\\200\\342\\224\\200\\342\\224\\200"
+        val prompt = "\\342\\235\\257\\302\\240"
+        val script = File(fixture.root, "typed.sh")
+        script.writeText("printf 'history\\n$rule\\n${prompt}hello\\n$rule\\n  status\\n'; exec sleep 3600\n")
+        val n = "claude-server-typed"
+        assertEquals(0, fixture.tmux("new-session", "-d", "-s", n, "bash ${script.absolutePath}").exit)
+        waitUntil(5_000, "$n drawn") { fixture.tmux("capture-pane", "-p", "-t", "=$n:").out.contains("status") }
+        val tok = assertNotNull(CloseFactsCommands.token(cr("facts", n, "--self", "android-1-x").out))
+        val r = cr("close", n, "--token", tok, "--self", "android-1-x")
+        // the pane's own `sleep` is a foreign process too
+        assertEquals("REFUSED_BLOCKED DRAFT,PROCESSES", r.out.trim()); assertEquals(1, r.exit)
+        assertTrue(n in fixture.tmuxSessions(), "a refused close leaves the session")
+        assertEquals("CLOSED", cr("close", n, "--token", tok, "--self", "android-1-x", "--force", "--reason", "test").out.trim())
+        assertFalse(n in fixture.tmuxSessions())
+        assertContains(File(fixture.home, ".claude-remote/jarvis-ops.log").readText(), "close $n by=jarvis kill=0 force=1")
     }
 
     /** The draft is read from the screen: typed text after `❯ ` counts, a dim suggestion does not; a shell's job is a foreign process. */
@@ -312,6 +371,7 @@ class SessionOpsIntegrationTest {
         // a job the pane's shell runs next to claude is
         assertEquals(0, fixture.tmux("new-session", "-d", "-s", "claude-server-job", "bash -c 'sleep 3600 & ${File(fixture.shims, "claude").absolutePath} --session-id $sidB; wait'").exit)
         waitUntil(10_000, "the job pane's claude") { cr("facts", "claude-server-job").out.contains(Regex("FACT pid [0-9]+")) }
-        assertContains(cr("facts", "claude-server-job").out, "FACT procs 1 sleep")
+        // counted once it is older than a statusline run (CloseFactsCommands.PROC_MIN_AGE_S)
+        waitUntil(10_000, "the job counted") { cr("facts", "claude-server-job").out.contains("FACT procs 1 sleep") }
     }
 }

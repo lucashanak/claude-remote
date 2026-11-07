@@ -37,6 +37,54 @@ class SessionOpsParseTest {
         return p.exitValue() to out
     }
 
+    /** [bash] with extra [env]; [stubTmux] puts [tmuxStub] first on PATH (no tmux is ever reached then). */
+    private fun bashEnv(cmd: String, home: File, env: Map<String, String> = emptyMap(), stubTmux: Boolean = false): Pair<Int, String> {
+        val pb = ProcessBuilder("bash", "-c", cmd).directory(home).redirectErrorStream(true)
+        pb.environment()["HOME"] = home.absolutePath
+        if (stubTmux) pb.environment()["PATH"] = tmuxStub(home).absolutePath + ":" + pb.environment()["PATH"]
+        pb.environment().putAll(env)
+        val p = pb.start()
+        val out = p.inputStream.bufferedReader().readText()
+        if (!p.waitFor(60, TimeUnit.SECONDS)) { p.destroyForcibly(); fail("timeout") }
+        return p.exitValue() to out
+    }
+
+    /**
+     * A `tmux` stand-in under [home] (not tmux: a script that answers the record's two questions): one pane whose pid
+     * is `$STUB_PANE` (none when empty), its path `$STUB_PATH`; `kill-session` logs whether the tombstone and the
+     * record were already there; anything else fails like a missing server.
+     */
+    private fun tmuxStub(home: File): File {
+        val dir = File(home, "stubbin").apply { mkdirs() }
+        File(dir, "tmux").apply {
+            writeText(
+                "#!/usr/bin/env bash\n" +
+                    "case \"\$*\" in\n" +
+                    "  *list-panes*) [ -n \"\${STUB_PANE:-}\" ] && echo \"\$STUB_PANE\" ;;\n" +
+                    "  *display-message*) echo \"\${STUB_PATH:-/w}\" ;;\n" +
+                    "  *kill-session*) D=\"\$HOME/.claude-remote\"; t=0; grep -q . \"\$D/forgotten\" 2>/dev/null && t=1; " +
+                    "echo \"kill tomb=\$t rec=\$(cat \"\$D/closed.jsonl\" 2>/dev/null | wc -l)\" >> \"\$HOME/stub.log\" ;;\n" +
+                    "  *) exit 1 ;;\n" +
+                    "esac\n",
+            )
+            setExecutable(true)
+        }
+        return dir
+    }
+
+    /** A process named `claude` (a copy of bash, see 9b84c00) with [args] after its own `-c 'sleep 300; :' x`. */
+    private fun fakeClaude(home: File, vararg args: String, env: Map<String, String> = emptyMap()): Process {
+        val bin = File(home, "fakebin").apply { mkdirs() }
+        val copy = File(bin, "claude")
+        if (!copy.exists()) {
+            File(ProcessBuilder("bash", "-c", "command -v bash").start().inputStream.bufferedReader().readText().trim()).copyTo(copy)
+            copy.setExecutable(true)
+        }
+        val pb = ProcessBuilder(listOf(copy.absolutePath, "-c", "sleep 300; :", "x") + args).directory(home)
+        pb.environment().putAll(env)
+        return pb.start()
+    }
+
     // ---- closed.jsonl -----------------------------------------------------------------------
 
     @Test fun aRecordLineIsReadToleratingMissingAndUnknownFields() {
@@ -75,22 +123,33 @@ class SessionOpsParseTest {
         assertNull(ClosedRecords.parseRead("""{"tmuxName":"a"}"""), "no end marker: cut off, not empty")
     }
 
-    /** The record is written by bash and read back by the parser; the tombstone still happens when the record cannot. */
+    /**
+     * The record is written by bash and read back by the parser; the tombstone still happens when the record cannot.
+     * A pane that is gone gets no record at all: an empty line would shadow the real one a restore needs.
+     */
     @Test fun theRecordBodyWritesAParsableLineTrimsTheFileAndNeverFailsTheTombstone() {
         val h = home()
+        val pane = ProcessBuilder("sleep", "300").start()
         try {
             val name = "claude-server-my proj's tab"
-            val (rc, out) = bash(ManifestCommands.tombstoneAndRecord(name, durable = true, by = "app:android-x"), h)
-            assertEquals(0, rc, out)
             val d = File(h, ".claude-remote")
+            val live = mapOf("STUB_PANE" to pane.pid().toString(), "STUB_PATH" to "/w/my proj")
+
+            // no pane (closed twice, or a prune of a dead one): tombstone yes, record no
+            val (rc0, out0) = bashEnv(ManifestCommands.tombstoneAndRecord(name, durable = true, by = "app:android-x"), h, stubTmux = true)
+            assertEquals(0, rc0, out0)
+            assertTrue(File(d, "forgotten.d/$name").isFile, "the durable tombstone")
+            assertFalse(File(d, "closed.jsonl").exists(), "no pane, no record")
+
+            val (rc, out) = bashEnv(ManifestCommands.tombstoneAndRecord(name, durable = true, by = "app:android-x"), h, live, stubTmux = true)
+            assertEquals(0, rc, out)
             val rec = assertNotNull(ClosedRecords.parseLine(File(d, "closed.jsonl").readLines().single()), File(d, "closed.jsonl").readText())
             assertEquals(name, rec.tmuxName); assertEquals("app:android-x", rec.by); assertEquals(true, rec.durable)
-            assertNull(rec.pid, "no pane: no claude"); assertNotNull(rec.at)
-            assertTrue(File(d, "forgotten.d/$name").isFile, "the durable tombstone")
+            assertNull(rec.pid, "a pane without claude"); assertNotNull(rec.at); assertEquals("/w/my proj", rec.restoreFolder)
 
             // a prune: transient, by prune, with a reason; then the file is cut to its last 500 lines
             File(d, "closed.jsonl").writeText((1..ManifestCommands.CLOSED_MAX_LINES).joinToString("") { """{"tmuxName":"old-$it"}""" + "\n" })
-            assertEquals(0, bash(ManifestCommands.closeRecord("claude-server-p", "prune", durable = false, reason = "gone"), h).first)
+            assertEquals(0, bashEnv(ManifestCommands.closeRecord("claude-server-p", "prune", durable = false, reason = "gone"), h, live, stubTmux = true).first)
             val lines = File(d, "closed.jsonl").readLines()
             assertEquals(ManifestCommands.CLOSED_MAX_LINES, lines.size)
             assertEquals("old-2", ClosedRecords.parseLine(lines.first())!!.tmuxName)
@@ -99,11 +158,71 @@ class SessionOpsParseTest {
 
             // closed.jsonl cannot be written (a directory): the tombstone still lands and the exit status is its own
             File(d, "closed.jsonl").delete(); File(d, "closed.jsonl").mkdirs()
-            val (rc2, out2) = bash(ManifestCommands.tombstoneAndRecord("claude-server-z", durable = true, by = "app:x"), h)
+            val (rc2, out2) = bashEnv(ManifestCommands.tombstoneAndRecord("claude-server-z", durable = true, by = "app:x"), h, live, stubTmux = true)
             assertEquals(0, rc2, out2)
             assertTrue(File(d, "forgotten.d/claude-server-z").isFile)
             assertTrue(File(d, "forgotten").readLines().contains("claude-server-z"))
         } finally {
+            pane.destroyForcibly()
+            safeDeleteTree(h)
+        }
+    }
+
+    /**
+     * The app's close is ONE command: tombstone, record (the pane still lives), the opened.d marker gone, then the
+     * kill — in that order, its status printed for the app; the exit status stays the tombstone's.
+     */
+    @Test fun theAppsCloseIsOneCommandInTheRightOrder() {
+        val h = home()
+        val pane = ProcessBuilder("sleep", "300").start()
+        try {
+            val name = "claude-server-p--a"
+            val d = File(h, ".claude-remote")
+            File(d, "opened.d").mkdirs(); File(d, "opened.d/$name").writeText("{}")
+            val (rc, out) = bashEnv(ManifestCommands.closeCommand(name, durable = true, by = "app:x"), h,
+                mapOf("STUB_PANE" to pane.pid().toString()), stubTmux = true)
+            assertEquals(0, rc, out)
+            assertEquals(0, ManifestCommands.closeKillStatus(out), out)
+            assertEquals("kill tomb=1 rec=1", File(h, "stub.log").readText().trim(), "the kill came after the tombstone and the record")
+            assertFalse(File(d, "opened.d/$name").exists(), "a close from the app drops the marker, as cr-session close does")
+            assertNull(ManifestCommands.closeKillStatus("no kill line"))
+        } finally {
+            pane.destroyForcibly()
+            safeDeleteTree(h)
+        }
+    }
+
+    /**
+     * claude-local exports its own config dir and execs plain `claude`: the record says LOCAL, finds the transcript
+     * there. A pane whose claude is gone takes account, model, mode and conversation from the manifest.
+     */
+    @Test fun theRecordKnowsClaudeLocalAndFallsBackToTheManifest() {
+        val h = home()
+        var claude: Process? = null
+        val shell = ProcessBuilder("sleep", "300").start()
+        try {
+            val lc = File(h, "claude-local/cc-config")
+            claude = fakeClaude(h, "--session-id", sid, env = mapOf("CLAUDE_CONFIG_DIR" to lc.absolutePath))
+            File(lc, "sessions").mkdirs()
+            File(lc, "sessions/${claude.pid()}.json").writeText("""{"pid":${claude.pid()},"sessionId":"$sid","cwd":"/w/l"}""")
+            File(lc, "projects/-w-l").mkdirs(); File(lc, "projects/-w-l/$sid.jsonl").writeText("{}\n")
+            val d = File(h, ".claude-remote").apply { mkdirs() }
+            assertEquals(0, bashEnv(ManifestCommands.closeRecord("claude-server-l", "app:x", durable = true), h,
+                mapOf("STUB_PANE" to claude.pid().toString()), stubTmux = true).first)
+            val local = assertNotNull(ClosedRecords.parseRead(bash(ManifestCommands.readClosed(), h).second)).first()
+            assertEquals("LOCAL", local.model); assertNull(local.account); assertEquals(sid, local.sessionId)
+            assertEquals(File(lc, "projects/-w-l/$sid.jsonl").absolutePath, local.transcript)
+
+            File(d, "sessions.restore.json").writeText(
+                """[{"tmuxSessionName":"claude-server-m","accountSlug":"acc","claudeSessionId":"$sid2","model":"OPUS","mode":"PLAN"}]""",
+            )
+            assertEquals(0, bashEnv(ManifestCommands.closeRecord("claude-server-m", "app:x", durable = true), h,
+                mapOf("STUB_PANE" to shell.pid().toString()), stubTmux = true).first)
+            val m = assertNotNull(ClosedRecords.parseRead(bash(ManifestCommands.readClosed(), h).second)).first()
+            assertEquals("claude-server-m", m.tmuxName)
+            assertEquals("acc", m.account); assertEquals(sid2, m.launchSessionId); assertEquals("OPUS", m.model); assertEquals("PLAN", m.mode)
+        } finally {
+            claude?.destroyForcibly(); shell.destroyForcibly()
             safeDeleteTree(h)
         }
     }
@@ -132,7 +251,8 @@ class SessionOpsParseTest {
         // no registry: a recent `work` without a stop is a running turn, an old one is not trusted
         assertEquals("běží tah", only(*with("status", "FACT status - -").let { a -> a.map { if (it.startsWith("FACT event")) "FACT event work 30 0" else it }.toTypedArray() }).blockText)
         assertEquals(CloseLevel.OK, only(*with("status", "FACT status - -").let { a -> a.map { if (it.startsWith("FACT event")) "FACT event work 99999 0" else it }.toTypedArray() }).level)
-        assertEquals("běží úlohy na pozadí", only(*with("event", "FACT event stop 4000 1")).blockText)
+        assertEquals("běží úlohy na pozadí", only(*with("event", "FACT event stop 100 1")).blockText)
+        assertEquals(CloseLevel.OK, only(*with("event", "FACT event stop 4000 1")).level, "a stop long ago: its tasks are processes by now, or gone")
         assertEquals("rozepsaný vstup", only(*with("draft", "FACT draft 1")).blockText)
         assertEquals(CloseLevel.OK, only(*with("draft", "FACT draft -")).level, "no input box visible: no draft claim")
         assertEquals("dívá se jiné zařízení", only(*with("clients", "FACT clients 1 1")).blockText)
@@ -151,6 +271,36 @@ class SessionOpsParseTest {
         assertEquals("5 necommitnutých souborů", CloseFactsCommands.czCount(5, "necommitnutý soubor", "necommitnuté soubory", "necommitnutých souborů"))
     }
 
+    /** `cr-session close` refuses with the shell twin of the BLOCK rules: the same codes as the app's parser. */
+    @Test fun theShellBlockRulesAreTheParsersRules() {
+        val h = home()
+        try {
+            val wf = java.util.Base64.getEncoder().encodeToString("dialog".toByteArray())
+            val cases = listOf(
+                idle, with("status", "FACT status busy -"), with("status", "FACT status waiting $wf"),
+                with("status", "FACT status - -").map { if (it.startsWith("FACT event")) "FACT event work 30 0" else it }.toTypedArray(),
+                with("status", "FACT status - -").map { if (it.startsWith("FACT event")) "FACT event perm 30 0" else it }.toTypedArray(),
+                with("status", "FACT status - -").map { if (it.startsWith("FACT event")) "FACT event work 99999 0" else it }.toTypedArray(),
+                with("status", "FACT status busy -").map { if (it.startsWith("FACT event")) "FACT event ask 30 0" else it }.toTypedArray(),
+                with("event", "FACT event stop 100 1"), with("event", "FACT event stop 4000 1"), with("event", "FACT event - - 0"),
+                with("draft", "FACT draft 1"), with("draft", "FACT draft -"),
+                with("clients", "FACT clients 1 1"), with("clients", "FACT clients 2 -"), with("clients", "FACT clients 1 0"),
+                with("procs", "FACT procs 3 node,gradle"), with("git", "FACT git 3 1 7"),
+                arrayOf("FACT alive 0"),
+                with("draft", "FACT draft 1").map { if (it.startsWith("FACT procs")) "FACT procs 1 sleep" else it }.toTypedArray(),
+            )
+            for (c in cases) {
+                val out = (c.toList() + listOf("TOKEN 1.x", CloseFactsCommands.END)).joinToString("\n")
+                val (rc, sh) = bash(CloseFactsCommands.BLOCKS_SH + "\nprintf '%s\\n' ${ManifestCommands.sq(out)} | cr_blocks", h)
+                assertEquals(0, rc, sh)
+                val parsed = CloseFactsCommands.parse(out).reasons.filter { it.level == CloseLevel.BLOCK }.map { it.code.name }
+                assertEquals(parsed, sh.trim().split(',').filter { it.isNotEmpty() }, "facts: ${c.toList()}")
+            }
+        } finally {
+            safeDeleteTree(h)
+        }
+    }
+
     /** The marker name the facts read is exactly the one the attach preamble writes. */
     @Test fun selfMarkerIsTheAttachPreamblesFile() {
         val key = CloseFactsCommands.selfMarkerFor("claude-server-a b", "android-1234")
@@ -164,7 +314,10 @@ class SessionOpsParseTest {
     @Test fun restoreResultsParse() {
         fun p(s: String) = SessionRestore.parse("noise\n${SessionRestore.RESULT_PREFIX} $s\n")
         assertEquals(RestoreResult.Restored(42, sid, true), p("RESTORED 42 $sid"))
+        assertEquals(RestoreResult.Restored(42, sid, true, resumedId = sid2), p("RESTORED 42 $sid $sid2"))
         assertEquals(RestoreResult.Restored(null, null, false), p("RESTORED_NO_REGISTRY"))
+        assertEquals(RestoreResult.Restored(null, null, false, resumedId = sid2), p("RESTORED_NO_REGISTRY $sid2"))
+        assertEquals(RestoreResult.Failed("tmux-timeout"), p("FAILED tmux-timeout"))
         assertEquals(RestoreResult.Exists("claude-server-a--b-2"), p("EXISTS claude-server-a--b-2"))
         assertEquals(RestoreResult.PendingSelfHeal, p("PENDING_SELF_HEAL"))
         assertEquals(RestoreResult.RunningElsewhere("claude-server-q"), p("RUNNING_ELSEWHERE claude-server-q"))
@@ -226,10 +379,29 @@ class SessionOpsParseTest {
             val pid = sleeper.pid()
             val start = File("/proc/$pid/stat").readText().substringAfterLast(") ").split(' ')[19]
             File(h, ".claude/sessions/$pid.json").writeText("""{"pid":$pid,"sessionId":"$sid2","procStart":"$start","tmux":"claude-server-other:@1.%1"}""")
-            assertEquals(RestoreResult.RunningElsewhere("claude-server-other"), restore())
+            // where: only a pane of THIS socket counts (the registry's own `tmux` names no socket), and there is none
+            assertEquals(RestoreResult.RunningElsewhere(null), restore())
             // a recycled pid (another procStart) is not that process
             File(h, ".claude/sessions/$pid.json").writeText("""{"pid":$pid,"sessionId":"$sid2","procStart":"1","tmux":"claude-server-other:@1.%1"}""")
             assertEquals(RestoreResult.LoggedOut("default"), restore())
+
+            // no registry yet (claude writes it once it is up): its argv `--resume <id>` is enough. The restore's own
+            // bash carries the id in its argv too, and is no claude.
+            val c = fakeClaude(h, "--dangerously-skip-permissions", "--resume", sid2)
+            try {
+                assertEquals(RestoreResult.RunningElsewhere(null), restore())
+                assertEquals(RestoreResult.RunningElsewhere(null), restore(record(folder = h.absolutePath, s = sid2, l = null)))
+            } finally {
+                c.destroyForcibly(); c.waitFor()
+            }
+            assertEquals(RestoreResult.LoggedOut("default"), restore(), "gone with its process")
+            // the candidate is searched in the record's account too
+            File(proj, "$sid2.jsonl").delete()
+            val accProj = File(d, "accounts/acc/projects/" + h.absolutePath.replace(Regex("[^A-Za-z0-9]"), "-")).apply { mkdirs() }
+            cand.delete()
+            File(accProj, "55555555-2222-3333-4444-555555555555.jsonl").apply { writeText("{}\n"); setLastModified(1793985603L * 1000 + 30_000) }
+            assertEquals(RestoreResult.NoTranscript("55555555-2222-3333-4444-555555555555"), restore(record(folder = h.absolutePath, account = "acc")))
+            File(proj, "$sid2.jsonl").writeText("{}\n")
 
             // a manifest entry of the name that is not tombstoned waits for drift's self-heal
             File(d, "sessions.restore.json").writeText("""[{"tmuxSessionName":"claude-server-p--a"}]""")
@@ -275,7 +447,9 @@ class SessionOpsParseTest {
         try {
             val write = "N='claude-server-x y'; BY=jarvis; F='/w/it'\"'\"'s'; A=acc; S=$sid; TASK=''\n" + ManifestCommands.openedMarkerBody()
             assertEquals(0, bash(write, h).first)
-            val loop = ManifestCommands.reconcileAll(emptyList()).lines().first { it.startsWith("for f in \"\$D\"/opened.d/") }
+            // a marker older than a day is never adopted: the section does not send it
+            File(h, ".claude-remote/opened.d/claude-server-old").apply { writeText("{}\n"); setLastModified(System.currentTimeMillis() - 25 * 3600_000L) }
+            val loop = ManifestCommands.reconcileAll(emptyList()).lines().first { it.contains("\"/opened.d/*") }
             val (rc, out) = bash("D=\"\$HOME/.claude-remote\"\n$loop", h)
             assertEquals(0, rc, out)
             val m = assertNotNull(ReconcileParse.parseOpened(out)).single()

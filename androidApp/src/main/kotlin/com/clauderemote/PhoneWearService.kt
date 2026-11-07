@@ -102,8 +102,8 @@ class PhoneWearService : WearableListenerService() {
             return
         }
         // An answer from the wrist to a session whose close is still in its undo window (the watch may hold a
-        // snapshot from before the close) keeps that session: "Vrátit", not an answer followed by the kill.
-        orchestrator.reclaimPendingClose(sessionId)
+        // snapshot from before the close) keeps that session once it reached the pane: sendReply undoes the close
+        // after its checks, so a refused answer does not.
         val why = try {
             kotlinx.coroutines.runBlocking {
                 orchestrator.sendReply(sessionId, PromptFingerprint.decode(rawPrompt), reply, text)

@@ -48,6 +48,9 @@ internal object CloseFactsCommands {
     /** Activity younger than this is worth a warning. */
     const val RECENT_S = 600
 
+    /** A foreign process of the pane younger than this is not counted (a statusline or hook run, gone in a moment). */
+    const val PROC_MIN_AGE_S = 3
+
     /**
      * Read-only facts of the session `$N`. `$SELF` (may be empty) names this device's client marker
      * (`~/.claude-remote/clients/<SELF>`, written by `TmuxProbes.singleClientPreamble` on every attach): the client
@@ -81,8 +84,8 @@ internal object CloseFactsCommands {
         fi
         cfg_of() { tr '\0' '\n' < "/proc/§1/environ" 2>/dev/null | sed -n 's|^CLAUDE_CONFIG_DIR=||p' | head -n 1; }
         if [ -n "§PP" ]; then
-          PS=§(ps -eo pid=,ppid=,comm= 2>/dev/null)
-          TREE=§(printf '%s\n' "§PS" | awk -v root="§PP" '{ k[§2]=k[§2]" "§1; c[§1]=§3 } END { h=0;t=0;q[t++]=root; while(h<t){p=q[h++];print p, c[p];m=split(k[p],a," ");for(i=1;i<=m;i++)if(a[i]!="")q[t++]=a[i]} }')
+          PS=§(ps -eo pid=,ppid=,etimes=,comm= 2>/dev/null)
+          TREE=§(printf '%s\n' "§PS" | awk -v root="§PP" '{ k[§2]=k[§2]" "§1; c[§1]=§4 } END { h=0;t=0;q[t++]=root; while(h<t){p=q[h++];print p, c[p];m=split(k[p],a," ");for(i=1;i<=m;i++)if(a[i]!="")q[t++]=a[i]} }')
           for p in §(printf '%s\n' "§TREE" | cut -d' ' -f1); do
             c=§(cfg_of "§p")
             if [ -f "§{c:-§HOME/.claude}/sessions/§p.json" ]; then CP=§p; CFG=§c; break; fi
@@ -142,16 +145,17 @@ internal object CloseFactsCommands {
         echo "FACT clients §OTHERS §SELFON"
         # processes in the pane that are not claude, not its MCP servers and not a plain shell: what a shell (the
         # pane's own, or one claude spawned for a tool) runs — a dev server, a build, a background task
+        # (a process younger than @@YOUNG@@ s is not counted: claude's statusline, `sh -c node …`, and hooks come and go)
         PR=""
         if [ -n "§PP" ]; then
-          PR=§(printf '%s\n' "§PS" | awk -v root="§PP" -v cl="§{CP:-0}" '
-            { k[§2]=k[§2]" "§1; c[§1]=§3 }
+          PR=§(printf '%s\n' "§PS" | awk -v root="§PP" -v cl="§{CP:-0}" -v young=@@YOUNG@@ '
+            { k[§2]=k[§2]" "§1; e[§1]=§3; c[§1]=§4 }
             function shell(n) { return n ~ /^-?(ba|da|z|k|fi|tc|c)?sh§/ || n == "login" }
             END {
               h=0; t=0; q[t]=root; z[t]=0; t++
               while (h<t) { p=q[h]; zz=z[h]; h++
                 if (p == cl) zc = 1; else if (zz == 1) zc = (shell(c[p]) ? 3 : 2); else zc = zz
-                if ((zc == 0 && !shell(c[p]) && p != cl) || (zz == 3)) { n++; if (!(c[p] in seen)) { seen[c[p]]=1; names = names (names==""?"":",") c[p] } }
+                if (((zc == 0 && !shell(c[p]) && p != cl) || (zz == 3)) && e[p] + 0 >= young) { n++; if (!(c[p] in seen)) { seen[c[p]]=1; names = names (names==""?"":",") c[p] } }
                 m=split(k[p],a," "); for(i=1;i<=m;i++) if (a[i]!="") { q[t]=a[i]; z[t]=zc; t++ } }
               print (n+0), (names==""?"-":names) }')
         fi
@@ -181,7 +185,34 @@ internal object CloseFactsCommands {
         echo "@@END@@"
         )
         """.trimIndent(),
-    ).replace("@@VIEW@@", VIEWER_ACTIVE_S.toString()).replace("@@END@@", END)
+    ).replace("@@VIEW@@", VIEWER_ACTIVE_S.toString()).replace("@@END@@", END).replace("@@YOUNG@@", PROC_MIN_AGE_S.toString())
+
+    /**
+     * `cr_blocks`: reads a facts output on stdin and prints the codes of its BLOCK reasons, comma-joined (empty = none),
+     * the shell twin of the BLOCK rules in [parse] (a test runs both over the same outputs). `cr-session close` refuses
+     * with it; the app needs no twin, it parses.
+     */
+    internal val BLOCKS_SH: String = sh(
+        """
+        cr_blocks() {
+          awk -v busy=@@BUSY@@ '
+            function add(c) { if (!(c in seen)) { seen[c] = 1; out = out (out == "" ? "" : ",") c } }
+            §1 == "FACT" { a[§2] = §3; b[§2] = §4; c[§2] = §5 }
+            END {
+              if (a["alive"] == "0") { print ""; exit }
+              st = a["status"]; ev = a["event"]; age = b["event"]; bg = c["event"]
+              young = (age ~ /^[0-9]+§/ && age + 0 < busy)
+              if (st == "busy") add("BUSY"); if (st == "waiting") add("WAITING")
+              if ((st == "" || st == "-") && young) { if (ev == "work") add("BUSY"); if (ev == "ask" || ev == "perm") add("WAITING") }
+              if (ev == "stop" && bg == "1" && young) add("BACKGROUND")
+              if (a["draft"] == "1") add("DRAFT")
+              if (a["clients"] + 0 > 0 && b["clients"] != "0") add("VIEWER")
+              if (a["procs"] + 0 > 0) add("PROCESSES")
+              print out
+            }'
+        }
+        """.trimIndent(),
+    ).replace("@@BUSY@@", EVENT_BUSY_S.toString())
 
     /** The value of `TOKEN` in [out], or null. */
     fun token(out: String): String? =
@@ -225,7 +256,11 @@ internal object CloseFactsCommands {
             "work" -> block(CloseReason.Code.BUSY, "běží tah")
             "ask", "perm" -> block(CloseReason.Code.WAITING, "čeká na odpověď")
         }
-        if (evName == "stop" && ev?.getOrNull(2) == "1") block(CloseReason.Code.BACKGROUND, "běží úlohy na pozadí")
+        // a `stop` that left background tasks running: a BLOCK only while it is recent — a later event would have
+        // replaced it, and tasks still running then show up as processes of the pane anyway
+        if (evName == "stop" && ev?.getOrNull(2) == "1" && evAge != null && evAge < EVENT_BUSY_S) {
+            block(CloseReason.Code.BACKGROUND, "běží úlohy na pozadí")
+        }
         if (f["draft"]?.firstOrNull() == "1") block(CloseReason.Code.DRAFT, "rozepsaný vstup")
         val others = num(f["clients"]?.getOrNull(0)) ?: 0
         val selfOn = f["clients"]?.getOrNull(1)

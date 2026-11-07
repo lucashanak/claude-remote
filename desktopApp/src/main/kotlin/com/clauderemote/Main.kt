@@ -496,15 +496,16 @@ fun main() = application {
     sessionOrchestrator.restoreAndReconnect()
 
     // Leaving the app runs the pending tab closes now (Jarvis R7 = 7b) instead of losing them with the JVM; the
-    // join covers the server side too (tombstone, kill). The window goes away first, so waiting for that (at most
-    // 5 s, and only when a close is pending) never looks like a frozen window.
+    // join covers a facts check still under way and the server side (tombstone, record, kill: one exec). The window
+    // goes away first, so waiting for that (EXIT_WAIT_MS at most, and only when a close is pending) never looks like
+    // a frozen window.
     var exiting by remember { mutableStateOf(false) }
     val exitAfterPendingCloses: () -> Unit = {
         if (!exiting) {
             exiting = true
             val flush = sessionOrchestrator.pendingCloses.flush()
             Thread({
-                kotlinx.coroutines.runBlocking { kotlinx.coroutines.withTimeoutOrNull(5_000) { flush.join() } }
+                kotlinx.coroutines.runBlocking { kotlinx.coroutines.withTimeoutOrNull(com.clauderemote.session.PendingCloses.EXIT_WAIT_MS) { flush.join() } }
                 javax.swing.SwingUtilities.invokeLater {
                     sshConnector?.close()
                     exitApplication()
