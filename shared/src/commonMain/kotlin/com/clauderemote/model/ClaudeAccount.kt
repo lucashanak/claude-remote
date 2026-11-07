@@ -159,6 +159,60 @@ data class FolderPolicy(
 }
 
 /**
+ * The one form a folder takes when a [FolderPolicy] is written or looked up.
+ * The same directory reaches the policy code in several spellings: the folder
+ * picker and `recentFolders` say `~/kontexta`, a tab attached from a tmux name
+ * says `kontexta` (TmuxNameParser keeps only the last segment), and a tab
+ * restored from the server manifest or resumed from history says
+ * `/home/lucas/kontexta`. Compared as raw strings they never meet, so a policy
+ * set in one spelling silently missed sessions opened in another.
+ *
+ * Canonical form: `~` or `~/rel` for anything under the server's home, an
+ * absolute path otherwise. A relative path is taken relative to home, because
+ * that is where the launch `cd` runs from. [home] is the server's home
+ * directory when known; without it an absolute path under home stays absolute
+ * and only matches another absolute spelling.
+ */
+fun canonicalPolicyFolder(folder: String, home: String? = null): String {
+    var p = RemotePath.normalize(folder)
+    while (p.startsWith("./")) p = p.removePrefix("./")
+    if (p == ".") return "~"
+    val h = home?.let { RemotePath.normalize(it) }?.takeIf { it.startsWith("/") && it != "/" }
+    return when {
+        // `~` and `~/x`, and also `~user/x`, which is not ours to rewrite.
+        p.startsWith("~") -> p
+        h != null && p == h -> "~"
+        h != null && p.startsWith("$h/") -> "~" + p.removePrefix(h)
+        p.startsWith("/") -> p
+        else -> "~/$p"
+    }
+}
+
+/**
+ * The home directory a policy lookup assumes for an SSH login. The app never
+ * learns the real `$HOME` synchronously, and the policy lookup runs inside
+ * composition, so this is the conventional Linux layout. A wrong guess only
+ * means an absolute spelling falls back to exact matching, as before.
+ */
+fun policyHomeFor(username: String): String? = when {
+    username.isBlank() -> null
+    username == "root" -> "/root"
+    else -> "/home/$username"
+}
+
+/**
+ * Whether a policy keyed on [policyKey] applies to a session in [folder], both
+ * already in [canonicalPolicyFolder] form. A policy covers its folder and every
+ * folder under it (Claude's own worktrees live in `<repo>/.claude/worktrees`),
+ * but not siblings that merely share a prefix: `~/kontexta-deploy` is a
+ * different checkout and may belong to a different account. A policy on `~` or
+ * `/` covers only that exact folder, otherwise it would quietly govern every
+ * project on the server.
+ */
+fun policyCoversFolder(policyKey: String, folder: String): Boolean =
+    policyKey == folder || (policyKey != "~" && policyKey != "/" && folder.startsWith("$policyKey/"))
+
+/**
  * Accounts offerable for a folder. An empty allow-set means unrestricted; a
  * non-empty one that matches nothing (accounts were removed since it was set)
  * also falls back to the full list rather than locking the user out of their

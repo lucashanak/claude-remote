@@ -20,6 +20,8 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.clauderemote.model.ClaudeAccount
 import com.clauderemote.model.FolderPolicy
+import com.clauderemote.model.canonicalPolicyFolder
+import com.clauderemote.model.policyHomeFor
 import com.clauderemote.model.SshServer
 import com.clauderemote.model.accountSlugFromEmail
 import com.clauderemote.session.SessionOrchestrator
@@ -264,6 +266,11 @@ fun AccountsScreen(
                 CRCard {
                     Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
                         val configuredFolders = (policies.keys + draftFolders).distinct().sorted()
+                        // Compared canonically: the file may spell a folder `kontexta`
+                        // while a recent says `~/kontexta`, and offering or adding the
+                        // second would show two rows for one folder.
+                        val policyHome = selectedServer?.let { policyHomeFor(it.username) }
+                        val configuredCanonical = configuredFolders.map { canonicalPolicyFolder(it, policyHome) }.toSet()
                         if (configuredFolders.isEmpty()) {
                             Text(
                                 "No folder-specific policy — every folder offers every account.",
@@ -278,7 +285,7 @@ fun AccountsScreen(
                                     accounts = accounts,
                                     onChange = { updated ->
                                         selectedServer?.let { srv ->
-                                            folderPolicyStorage.set(srv.id, folder, updated)
+                                            folderPolicyStorage.set(srv.id, folder, updated, policyHome)
                                             // Publish immediately: a rule only kept
                                             // on this device is exactly the bug this
                                             // replaced.
@@ -298,7 +305,7 @@ fun AccountsScreen(
                                         }
                                     },
                                     onRemove = {
-                                        selectedServer?.let { srv -> folderPolicyStorage.clear(srv.id, folder) }
+                                        selectedServer?.let { srv -> folderPolicyStorage.clear(srv.id, folder, policyHome) }
                                         draftFolders = draftFolders - folder
                                         refreshPolicies()
                                     },
@@ -308,10 +315,11 @@ fun AccountsScreen(
                         HorizontalDivider(color = c.border)
                         AddFolderPolicyRow(
                             suggestions = (selectedServer?.recentFolders ?: emptyList())
-                                .filterNot { it in configuredFolders },
+                                .filterNot { canonicalPolicyFolder(it, policyHome) in configuredCanonical },
                             onAdd = { folder ->
-                                if (folder.isNotBlank() && folder !in configuredFolders) {
-                                    draftFolders = draftFolders + folder
+                                val canonical = canonicalPolicyFolder(folder, policyHome)
+                                if (folder.isNotBlank() && canonical !in configuredCanonical) {
+                                    draftFolders = draftFolders + canonical
                                 }
                             },
                         )

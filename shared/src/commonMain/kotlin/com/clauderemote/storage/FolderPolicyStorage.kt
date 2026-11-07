@@ -1,6 +1,8 @@
 package com.clauderemote.storage
 
 import com.clauderemote.model.FolderPolicy
+import com.clauderemote.model.canonicalPolicyFolder
+import com.clauderemote.model.policyCoversFolder
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
@@ -41,26 +43,59 @@ class FolderPolicyStorage(private val prefs: KeyValueStore) {
     // older one, and vice versa.
     private val json = Json { ignoreUnknownKeys = true; coerceInputValues = true; encodeDefaults = true }
 
-    fun get(serverId: String, folder: String): FolderPolicy =
-        load()[compositeKey(serverId, folder)]?.toDomain() ?: FolderPolicy()
+    /**
+     * The policy for a session in [folder]: the one keyed on that folder, or on
+     * the nearest folder above it (see [policyCoversFolder]). Keys and [folder]
+     * are both compared in [canonicalPolicyFolder] form, so `kontexta`,
+     * `~/kontexta` and `/home/lucas/kontexta` find the same policy whichever
+     * spelling stored it — the server file is matched as written, not rewritten.
+     */
+    fun get(serverId: String, folder: String, home: String? = null): FolderPolicy {
+        val target = canonicalPolicyFolder(folder, home)
+        val prefix = "$serverId$SEPARATOR"
+        return load()
+            .filterKeys { it.startsWith(prefix) }
+            .mapNotNull { (key, dto) ->
+                val policyKey = canonicalPolicyFolder(key.removePrefix(prefix), home)
+                if (policyCoversFolder(policyKey, target)) policyKey to dto else null
+            }
+            // Most specific wins: a rule on `~/repo/sub` overrides one on `~/repo`.
+            .maxByOrNull { it.first.length }
+            ?.second?.toDomain() ?: FolderPolicy()
+    }
 
-    fun set(serverId: String, folder: String, policy: FolderPolicy) {
-        val key = compositeKey(serverId, folder)
+    /**
+     * Stores [policy] for [folder]. An existing key that already names the same
+     * folder in another spelling is reused rather than joined by a second key,
+     * so the file never holds two rules for one folder; a new folder is stored
+     * canonically.
+     */
+    fun set(serverId: String, folder: String, policy: FolderPolicy, home: String? = null) {
         val map = load().toMutableMap()
-        if (policy.isEmpty) {
-            map.remove(key)
-        } else {
-            map[key] = FolderPolicyDto.fromDomain(policy)
-        }
+        val same = sameFolderKeys(map.keys, serverId, folder, home)
+        val key = same.firstOrNull() ?: "$serverId$SEPARATOR${canonicalPolicyFolder(folder, home)}"
+        same.forEach { map.remove(it) }
+        if (!policy.isEmpty) map[key] = FolderPolicyDto.fromDomain(policy)
         save(map)
     }
 
-    fun clear(serverId: String, folder: String) {
+    fun clear(serverId: String, folder: String, home: String? = null) {
         val map = load().toMutableMap()
-        if (map.remove(compositeKey(serverId, folder)) != null) save(map)
+        val same = sameFolderKeys(map.keys, serverId, folder, home)
+        if (same.isNotEmpty()) {
+            same.forEach { map.remove(it) }
+            save(map)
+        }
     }
 
-    /** Every folder configured for [serverId], keyed by the (normalised) folder path. */
+    /** Stored keys of [serverId] that name exactly [folder] (not its parents). */
+    private fun sameFolderKeys(keys: Set<String>, serverId: String, folder: String, home: String?): List<String> {
+        val target = canonicalPolicyFolder(folder, home)
+        val prefix = "$serverId$SEPARATOR"
+        return keys.filter { it.startsWith(prefix) && canonicalPolicyFolder(it.removePrefix(prefix), home) == target }
+    }
+
+    /** Every folder configured for [serverId], keyed as stored (any spelling, see [get]). */
     fun forServer(serverId: String): Map<String, FolderPolicy> {
         val prefix = "$serverId$SEPARATOR"
         return load()
@@ -112,16 +147,5 @@ class FolderPolicyStorage(private val prefs: KeyValueStore) {
     companion object {
         private const val KEY_POLICIES = "folder_policies"
         private const val SEPARATOR = "::"
-
-        /**
-         * Trims a trailing `/` so `/repo` and `/repo/` key the same policy. Deliberately
-         * does NOT expand `~` — the app stores folders exactly as the user typed them,
-         * and expanding here would desync from how they're stored/compared elsewhere.
-         */
-        private fun normalize(folder: String): String =
-            folder.removeSuffix("/").ifEmpty { folder }
-
-        private fun compositeKey(serverId: String, folder: String): String =
-            "$serverId$SEPARATOR${normalize(folder)}"
     }
 }

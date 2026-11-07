@@ -133,4 +133,122 @@ class FolderPolicyStorageTest {
         storage.set("serverA", "/repo", FolderPolicy(defaultAccountSlug = "work"))
         assertTrue(storage.forServer("serverB").isEmpty())
     }
+
+    // --- folder spellings (the `kontexta` key that never matched) ---
+
+    private val home = "/home/lucas"
+    private val kontexta = FolderPolicy(
+        defaultAccountSlug = "lukas-kontexta-cz",
+        allowedAccountSlugs = setOf("lukas-kontexta-cz"),
+    )
+
+    /** The dev box's real folder-policies.json, imported the way App.kt does. */
+    private fun withServerFile(): FolderPolicyStorage {
+        val (storage, _) = storage()
+        storage.importFromServer(
+            "dev",
+            """{"kontexta":{"defaultAccountSlug":"lukas-kontexta-cz","allowedAccountSlugs":["lukas-kontexta-cz"]}}""",
+        )
+        return storage
+    }
+
+    @Test
+    fun relativeServerKey_matchesEveryCallersSpelling() {
+        val storage = withServerFile()
+        // ConnectScreen / recentFolders, TmuxNameParser (attach), server manifest
+        // restore and history resume, and a hand-typed trailing slash.
+        for (folder in listOf("~/kontexta", "kontexta", "/home/lucas/kontexta", "/home/lucas/kontexta/", "~/kontexta/")) {
+            assertEquals(kontexta, storage.get("dev", folder, home), folder)
+        }
+    }
+
+    @Test
+    fun withoutHome_relativeKeyStillMatchesTildeAndRelativeSpellings() {
+        val storage = withServerFile()
+        assertEquals(kontexta, storage.get("dev", "~/kontexta"))
+        assertEquals(kontexta, storage.get("dev", "kontexta"))
+        // Unknowable without home: absolute spelling falls back to no policy.
+        assertEquals(FolderPolicy(), storage.get("dev", "/home/lucas/kontexta"))
+    }
+
+    @Test
+    fun absoluteKey_matchesTildeAndRelativeSpellings() {
+        val (storage, _) = storage()
+        storage.importFromServer("dev", """{"/home/lucas/kontexta":{"defaultAccountSlug":"lukas-kontexta-cz"}}""")
+        for (folder in listOf("~/kontexta", "kontexta", "/home/lucas/kontexta")) {
+            assertEquals("lukas-kontexta-cz", storage.get("dev", folder, home).defaultAccountSlug, folder)
+        }
+    }
+
+    @Test
+    fun subfoldersInheritButSiblingCheckoutsDoNot() {
+        val storage = withServerFile()
+        assertEquals(kontexta, storage.get("dev", "/home/lucas/kontexta/web", home))
+        assertEquals(kontexta, storage.get("dev", "~/kontexta/.claude/worktrees/fix", home))
+        assertEquals(FolderPolicy(), storage.get("dev", "/home/lucas/kontexta-deploy", home))
+        assertEquals(FolderPolicy(), storage.get("dev", "kontexta-h42", home))
+        assertEquals(FolderPolicy(), storage.get("dev", "~", home))
+    }
+
+    @Test
+    fun mostSpecificPolicyWins() {
+        val storage = withServerFile()
+        storage.set("dev", "~/kontexta/web", FolderPolicy(defaultAccountSlug = "other"), home)
+        assertEquals("other", storage.get("dev", "/home/lucas/kontexta/web/src", home).defaultAccountSlug)
+        assertEquals(kontexta, storage.get("dev", "/home/lucas/kontexta/api", home))
+    }
+
+    @Test
+    fun homePolicy_doesNotGovernEveryProject() {
+        val (storage, _) = storage()
+        storage.set("dev", "~", FolderPolicy(defaultAccountSlug = "personal"), home)
+        assertEquals("personal", storage.get("dev", "/home/lucas", home).defaultAccountSlug)
+        assertEquals(FolderPolicy(), storage.get("dev", "~/kontexta", home))
+    }
+
+    @Test
+    fun set_inAnotherSpelling_reusesTheExistingKeyInsteadOfAddingASecond() {
+        val storage = withServerFile()
+        val updated = FolderPolicy(defaultAccountSlug = "lukas-kontexta-cz")
+        storage.set("dev", "/home/lucas/kontexta", updated, home)
+        assertEquals(mapOf("kontexta" to updated), storage.forServer("dev"))
+        assertEquals("""{"kontexta":{"defaultAccountSlug":"lukas-kontexta-cz","allowedAccountSlugs":[]}}""",
+            storage.exportForServer("dev"))
+    }
+
+    @Test
+    fun set_newFolder_isStoredCanonically() {
+        val (storage, _) = storage()
+        storage.set("dev", "/home/lucas/music-seeker/", FolderPolicy(defaultAccountSlug = "work"), home)
+        assertEquals(setOf("~/music-seeker"), storage.forServer("dev").keys)
+    }
+
+    @Test
+    fun set_onlyTouchesTheSameFolder_notItsParentOrSiblings() {
+        val storage = withServerFile()
+        storage.set("dev", "~/kontexta-deploy", FolderPolicy(defaultAccountSlug = "work"), home)
+        storage.set("dev", "~/kontexta/web", FolderPolicy(defaultAccountSlug = "web"), home)
+        assertEquals(setOf("kontexta", "~/kontexta-deploy", "~/kontexta/web"), storage.forServer("dev").keys)
+    }
+
+    @Test
+    fun clear_inAnotherSpelling_removesTheStoredKey() {
+        val storage = withServerFile()
+        storage.clear("dev", "~/kontexta/", home)
+        assertTrue(storage.forServer("dev").isEmpty())
+    }
+
+    @Test
+    fun clear_ofASubfolder_leavesTheParentPolicy() {
+        val storage = withServerFile()
+        storage.clear("dev", "~/kontexta/web", home)
+        assertEquals(setOf("kontexta"), storage.forServer("dev").keys)
+    }
+
+    @Test
+    fun set_emptyPolicy_inAnotherSpelling_removesTheRow() {
+        val storage = withServerFile()
+        storage.set("dev", "/home/lucas/kontexta", FolderPolicy(), home)
+        assertTrue(storage.forServer("dev").isEmpty())
+    }
 }
