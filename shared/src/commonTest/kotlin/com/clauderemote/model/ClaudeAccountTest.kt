@@ -265,4 +265,71 @@ class ClaudeAccountTest {
         assertTrue(!isAccountPreferred(p, null))
         assertTrue(isAccountPreferred(FolderPolicy(allowedAccountSlugs = setOf(ClaudeAccount.DEFAULT_SLUG)), null))
     }
+
+    // --- canonicalPolicyFolder / policyCoversFolder ---
+
+    @Test
+    fun canonicalPolicyFolder_everySpellingOfAHomeFolderMeets() {
+        val home = "/home/lucas"
+        for (spelling in listOf(
+            "kontexta", "kontexta/", "./kontexta", "~/kontexta", "~/kontexta/", "~//kontexta",
+            "/home/lucas/kontexta", "/home/lucas/kontexta/", " /home/lucas//kontexta ",
+        )) {
+            assertEquals("~/kontexta", canonicalPolicyFolder(spelling, home), spelling)
+        }
+    }
+
+    @Test
+    fun canonicalPolicyFolder_homeItself() {
+        for (spelling in listOf("~", "~/", "", ".", "/home/lucas", "/home/lucas/")) {
+            assertEquals("~", canonicalPolicyFolder(spelling, "/home/lucas"), spelling)
+        }
+    }
+
+    @Test
+    fun canonicalPolicyFolder_withoutHome_absoluteStaysAbsolute() {
+        assertEquals("/home/lucas/kontexta", canonicalPolicyFolder("/home/lucas/kontexta/"))
+        // A relative path is still home-relative: that is where the launch cd runs.
+        assertEquals("~/kontexta", canonicalPolicyFolder("kontexta"))
+    }
+
+    @Test
+    fun canonicalPolicyFolder_leavesPathsOutsideHomeAndPrefixLookalikesAbsolute() {
+        assertEquals("/srv/app", canonicalPolicyFolder("/srv/app/", "/home/lucas"))
+        // `/home/lucasx` shares a string prefix with home but is not under it.
+        assertEquals("/home/lucasx/repo", canonicalPolicyFolder("/home/lucasx/repo", "/home/lucas"))
+        assertEquals("/", canonicalPolicyFolder("/", "/home/lucas"))
+    }
+
+    @Test
+    fun canonicalPolicyFolder_ignoresUnusableHome() {
+        assertEquals("/repo", canonicalPolicyFolder("/repo", "/"))
+        assertEquals("/repo", canonicalPolicyFolder("/repo", "relative"))
+        assertEquals("~/x", canonicalPolicyFolder("/home/lucas/x", "/home/lucas/"))
+    }
+
+    @Test
+    fun policyHomeFor_conventionalLayout() {
+        assertEquals("/home/lucas", policyHomeFor("lucas"))
+        assertEquals("/root", policyHomeFor("root"))
+        assertNull(policyHomeFor(""))
+    }
+
+    @Test
+    fun policyCoversFolder_exactAndSubfoldersButNotSiblings() {
+        assertTrue(policyCoversFolder("~/kontexta", "~/kontexta"))
+        assertTrue(policyCoversFolder("~/kontexta", "~/kontexta/sub"))
+        assertTrue(policyCoversFolder("~/kontexta", "~/kontexta/.claude/worktrees/x"))
+        assertFalse(policyCoversFolder("~/kontexta", "~/kontexta-deploy"))
+        assertFalse(policyCoversFolder("~/kontexta", "~/kontexta-h42"))
+        assertFalse(policyCoversFolder("~/kontexta/sub", "~/kontexta"))
+    }
+
+    @Test
+    fun policyCoversFolder_homeAndRootCoverOnlyThemselves() {
+        assertTrue(policyCoversFolder("~", "~"))
+        assertFalse(policyCoversFolder("~", "~/kontexta"))
+        assertTrue(policyCoversFolder("/", "/"))
+        assertFalse(policyCoversFolder("/", "/srv"))
+    }
 }

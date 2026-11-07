@@ -1518,7 +1518,10 @@ fun App(
                         },
                         activeFolderPolicy = activeTabId?.let { id ->
                             tabManager.getTab(id)?.let { t ->
-                                folderPolicyStorage.get(t.server.id, t.folder)
+                                folderPolicyStorage.get(
+                                    t.server.id, t.folder,
+                                    com.clauderemote.model.policyHomeFor(t.server.username),
+                                )
                             }
                         },
                         accountTags = buildAccountTags(terminalAccounts, tabs) { slugs ->

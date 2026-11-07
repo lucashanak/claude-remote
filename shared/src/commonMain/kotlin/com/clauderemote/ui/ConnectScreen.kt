@@ -73,7 +73,9 @@ fun ConnectScreen(
     LaunchedEffect(server.id) {
         accounts = try { onLoadAccounts?.invoke() ?: emptyList() } catch (_: Exception) { emptyList() }
     }
-    val folderPolicy = remember(folder, server.id, accounts) { folderPolicyStorage?.get(server.id, folder) }
+    val folderPolicy = remember(folder, server.id, accounts) {
+        folderPolicyStorage?.get(server.id, folder, com.clauderemote.model.policyHomeFor(server.username))
+    }
     // Every account is offered; the folder policy only drives which one is
     // PRESELECTED and whether a warning shows. Hiding accounts here while the
     // live-session switcher allowed them made the guard inconsistent, and it is
