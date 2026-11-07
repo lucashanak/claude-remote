@@ -332,13 +332,14 @@ class SessionOpsIntegrationTest {
         val rule = "\\342\\224\\200\\342\\224\\200\\342\\224\\200"
         val prompt = "\\342\\235\\257\\302\\240"
         val script = File(fixture.root, "typed.sh")
-        script.writeText("printf 'history\\n$rule\\n${prompt}hello\\n$rule\\n  status\\n'; exec sleep 3600\n")
+        script.writeText("printf 'history\\n$rule\\n${prompt}hello\\n$rule\\n  status\\n'; sleep 3600\n")
         val n = "claude-server-typed"
         assertEquals(0, fixture.tmux("new-session", "-d", "-s", n, "bash ${script.absolutePath}").exit)
         waitUntil(5_000, "$n drawn") { fixture.tmux("capture-pane", "-p", "-t", "=$n:").out.contains("status") }
         val tok = assertNotNull(CloseFactsCommands.token(cr("facts", n, "--self", "android-1-x").out))
         val r = cr("close", n, "--token", tok, "--self", "android-1-x")
-        // the pane's own `sleep` is a foreign process too
+        // the shell's `sleep` child is a foreign process too. Not `exec sleep`: then the pane's own pid becomes the
+        // sleep, and whether that counts depends on how the CI's tmux/shell starts the pane command
         assertEquals("REFUSED_BLOCKED DRAFT,PROCESSES", r.out.trim()); assertEquals(1, r.exit)
         assertTrue(n in fixture.tmuxSessions(), "a refused close leaves the session")
         assertEquals("CLOSED", cr("close", n, "--token", tok, "--self", "android-1-x", "--force", "--reason", "test").out.trim())
