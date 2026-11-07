@@ -271,4 +271,38 @@ class ReplyGuardTest {
         t.sameDialog("s", permA.key)
         assertEquals(true, t.current("s")!!.names(screenD.key))
     }
+
+    @Test fun theTextOfAPromptIsKeptAndPublished() {
+        val t = PromptTokens()
+        t.note("s", permA, atMs = 1_000, text = "Bash: rm -rf build")
+        assertEquals("Bash: rm -rf build", t.current("s")?.text)
+        assertEquals(PromptTokens.Shown(t.current("s")!!, 1_000), t.shown.value["s"], "the published state mirrors current()")
+        // fireNeedsInput notes the same prompt again without a text: the text stays
+        t.note("s", permA, atMs = 1_200)
+        assertEquals("Bash: rm -rf build", t.shown.value["s"]?.current?.text)
+        assertEquals(1_000, t.shown.value["s"]?.atMs, "re-noting keeps when it appeared")
+        // a screen-first note gains the hook's text when the hook names the same prompt later
+        t.forget("s")
+        t.note("s", screenD, atMs = 5_000)
+        t.note("s", screenD, atMs = 5_100, text = "late text")
+        assertEquals("late text", t.current("s")?.text)
+        // the alias merge keeps the text
+        t.note("s", permB, atMs = 4_900, text = "Edit: a.kt")
+        t.sameDialog("s", permB.key)
+        assertEquals("Edit: a.kt", t.shown.value["s"]?.current?.text)
+        assertEquals(true, t.shown.value["s"]?.current?.names(screenD.key))
+    }
+
+    @Test fun thePublishedStateFollowsEveryRemoval() {
+        val t = PromptTokens()
+        t.note("a", permA, text = "x")
+        t.note("b", permB, text = "y")
+        assertEquals(setOf("a", "b"), t.shown.value.keys)
+        t.onActivity("a", SessionActivity.WORKING)
+        assertEquals(setOf("b"), t.shown.value.keys)
+        t.onActivity("b", SessionActivity.APPROVAL_NEEDED)
+        assertEquals(setOf("b"), t.shown.value.keys, "staying in a prompt state keeps it")
+        t.forget("b")
+        assertEquals(emptyMap(), t.shown.value)
+    }
 }

@@ -215,6 +215,7 @@ class SessionOrchestrator(
         { id -> statusService.sessionActivities.value[id] },
         statusService.promptTokens,
         { sid -> onDialogAnswered?.invoke(sid) },
+        { sid, endedAt -> statusService.markClaudeEnded(sid, endedAt) },
     )
 
     // Per-session terminal output buffer (ring buffer) + pty size tracking.
@@ -2762,6 +2763,16 @@ class SessionOrchestrator(
     fun resize(sessionId: String, cols: Int, rows: Int) = terminalIO.resize(sessionId, cols, rows)
 
     fun sendClaudeCommand(sessionId: String, command: String) = claudeControl.sendClaudeCommand(sessionId, command)
+
+    /** Every session's newest prompt with its text and age (Velín inbox); the reply check reads the same state. */
+    internal val shownPrompts: kotlinx.coroutines.flow.StateFlow<Map<String, com.clauderemote.session.service.PromptTokens.Shown>>
+        get() = statusService.promptTokens.shown
+
+    /** Sessions whose Claude exited (hook `end`, no event since), with when (device ms). */
+    val claudeEndedAt: kotlinx.coroutines.flow.StateFlow<Map<String, Long>> get() = statusService.claudeEndedAt
+
+    /** When [sessionId]'s activity last changed (device ms), or null. */
+    fun activitySinceMs(sessionId: String): Long? = statusService.activitySinceMs(sessionId)
 
     /** The prompt the session shows right now, for a view that offers a reply to it (the test notification). */
     fun currentPrompt(sessionId: String): com.clauderemote.session.service.PromptFingerprint? =

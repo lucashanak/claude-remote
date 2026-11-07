@@ -293,7 +293,12 @@ object ReplyGuard {
  * so the alert raised by the other one stays answerable.
  */
 internal class PromptTokens(private val clock: () -> Long = { System.currentTimeMillis() }) {
-    data class Current(val prompt: PromptFingerprint, val aliases: Set<String> = emptySet()) {
+    /**
+     * [text]: what the prompt asks, as its hook event put it (`perm`: "Tool: description or
+     * command", `ask`: "question [option, …]"), null for a prompt only the screen or a Stop marker
+     * named. Shown by the Velín inbox; never part of the identity a reply is checked against.
+     */
+    data class Current(val prompt: PromptFingerprint, val aliases: Set<String> = emptySet(), val text: String? = null) {
         fun names(key: String) = key == prompt.key || key in aliases
 
         /** The hook event among the names ((ev, atMs)), the primary first. */
@@ -306,11 +311,35 @@ internal class PromptTokens(private val clock: () -> Long = { System.currentTime
     private val lock = Any()
     private val tokens = HashMap<String, Entry>()
 
+    /** A session's newest prompt and when it appeared (device clock), for a view that lists them. */
+    data class Shown(val current: Current, val atMs: Long)
+
+    private val _shown = kotlinx.coroutines.flow.MutableStateFlow<Map<String, Shown>>(emptyMap())
+
+    /**
+     * The same state as [current], published so a list of open prompts (the Velín inbox) redraws
+     * when one appears, merges or goes away. Written under [lock] after every change.
+     */
+    val shown: kotlinx.coroutines.flow.StateFlow<Map<String, Shown>> = _shown
+
+    private fun publish() {
+        _shown.value = tokens.mapValues { (_, e) -> Shown(e.current, e.atMs) }
+    }
+
     /** [atMs]: when the prompt appeared, on the device clock (a hook event's time corrected for skew). */
-    fun note(sessionId: String, prompt: PromptFingerprint, atMs: Long = clock()) = synchronized(lock) {
+    fun note(sessionId: String, prompt: PromptFingerprint, atMs: Long = clock(), text: String? = null) = synchronized(lock) {
         val prev = tokens[sessionId]
-        if (prev?.current?.prompt == prompt) return@synchronized
-        tokens[sessionId] = Entry(Current(prompt), atMs, prev?.let { Entry(it.current, it.atMs, null) })
+        if (prev?.current?.prompt == prompt) {
+            // The same prompt noted again (the alert after the hook's own note): keep it, but a
+            // text the first note lacked is still worth having.
+            if (text != null && prev.current.text == null) {
+                tokens[sessionId] = Entry(prev.current.copy(text = text), prev.atMs, prev.replaced)
+                publish()
+            }
+            return@synchronized
+        }
+        tokens[sessionId] = Entry(Current(prompt, text = text), atMs, prev?.let { Entry(it.current, it.atMs, null) })
+        publish()
     }
 
     /**
@@ -333,16 +362,17 @@ internal class PromptTokens(private val clock: () -> Long = { System.currentTime
             else -> return@synchronized
         }
         tokens[sessionId] = Entry(merged, e.atMs, e.replaced)
+        publish()
     }
 
     fun onActivity(sessionId: String, activity: SessionActivity) {
         if (activity == SessionActivity.WAITING_FOR_INPUT || activity == SessionActivity.APPROVAL_NEEDED) return
-        synchronized(lock) { tokens.remove(sessionId) }
+        synchronized(lock) { if (tokens.remove(sessionId) != null) publish() }
     }
 
     fun current(sessionId: String): Current? = synchronized(lock) { tokens[sessionId]?.current }
 
-    fun forget(sessionId: String) { synchronized(lock) { tokens.remove(sessionId) } }
+    fun forget(sessionId: String) { synchronized(lock) { if (tokens.remove(sessionId) != null) publish() } }
 
     companion object {
         /**

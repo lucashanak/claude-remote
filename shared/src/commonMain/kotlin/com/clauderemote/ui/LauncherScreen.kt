@@ -82,6 +82,8 @@ fun LauncherScreen(
     onSettings: () -> Unit,
     onViewLog: () -> Unit = {},
     onHistory: (() -> Unit)? = null,
+    /** Opens the Velín (all sessions by project, and what waits for you). */
+    onVelin: (() -> Unit)? = null,
     onUsageDashboard: (() -> Unit)? = null,
     onCheckUpdate: (() -> Unit)? = null,
     serverHealth: Map<String, ServerHealth> = emptyMap(),
@@ -288,9 +290,14 @@ fun LauncherScreen(
                     LauncherSectionHeader(
                         title = sectionTitle,
                         modifier = Modifier.padding(top = m.sectionTopGap, bottom = 4.dp),
-                        trailing = if (onHistory != null || onUsageDashboard != null) {
+                        trailing = if (onHistory != null || onUsageDashboard != null || onVelin != null) {
                             {
                                 Row(verticalAlignment = Alignment.CenterVertically) {
+                                    if (onVelin != null) {
+                                        TextButton(onClick = onVelin) {
+                                            Text("Velín ›", style = CRType.bodyDim, color = c.textDim)
+                                        }
+                                    }
                                     if (onHistory != null) {
                                         TextButton(onClick = onHistory) {
                                             Text("History ›", style = CRType.bodyDim, color = c.textDim)
