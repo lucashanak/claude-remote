@@ -468,7 +468,7 @@ fun SettingsScreen(
             CRCard {
                 Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
                     SettingsSwitch(
-                        label = "Notify when Claude is ready",
+                        label = "Notifikace",
                         checked = notifications,
                         onCheckedChange = { notifications = it; settings.notificationsEnabled = it }
                     )
