@@ -204,10 +204,19 @@ class ReplyServerCommandTest {
      * socket anyway. Czech text ending in `;` arrives literally in the main pane, Enter included.
      */
     @Test fun realTmuxReceivesCzechTextWithATrailingSemicolonLiterally() {
-        if (listOf("/usr/bin/tmux", "/usr/local/bin/tmux").none { File(it).canExecute() }) return
+        // Reported as skipped, never a silent pass.
+        org.junit.Assume.assumeTrue(
+            "SKIPPED: no tmux in /usr/bin or /usr/local/bin",
+            listOf("/usr/bin/tmux", "/usr/local/bin/tmux").any { File(it).canExecute() },
+        )
         val tmuxDir = File(root, "t").apply { mkdirs() }
-        if (tmuxDir.absolutePath.length > 70) return // the socket path must stay under the 108-byte limit
-        val shim = System.getProperty("clauderemote.test.shimDir")?.let { File(it, "tmux") }?.takeIf { it.canExecute() } ?: return
+        org.junit.Assume.assumeTrue(
+            "SKIPPED: socket directory ${tmuxDir.absolutePath} is over 70 characters (socket path limit 108 bytes)",
+            tmuxDir.absolutePath.length <= 70,
+        )
+        val shim = System.getProperty("clauderemote.test.shimDir")?.let { File(it, "tmux") }?.takeIf { it.canExecute() }
+        org.junit.Assume.assumeTrue("SKIPPED: the Gradle test tmux shim is not available", shim != null)
+        shim!!
         // Replaces the recording stub: every tmux call of this test goes to the private named socket.
         // The shim runs with the PATH Gradle gave it (without this wrapper's directory), or its
         // "next tmux on PATH" would be this wrapper again — an endless exec loop.
