@@ -54,7 +54,7 @@ fun buildPaletteActions(
     onReconnect: ((String) -> Unit)?,
     onSwitchModel: (ClaudeModel) -> Unit,
     onSendEscape: () -> Unit,
-    onNavigate: (String) -> Unit, // "settings", "dashboard", "logs", "launcher"
+    onNavigate: (String) -> Unit, // "settings", "dashboard", "logs", "velin", "launcher"
     /** Effort entries, so Ctrl+Shift+E has something to land on. Null hides them. */
     onSwitchEffort: ((com.clauderemote.model.ClaudeEffort) -> Unit)? = null,
 ): List<PaletteAction> {
@@ -126,6 +126,7 @@ fun buildPaletteActions(
     actions.add(PaletteAction("nav_dashboard", "Open Usage Dashboard", "Navigation") { onNavigate("dashboard") })
     actions.add(PaletteAction("nav_account_usage", "Open Usage by Account", "Navigation") { onNavigate("account-usage") })
     actions.add(PaletteAction("nav_logs", "Open Logs", "Navigation") { onNavigate("logs") })
+    actions.add(PaletteAction("nav_velin", "Open Velín", "Navigation") { onNavigate("velin") })
     actions.add(PaletteAction("nav_launcher", "Back to Launcher", "Navigation") { onNavigate("launcher") })
 
     return actions

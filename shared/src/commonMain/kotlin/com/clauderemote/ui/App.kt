@@ -55,7 +55,7 @@ import kotlinx.coroutines.withContext
 
 enum class Screen {
     LAUNCHER, CONNECT, TERMINAL, SETTINGS, LOG_VIEWER, USAGE_DASHBOARD, HISTORY, ACCOUNTS,
-    ACCOUNT_USAGE,
+    ACCOUNT_USAGE, VELIN,
 }
 
 @Composable
@@ -111,7 +111,12 @@ fun App(
     // Which chat-mentioned paths the server confirmed are real files.
     val pathVerifyCache = remember { RemotePathCache() }
 
-    var currentScreen by remember { mutableStateOf(Screen.LAUNCHER) }
+    // The start screen is a setting (Launcher unless the user chose the Velín), read once here.
+    var currentScreen by remember {
+        mutableStateOf(if (appSettings.startScreen == AppSettings.START_VELIN) Screen.VELIN else Screen.LAUNCHER)
+    }
+    // The Velín asks once whether the app should open there; answered, it never asks again.
+    var velinStartOfferPending by remember { mutableStateOf(!appSettings.velinStartOffered) }
     // Which server's accounts the accounts screen is showing; set when opened
     // from that server's settings, which is the only way in.
     var accountsServerId by remember { mutableStateOf<String?>(null) }
@@ -494,16 +499,16 @@ fun App(
     // Scan remote sessions on startup and whenever launcher is shown
     LaunchedEffect(Unit) { scanRemoteSessions() }
     LaunchedEffect(currentScreen) {
-        if (currentScreen == Screen.LAUNCHER) scanRemoteSessions()
+        if (currentScreen == Screen.LAUNCHER || currentScreen == Screen.VELIN) scanRemoteSessions()
     }
     // Scan transcript history whenever the history browser is opened.
     LaunchedEffect(currentScreen) {
         if (currentScreen == Screen.HISTORY) scanHistory()
     }
     // Periodically refresh remote sessions while on terminal screen
-    // so the side panel stays up-to-date
+    // so the side panel stays up-to-date (and the Velín's list of sessions not open here)
     LaunchedEffect(currentScreen) {
-        if (currentScreen == Screen.TERMINAL) {
+        if (currentScreen == Screen.TERMINAL || currentScreen == Screen.VELIN) {
             while (true) {
                 kotlinx.coroutines.delay(30_000) // every 30s
                 scanRemoteSessions()
@@ -565,6 +570,28 @@ fun App(
 
     fun refreshServers() {
         serverList = serverStorage.loadServers()
+    }
+
+    // Open a tmux session the server runs but no tab shows (Launcher and Velín alike).
+    fun attachRemote(remote: RemoteSession) {
+        scope.launch {
+            try {
+                connectionError = null
+                val parsed = TmuxNameParser.parse(remote.tmuxSession.name, remote.server.name)
+                sessionOrchestrator.launchSession(
+                    server = remote.server,
+                    folder = parsed.folder,
+                    mode = if (parsed.isYolo) ClaudeMode.YOLO else remote.server.defaultClaudeMode,
+                    model = remote.server.defaultClaudeModel,
+                    connectionType = ConnectionType.SSH,
+                    tmuxSessionName = remote.tmuxSession.name,
+                    isNewTmuxSession = false
+                )
+                currentScreen = Screen.TERMINAL
+            } catch (e: Exception) {
+                connectionError = e.message
+            }
+        }
     }
 
     // The server list can also change from outside this composition — the
@@ -810,26 +837,7 @@ fun App(
                         onRestartAllSessions = {
                             scope.launch { sessionOrchestrator.restartClaudeForAllSessions() }
                         },
-                        onAttachRemote = { remote ->
-                            scope.launch {
-                                try {
-                                    connectionError = null
-                                    val parsed = TmuxNameParser.parse(remote.tmuxSession.name, remote.server.name)
-                                    sessionOrchestrator.launchSession(
-                                        server = remote.server,
-                                        folder = parsed.folder,
-                                        mode = if (parsed.isYolo) ClaudeMode.YOLO else remote.server.defaultClaudeMode,
-                                        model = remote.server.defaultClaudeModel,
-                                        connectionType = ConnectionType.SSH,
-                                        tmuxSessionName = remote.tmuxSession.name,
-                                        isNewTmuxSession = false
-                                    )
-                                    currentScreen = Screen.TERMINAL
-                                } catch (e: Exception) {
-                                    connectionError = e.message
-                                }
-                            }
-                        },
+                        onAttachRemote = { remote -> attachRemote(remote) },
                         onQuickConnect = { server ->
                             // Long-press: connect directly with defaults
                             scope.launch {
@@ -905,6 +913,7 @@ fun App(
                         onSettings = { currentScreen = Screen.SETTINGS },
                         onViewLog = { currentScreen = Screen.LOG_VIEWER },
                         onHistory = { currentScreen = Screen.HISTORY },
+                        onVelin = { currentScreen = Screen.VELIN },
                         // Per-account usage IS the usage screen now: with
                         // several seats provisioned, "which account still has
                         // room" is the question being asked, and the
@@ -1429,6 +1438,7 @@ fun App(
                                 "dashboard" -> Screen.USAGE_DASHBOARD
                                 "account-usage" -> Screen.ACCOUNT_USAGE
                                 "logs" -> Screen.LOG_VIEWER
+                                "velin" -> Screen.VELIN
                                 "launcher" -> Screen.LAUNCHER
                                 else -> Screen.LAUNCHER
                             }
@@ -1601,6 +1611,39 @@ fun App(
                         // own caller.
                         onBack = { currentScreen = Screen.ACCOUNT_USAGE },
                         onPerAccountUsage = null,
+                    )
+                }
+
+                Screen.VELIN -> {
+                    VelinScreen(
+                        tabs = tabs,
+                        remoteSessions = remoteSessions,
+                        remoteSessionsLoading = remoteSessionsLoading,
+                        sessionOrchestrator = sessionOrchestrator,
+                        accountTags = buildAccountTags(emptyList(), tabs) { slugs ->
+                            accountColorStorage.assign(slugs).mapValues { it.value.color }
+                        },
+                        onBack = { currentScreen = Screen.LAUNCHER },
+                        onRefresh = {
+                            sessionOrchestrator.probeServers(serverList, true)
+                            scanRemoteSessions()
+                        },
+                        // The same way the Launcher opens a session: it becomes the active tab.
+                        onOpenSession = { session ->
+                            switchActiveSession(session.id)
+                            currentScreen = Screen.TERMINAL
+                        },
+                        onAttachRemote = { remote -> attachRemote(remote) },
+                        onAccountUsage = {
+                            usageReturnScreen = Screen.VELIN
+                            currentScreen = Screen.ACCOUNT_USAGE
+                        },
+                        // Settings may have answered it meanwhile (choosing a start screen there counts).
+                        onStartOffer = if (velinStartOfferPending && !appSettings.velinStartOffered) { yes ->
+                            if (yes) appSettings.startScreen = AppSettings.START_VELIN
+                            appSettings.velinStartOffered = true
+                            velinStartOfferPending = false
+                        } else null,
                     )
                 }
 

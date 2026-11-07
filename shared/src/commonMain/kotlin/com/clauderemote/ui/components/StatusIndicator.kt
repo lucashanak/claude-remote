@@ -21,7 +21,11 @@ import com.clauderemote.ui.theme.CRStatusViz
 import com.clauderemote.ui.theme.CRTheme
 import com.clauderemote.ui.theme.CRType
 
-enum class CRStatus { Working, Ready, Approval, Idle, Disconnected }
+/**
+ * [Crashed]: Claude exited in a pane the app still holds (hook `end` with no event after it); it
+ * reuses the `disconnected` colour, and the Velín pairs it with its own glyph (✕).
+ */
+enum class CRStatus { Working, Ready, Approval, Idle, Disconnected, Crashed }
 
 @Composable
 fun CRStatus.color(): Color = when (this) {
@@ -30,6 +34,7 @@ fun CRStatus.color(): Color = when (this) {
     CRStatus.Approval -> CRTheme.colors.approval
     CRStatus.Idle -> CRTheme.colors.idle
     CRStatus.Disconnected -> CRTheme.colors.disconnected
+    CRStatus.Crashed -> CRTheme.colors.disconnected
 }
 
 @Composable
@@ -39,6 +44,7 @@ fun CRStatus.label(): String = when (this) {
     CRStatus.Approval -> "Approval"
     CRStatus.Idle -> "Idle"
     CRStatus.Disconnected -> "Offline"
+    CRStatus.Crashed -> "Crashed"
 }
 
 @Composable

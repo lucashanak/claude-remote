@@ -43,12 +43,30 @@ internal class StatusService(
     // prompt states must forget it.
     internal val promptTokens = PromptTokens()
 
+    // When each session's activity last CHANGED (device ms): the Velín's "time in this state".
+    // Written before the activity flow, so a redraw that sees the new activity sees its time too.
+    private val activitySince = java.util.concurrent.ConcurrentHashMap<String, Long>()
+
+    // Sessions whose newest hook event is `end` (Claude exited, the pane sits at its shell), with
+    // when it fired. Any later event of the session clears it: Claude runs again.
+    private val _claudeEndedAt = kotlinx.coroutines.flow.MutableStateFlow<Map<String, Long>>(emptyMap())
+    val claudeEndedAt: kotlinx.coroutines.flow.StateFlow<Map<String, Long>> = _claudeEndedAt
+
+    fun markClaudeEnded(sessionId: String, endedAtMs: Long?) {
+        if (endedAtMs != null) _claudeEndedAt.update { it + (sessionId to endedAtMs) }
+        else if (sessionId in _claudeEndedAt.value) _claudeEndedAt.update { it - sessionId }
+    }
+
+    /** When [id]'s activity last changed (device ms), or null when none is tracked. */
+    fun activitySinceMs(id: String): Long? = activitySince[id]
+
     fun updateActivity(sessionId: String, activity: SessionActivity) {
         if (activity == SessionActivity.WORKING) markWorkSeen(sessionId)
         if (activity == SessionActivity.APPROVAL_NEEDED) {
             lastApprovalAt[sessionId] = System.currentTimeMillis()
         }
         val previous = _sessionActivities.value[sessionId]
+        if (previous != activity) activitySince[sessionId] = System.currentTimeMillis()
         promptTokens.onActivity(sessionId, activity)
         _sessionActivities.update { it + (sessionId to activity) }
         // Refresh git status when the session goes idle (e.g. a command just
@@ -102,6 +120,8 @@ internal class StatusService(
     /** Drop a disconnected session's activity entry. */
     fun clearActivity(sessionId: String) {
         promptTokens.forget(sessionId)
+        activitySince.remove(sessionId)
+        markClaudeEnded(sessionId, null)
         _sessionActivities.update { it - sessionId }
     }
 }
