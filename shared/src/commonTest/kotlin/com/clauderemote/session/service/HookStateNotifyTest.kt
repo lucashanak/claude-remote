@@ -54,7 +54,7 @@ class HookStateNotifyTest {
             scope = scope, registry = registry, tabManager = tabs, isBackground = { background },
             updateActivity = { id, a -> status.updateActivity(id, a) },
             lastAssistantEntry = { null }, entriesOf = { emptyList() }, streamOrNull = { null },
-            onNeedsInput = { id, hint, _, _ -> needs += id to hint },
+            onNeedsInput = { id, hint, _, _, _ -> needs += id to hint },
             activityOf = { id -> status.currentActivity(id) },
         )
         val sent = Collections.synchronizedList(mutableListOf<String>())

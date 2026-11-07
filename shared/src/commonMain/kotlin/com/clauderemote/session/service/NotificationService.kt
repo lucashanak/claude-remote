@@ -210,11 +210,14 @@ internal class NotificationService(
     private val entriesOf: (String) -> List<TranscriptEntry>,
     // Bridge to transcriptService.streamOrNull — the notify watcher polls it.
     private val streamOrNull: (String) -> TranscriptStream?,
-    // Bridge to the facade's public `var onClaudeNeedsInput`.
-    private val onNeedsInput: (String, String, Boolean, String?) -> Unit,
+    // Bridge to the facade's public `var onClaudeNeedsInput`. The last argument names the prompt
+    // the alert is for, so a reply from the notification or the watch can be checked against it.
+    private val onNeedsInput: (String, String, Boolean, String?, PromptFingerprint?) -> Unit,
     // The session's current activity: a live v2 `stop` may only LEAVE an approval, never overwrite
     // the ready state the legacy Stop marker (which lands first) has already set.
     private val activityOf: (String) -> SessionActivity? = { null },
+    // Bridge to statusService.promptTokens: the newest prompt of the session (ReplyGuard).
+    private val notePrompt: (String, PromptFingerprint) -> Unit = { _, _ -> },
 ) {
     // Prompt detection for notifications — quiescence-based, reads rendered screen state.
     internal val promptDetector = InputPromptDetector().apply {
@@ -468,6 +471,7 @@ internal class NotificationService(
         // platform callback is invoked OUTSIDE the lock (never hold a lock
         // across a platform callback).
         val key = eventKey ?: lastAssistantEntry(sessionId)?.id?.let { "$hint#$it" }
+        val prompt = NotifyKeys.prompt(eventKey)
         val source = dialogSource(eventKey)
         // Outside lastNotifiedKey's monitor: the reducer has its own lock and never takes this one.
         val (pendingHookApproval, hooksLive) = if (source != null) hookApprovalOf(sessionId) else (null to false)
@@ -491,6 +495,9 @@ internal class NotificationService(
                 // Stop markers stay debounced — several fire inside one turn
                 // (model handoff, tool retries) and the user experiences them as
                 // a single completion. See NotifyKeys.isDebounceExempt.
+                // Past both "same prompt" gates: this is the session's newest prompt even when the
+                // debounce swallows its alert, so a reply to the previous one no longer matches it.
+                prompt?.let { notePrompt(sessionId, it) }
                 val last = lastNeedsInputAt[sessionId] ?: 0L
                 if (!NotifyKeys.isDebounceExempt(eventKey) && now - last < notifyDebounceMs) {
                     FileLogger.log(TAG, "Suppressed needs-input for $sessionId (debounce)")
@@ -503,7 +510,7 @@ internal class NotificationService(
             }
         }
         if (!proceed) return
-        onNeedsInput(sessionId, hint, isActive, body)
+        onNeedsInput(sessionId, hint, isActive, body, prompt)
     }
 
     /**
@@ -991,6 +998,9 @@ internal class NotificationService(
                     if (act == SessionActivity.WORKING) armSilenceWatch(sessionId)
                 }
             }
+            // A new dialog replaces the prompt a pending reply was written for NOW, not after the
+            // settle delay, and also when no alert follows (the foreground tab, an old event).
+            if (e.ev == "perm" || e.ev == "ask") NotifyKeys.prompt(NotifyKeys.hook(e.ev, e.tmux, e.atMs))?.let { notePrompt(sessionId, it) }
             val n = r.notify ?: return@onSessionLane
             kotlinx.coroutines.delay(hookSettleMs)
             if (w.reducer.isSuperseded(e.tmux, e.atMs)) return@onSessionLane

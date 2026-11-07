@@ -211,8 +211,9 @@ class SessionOrchestrator(
         { id -> transcriptService.lastAssistantEntry(id) },
         { id -> transcriptService.entries(id) },
         { id -> transcriptService.streamOrNull(id) },
-        { sid, hint, active, body -> onClaudeNeedsInput?.invoke(sid, hint, active, body) },
+        { sid, hint, active, body, prompt -> onClaudeNeedsInput?.invoke(sid, hint, active, body, prompt) },
         { id -> statusService.sessionActivities.value[id] },
+        { id, prompt -> statusService.promptTokens.note(id, prompt) },
     )
 
     // Per-session terminal output buffer (ring buffer) + pty size tracking.
@@ -343,8 +344,11 @@ class SessionOrchestrator(
     // Session became active callback (for keep-alive etc.)
     var onSessionActive: ((ClaudeSession) -> Unit)? = null
 
-    // Notification callback when Claude needs attention
-    var onClaudeNeedsInput: ((sessionId: String, hint: String, isActiveTab: Boolean, body: String?) -> Unit)? = null
+    // Notification callback when Claude needs attention. [prompt] names the prompt the alert is
+    // for (null when no event named one): an actionable notification carries it so its reply can
+    // be checked with [checkReply].
+    var onClaudeNeedsInput: ((sessionId: String, hint: String, isActiveTab: Boolean, body: String?,
+        prompt: com.clauderemote.session.service.PromptFingerprint?) -> Unit)? = null
 
     // Context window usage callback (0-100 percent)
     var onContextUpdate: ((sessionId: String, percent: Int) -> Unit)? = null
@@ -2742,6 +2746,30 @@ class SessionOrchestrator(
     fun resize(sessionId: String, cols: Int, rows: Int) = terminalIO.resize(sessionId, cols, rows)
 
     fun sendClaudeCommand(sessionId: String, command: String) = claudeControl.sendClaudeCommand(sessionId, command)
+
+    /** The prompt the session shows right now, for a view that offers a reply to it (the watch row). */
+    fun currentPrompt(sessionId: String): com.clauderemote.session.service.PromptFingerprint? =
+        com.clauderemote.session.service.ReplyGuard.promptShown(
+            statusService.promptTokens.current(sessionId), statusService.currentActivity(sessionId),
+        )
+
+    /**
+     * Whether a reply given outside the app for [notified] may be sent to [sessionId] now: the
+     * session must still show that prompt (see ReplyGuard). Call it right before
+     * [sendClaudeCommand]; a Refuse means send nothing.
+     */
+    fun checkReply(
+        sessionId: String,
+        notified: com.clauderemote.session.service.PromptFingerprint?,
+        reply: com.clauderemote.session.service.ReplyGuard.Reply,
+    ): com.clauderemote.session.service.ReplyGuard.Verdict =
+        com.clauderemote.session.service.ReplyGuard.check(
+            notified,
+            statusService.promptTokens.current(sessionId),
+            statusService.currentActivity(sessionId),
+            claudeControl.canDeliverNow(sessionId),
+            reply,
+        )
 
     fun switchModel(sessionId: String, model: ClaudeModel) = claudeControl.switchModel(sessionId, model)
 

@@ -4,6 +4,7 @@ import android.app.NotificationManager
 import com.google.android.gms.wearable.DataEvent
 import com.google.android.gms.wearable.DataEventBuffer
 import com.google.android.gms.wearable.DataMapItem
+import com.google.android.gms.wearable.MessageEvent
 import com.google.android.gms.wearable.WearableListenerService
 import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.json.Json
@@ -19,6 +20,22 @@ import kotlinx.serialization.json.Json
  * than the phone notification tier this is meant to improve on.
  */
 class WearDataListenerService : WearableListenerService() {
+    /**
+     * Telefon odpověď z hodinek NEodeslal, protože session mezitím ukazuje
+     * jiný dotaz (PhoneWearService.refused). Akce už notifikaci zrušila jako
+     * odeslanou, takže to řekni znovu — bez akcí, nový dotaz je třeba nejdřív
+     * vidět.
+     */
+    override fun onMessageReceived(messageEvent: MessageEvent) {
+        if (messageEvent.path != PATH_REPLY_REFUSED) return
+        val refused = runCatching {
+            WEAR_JSON.decodeFromString<WearReplyRefused>(String(messageEvent.data, Charsets.UTF_8))
+        }.getOrNull() ?: return
+        WearLog.i(this, TAG, "reply for ${refused.sessionId} refused by the phone: ${refused.message}")
+        WearNotifier.notifySendFailure(this, refused.sessionId, null, refused.message)
+        WearHaptics.error(this)
+    }
+
     override fun onDataChanged(dataEvents: DataEventBuffer) {
         // Logged unconditionally (not just on failure) — diagnosing the
         // watch side was blocked by having zero visibility into whether
@@ -327,6 +344,7 @@ class WearDataListenerService : WearableListenerService() {
 
     companion object {
         private const val TAG = "WearDataListener"
+        const val PATH_REPLY_REFUSED = "/reply-refused"
         const val PATH = "/sessions"
         const val KEY_JSON = "json"
         val WEAR_JSON = Json { ignoreUnknownKeys = true }

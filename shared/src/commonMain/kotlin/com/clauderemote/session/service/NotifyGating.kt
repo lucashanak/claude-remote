@@ -308,6 +308,20 @@ internal object NotifyKeys {
     fun isHook(key: String?): Boolean = key != null && key.startsWith(HOOK_PREFIX)
 
     fun isDetection(key: String?): Boolean = key != null && key.startsWith(DETECTION_PREFIX)
+
+    /**
+     * The prompt an event [key] names, for the reply check ([ReplyGuard]). A Stop marker is a
+     * ready completion; a hook `perm` / `ask` and a screen-detected selector are dialogs. Any
+     * other key (a malformed marker's message-id fallback) names no prompt: replies to it fail closed.
+     */
+    fun prompt(key: String?): PromptFingerprint? = when {
+        key == null -> null
+        key.startsWith(STOP_PREFIX) -> PromptFingerprint(key, PromptKind.READY)
+        key.startsWith(DETECTION_PREFIX + PromptType.INPUT_PROMPT.name + "#") -> PromptFingerprint(key, PromptKind.READY)
+        key.startsWith(DETECTION_PREFIX) -> PromptFingerprint(key, PromptKind.DIALOG)
+        key.startsWith(HOOK_PREFIX + "perm#") || key.startsWith(HOOK_PREFIX + "ask#") -> PromptFingerprint(key, PromptKind.DIALOG)
+        else -> null
+    }
 }
 
 /**

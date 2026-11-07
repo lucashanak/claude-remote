@@ -437,7 +437,7 @@ private fun SessionDetailScreen(session: WearSessionInfo) {
         if (!text.isNullOrBlank() && !sending) {
             sending = true
             status = "Odesílám…"
-            sendReply(context, session.id, text) { onSendResult(it) }
+            sendReply(context, session.id, text, session.prompt) { onSendResult(it) }
         }
     }
 
@@ -534,7 +534,7 @@ private fun SessionDetailScreen(session: WearSessionInfo) {
                                 if (!sending) {
                                     sending = true
                                     status = "Odesílám…"
-                                    sendApprove(context, session.id, "y") { onSendResult(it) }
+                                    sendApprove(context, session.id, "y", session.prompt) { onSendResult(it) }
                                 }
                             },
                             enabled = !sending,
@@ -547,7 +547,7 @@ private fun SessionDetailScreen(session: WearSessionInfo) {
                                 if (!sending) {
                                     sending = true
                                     status = "Odesílám…"
-                                    sendApprove(context, session.id, "n") { onSendResult(it) }
+                                    sendApprove(context, session.id, "n", session.prompt) { onSendResult(it) }
                                 }
                             },
                             enabled = !sending,
@@ -612,7 +612,7 @@ private fun SessionDetailScreen(session: WearSessionInfo) {
                                     if (!sending) {
                                         sending = true
                                         status = "Odesílám…"
-                                        sendReply(context, session.id, pending) { onSendResult(it) }
+                                        sendReply(context, session.id, pending, session.prompt) { onSendResult(it) }
                                         pendingDraft = null
                                     }
                                 },

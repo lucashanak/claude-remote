@@ -609,7 +609,7 @@ class HookScriptIntegrationTest {
             updateActivity = { id, a -> rig.activity += id to a },
             activityOf = { id -> rig.activity.lastOrNull { it.first == id }?.second },
             lastAssistantEntry = { null }, entriesOf = { emptyList() }, streamOrNull = { null },
-            onNeedsInput = { id, hint, _, body -> rig.needsInput += Triple(id, hint, body) },
+            onNeedsInput = { id, hint, _, body, _ -> rig.needsInput += Triple(id, hint, body) },
         )
         rig = WatcherRig(service, scope, manager)
         service.hookSink = rig.sink

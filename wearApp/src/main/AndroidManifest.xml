@@ -106,6 +106,15 @@
                     android:host="*"
                     android:pathPrefix="/sessions" />
             </intent-filter>
+            <!-- A reply the phone refused (the prompt changed meanwhile) — must
+                 reach the watch with no Activity open, so not an in-app listener. -->
+            <intent-filter>
+                <action android:name="com.google.android.gms.wearable.MESSAGE_RECEIVED" />
+                <data
+                    android:scheme="wear"
+                    android:host="*"
+                    android:path="/reply-refused" />
+            </intent-filter>
         </service>
 
         <!-- Glanceable tile — swipe-from-watch-face summary of what needs the
