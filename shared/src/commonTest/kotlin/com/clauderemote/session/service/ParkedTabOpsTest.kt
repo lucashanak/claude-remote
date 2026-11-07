@@ -169,8 +169,19 @@ class ParkedTabOpsTest {
         // server side went over the exec transport: tombstone FIRST, then the kill, then the manifest
         val cmds = exec.calls.map { it.cmd }
         assertTrue("forgotten" in cmds[0], cmds[0])
+        // the close record rides in the tombstone's exec, after it and before the kill (Jarvis F0b)
+        assertEquals(ManifestCommands.tombstoneAndRecord("claude-server-old", durable = true, by = "app"), cmds[0])
         assertEquals("tmux kill-session -t '=claude-server-old'", cmds[1])
         assertTrue(cmds.size >= 3)
+    }
+
+    @Test fun aPruneIsRecordedAsPruneAndTransient() = runTest {
+        val exec = FakeExec()
+        val w = wire(exec)
+        val p = persistence(w, transcript(w))
+        p.forgetSession("t1", userInitiated = false)
+        testScheduler.runCurrent()
+        assertEquals(ManifestCommands.tombstoneAndRecord("claude-server-old", durable = false, by = "prune"), exec.calls.first().cmd)
     }
 
     @Test fun gitStatusOfAParkedTabIsProbedOverTheExecTransport() = runTest {

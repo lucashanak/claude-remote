@@ -251,6 +251,8 @@ class SessionOrchestrator(
         { id, act -> statusService.updateActivity(id, act) },
         ::disconnectSession,
         { sid, tmux -> onSessionForgotten?.invoke(sid, tmux) },
+        // read at close time: deviceKey is set by startLogShipping after construction
+        closedBy = { "app:$deviceKey" },
     )
 
     // Tailscale/Cloudflare/direct transport selection + per-session connection

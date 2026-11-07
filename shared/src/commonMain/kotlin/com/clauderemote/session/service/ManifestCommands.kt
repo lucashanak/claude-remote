@@ -62,26 +62,29 @@ internal object ManifestCommands {
      * `flock -x LOCK bash -c '…'`: no nested quoting, so the body stays
      * readable (and checkable) as plain bash.
      */
-    fun tombstone(tmuxName: String, durable: Boolean): String {
-        val n = sq(tmuxName)
-        val marker = durable && isMarkerSafe(tmuxName)
-        return buildString {
-            append("set -u; D=\"\$HOME/.claude-remote\"; mkdir -p \"\$D\"; ")
-            if (marker) append("mkdir -p \"\$D/forgotten.d\"; ")
-            append("LOCK=\"\$D/sessions.lock\"; touch \"\$LOCK\"; ")
-            append("N=$n; ")
-            append("( flock -x 9; ")
-            append("grep -qxF \"\$N\" \"\$D/forgotten\" 2>/dev/null || printf '%s\\n' \"\$N\" >> \"\$D/forgotten\"; ")
-            if (marker) {
-                append("touch \"\$D/forgotten.d/\$N\"; ")
-                // Sweep long-expired markers while we hold the lock — they are
-                // no longer honoured by closeState() and would otherwise
-                // accumulate one file per session ever closed.
-                append("find \"\$D/forgotten.d\" -maxdepth 1 -type f -mtime +$TOMBSTONE_PRUNE_DAYS -delete 2>/dev/null || true; ")
-            }
-            append(") 9<>\"\$LOCK\"; ")
-            append("echo \"[\$(date -u +%FT%TZ)] forget: \$N (durable=${if (marker) 1 else 0})\" >> \"\$D/forget.log\"")
+    fun tombstone(tmuxName: String, durable: Boolean): String =
+        "N=${sq(tmuxName)}; " + tombstoneBody(marker = durable && isMarkerSafe(tmuxName))
+
+    /**
+     * [tombstone] over the shell variable `$N` (Jarvis F0: `cr-session` closes with this very body). [marker] = write
+     * the durable `forgotten.d` marker; the caller decides it from the name ([isMarkerSafe]), since the body cannot.
+     * Leaves `set -u` on: a caller composing more after it runs that part in a subshell ([closeRecordBody] does).
+     */
+    fun tombstoneBody(marker: Boolean): String = buildString {
+        append("set -u; D=\"\$HOME/.claude-remote\"; mkdir -p \"\$D\"; ")
+        if (marker) append("mkdir -p \"\$D/forgotten.d\"; ")
+        append("LOCK=\"\$D/sessions.lock\"; touch \"\$LOCK\"; ")
+        append("( flock -x 9; ")
+        append("grep -qxF \"\$N\" \"\$D/forgotten\" 2>/dev/null || printf '%s\\n' \"\$N\" >> \"\$D/forgotten\"; ")
+        if (marker) {
+            append("touch \"\$D/forgotten.d/\$N\"; ")
+            // Sweep long-expired markers while we hold the lock — they are
+            // no longer honoured by closeState() and would otherwise
+            // accumulate one file per session ever closed.
+            append("find \"\$D/forgotten.d\" -maxdepth 1 -type f -mtime +$TOMBSTONE_PRUNE_DAYS -delete 2>/dev/null || true; ")
         }
+        append(") 9<>\"\$LOCK\"; ")
+        append("echo \"[\$(date -u +%FT%TZ)] forget: \$N (durable=${if (marker) 1 else 0})\" >> \"\$D/forget.log\"")
     }
 
     /**
@@ -140,11 +143,15 @@ internal object ManifestCommands {
      * stay poisoned (closeState would keep reporting "closed elsewhere", and
      * the manifest push below would keep filtering the session out).
      */
-    fun clearTombstone(tmuxName: String): String {
-        val n = sq(tmuxName)
-        return "set -u; D=\"\$HOME/.claude-remote\"; [ -d \"\$D\" ] || exit 0; " +
+    fun clearTombstone(tmuxName: String): String = "N=${sq(tmuxName)}; " + clearTombstoneBody()
+
+    /**
+     * [clearTombstone] over `$N`. Ends the shell (`exit 0`) when `~/.claude-remote` does not exist, so a caller
+     * composing more after it runs it in a subshell (`cr-session` does).
+     */
+    fun clearTombstoneBody(): String =
+        "set -u; D=\"\$HOME/.claude-remote\"; [ -d \"\$D\" ] || exit 0; " +
             "LOCK=\"\$D/sessions.lock\"; touch \"\$LOCK\"; " +
-            "N=$n; " +
             "( flock -x 9; " +
             "rm -f \"\$D/forgotten.d/\$N\" 2>/dev/null || true; " +
             "if [ -s \"\$D/forgotten\" ]; then " +
@@ -152,7 +159,197 @@ internal object ManifestCommands {
             "mv \"\$D/.forgotten.tmp.\$\$\" \"\$D/forgotten\" 2>/dev/null || rm -f \"\$D/.forgotten.tmp.\$\$\"; " +
             "fi; " +
             ") 9<>\"\$LOCK\""
+
+    // ------------------------------------------------------------------ closed.jsonl (Jarvis F0b, §15.12)
+
+    /** Where every close leaves its record (one JSON object per line, newest last, at most [CLOSED_MAX_LINES]). */
+    const val CLOSED_PATH = "~/.claude-remote/closed.jsonl"
+    const val CLOSED_MAX_LINES = 500
+    /** Last line of [readClosed]: everything before it is the file's tail; without it the read was cut off. */
+    const val CLOSED_END = "__CR_CLOSED_END__"
+
+    private fun sh(s: String) = s.replace('§', '$')
+
+    /**
+     * Shell functions building JSON without jq (the record must be written even on a server without it):
+     * `js` = a JSON string of any text (backslash, quote and tab escaped, other control characters dropped),
+     * `jn` = [js] or `null` for empty, `je` = a value that is ALREADY JSON-escaped (cut out of a JSON file by `jget`)
+     * quoted as it is, or `null`; `jget KEY JSON` = the raw (still escaped) string value of KEY.
+     */
+    internal val JSON_SH: String = sh(
+        """
+        js() { printf '"%s"' "§(printf '%s' "§1" | tr '\n\r' '  ' | LC_ALL=C sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' -e 's/\t/\\t/g' | LC_ALL=C tr -d '\000-\037')"; }
+        jn() { if [ -n "§1" ]; then js "§1"; else printf null; fi; }
+        je() { if [ -n "§1" ]; then printf '"%s"' "§1"; else printf null; fi; }
+        jget() { printf '%s' "§2" | sed -n 's/.*"'"§1"'"[[:space:]]*:[[:space:]]*"\(\([^"\\]\|\\.\)*\)".*/\1/p' | head -n 1; }
+        """.trimIndent(),
+    )
+
+    /**
+     * The close record of the session `$N` (§15.12), appended to [CLOSED_PATH] under `sessions.lock` and the file cut
+     * to its last [CLOSED_MAX_LINES] lines (tmp + mv). Inputs: `$N`, `$BY` (`app:<installId>`, `prune`, `jarvis`),
+     * `$DUR` (1 = a durable close), optional `$REASON`.
+     *
+     * Runs between the tombstone and the kill, in the same exec as the tombstone: the facts (the claude process, its
+     * argv, environment and registry entry) exist only while the pane lives. The fields are read the way drift reads
+     * them: claude = the first process of the pane's subtree, breadth first, with a `sessions/<pid>.json` under its own
+     * config dir (else the first named `claude`); account = `CLAUDE_CONFIG_DIR` from its environment; model, mode and
+     * flags from its argv; the session id = the registry's when that transcript exists (claude forks on `--resume` and
+     * writes the new transcript lazily), else the launch's (`launchSessionId` keeps the launch's either way); title =
+     * the last `ai-title` in the transcript's last MiB. A field that cannot be read is null.
+     *
+     * NEVER fails its caller: one subshell, every error swallowed, each tmux call `timeout 2`, the lock waited for at
+     * most 3 s (then no record), so it stays inside the app's 10 s exec. A close without a record is a lost "Recently closed" row; a close stopped by its
+     * record would be a session that does not close.
+     */
+    fun closeRecordBody(): String =
+        CLOSE_RECORD
+            .replace("@@JSON@@", JSON_SH)
+            .replace("@@MODELS@@", com.clauderemote.model.ClaudeModel.entries
+                .filter { it.cliValue != null }
+                .joinToString(" ") { "${it.cliValue}) MODEL=${it.name} ;;" })
+            .replace("@@MODES@@", com.clauderemote.model.ClaudeMode.entries.mapNotNull { m ->
+                val a = com.clauderemote.session.ClaudeConfig.modeArgs(m)
+                val i = a.indexOf("--permission-mode")
+                if (i >= 0 && i + 1 < a.size) "${a[i + 1]}) MODE=${m.name} ;;" else null
+            }.joinToString(" "))
+            .replace("@@YOLO@@", com.clauderemote.session.ClaudeConfig.modeArgs(com.clauderemote.model.ClaudeMode.YOLO).last())
+            .replace("@@LOCAL@@", com.clauderemote.session.ClaudeConfig.claudeBinary(com.clauderemote.model.ClaudeModel.LOCAL))
+            .replace("@@MAX@@", CLOSED_MAX_LINES.toString())
+
+    /** [closeRecordBody] for [tmuxName] on its own. */
+    fun closeRecord(tmuxName: String, by: String, durable: Boolean, reason: String? = null): String =
+        "N=${sq(tmuxName)}; BY=${sq(by)}; DUR=${if (durable) 1 else 0}; REASON=${sq(reason.orEmpty())}\n" + closeRecordBody()
+
+    /**
+     * The app's close, server half before the kill: [tombstone] then [closeRecordBody], one exec (§15.12). The exit
+     * status is the tombstone's, whatever the record did.
+     */
+    fun tombstoneAndRecord(tmuxName: String, durable: Boolean, by: String): String =
+        tombstone(tmuxName, durable) + "; CR_TS=\$?\n" +
+            "BY=${sq(by)}; DUR=${if (durable) 1 else 0}; REASON=''\n" +
+            closeRecordBody() + "\n[ \"\$CR_TS\" = 0 ]"
+
+    /** The last [limit] records of [CLOSED_PATH] (oldest first), then [CLOSED_END]. Read-only. */
+    fun readClosed(limit: Int = 50): String {
+        require(limit in 1..CLOSED_MAX_LINES) { "limit must be 1..$CLOSED_MAX_LINES" }
+        return "F=\"\$HOME/.claude-remote/closed.jsonl\"; [ -f \"\$F\" ] && tail -n $limit \"\$F\"; echo; echo $CLOSED_END"
     }
+
+    private val CLOSE_RECORD = sh(
+        """
+        ( set +eu
+        @@JSON@@
+        D="§HOME/.claude-remote"; mkdir -p "§D" 2>/dev/null; LOCK="§D/sessions.lock"; touch "§LOCK" 2>/dev/null
+        CJ="§D/closed.jsonl"
+        AT=§(date -u +%FT%TZ)
+        PP=§(timeout 2 tmux -u list-panes -t "=§N:" -F '#{pane_pid}' 2>/dev/null | head -n 1)
+        PC=§(timeout 2 tmux -u display-message -p -t "=§N:" '#{pane_current_path}' 2>/dev/null)
+        CP=""; CFG=""
+        cfg_of() { tr '\0' '\n' < "/proc/§1/environ" 2>/dev/null | sed -n 's|^CLAUDE_CONFIG_DIR=||p' | head -n 1; }
+        if [ -n "§PP" ]; then
+          TREE=§(ps -eo pid=,ppid=,comm= 2>/dev/null | awk -v root="§PP" '{ k[§2]=k[§2]" "§1; c[§1]=§3 } END { h=0;t=0;q[t++]=root; while(h<t){p=q[h++];print p, c[p];m=split(k[p],a," ");for(i=1;i<=m;i++)if(a[i]!="")q[t++]=a[i]} }')
+          for p in §(printf '%s\n' "§TREE" | cut -d' ' -f1); do
+            c=§(cfg_of "§p")
+            if [ -f "§{c:-§HOME/.claude}/sessions/§p.json" ]; then CP=§p; CFG=§c; break; fi
+          done
+          if [ -z "§CP" ]; then
+            CP=§(printf '%s\n' "§TREE" | awk '§2=="claude" {print §1; exit}')
+            [ -n "§CP" ] && CFG=§(cfg_of "§CP")
+          fi
+        fi
+        C="§{CFG:-§HOME/.claude}"
+        RJ=""; [ -n "§CP" ] && [ -f "§C/sessions/§CP.json" ] && RJ=§(head -c 65536 "§C/sessions/§CP.json" 2>/dev/null | tr '\n' ' ')
+        RSID=§(jget sessionId "§RJ"); CWD=§(jget cwd "§RJ"); VER=§(jget version "§RJ")
+        BIN=""; LSID=""; MARG=""; PM=""; EFF=""; YO=0; FL=""; prev=""; i=0
+        if [ -n "§CP" ]; then
+          while IFS= read -r a; do
+            i=§((i+1))
+            if [ §i -eq 1 ]; then BIN=§a; continue; fi
+            case "§prev" in
+              --resume|--session-id) LSID=§a; prev=""; continue ;;
+              --model) MARG=§a; FL="§FL,§(js "§a")"; prev=""; continue ;;
+              --permission-mode) PM=§a; FL="§FL,§(js "§a")"; prev=""; continue ;;
+              --effort) EFF=§a; FL="§FL,§(js "§a")"; prev=""; continue ;;
+            esac
+            case "§a" in --resume|--session-id) prev=§a; continue ;; esac
+            case "§a" in -*) FL="§FL,§(js "§a")" ;; esac
+            [ "§a" = "@@YOLO@@" ] && YO=1
+            prev=§a
+          done <<CR_ARGV
+        §(tr '\0' '\n' < "/proc/§CP/cmdline" 2>/dev/null)
+        CR_ARGV
+        fi
+        MODEL=""; MODE=""
+        if [ -n "§CP" ]; then
+          case "§MARG" in
+            @@MODELS@@
+            "") case "§BIN" in *@@LOCAL@@) MODEL=LOCAL ;; *) MODEL=DEFAULT ;; esac ;;
+          esac
+          if [ "§YO" = 1 ]; then MODE=YOLO; else case "§PM" in @@MODES@@ *) MODE=NORMAL ;; esac; fi
+        fi
+        tr_of() { case "§1" in ''|*[!0-9a-f-]*) return 0 ;; esac; ls "§HOME"/.claude/projects/*/"§1".jsonl "§C"/projects/*/"§1".jsonl 2>/dev/null | head -n 1; }
+        SID=§LSID
+        if [ -n "§RSID" ] && [ "§RSID" != "§LSID" ] && [ -n "§(tr_of "§RSID")" ]; then SID=§RSID; fi
+        [ -n "§SID" ] || SID=§RSID
+        TR=§(tr_of "§SID")
+        TITLE=""; [ -n "§TR" ] && TITLE=§(jget aiTitle "§(tail -c 1048576 "§TR" 2>/dev/null | grep '"type":"ai-title"' | tail -n 1)")
+        ACCT=§(printf '%s' "§CFG" | sed -n 's|.*/accounts/\([^/]*\)/*§|\1|p')
+        if [ -n "§CWD" ]; then CWDJ=§(je "§CWD"); else CWDJ=§(jn "§PC"); fi
+        if [ "§DUR" = 1 ]; then DJ=true; else DJ=false; fi
+        LINE="{\"v\":1,\"at\":§(js "§AT"),\"tmuxName\":§(js "§N"),\"sessionId\":§(jn "§SID"),\"launchSessionId\":§(jn "§LSID"),\"transcript\":§(jn "§TR"),\"cwd\":§CWDJ,\"folder\":§(jn "§PC"),\"account\":§(jn "§ACCT"),\"model\":§(jn "§MODEL"),\"mode\":§(jn "§MODE"),\"flags\":[§{FL#,}],\"effort\":§(jn "§EFF"),\"claudeVersion\":§(je "§VER"),\"title\":§(je "§TITLE"),\"pid\":§{CP:-null},\"by\":§(js "§BY"),\"durable\":§DJ,\"reason\":§(jn "§{REASON:-}")}"
+        ( flock -w 3 -x 9 || exit 0
+          printf '%s\n' "§LINE" >> "§CJ"
+          L=§(wc -l < "§CJ" 2>/dev/null)
+          if [ "§{L:-0}" -gt @@MAX@@ ]; then tail -n @@MAX@@ "§CJ" > "§CJ.tmp.§§" && mv -f "§CJ.tmp.§§" "§CJ"; fi
+        ) 9<>"§LOCK"
+        ) >/dev/null 2>&1 || true
+        """.trimIndent(),
+    )
+
+    /**
+     * `in_manifest NAME`: drift's manifest (`sessions.restore.json`) holds NAME; `tombstoned NAME`: a transient or a
+     * live durable tombstone names it. A name in the manifest and not tombstoned is waiting for drift's self-heal,
+     * which open and restore must not race (§15.14, §15.15: two panes of one name). `$D` = `~/.claude-remote`.
+     */
+    internal val MANIFEST_SH: String = sh(
+        """
+        in_manifest() {
+          [ -f "§D/sessions.restore.json" ] || return 1
+          if command -v jq >/dev/null 2>&1; then jq -e --arg n "§1" 'any(.[]; .tmuxSessionName == §n)' "§D/sessions.restore.json" >/dev/null 2>&1
+          else sed 's/"tmuxSessionName"[[:space:]]*:[[:space:]]*/"tmuxSessionName":/g' "§D/sessions.restore.json" 2>/dev/null | grep -qF "\"tmuxSessionName\":\"§1\""; fi
+        }
+        tombstoned() {
+          grep -qxF "§1" "§D/forgotten" 2>/dev/null && return 0
+          [ -f "§D/forgotten.d/§1" ] && [ -n "§(find "§D/forgotten.d/§1" -maxdepth 0 -mtime -$TOMBSTONE_DAYS 2>/dev/null)" ]
+        }
+        """.trimIndent(),
+    )
+
+    // ------------------------------------------------------------------ opened.d (Jarvis F0c, §15.4)
+
+    /**
+     * `~/.claude-remote/opened.d/$N`: a session opened (or restored) by someone other than this device's own launch
+     * — `cr-session open` (`by:"jarvis"`), a restore (`by:"restore"`, `by:"app:<installId>"`). The app reads them
+     * in [reconcileAll]'s `opened` section to adopt a parked tab. Inputs: `$N`, `$BY`, `$F` (folder), `$A` (account
+     * or empty), `$S` (session id or empty), `$TASK` (or empty). Written under `sessions.lock` (tmp + mv); markers
+     * older than 7 days are swept on the way. Never fails its caller.
+     */
+    fun openedMarkerBody(): String = OPENED_MARKER.replace("@@JSON@@", JSON_SH)
+
+    private val OPENED_MARKER = sh(
+        """
+        ( set +eu
+        @@JSON@@
+        D="§HOME/.claude-remote"; OD="§D/opened.d"; mkdir -p "§OD" 2>/dev/null; LOCK="§D/sessions.lock"; touch "§LOCK" 2>/dev/null
+        J="{\"by\":§(js "§BY"),\"at\":§(js "§(date -u +%FT%TZ)"),\"folder\":§(jn "§{F:-}"),\"account\":§(jn "§{A:-}"),\"sessionId\":§(jn "§{S:-}"),\"task\":§(jn "§{TASK:-}")}"
+        ( flock -w 5 -x 9 || exit 0
+          printf '%s\n' "§J" > "§OD/.§N.tmp.§§" && mv -f "§OD/.§N.tmp.§§" "§OD/§N"
+          find "§OD" -maxdepth 1 -type f -mtime +7 -delete 2>/dev/null
+        ) 9<>"§LOCK"
+        ) >/dev/null 2>&1 || true
+        """.trimIndent(),
+    )
 
     /**
      * Rename tmux session [oldName] to [newName]. `=` forces an EXACT target match: plain
@@ -181,7 +378,9 @@ internal object ManifestCommands {
      *    `~/.claude-remote/hookev.off` exists, which silences every hook) and, when the process has a
      *    `sessions/<pid>.json` under its own config dir, `SID <pid> <uuid|->` (`-` when
      *    the transcript does not exist yet — claude forks on --resume and reports the new
-     *    id before writing its jsonl).
+     *    id before writing its jsonl);
+     *  - `opened`: one `OPENED <mtime epoch> <base64 name> <marker json>` line per file of
+     *    `~/.claude-remote/opened.d` ([openedMarkerBody]); a parser that predates it ignores the section.
      */
     fun reconcileAll(names: Collection<String>): String =
         RECONCILE_ALL.replace("@@TD@@", TOMBSTONE_DAYS.toString())
@@ -213,7 +412,8 @@ if [ "${'$'}D1" = 1 ] || [ "${'$'}D2" = 1 ]; then X=1; elif [ "${'$'}D1" = - ] |
 echo "CAPF ${'$'}p ${'$'}M ${'$'}X ${'$'}OFF"
 f="${'$'}C/sessions/${'$'}p.json"
 if [ -f "${'$'}f" ]; then v=${'$'}(jq -r '.sessionId // empty' "${'$'}f" 2>/dev/null); ok=-; [ -n "${'$'}v" ] && { ls "${'$'}HOME"/.claude/projects/*/"${'$'}v".jsonl >/dev/null 2>&1 || ls "${'$'}C"/projects/*/"${'$'}v".jsonl >/dev/null 2>&1; } && ok=${'$'}v; echo "SID ${'$'}p ${'$'}ok"; fi
-done; true; echo "__END_claude__ rc=${'$'}?""""
+done; true; echo "__END_claude__ rc=${'$'}?"
+for f in "${'$'}D"/opened.d/*; do [ -f "${'$'}f" ] || continue; printf 'OPENED %s %s ' "${'$'}(stat -c %Y "${'$'}f" 2>/dev/null || echo 0)" "${'$'}(printf '%s' "${'$'}{f##*/}" | base64 -w0)"; head -c 2048 "${'$'}f" 2>/dev/null | tr '\n\r\t' '   '; echo; done; echo "__END_opened__ rc=0""""
 
     /**
      * The pid-pinned UUID probe of one tmux session (what `readRealSessionId` runs): the
@@ -328,6 +528,23 @@ internal data class ClaudeFact(
     val uuid: String? = null,
 )
 
+/**
+ * `~/.claude-remote/opened.d/<name>`: a session opened or restored outside this device's own launch (`cr-session open`
+ * → `by:"jarvis"`, a restore → `by:"restore"`). The app adopts a parked tab for a marker younger than 24 h whose name is
+ * live and not already a tab (§15.4).
+ */
+internal data class OpenedMarker(
+    val tmuxName: String,
+    /** The file's mtime (epoch seconds): when it was (re)written. */
+    val mtimeEpochS: Long,
+    val by: String?,
+    val at: String?,
+    val folder: String?,
+    val account: String?,
+    val sessionId: String?,
+    val task: String?,
+)
+
 /** The verdict of the forget rule for one tmux name. */
 internal enum class CloseVerdict { FORGET, KEEP, UNKNOWN }
 
@@ -345,6 +562,8 @@ internal class ReconcileSnapshot(
     val panePids: Map<String, Int>?,
     val procs: List<HookCapContract.Proc>?,
     val claude: Map<Int, ClaudeFact>?,
+    /** The `opened` section ([ManifestCommands.openedMarkerBody]); null = unknown (missing, cut off, older script). */
+    val opened: List<OpenedMarker>? = null,
 ) {
     /**
      * Forget iff tombstoned ∧ absent from `list-sessions` ∧ at least one OTHER live
@@ -457,8 +676,37 @@ internal object ReconcileParse {
             panePids = panes,
             procs = procs,
             claude = claude,
+            opened = parseOpened(sec),
         )
     }
+
+    /**
+     * The `opened` section: one `OPENED <mtime> <base64 name> <json>` line per marker. A line that does not read is
+     * skipped; a marker whose JSON does not read still yields its name and time (adopting a live session by name is
+     * the point). Null when the section is missing, cut off or failed.
+     */
+    fun parseOpened(sections: Map<String, List<String>>): List<OpenedMarker>? {
+        val lines = sections["opened"] ?: return null
+        val json = kotlinx.serialization.json.Json { ignoreUnknownKeys = true; isLenient = true }
+        return lines.mapNotNull { l ->
+            val t = l.trim().split(' ', limit = 4)
+            if (t.size < 3 || t[0] != "OPENED") return@mapNotNull null
+            val name = try { java.util.Base64.getDecoder().decode(t[2]).decodeToString() } catch (_: IllegalArgumentException) { return@mapNotNull null }
+            if (name.isBlank()) return@mapNotNull null
+            val o = t.getOrNull(3)?.let { runCatching { json.parseToJsonElement(it) as? kotlinx.serialization.json.JsonObject }.getOrNull() }
+            fun str(k: String) = (o?.get(k) as? kotlinx.serialization.json.JsonPrimitive)
+                ?.takeIf { it.isString }?.content?.takeIf { it.isNotEmpty() }
+            OpenedMarker(
+                tmuxName = name,
+                mtimeEpochS = t[1].toLongOrNull() ?: 0L,
+                by = str("by"), at = str("at"), folder = str("folder"), account = str("account"),
+                sessionId = str("sessionId"), task = str("task"),
+            )
+        }
+    }
+
+    /** [parseOpened] of a raw [ManifestCommands.reconcileAll] output. */
+    fun parseOpened(raw: String): List<OpenedMarker>? = parseOpened(sections(raw))
 
     private fun parseClaude(lines: List<String>): Map<Int, ClaudeFact> {
         val m = HashMap<Int, ClaudeFact>()

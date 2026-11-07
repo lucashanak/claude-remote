@@ -73,6 +73,8 @@ internal class SessionPersistenceService(
     private val onActivityUpdate: (sessionId: String, activity: SessionActivity) -> Unit,
     private val disconnectSession: suspend (sessionId: String) -> Unit,
     private val onForgotten: (serverId: String, tmuxSessionName: String) -> Unit,
+    /** Who a user close is recorded as in `closed.jsonl` (`app:<installId>`); a prune is recorded as `prune`. */
+    private val closedBy: () -> String = { "app" },
 ) : PersistenceClosures {
     // (serverId, tmux name) -> when THIS device closed it (forgetSession). Feeds
     // recentlyClosedLocally; bounded by pruning on every write.
@@ -1454,10 +1456,13 @@ DTIMER_EOF
     suspend fun writeTombstone(sshManager: SshManager, tmuxSessionName: String, durable: Boolean) {
         runShellCommand(
             sshManager,
-            ManifestCommands.tombstone(tmuxSessionName, durable),
+            ManifestCommands.tombstoneAndRecord(tmuxSessionName, durable, closeRecordBy(durable)),
             "tombstone($tmuxSessionName, durable=$durable)",
         )
     }
+
+    /** `by` of a close record: a user close is this install's, a prune (not user-initiated) is `prune`. */
+    private fun closeRecordBy(userInitiated: Boolean): String = if (userInitiated) closedBy() else "prune"
 
     /**
      * Drop every tombstone for [tmuxSessionName]. Called when the user
@@ -1693,7 +1698,12 @@ DTIMER_EOF
         val serverId = session.server.id
         val name = session.tmuxSessionName
         try {
-            val tomb = registry.execRun(serverId, ManifestCommands.tombstone(name, durable = userInitiated), totalMs = 8_000)
+            // Tombstone and the close record in ONE exec, before the kill: the record reads the live pane (§15.12).
+            val tomb = registry.execRun(
+                serverId,
+                ManifestCommands.tombstoneAndRecord(name, durable = userInitiated, by = closeRecordBy(userInitiated)),
+                totalMs = 10_000,
+            )
                 ?: return false
             if (tomb.exitStatus != 0) FileLogger.error(TAG, "tombstone($name) exited with ${tomb.exitStatus}", null)
             val kill = registry.execRun(serverId, "tmux kill-session -t '=${name.replace("'", "'\\''")}'", totalMs = 8_000)
