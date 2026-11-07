@@ -45,6 +45,11 @@ EVENTS_MAX_READ = 4 * 1024 * 1024
 # A reply that ends with a question waits for Lukáš only so long: one left unanswered for days is no longer news, and
 # the inbox ("co na mě čeká") would otherwise fill with every session parked on a question.
 QUESTION_MAX_AGE_MS = 12 * 3600 * 1000
+# An open ask/perm whose session state cannot be read (`unknown`) stops counting after the same time: without a
+# registry nothing would ever close it, and the inbox would keep it forever.
+OPEN_MAX_AGE_MS = 12 * 3600 * 1000
+# Fallback self (I8) when `<state>/self` is missing: a session whose alias is this.
+SELF_ALIAS = "jarvis"
 # Hashes of the last lines read. The app's rotation keeps the last 200 lines under a NEW inode, so after a rotation
 # those lines come round again and must not be applied twice.
 EVENTS_RING = 2000
@@ -145,7 +150,7 @@ class Env:
     """Paths and seams. Tests pass their own `environ` (temp HOME) and fake liveness/tmux/clock."""
 
     def __init__(self, environ=None, proc_start=None, ppid=None, tmux_panes=None, now_ms=None, pid_ns=None,
-                 proc_table=None):
+                 proc_table=None, my_pid=None):
         e = os.environ if environ is None else environ
         self.home = e.get("HOME") or os.path.expanduser("~")
         self.cr = os.path.join(self.home, ".claude-remote")
@@ -171,6 +176,7 @@ class Env:
         self.tmux_panes = tmux_panes or (lambda: tmux_list_panes(self.tmux_bin))
         self.now_ms = now_ms or (lambda: int(time.time() * 1000))
         self.pid_ns = own_pid_ns() if pid_ns is None else pid_ns
+        self.my_pid = os.getpid() if my_pid is None else my_pid
 
     def path(self, *parts):
         return os.path.join(self.state_dir, *parts)
@@ -233,13 +239,14 @@ _INJECTION = [re.compile(p, re.IGNORECASE) for p in (
     r"\b(system|developer)\s*(prompt|message|instructions?)\b",
     r"^\s*(system|assistant|user|human)\s*:",
     r"\byou are now\b|\bnew instructions?\b|\bnov[ée] pokyny\b",
-    r"\bjarvis\w*\s*,",
+    r"\bjarvis\w*\s*[,:;!]",
     r"\b(cr-mail|cr-session|cr-task|send-keys|paste-buffer|kill-session)\b",
     r"\b(po[šs]li|odešli|send|spus[tť]|run|execute|vykonej|zavři|close)\b.{0,40}\b(session\w*|relac\w*|p[řr]íkaz\w*|command|tmux)\b",
     r"<\s*/?\s*(system|assistant|user|human|instructions?|system-reminder|tool)\b",
 )]
 HIDDEN = "(skryto: text vypadá jako pokyn)"
-_REPL = str.maketrans({"<": "‹", ">": "›", "[": "(", "]": ")", "«": '"', "»": '"', "`": "'", "\\": "/"})
+_REPL = str.maketrans({"<": "‹", ">": "›", "`": "'", "\\": "/"})
+_BRACKET = {"Ps": "(", "Pe": ")", "Pi": '"', "Pf": '"'}
 
 
 def safe_text(s, max_len=120):
@@ -253,32 +260,20 @@ def safe_text(s, max_len=120):
     """
     if not isinstance(s, str) or not s:
         return ""
-    s = unicodedata.normalize("NFC", s)
+    # NFKC, not NFC: fullwidth and other compatibility forms (`［jarvis］`, `＜system＞`, `ｉｇｎｏｒｅ`) fold to ASCII
+    # before the patterns look at them
+    s = unicodedata.normalize("NFKC", s)
     s = "".join(" " if unicodedata.category(c) in ("Cc", "Cf", "Cs", "Co", "Zl", "Zp") else c for c in s)
     s = " ".join(s.split())
     if any(p.search(s) for p in _INJECTION):
         return HIDDEN
+    # every opening/closing bracket and quotation mark of any script (〈》「」‹›«» …) becomes ( ) or ", so none of
+    # them can pose as our «» or as a `[jarvis …]` prefix; then the ASCII ones that are not brackets
+    s = "".join(_BRACKET.get(unicodedata.category(c), c) if c not in "<>" else c for c in s)
     s = s.translate(_REPL)
     s = _OMC_WORDS.sub(lambda m: m.group(0)[:2] + "·" + m.group(0)[2:], s)
     if len(s) > max_len:
         s = s[:max(1, max_len - 1)].rstrip() + "…"
-    return s
-
-
-_SPOKEN_STRIP = re.compile(r"(/[^\s]*)|\b[0-9a-f]{8,}\b|\b[0-9a-f]{8}-[0-9a-f-]{8,}\b", re.IGNORECASE)
-
-
-def spoken_text(s, max_len=80):
-    """`safe_text` for speech: no paths and no ids (hex runs), punctuation that TTS would spell out dropped."""
-    s = safe_text(s, 400)
-    if s == HIDDEN:
-        return ""
-    s = _SPOKEN_STRIP.sub(" ", s)
-    s = re.sub(r"[‹›()\"'*_#|=~^{}$@&%+]", " ", s)
-    s = " ".join(s.split()).strip(" ,.;:-")
-    if len(s) > max_len:
-        cut = s[:max_len].rsplit(" ", 1)[0]
-        s = (cut or s[:max_len]).rstrip(" ,.;:-") + "…"
     return s
 
 
@@ -298,16 +293,23 @@ def parse_name(name):
     return (rest or "~"), alias, yolo
 
 
+def safe_name(name, max_len=40):
+    """A session name as it may be shown: tmux names are typed by people, so anything but letters, digits and
+    `.~-` becomes `_` (no spaces, quotes, brackets or control characters reach a model or TTS)."""
+    s = re.sub(r"[^\w.~-]", "_", unicodedata.normalize("NFKC", name or ""))
+    return s[:max_len] or "_"
+
+
 def short_name(name):
     folder, alias, _ = parse_name(name)
-    return alias or folder
+    return safe_name(alias or folder)
 
 
 def short_names(names):
     """name -> short form; a short form two sessions share falls back to the name without `claude-server-`."""
     first = {n: short_name(n) for n in names}
     count = collections.Counter(first.values())
-    return {n: (s if count[s] == 1 else n[len(SERVER_PREFIX):] if n.startswith(SERVER_PREFIX) else n)
+    return {n: (s if count[s] == 1 else safe_name(n[len(SERVER_PREFIX):] if n.startswith(SERVER_PREFIX) else n))
             for n, s in first.items()}
 
 
@@ -332,7 +334,7 @@ def account_short(slug):
 
 class Reg:
     __slots__ = ("file", "cfg", "account", "pid", "proc_start", "session_id", "cwd", "status", "waiting_for",
-                 "status_at", "started_at", "tmux", "pane", "alive", "why", "version", "pid_domain")
+                 "status_at", "started_at", "tmux", "pane", "alive", "why", "version", "pid_domain", "kind")
 
 
 def read_registry(env):
@@ -373,12 +375,16 @@ def read_registry(env):
                 r.pane = loc[loc.find("%"):] if "%" in loc else None
             else:
                 r.tmux, r.pane = None, None
+            r.kind = d.get("kind") if isinstance(d.get("kind"), str) else None
             r.alive, r.why = _alive(env, r)
             regs.append(r)
     return regs
 
 
 def _alive(env, r):
+    # only an interactive claude is a session; anything else that writes a registry record (other entrypoints) is not
+    if r.kind not in (None, "interactive"):
+        return False, "not-interactive"
     if r.pid_domain and env.pid_ns and "pid:[" in r.pid_domain and not r.pid_domain.endswith(env.pid_ns):
         return False, "foreign-pid-namespace"
     if not r.proc_start:
@@ -462,8 +468,12 @@ class EventsReader:
             st = os.fstat(f.fileno())
             first = self.ino is None
             rotated = not first and (st.st_ino != self.ino or st.st_size < self.off)
+            prev_nl = True
             if first:
                 start = max(0, st.st_size - EVENTS_FIRST_WINDOW)
+                if start > 0:
+                    f.seek(start - 1)
+                    prev_nl = f.read(1) == b"\n"
             elif rotated:
                 self.rotations += 1
                 start = 0
@@ -471,7 +481,8 @@ class EventsReader:
                 start = self.off
             f.seek(start)
             raw = f.read(EVENTS_MAX_READ)
-        if first and start > 0:
+        if first and start > 0 and not prev_nl:
+            # the window starts inside a line: its tail is not an event (it may even look like one)
             nl = raw.find(b"\n")
             skip = nl + 1 if nl >= 0 else len(raw)
             raw, start = raw[skip:], start + skip
@@ -646,7 +657,8 @@ def read_manifest(env):
     if isinstance(d, list):
         for x in d:
             if isinstance(x, dict) and isinstance(x.get("tmuxSessionName"), str):
-                out[x["tmuxSessionName"]] = x
+                # only string fields survive: one odd entry must not break every tick (the daemon would go blind)
+                out[x["tmuxSessionName"]] = {k: v for k, v in x.items() if isinstance(v, str)}
     return out
 
 
@@ -671,11 +683,12 @@ def read_usage(env, now_ms):
             continue
         acct = os.path.basename(f)[:-5]
         acct = None if acct in (".claude", "default") else acct
-        fh_, sd = d.get("five_hour") or {}, d.get("seven_day") or {}
+        fh_, sd = d.get("five_hour"), d.get("seven_day")
+        fh_, sd = (fh_ if isinstance(fh_, dict) else {}), (sd if isinstance(sd, dict) else {})
         out[acct or "default"] = {
             "account": acct,
-            "fiveHour": _num(fh_.get("utilization")), "fiveHourResets": fh_.get("resets_at"),
-            "sevenDay": _num(sd.get("utilization")), "sevenDayResets": sd.get("resets_at"),
+            "fiveHour": _num(fh_.get("utilization")), "fiveHourResets": _str(fh_.get("resets_at")),
+            "sevenDay": _num(sd.get("utilization")), "sevenDayResets": _str(sd.get("resets_at")),
             "ageS": (now_ms // 1000 - fetched) if fetched else None,
         }
     return out
@@ -683,6 +696,10 @@ def read_usage(env, now_ms):
 
 def _num(v):
     return v if isinstance(v, (int, float)) and not isinstance(v, bool) else None
+
+
+def _str(v):
+    return v if isinstance(v, str) else None
 
 
 def read_closed(env, limit=20):
@@ -693,9 +710,9 @@ def read_closed(env, limit=20):
         except ValueError:
             continue
         if isinstance(d, dict) and isinstance(d.get("tmuxName"), str):
-            out.append({"name": d["tmuxName"], "at": d.get("at"), "atMs": _ts_ms(d.get("at")),
-                        "by": d.get("by"), "account": d.get("account"), "title": d.get("title"),
-                        "durable": d.get("durable")})
+            out.append({"name": d["tmuxName"], "at": _str(d.get("at")), "atMs": _ts_ms(d.get("at")),
+                        "by": _str(d.get("by")), "account": _str(d.get("account")), "title": _str(d.get("title")),
+                        "durable": d.get("durable") is True})
     return out
 
 
@@ -705,6 +722,39 @@ def read_self(env):
             return f.read(512).strip() or None
     except OSError:
         return None
+
+
+def resolve_self(env, regs, panes=None, ancestor=True):
+    """Jarvis's own tmux name (I8), in this order:
+    1. `<state>/self` (written by Jarvis's SessionStart hook);
+    2. the session whose live claude is an ancestor of this process (a hook or a Bash call inside Jarvis);
+    3. the one session whose alias is `jarvis` (cron's jarvis-d has no claude above it).
+    None when nothing matches; then nothing is filtered, which is what F1 did before.
+    `ancestor=False` for jarvis-d and plain views: started by hand from a work session, the daemon would otherwise
+    take THAT session for Jarvis and drop its events from the persistent fold.
+    """
+    name = read_self(env)
+    if name:
+        return name
+    by_pid = {r.pid: r for r in regs if r.alive and r.tmux}
+    q = env.my_pid if ancestor else None
+    for _ in range(64):
+        if q is None or q <= 1:
+            break
+        r = by_pid.get(q)
+        if r:
+            return _session_of(r, panes) or r.tmux
+        q = env.ppid(q)
+    names = {r.tmux for r in regs if r.alive and r.tmux} | {p[2] for p in (panes or ())}
+    hits = sorted(n for n in names if n.startswith(SERVER_PREFIX) and parse_name(n)[1] == SELF_ALIAS)
+    return hits[0] if len(hits) == 1 else None
+
+
+def _session_of(r, panes):
+    for pane_id, _pp, sess, _dead in panes or ():
+        if pane_id == r.pane:
+            return sess
+    return None
 
 
 # --------------------------------------------------------------------------------------------------------------------
@@ -730,12 +780,19 @@ def build_sessions(env, regs, panes, manifest, fold, self_name=None, tr_cache=No
 
     live = collections.defaultdict(list)
     stale = collections.Counter()
+    on_pane = set()
     for r in regs:
-        if not r.tmux:
-            continue
         if r.alive:
-            live[r.tmux].append(r)
-        else:
+            # Keyed by the session that owns the record's pane TODAY, when the claude really runs in that pane: the
+            # name in the record is the one at launch, and a session renamed in the app since would otherwise show
+            # its old name as alive and the new one as having no claude.
+            info = pane_info.get(r.pane) if r.pane else None
+            if info and not info[2] and is_descendant(env, r.pid, info[0]):
+                live[info[1]].append(r)
+                on_pane.add(id(r))
+            elif r.tmux:
+                live[r.tmux].append(r)
+        elif r.tmux:
             stale[r.tmux] += 1
 
     names = {n for n in tmux_sessions if n.startswith(SERVER_PREFIX)}
@@ -747,86 +804,93 @@ def build_sessions(env, regs, panes, manifest, fold, self_name=None, tr_cache=No
     out = {}
     ptab = None
     for name in sorted(names):
-        man = manifest.get(name) or {}
-        cands = live.get(name, [])
-        primary = None
-        if cands:
-            mp = main_pane.get(name)
-            on_main = [r for r in cands if mp and r.pane == mp]
-            # a teammate (agent teams) runs its own claude in a split pane of the same session; it starts later
-            primary = (on_main or sorted(cands, key=lambda r: r.started_at or 0))[0]
-        folder, alias, yolo = parse_name(name)
-        s = {
-            "name": name, "short": shorts[name], "alias": alias, "folder": folder,
-            "cwd": None, "account": None, "model": man.get("model"), "mode": man.get("mode"),
-            "pid": None, "pane": None, "sessionId": None, "version": None, "transcript": None,
-            "state": None, "waitingFor": None, "stateSince": None, "verified": False,
-            "teammates": max(0, len(cands) - 1), "staleRecords": stale.get(name, 0),
-            "self": name == self_name,
-        }
-        cfg = None
-        if primary:
-            r = primary
-            cfg = r.cfg
-            s.update(cwd=r.cwd, account=r.account or man.get("accountSlug"), pid=r.pid, pane=r.pane,
-                     sessionId=r.session_id, version=r.version, state=r.status or "unknown",
-                     waitingFor=r.waiting_for, stateSince=r.status_at)
-            if r.pane and r.pane in pane_info:
-                pp, sess, dead = pane_info[r.pane]
-                s["verified"] = sess == name and not dead and is_descendant(env, r.pid, pp)
-        else:
-            s["account"] = man.get("accountSlug")
-            s["cwd"] = man.get("folder")
-            s["sessionId"] = man.get("claudeSessionId")
-            orphan = None
-            if name in tmux_sessions:
-                if ptab is None:
-                    ptab = _children(env.proc_table())
-                orphan = _claude_under(ptab, pane_info[main_pane[name]][0])
-            if orphan:
-                # claude runs in the pane but has no live registry record (seen live: 3 sessions on 2.1.316): its
-                # state cannot be known, and calling it "dead" would be a lie
-                s["state"], s["pid"], s["noRegistry"] = "unknown", orphan, True
-            elif name in tmux_sessions:
-                s["state"] = "dead"
-            elif panes is not None:
-                s["state"] = "missing"
+        try:
+            man = manifest.get(name) or {}
+            cands = live.get(name, [])
+            primary = None
+            if cands:
+                mp = main_pane.get(name)
+                # a teammate (agent teams) runs its own claude in a split pane of the same session: the main pane wins,
+                # and among equals the claude that started first (not the order of the registry files)
+                by_start = sorted(cands, key=lambda r: (r.started_at or 0, r.pid))
+                on_main = [r for r in by_start if mp and r.pane == mp and id(r) in on_pane]
+                primary = (on_main or by_start)[0]
+            folder, alias, yolo = parse_name(name)
+            s = {
+                "name": name, "short": shorts[name], "alias": alias, "folder": folder,
+                "cwd": None, "account": None, "model": man.get("model"), "mode": man.get("mode"),
+                "pid": None, "pane": None, "sessionId": None, "version": None, "transcript": None,
+                "state": None, "waitingFor": None, "stateSince": None, "verified": False,
+                "teammates": max(0, len(cands) - 1), "staleRecords": stale.get(name, 0),
+                "self": name == self_name,
+            }
+            cfg = None
+            if primary:
+                r = primary
+                cfg = r.cfg
+                s.update(cwd=r.cwd, account=r.account or man.get("accountSlug"), pid=r.pid, pane=r.pane,
+                         sessionId=r.session_id, version=r.version, state=r.status or "unknown",
+                         waitingFor=safe_text(r.waiting_for, 80) or None, stateSince=r.status_at)
+                # I1 without capture-pane: the record was keyed through its pane (live pane of THIS session, pid below
+                # the pane's process); a record keyed by its stored name only is never verified
+                s["verified"] = id(r) in on_pane
             else:
-                s["state"] = "unknown"
-        fs = fold.s.get(name) or {}
-        last = fs.get("last")
-        s["lastEvent"] = {"ev": last["ev"], "ms": last["ms"]} if last else None
-        if s["stateSince"] is None and last:
-            s["stateSince"] = last["ms"]
-        # transcript tail, re-read only when the file changed
-        tp = transcript_path(env, cfg, s["cwd"], s["sessionId"])
-        s["transcript"] = tp
-        ti = {}
-        if tp:
-            try:
-                stt = os.stat(tp)
-                key = f"{stt.st_size}:{stt.st_mtime_ns}"
-            except OSError:
-                key = None
-            c = tr_cache.get(tp)
-            if c and c[0] == key:
-                ti = c[1]
-            elif key:
-                ti = transcript_info(tp)
-                ti["_key"] = key
-                tr_cache[tp] = (key, ti)
-        s["trKey"] = ti.get("_key")
-        s["lastPromptMs"] = ti.get("lastPromptMs")
-        s["lastAssistantMs"] = ti.get("lastAssistantMs")
-        s["endsWithQuestion"] = bool(ti.get("endsWithQuestion"))
-        # Stored and shown only escaped: whatever reads status.json (a model included) gets data, not instructions.
-        s["title"] = safe_text(ti.get("title"), 100) or None
-        s["lastPrompt"] = safe_text(ti.get("lastPrompt"), 160) or None
-        att = _attention(s, fs, ti, now_ms)
-        if att:
-            att["text"] = safe_text(att.get("text"), 160)
-        s["attention"] = att
-        out[name] = s
+                s["account"] = man.get("accountSlug")
+                s["cwd"] = man.get("folder")
+                s["sessionId"] = man.get("claudeSessionId")
+                orphan = None
+                if name in tmux_sessions:
+                    if ptab is None:
+                        ptab = _children(env.proc_table())
+                    orphan = _claude_under(ptab, pane_info[main_pane[name]][0])
+                if orphan:
+                    # claude runs in the pane but has no live registry record (seen live: 3 sessions on 2.1.316): its
+                    # state cannot be known, and calling it "dead" would be a lie
+                    s["state"], s["pid"], s["noRegistry"] = "unknown", orphan, True
+                elif name in tmux_sessions:
+                    s["state"] = "dead"
+                elif panes is not None:
+                    s["state"] = "missing"
+                else:
+                    s["state"] = "unknown"
+            fs = fold.s.get(name) or {}
+            last = fs.get("last")
+            s["lastEvent"] = {"ev": last["ev"], "ms": last["ms"]} if last else None
+            if s["stateSince"] is None and last:
+                s["stateSince"] = last["ms"]
+            # transcript tail, re-read only when the file changed
+            tp = transcript_path(env, cfg, s["cwd"], s["sessionId"])
+            s["transcript"] = tp
+            ti = {}
+            if tp:
+                try:
+                    stt = os.stat(tp)
+                    key = f"{stt.st_size}:{stt.st_mtime_ns}"
+                except OSError:
+                    key = None
+                c = tr_cache.get(tp)
+                if c and c[0] == key:
+                    ti = c[1]
+                elif key:
+                    ti = transcript_info(tp)
+                    ti["_key"] = key
+                    tr_cache[tp] = (key, ti)
+            s["trKey"] = ti.get("_key")
+            s["lastPromptMs"] = ti.get("lastPromptMs")
+            s["lastAssistantMs"] = ti.get("lastAssistantMs")
+            s["endsWithQuestion"] = bool(ti.get("endsWithQuestion"))
+            # Stored and shown only escaped: whatever reads status.json (a model included) gets data, not instructions.
+            s["title"] = safe_text(ti.get("title"), 100) or None
+            s["lastPrompt"] = safe_text(ti.get("lastPrompt"), 160) or None
+            att = _attention(s, fs, ti, now_ms)
+            if att:
+                att["text"] = safe_text(att.get("text"), 160)
+            s["attention"] = att
+            out[name] = s
+        except Exception as e:  # noqa: BLE001
+            # one malformed record or transcript must not take the whole picture down (the daemon would go blind)
+            out[name] = {"name": name, "short": shorts[name], "alias": parse_name(name)[1], "state": "unknown",
+                         "attention": None, "self": name == self_name, "error": f"{type(e).__name__}: {e}"[:200]}
     return out
 
 
@@ -859,7 +923,8 @@ def _attention(s, fs, ti, now_ms):
         # flips to busy after it. An open ask/perm counts while the registry is `waiting` or has not moved since
         # (hook-ev writes its line after the registry flipped to waiting, so "moved" means strictly later).
         reg_moved = s["stateSince"] is not None and s["stateSince"] > op["ms"] and state in ("busy", "idle")
-        if state == "waiting" or (not reg_moved and state not in ("dead", "missing")):
+        expired = state == "unknown" and now_ms - op["ms"] > OPEN_MAX_AGE_MS
+        if state == "waiting" or (not reg_moved and not expired and state not in ("dead", "missing")):
             return {"kind": op["ev"], "text": op.get("extra") or "", "since": op["ms"]}
     if state == "waiting":
         return {"kind": "waiting", "text": s.get("waitingFor") or "", "since": s["stateSince"]}
@@ -884,13 +949,13 @@ def significant(s):
     return (s.get("state"), s.get("waitingFor"), a.get("kind"), a.get("text"))
 
 
-def snapshot(env, fold=None, self_name=None, tr_cache=None, now_ms=None):
+def snapshot(env, fold=None, self_name=None, tr_cache=None, now_ms=None, ancestor_self=True):
     """A complete one-shot snapshot (cr-sessions, and cr-digest when the daemon is not running)."""
     now_ms = env.now_ms() if now_ms is None else now_ms
-    self_name = read_self(env) if self_name is None else self_name
-    fold = fold or fold_events_file(env, ignore=self_name)
     regs = read_registry(env)
     panes = env.tmux_panes()
+    self_name = resolve_self(env, regs, panes, ancestor_self) if self_name is None else self_name
+    fold = fold or fold_events_file(env, ignore=self_name)
     sessions = build_sessions(env, regs, panes, read_manifest(env), fold, self_name, tr_cache, now_ms)
     return {"at": now_ms, "self": self_name, "tmuxOk": panes is not None, "sessions": sessions,
             "registryRecords": len(regs), "registryLive": sum(1 for r in regs if r.alive)}

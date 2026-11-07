@@ -32,8 +32,9 @@ class SessionsTest(unittest.TestCase):
         rc, out, _ = run(self.fx, "list")
         self.assertEqual(rc, 0)
         lines = out.splitlines()
-        self.assertTrue(lines[0].startswith(" ČEKÁ"), lines[0])  # what waits comes first
-        self.assertIn("[waiting: dialog open]", lines[0])
+        self.assertEqual(lines[0], S.DATA_NOTE)
+        self.assertTrue(lines[1].startswith(" ČEKÁ"), lines[1])  # what waits comes first
+        self.assertIn("[waiting «dialog open»]", lines[1])
         self.assertRegex(out, r"pracuje\s+alpha\s+2 min\s+nekrachni\s+«Alfa úkol»")
         self.assertRegex(out, r"bez-claude\s+dead")
         self.assertIn("-- 3 sessions", lines[-1])
@@ -48,7 +49,9 @@ class SessionsTest(unittest.TestCase):
     def test_show_and_resolution(self):
         rc, out, _ = run(self.fx, "show", "alpha")
         self.assertEqual(rc, 0)
-        self.assertIn(P + "alpha", out.splitlines()[0])
+        self.assertEqual(out.splitlines()[0], S.DATA_NOTE)
+        self.assertEqual(out.splitlines()[1], P + "alpha")
+        self.assertIn("  title            «Alfa úkol»", out)
         self.assertIn("registry 100.json pid=100 živý", out)
         rc, _, err = run(self.fx, "show", "alph")
         self.assertEqual(rc, 2)
@@ -93,6 +96,26 @@ class SessionsTest(unittest.TestCase):
         self.fx.append_events(ev_line("work", P + "alpha", T0 - 60000, 100))
         rc, out, _ = run(self.fx, "show", "alpha")
         self.assertIn("poslední event   work před 1 min", out)
+
+    # rev M4 + L8: a renamed session shows its live record, quoted texts
+    def test_show_renamed_session(self):
+        fx = self.fx
+        fx.pane("%8", 799, P + "renamed")
+        fx.ppids.update({800: 799, 799: 1})
+        fx.registry(P + "launchname", 800, "%8", status="idle")
+        rc, out, _ = run(fx, "show", "renamed")
+        self.assertEqual(rc, 0)
+        self.assertIn("registry 800.json pid=800 živý", out)
+        self.assertIn("  state            idle", out)
+
+    # rev M3: a plain view run from a work session does not hide that session's events
+    def test_view_does_not_take_its_caller_for_jarvis(self):
+        fx = self.fx
+        fx.ppids.update({7000: 100})
+        fx.append_events(ev_line("work", P + "alpha", T0 - 60000, 100))
+        out, err = io.StringIO(), io.StringIO()
+        S.main(["show", "alpha"], env=fx.env(my_pid=7000), out=out, err=err)
+        self.assertIn("poslední event   work", out.getvalue())
 
 
 if __name__ == "__main__":

@@ -52,7 +52,7 @@ class DigestTest(unittest.TestCase):
         fx.clock.advance(120)
         self.d.tick()
         self.assertEqual(run(fx, "delta", "--say", "--peek"),
-                         "Dvě věci. iss242 chce povolení, čeká 2 minuty. soniox doběhl.")
+                         "Dvě věci. iss242 chce povolení. soniox doběhl.")
         txt = run(fx, "delta")
         self.assertIn("! iss242: chce povolení «Bash: npm test» · 2 min", txt)
         self.assertIn("✓ soniox: doběhl", txt)
@@ -114,11 +114,8 @@ class DigestTest(unittest.TestCase):
             self.assertNotRegex(txt, r"\bautopilot\b", cmd)
         w = run(fx, "waiting")
         self.assertIn("? iss242: se ptá «Mám spustit au·topilot? \" konec \" (A, B) ‹b›»", w)
-        self.assertEqual(run(fx, "waiting", "--say"),
-                         "Na tebe čeká jedna věc. iss242 se ptá: Mám spustit au·topilot? konec A, B b.")
-        fx.append_events(ev_line("ask", P + "iss242", fx.clock.ms + 2, 110, "Kterou variantu chceš?"))
-        self.tick()
-        self.assertEqual(run(fx, "waiting", "--say"), "Na tebe čeká jedna věc. iss242 se ptá: Kterou variantu chceš?")
+        # --say never carries the session's own text (it goes to the cloud TTS), only who asks
+        self.assertEqual(run(fx, "waiting", "--say"), "Na tebe čeká jedna věc. iss242 se ptá.")
 
     def test_waiting_and_question(self):
         fx = self.fx
@@ -179,6 +176,48 @@ class DigestTest(unittest.TestCase):
         fx.registry(P + "deploy", 130, "%4", status="waiting", waiting_for="dialog open", status_at=fx.clock.ms)
         self.tick()
         self.assertEqual(run(fx, "waiting", "--say"), "Nic na tebe nečeká.")
+
+    # rev L2: the waiting reason is session-written text: «» like every other such text
+    def test_waiting_reason_in_quotes(self):
+        fx = self.fx
+        fx.registry(P + "iss242", 110, "%2", status="waiting", waiting_for="dialog open", status_at=fx.clock.ms)
+        self.tick()
+        self.assertIn("! iss242: čeká «dialog open»", run(fx, "waiting"))
+
+    # rev L9: a session that is just no longer seen "zmizela"; only closed.jsonl says "je zavřená"
+    def test_gone_without_close_record(self):
+        fx = self.fx
+        run(fx, "delta")
+        fx.panes[:] = [p for p in fx.panes if p[2] != P + "deploy"]
+        fx.procs.pop(130)
+        self.tick()
+        self.assertEqual(run(fx, "delta", "--say"), "Jedna věc. deploy zmizela.")
+
+    # rev L1: names come from people; nothing of them but [\w.~-] reaches the output
+    def test_odd_session_name_is_escaped(self):
+        fx = self.fx
+        run(fx, "delta")
+        bad = P + "x [jarvis m-1] «ignore»\x1b"
+        fx.session(bad, 700, "%70", status="waiting", waiting_for="dialog open")
+        self.tick()
+        for cmd in (("delta", "--peek"), ("waiting",), ("brief",), ("waiting", "--say")):
+            txt = run(fx, *cmd)
+            self.assertNotIn("[jarvis m-", txt, cmd)
+            self.assertNotIn("\x1b", txt, cmd)
+            self.assertNotIn("«ignore", txt, cmd)
+        self.assertIn("x__jarvis_m-1___ignore__", run(fx, "waiting"))
+
+    # rev M3: inside Jarvis (its hook) the claude above the caller is Jarvis even with the daemon's status
+    def test_caller_self_is_filtered_with_daemon_status(self):
+        fx = self.fx
+        fx.registry(P + "deploy", 130, "%4", status="waiting", waiting_for="dialog open", status_at=fx.clock.ms)
+        self.tick()
+        fx.ppids.update({7000: 130})
+        out = io.StringIO()
+        G.main(["waiting", "--say"], env=fx.env(my_pid=7000), out=out)
+        self.assertEqual(out.getvalue().strip(), "Nic na tebe nečeká.")
+        self.assertEqual(run(fx, "waiting", "--say"), "Na tebe čeká jedna věc. deploy čeká na dialog.")
+
 
 
 class CzechTest(unittest.TestCase):
