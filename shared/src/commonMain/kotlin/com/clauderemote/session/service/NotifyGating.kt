@@ -311,17 +311,31 @@ internal object NotifyKeys {
 
     /**
      * The prompt an event [key] names, for the reply check ([ReplyGuard]). A Stop marker is a
-     * ready completion; a hook `perm` / `ask` and a screen-detected selector are dialogs. Any
-     * other key (a malformed marker's message-id fallback) names no prompt: replies to it fail closed.
+     * ready completion; a hook `perm` and a screen-detected selector (which the screen cannot tell
+     * from a permission) are permissions; a hook `ask` is a question. Any other key (a malformed
+     * marker's message-id fallback) names no prompt: replies to it fail closed.
      */
     fun prompt(key: String?): PromptFingerprint? = when {
         key == null -> null
         key.startsWith(STOP_PREFIX) -> PromptFingerprint(key, PromptKind.READY)
         key.startsWith(DETECTION_PREFIX + PromptType.INPUT_PROMPT.name + "#") -> PromptFingerprint(key, PromptKind.READY)
-        key.startsWith(DETECTION_PREFIX) -> PromptFingerprint(key, PromptKind.DIALOG)
-        key.startsWith(HOOK_PREFIX + "perm#") || key.startsWith(HOOK_PREFIX + "ask#") -> PromptFingerprint(key, PromptKind.DIALOG)
+        key.startsWith(DETECTION_PREFIX) -> PromptFingerprint(key, PromptKind.PERMISSION)
+        key.startsWith(HOOK_PREFIX + "perm#") -> PromptFingerprint(key, PromptKind.PERMISSION)
+        key.startsWith(HOOK_PREFIX + "ask#") -> PromptFingerprint(key, PromptKind.QUESTION)
         else -> null
     }
+
+    /** (event, server-clock ms) of a [hook] key, null for any other key. */
+    fun hookEvent(key: String): Pair<String, Long>? {
+        if (!key.startsWith(HOOK_PREFIX)) return null
+        val ev = key.substring(HOOK_PREFIX.length).substringBefore('#')
+        val at = key.substringAfterLast('#').toLongOrNull() ?: return null
+        return if (ev == "perm" || ev == "ask") ev to at else null
+    }
+
+    /** The marker epoch (seconds) of a [stop] key, null for any other key. */
+    fun stopEpochSec(key: String): Long? =
+        if (key.startsWith(STOP_PREFIX)) key.substringAfterLast('#').toLongOrNull() else null
 }
 
 /**

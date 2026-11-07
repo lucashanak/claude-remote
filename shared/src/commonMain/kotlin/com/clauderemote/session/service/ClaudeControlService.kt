@@ -31,6 +31,8 @@ private val BRACKETED_PASTE = Regex("\u001b\\[200~[\\s\\S]*?(?:\u001b\\[201~|\\z
  * [onOutput] bridges to the facade's `onTerminalOutput` callback so the queued
  * / flushed / no-connection banners still echo to the active tab.
  */
+private const val REPLY_EXEC_MS = 8_000L
+
 internal class ClaudeControlService(
     private val scope: CoroutineScope,
     private val registry: ConnectionRegistry,
@@ -119,6 +121,37 @@ internal class ClaudeControlService(
 
     /** Whether a send reaches the session now instead of the offline queue. */
     fun canDeliverNow(sessionId: String): Boolean = route(sessionId) != null
+
+    /** Test seam: replaces the exec of [sendCheckedReply] ((serverId, command) -> stdout, null = failed). */
+    internal var replyExecOverride: (suspend (String, String) -> String?)? = null
+
+    /**
+     * Type a reply into the session through one exec that first checks the server's hook event
+     * log against [expect] ([ReplyGuard.serverCommand]). Not through the PTY: the check and the
+     * keys must run in the same shell on the server. Returns null when sent, else why not; a
+     * failed exec fails closed.
+     */
+    suspend fun sendCheckedReply(sessionId: String, expect: ServerExpectation, text: String): RefuseReason? {
+        val tab = tabManager.getTab(sessionId) ?: return RefuseReason.NOT_CONNECTED
+        val cmd = ReplyGuard.serverCommand(tab.tmuxSessionName, expect, text)
+        val exec = replyExecOverride
+        val out = try {
+            if (exec != null) exec(tab.server.id, cmd) else registry.execRead(tab.server.id, cmd, totalMs = REPLY_EXEC_MS)
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            FileLogger.log(TAG, "checked reply exec failed for $sessionId: ${e.message}")
+            null
+        }
+        val why = ReplyGuard.serverResult(out)
+        if (why == null) {
+            // What sendClaudeCommand does around a PTY send: the dot goes to WORKING, a dialog
+            // hold ends, the detector re-arms.
+            notifications.promptDetector.onUserInput(sessionId)
+            noteSent(sessionId, text + "\r")
+        }
+        return why
+    }
 
     // ---- Offline input queue ----
 

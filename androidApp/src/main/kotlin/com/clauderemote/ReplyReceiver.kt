@@ -4,8 +4,6 @@ import android.app.RemoteInput
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
-import android.os.Handler
-import android.os.Looper
 import com.clauderemote.session.SessionOrchestrator
 import com.clauderemote.session.service.PromptFingerprint
 import com.clauderemote.session.service.ReplyGuard
@@ -27,19 +25,22 @@ object OrchestratorHolder {
  * voice input (which does Czech), so the user can answer Claude from the
  * wrist with zero watch-side code.
  *
- * Mirrors the chat input path: sendClaudeCommand(text) followed by a CR a
- * beat later (same as voice mode), then reverts the alert notification —
- * which also clears the watch-side "sending…" spinner.
+ * Also the Ano/Ne of a permission alert ([EXTRA_ANSWER]): free text never
+ * answers a permission dialog, Enter would pick its default "Yes".
  *
- * Only while the session still shows the prompt the alert was raised for
- * (SessionOrchestrator.checkReply): every session runs in yolo mode, so a
- * text meant for one permission dialog must never answer the next one.
- * Otherwise nothing is sent and the alert says the question has changed.
+ * Sent through SessionOrchestrator.sendReply, only while the session still
+ * shows the prompt the alert was raised for — checked against the app's
+ * state and then against the server's hook event log in the same exec that
+ * types the keys. Every session runs in yolo mode, so a text meant for one
+ * permission dialog must never answer the next one. Otherwise nothing is
+ * sent and the alert says why.
  */
 class ReplyReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
         val sessionId = intent.getStringExtra(EXTRA_SESSION_ID) ?: return
-        val text = RemoteInput.getResultsFromIntent(intent)
+        // Ano/Ne of a permission alert, or the inline reply's text.
+        val answer = intent.getStringExtra(EXTRA_ANSWER)?.takeIf { it == "y" || it == "n" }
+        val text = answer ?: RemoteInput.getResultsFromIntent(intent)
             ?.getCharSequence(KEY_REPLY)?.toString()?.trim().orEmpty()
         if (text.isEmpty()) return
         val orchestrator = OrchestratorHolder.orchestrator
@@ -48,20 +49,22 @@ class ReplyReceiver : BroadcastReceiver() {
             return
         }
         val prompt = PromptFingerprint.decode(intent.getStringExtra(EXTRA_PROMPT))
-        val verdict = orchestrator.checkReply(sessionId, prompt, ReplyGuard.Reply.TEXT)
-        if (verdict is ReplyGuard.Verdict.Refuse) {
-            FileLogger.log(TAG, "Reply to $sessionId refused (${prompt?.key}): ${verdict.reason}")
-            AlertNotifier.postPromptChanged(context, sessionId, intent.getStringExtra(EXTRA_TITLE) ?: "Claude")
-            return
+        val title = intent.getStringExtra(EXTRA_TITLE) ?: "Claude"
+        val reply = if (answer != null) ReplyGuard.Reply.APPROVE else ReplyGuard.Reply.TEXT
+        // The server check is an exec round trip: keep the receiver alive until it answers
+        // (the exec is capped well inside the broadcast budget).
+        val pending = goAsync()
+        val appContext = context.applicationContext
+        orchestrator.sendReplyAsync(sessionId, prompt, reply, text) { why ->
+            try {
+                // Cancelling also clears the RemoteInput progress indicator; a refusal replaces
+                // the alert with its reason and no actions.
+                if (why == null) AlertNotifier.clear(appContext, sessionId)
+                else AlertNotifier.postRefused(appContext, sessionId, title, why.message)
+            } finally {
+                pending.finish()
+            }
         }
-        FileLogger.log(TAG, "Reply to $sessionId: ${text.length} chars")
-        orchestrator.sendClaudeCommand(sessionId, text)
-        Handler(Looper.getMainLooper()).postDelayed({
-            OrchestratorHolder.orchestrator?.sendClaudeCommand(sessionId, "\r")
-        }, 60)
-        // Cancel the alert — acknowledges it and clears the RemoteInput
-        // progress indicator on the watch.
-        AlertNotifier.clear(context, sessionId)
     }
 
     companion object {
@@ -70,6 +73,8 @@ class ReplyReceiver : BroadcastReceiver() {
         const val EXTRA_TITLE = "session_title"
         // PromptFingerprint.encode() of the prompt the alert was raised for.
         const val EXTRA_PROMPT = "prompt"
+        // "y" / "n" of a permission alert's Ano/Ne.
+        const val EXTRA_ANSWER = "answer"
         private const val TAG = "ReplyReceiver"
     }
 }

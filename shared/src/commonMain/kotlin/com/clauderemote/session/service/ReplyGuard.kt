@@ -2,12 +2,19 @@ package com.clauderemote.session.service
 
 import com.clauderemote.model.SessionActivity
 
-/** What an actionable notification asked the user for. */
+/** What a reply from outside the app (phone notification, watch) answers. */
 enum class PromptKind {
-    /** Claude finished and sits at its input box: the answer is a new instruction. */
+    /** Claude finished a turn (a Stop marker names it) and sits at its input box. */
     READY,
-    /** A selector is open (tool permission or AskUserQuestion): a key press answers it. */
-    DIALOG,
+    /** A tool permission dialog, or a selector the screen cannot tell apart from one. Only Ano/Ne answers it. */
+    PERMISSION,
+    /** An AskUserQuestion (hook `ask`): Ano/Ne or a typed answer. */
+    QUESTION,
+    /**
+     * No prompt at all: an instruction for a session that is working (Claude Code queues it) or
+     * idle without a known completion. Allowed only when the server's event log vouches for it.
+     */
+    INSTRUCTION,
 }
 
 /**
@@ -32,11 +39,44 @@ data class PromptFingerprint(val key: String, val kind: PromptKind) {
     }
 }
 
+/** Why a reply was not sent, with the short Czech text the phone or the watch shows for it. */
+enum class RefuseReason(val message: String) {
+    /** The watch app predates prompt identities and sends none. */
+    WATCH_OUTDATED("Aktualizuj aplikaci na hodinkách"),
+    /** The notification names no prompt (an event the app could not identify). */
+    NO_PROMPT("Na tohle odpověď poslat nejde – otevři aplikaci"),
+    NOT_CONNECTED("Session není připojená"),
+    PROMPT_CHANGED("Dotaz se mezitím změnil – otevři aplikaci"),
+    /** Free text for a permission dialog: Enter would pick its default "Yes". */
+    YES_NO_ONLY("Na schválení odpověz Ano/Ne"),
+    /** The server could not confirm the prompt (no hooks, exec failed, hooks switched off). */
+    NOT_VERIFIABLE("Stav session nejde ověřit – otevři aplikaci"),
+}
+
+/**
+ * What the server's own event log must still say right before the keys go in
+ * ([ReplyGuard.serverCommand]): the app's view of the session can lag behind it.
+ */
+sealed interface ServerExpectation {
+    /** The newest `claude-remote-ev` line of the pane is this very `perm` / `ask`. */
+    data class Dialog(val ev: String, val atMs: Long) : ServerExpectation
+    /** The newest line is a `stop`; with no v2 line at all, the newest legacy Stop marker is at least [stopEpochSec]. */
+    data class Ready(val stopEpochSec: Long) : ServerExpectation
+    /** The newest line is a `stop` (v2 only). */
+    data object Idle : ServerExpectation
+    /** The newest line exists and is not a `perm` / `ask` (v2 only). */
+    data object Working : ServerExpectation
+}
+
 /**
  * Decides whether a reply given from outside the app (the notification's inline reply, the
  * watch) may be typed into the session. Every session runs in yolo mode, so a permission
  * dialog is the last safety gate: an "Ano" written for command A must never approve command B
  * that took A's place while the notification sat on the wrist. Anything unknown fails closed.
+ *
+ * Two stages: [check] against the app's state, then [serverCommand], which checks the server's
+ * event log and sends the keys in the same shell, so nothing the phone has not read yet can
+ * slip in between.
  */
 object ReplyGuard {
     enum class Reply {
@@ -47,58 +87,149 @@ object ReplyGuard {
     }
 
     sealed interface Verdict {
-        data object Send : Verdict
-        data class Refuse(val reason: String) : Verdict
+        data class Send(val expect: ServerExpectation) : Verdict
+        data class Refuse(val reason: RefuseReason, val detail: String) : Verdict
     }
 
-    /** Placeholder key of a [PromptKind.READY] prompt no event named (see [promptShown]). */
-    const val IDLE_KEY = "idle"
+    /** Key of a [PromptKind.INSTRUCTION] prompt, which no event names. */
+    const val INSTRUCTION_KEY = "instruction"
+
+    private fun refuse(reason: RefuseReason, detail: String) = Verdict.Refuse(reason, detail)
+
+    private fun PromptKind.isDialog() = this == PromptKind.PERMISSION || this == PromptKind.QUESTION
 
     /**
      * [notified]: the prompt the user answered (from the notification or the watch row).
      * [current]: the newest prompt the session announced, null once it went back to work.
-     * [activity]: the session's current activity. [deliverable]: the input reaches the session now
-     * rather than being queued for a reconnect, when the state it was checked against is long gone.
+     * [activity]: the session's current activity. [deliverable]: the session's transport is up;
+     * with it down the app's view of the session is stale.
      */
-    fun check(
+    internal fun check(
         notified: PromptFingerprint?,
-        current: PromptFingerprint?,
+        current: PromptTokens.Current?,
         activity: SessionActivity?,
         deliverable: Boolean,
         reply: Reply,
     ): Verdict {
-        if (notified == null) return Verdict.Refuse("the reply names no prompt")
-        if (!deliverable) return Verdict.Refuse("the session is not connected")
+        if (notified == null) return refuse(RefuseReason.NO_PROMPT, "the reply names no prompt")
+        if (!deliverable) return refuse(RefuseReason.NOT_CONNECTED, "the session is not connected")
         return when (notified.kind) {
-            // Only the very dialog the user saw: a new perm/ask or a screen detection replaces
-            // the key, and going back to work clears it.
-            PromptKind.DIALOG -> when {
-                activity != SessionActivity.APPROVAL_NEEDED -> Verdict.Refuse("no dialog is open now ($activity)")
-                current != notified -> Verdict.Refuse("another prompt is open now (${current?.key})")
-                else -> Verdict.Send
+            PromptKind.PERMISSION, PromptKind.QUESTION -> when {
+                // Text + Enter in a permission selector picks its default, "Yes".
+                notified.kind == PromptKind.PERMISSION && reply == Reply.TEXT ->
+                    refuse(RefuseReason.YES_NO_ONLY, "free text for a permission dialog")
+                activity != SessionActivity.APPROVAL_NEEDED ->
+                    refuse(RefuseReason.PROMPT_CHANGED, "no dialog is open now ($activity)")
+                current == null || !current.names(notified.key) ->
+                    refuse(RefuseReason.PROMPT_CHANGED, "another prompt is open now (${current?.prompt?.key})")
+                else -> current.hookEvent()?.let { (ev, at) -> Verdict.Send(ServerExpectation.Dialog(ev, at)) }
+                    // A dialog only the screen saw: the server log cannot confirm it.
+                    ?: refuse(RefuseReason.NOT_VERIFIABLE, "no hook event names this dialog")
             }
-            // A new instruction for an idle session may answer any completion, not only the one
-            // notified, as long as no selector is open to catch it.
             PromptKind.READY -> when {
-                reply != Reply.TEXT -> Verdict.Refuse("a dialog answer for a session that asked no question")
-                activity != SessionActivity.WAITING_FOR_INPUT -> Verdict.Refuse("the session is not at its input prompt ($activity)")
-                current?.kind == PromptKind.DIALOG -> Verdict.Refuse("a dialog is open now (${current.key})")
-                else -> Verdict.Send
+                reply != Reply.TEXT -> refuse(RefuseReason.PROMPT_CHANGED, "a dialog answer for a finished turn")
+                activity != SessionActivity.WAITING_FOR_INPUT ->
+                    refuse(RefuseReason.PROMPT_CHANGED, "the session is not at its input prompt ($activity)")
+                current != null && current.prompt.kind.isDialog() ->
+                    refuse(RefuseReason.PROMPT_CHANGED, "a dialog was announced last (${current.prompt.key})")
+                // A later completion is fine too (the server checks that the session is idle), so
+                // the key only has to name a real Stop marker.
+                else -> NotifyKeys.stopEpochSec(notified.key)?.let { Verdict.Send(ServerExpectation.Ready(it)) }
+                    ?: refuse(RefuseReason.NOT_VERIFIABLE, "no Stop marker names this prompt")
+            }
+            PromptKind.INSTRUCTION -> when {
+                reply != Reply.TEXT -> refuse(RefuseReason.PROMPT_CHANGED, "a dialog answer without a dialog")
+                current != null && current.prompt.kind.isDialog() ->
+                    refuse(RefuseReason.PROMPT_CHANGED, "a dialog was announced last (${current.prompt.key})")
+                // Claude Code queues text typed while it works.
+                activity == SessionActivity.WORKING -> Verdict.Send(ServerExpectation.Working)
+                activity == SessionActivity.WAITING_FOR_INPUT -> Verdict.Send(ServerExpectation.Idle)
+                else -> refuse(RefuseReason.PROMPT_CHANGED, "the session takes no input now ($activity)")
             }
         }
     }
 
     /**
-     * The prompt a view of the session shows right now (the watch row): the announced one when
-     * it agrees with [activity]. A ready session nobody announced (a silence drop, a restarted
-     * app) still offers a free-text reply, which [check] judges by the state alone; an approval
-     * with no announced dialog offers nothing that could pass.
+     * The prompt a view of the session offers a reply to (the watch row, captured again when the
+     * user starts answering): [notified] when it agrees with [activity], an instruction for a
+     * working or an unannounced idle session, nothing for an approval nobody announced.
      */
-    fun promptShown(current: PromptFingerprint?, activity: SessionActivity?): PromptFingerprint? = when (activity) {
-        SessionActivity.WAITING_FOR_INPUT -> current?.takeIf { it.kind == PromptKind.READY }
-            ?: PromptFingerprint(IDLE_KEY, PromptKind.READY)
-        SessionActivity.APPROVAL_NEEDED -> current?.takeIf { it.kind == PromptKind.DIALOG }
+    fun promptShown(notified: PromptFingerprint?, activity: SessionActivity?): PromptFingerprint? = when (activity) {
+        SessionActivity.WAITING_FOR_INPUT -> notified?.takeIf { it.kind == PromptKind.READY }
+            ?: PromptFingerprint(INSTRUCTION_KEY, PromptKind.INSTRUCTION)
+        SessionActivity.APPROVAL_NEEDED -> notified?.takeIf { it.kind.isDialog() }
+        SessionActivity.WORKING -> PromptFingerprint(INSTRUCTION_KEY, PromptKind.INSTRUCTION)
         else -> null
+    }
+
+    private fun sq(s: String) = "'" + s.replace("'", "'\\''") + "'"
+
+    /** Output token of [serverCommand]. */
+    const val SERVER_TOKEN = "CR_REPLY"
+
+    /**
+     * One shell command that checks the pane's newest hook event against [expect] and, only if
+     * it matches, types [text] into tmux session [tmux] and presses Enter. Check and send run in
+     * the same shell on the server, so the gap between them is a few milliseconds instead of a
+     * round trip; what remains is a dialog drawn in those milliseconds, or one the hooks never
+     * report (see the lane notes).
+     *
+     * `claude-remote-ev <EV> <name_b64> <epoch_ms> <pid> <extra_b64>` lines come from
+     * [HookCommands.EVENTS_PATH]; legacy Stop markers (`claude-remote-notify <name> <epoch_s>`)
+     * from both marker files the notify watcher tails (the newest epoch wins). A switched-off or full events file counts as "no hooks".
+     * Prints `CR_REPLY SENT`, or `CR_REPLY STALE|NOHOOKS|FAILED`.
+     */
+    fun serverCommand(tmux: String, expect: ServerExpectation, text: String): String {
+        val decide = when (expect) {
+            is ServerExpectation.Dialog -> {
+                val want = sq("${expect.ev} ${expect.atMs}")
+                "if [ -z \"\$L\" ]; then W=NOHOOKS; elif [ \"\$L\" = $want ]; then OK=1; else W=STALE; fi"
+            }
+            is ServerExpectation.Ready ->
+                "case \"\$L\" in 'stop '*) OK=1;; '') " +
+                    "if [ -n \"\$M\" ] && [ \"\$M\" -ge ${expect.stopEpochSec} ] 2>/dev/null; then OK=1; else W=STALE; fi;; " +
+                    "*) W=STALE;; esac"
+            ServerExpectation.Idle -> "case \"\$L\" in 'stop '*) OK=1;; '') W=NOHOOKS;; *) W=STALE;; esac"
+            ServerExpectation.Working -> "case \"\$L\" in '') W=NOHOOKS;; 'perm '*|'ask '*) W=STALE;; *) OK=1;; esac"
+        }
+        val name = sq(tmux)
+        // tac reads the file from its end: the pane's newest line is found without scanning
+        // 20 MB of other panes' history.
+        return "N=\$(printf '%s' $name | base64 -w0); T=${sq("=$tmux:")}; " +
+            "E=\"\$HOME/${HookCommands.EVENTS_PATH.removePrefix("~/")}\"; L=''; OK=0; W=STALE; " +
+            "SZ=\$(stat -c %s \"\$E\" 2>/dev/null || echo 0); " +
+            "if [ ! -f \"\$HOME/${HookCommands.OFF_SWITCH_PATH.removePrefix("~/")}\" ] && " +
+            "[ \"\$SZ\" -lt ${HookCommands.EVENTS_MAX_BYTES - 2048} ]; then " +
+            "L=\$(tac \"\$E\" 2>/dev/null | awk -v n=\"\$N\" '\$1==\"claude-remote-ev\" && \$3==n {print \$2\" \"\$4; exit}'); fi; " +
+            "M=\$(cat \"\$HOME/${MARKER_PATH.removePrefix("~/")}\" ${sq(LEGACY_MARKER_PATH)} 2>/dev/null | " +
+            "awk -v n=$name '\$1==\"claude-remote-notify\" && \$2==n && \$3+0>m {m=\$3+0} END{if (m) print m}'); " +
+            "$decide; " +
+            "if [ \"\$OK\" = 1 ]; then " +
+            "if tmux send-keys -t \"\$T\" -l -- ${sq(text)} 2>/dev/null && sleep 0.1 && " +
+            "tmux send-keys -t \"\$T\" Enter 2>/dev/null; then echo '$SERVER_TOKEN SENT'; else echo '$SERVER_TOKEN FAILED'; fi; " +
+            "else echo \"$SERVER_TOKEN \$W\"; fi"
+    }
+
+    /**
+     * The refusal a watch reply earns before any state is looked at: an old watch build sends
+     * no prompt identity at all (it shows "sent" for it, so the phone has to say so), and an
+     * identity that does not decode names nothing.
+     */
+    fun watchRefusal(rawPrompt: String?): RefuseReason? = when {
+        rawPrompt == null -> RefuseReason.WATCH_OUTDATED
+        PromptFingerprint.decode(rawPrompt) == null -> RefuseReason.NO_PROMPT
+        else -> null
+    }
+
+    /** null = sent; otherwise why not. Anything unexpected (no output, a failed exec) fails closed. */
+    fun serverResult(output: String?): RefuseReason? {
+        val token = output?.lineSequence()?.map { it.trim() }?.lastOrNull { it.startsWith("$SERVER_TOKEN ") }
+            ?.removePrefix("$SERVER_TOKEN ")
+        return when (token) {
+            "SENT" -> null
+            "STALE" -> RefuseReason.PROMPT_CHANGED
+            else -> RefuseReason.NOT_VERIFIABLE
+        }
     }
 }
 
@@ -107,19 +238,69 @@ object ReplyGuard {
  * alert: the active tab in the foreground, an old replayed `perm`), cleared as soon as the
  * session leaves the prompt states — after WORKING, an APPROVAL with no new event must not
  * revive the key of the dialog that was answered.
+ *
+ * One dialog can be announced by two sources (hook event and screen detection, see
+ * [PromptDialogDedup]); the key of the one held back as "the same dialog" is kept as an alias,
+ * so the alert raised by the other one stays answerable.
  */
-internal class PromptTokens {
-    private val lock = Any()
-    private val tokens = HashMap<String, PromptFingerprint>()
+internal class PromptTokens(private val clock: () -> Long = { System.currentTimeMillis() }) {
+    data class Current(val prompt: PromptFingerprint, val aliases: Set<String> = emptySet()) {
+        fun names(key: String) = key == prompt.key || key in aliases
 
-    fun note(sessionId: String, prompt: PromptFingerprint) = synchronized(lock) { tokens[sessionId] = prompt }
+        /** The hook event among the names ((ev, atMs)), the primary first. */
+        fun hookEvent(): Pair<String, Long>? =
+            NotifyKeys.hookEvent(prompt.key) ?: aliases.firstNotNullOfOrNull { NotifyKeys.hookEvent(it) }
+    }
+
+    private class Entry(val current: Current, val atMs: Long, val replaced: Entry?)
+
+    private val lock = Any()
+    private val tokens = HashMap<String, Entry>()
+
+    /** [atMs]: when the prompt appeared, on the device clock (a hook event's time corrected for skew). */
+    fun note(sessionId: String, prompt: PromptFingerprint, atMs: Long = clock()) = synchronized(lock) {
+        val prev = tokens[sessionId]
+        if (prev?.current?.prompt == prompt) return@synchronized
+        tokens[sessionId] = Entry(Current(prompt), atMs, prev?.let { Entry(it.current, it.atMs, null) })
+    }
+
+    /**
+     * The dedup held back the event [key] as the same dialog an alert already announced.
+     * - Hook first: the screen's [key] joins the hook's prompt.
+     * - Screen first: the hook was noted on arrival and replaced the screen's prompt; that one
+     *   comes back as an alias, but only when the hook fired no later than [SAME_DIALOG_SLACK_MS]
+     *   after the screen saw a dialog. A hook that fired later belongs to a dialog that came after
+     *   the screen's one — the 15 s dedup window alone cannot tell them apart.
+     */
+    fun sameDialog(sessionId: String, key: String) = synchronized(lock) {
+        val e = tokens[sessionId] ?: return@synchronized
+        if (!e.current.prompt.kind.let { it == PromptKind.PERMISSION || it == PromptKind.QUESTION }) return@synchronized
+        val prev = e.replaced
+        val merged = when {
+            e.current.prompt.key != key -> e.current.copy(aliases = e.current.aliases + key)
+            prev != null && prev.current.prompt.kind.let { it == PromptKind.PERMISSION || it == PromptKind.QUESTION } &&
+                e.atMs <= prev.atMs + SAME_DIALOG_SLACK_MS ->
+                e.current.copy(aliases = e.current.aliases + prev.current.prompt.key + prev.current.aliases)
+            else -> return@synchronized
+        }
+        tokens[sessionId] = Entry(merged, e.atMs, e.replaced)
+    }
 
     fun onActivity(sessionId: String, activity: SessionActivity) {
         if (activity == SessionActivity.WAITING_FOR_INPUT || activity == SessionActivity.APPROVAL_NEEDED) return
         synchronized(lock) { tokens.remove(sessionId) }
     }
 
-    fun current(sessionId: String): PromptFingerprint? = synchronized(lock) { tokens[sessionId] }
+    fun current(sessionId: String): Current? = synchronized(lock) { tokens[sessionId]?.current }
 
-    fun forget(sessionId: String) = synchronized(lock) { tokens.remove(sessionId) }
+    fun forget(sessionId: String) { synchronized(lock) { tokens.remove(sessionId) } }
+
+    companion object {
+        /**
+         * How much later than the screen's sighting a hook may have fired and still be the same
+         * dialog. The hook fires before the dialog is drawn and the screen sees it only after it
+         * went quiet, so the true order is always hook first; this only absorbs clock-skew error.
+         */
+        const val SAME_DIALOG_SLACK_MS = 1_000L
+    }
 }

@@ -73,9 +73,9 @@ object AlertNotifier {
      * watch app suppresses this bridged copy from its own side via the
      * NO_BRIDGING meta-data in the wearApp manifest, so nothing is needed here.
      *
-     * [prompt] names the prompt this alert is for. The inline reply carries it back so
+     * [prompt] names the prompt this alert is for. The answer actions carry it back so
      * [ReplyReceiver] types nothing once the session shows a different prompt; null makes every
-     * reply to this alert fail closed.
+     * reply to this alert fail closed. A permission gets Ano/Ne instead of the inline reply.
      */
     fun post(
         context: Context,
@@ -106,31 +106,46 @@ object AlertNotifier {
                 PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
             )
 
-            // Inline reply (RemoteInput). Wear OS bridges this action to the
-            // watch automatically and offers its built-in voice input, so the
-            // user can answer Claude from the wrist without any watch app.
-            // FLAG_MUTABLE is required for RemoteInput on Android 12+.
-            val replyIntent = PendingIntent.getBroadcast(
-                context, sessionId.hashCode(),
+            // The extras name the prompt of THIS alert, and the request code does too: with one
+            // code per session, a later alert for the same session rewrote the extras of the
+            // PendingIntent a reply already in progress would fire, and the text written for A
+            // went out carrying B's identity.
+            fun answerIntent(tag: String, mutable: Boolean, extra: Intent.() -> Unit) = PendingIntent.getBroadcast(
+                context, "$sessionId#${prompt?.key}#$tag".hashCode(),
                 Intent(context, ReplyReceiver::class.java).apply {
                     putExtra(ReplyReceiver.EXTRA_SESSION_ID, sessionId)
                     putExtra(ReplyReceiver.EXTRA_TITLE, sessionTitle)
-                    // FLAG_UPDATE_CURRENT replaces it on every re-post, so the reply always
-                    // names the prompt of the alert the user is looking at.
                     putExtra(ReplyReceiver.EXTRA_PROMPT, prompt?.encode())
+                    extra()
                 },
-                PendingIntent.FLAG_MUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+                (if (mutable) PendingIntent.FLAG_MUTABLE else PendingIntent.FLAG_IMMUTABLE) or PendingIntent.FLAG_UPDATE_CURRENT
             )
-            val remoteInput = android.app.RemoteInput.Builder(ReplyReceiver.KEY_REPLY)
-                .setLabel("Odpověď pro Claude…")
-                .build()
-            val replyAction = Notification.Action.Builder(
-                android.graphics.drawable.Icon.createWithResource(
-                    context, android.R.drawable.ic_menu_send
-                ),
-                "Odpovědět",
-                replyIntent,
-            ).addRemoteInput(remoteInput).build()
+            val answerActions = if (prompt?.kind == com.clauderemote.session.service.PromptKind.PERMISSION) {
+                // A permission is answered with Ano/Ne only: typed text + Enter would pick the
+                // selector's default, "Yes".
+                listOf("Ano" to "y", "Ne" to "n").map { (label, answer) ->
+                    Notification.Action.Builder(
+                        android.graphics.drawable.Icon.createWithResource(context, android.R.drawable.ic_menu_send),
+                        label,
+                        answerIntent("answer_$answer", mutable = false) { putExtra(ReplyReceiver.EXTRA_ANSWER, answer) },
+                    ).build()
+                }
+            } else {
+                // Inline reply (RemoteInput). Wear OS bridges this action to the
+                // watch automatically and offers its built-in voice input, so the
+                // user can answer Claude from the wrist without any watch app.
+                // FLAG_MUTABLE is required for RemoteInput on Android 12+.
+                val remoteInput = android.app.RemoteInput.Builder(ReplyReceiver.KEY_REPLY)
+                    .setLabel("Odpověď pro Claude…")
+                    .build()
+                listOf(
+                    Notification.Action.Builder(
+                        android.graphics.drawable.Icon.createWithResource(context, android.R.drawable.ic_menu_send),
+                        "Odpovědět",
+                        answerIntent("reply", mutable = true) {},
+                    ).addRemoteInput(remoteInput).build()
+                )
+            }
 
             // "Přehrát" — read the message aloud on demand via the chosen TTS
             // engine. Distinct request code from reply so the PendingIntents
@@ -162,7 +177,7 @@ object AlertNotifier {
                 .setContentIntent(openIntent)
                 .setAutoCancel(true)
                 .setCategory(Notification.CATEGORY_MESSAGE)
-                .addAction(replyAction)
+                .apply { answerActions.forEach { addAction(it) } }
                 .addAction(playAction)
                 .build()
 
@@ -175,11 +190,11 @@ object AlertNotifier {
     }
 
     /**
-     * Replace the session's alert after a reply was refused because the session no longer shows
-     * the prompt it was written for. No reply action: the user has to see the new prompt in the
-     * app before answering it. Re-posting the same id also ends the RemoteInput spinner.
+     * Replace the session's alert after a reply was refused, saying why ([message]: a
+     * RefuseReason text). No answer actions: whatever the session shows now has to be seen in
+     * the app before it is answered. Re-posting the same id also ends the RemoteInput spinner.
      */
-    fun postPromptChanged(context: Context, sessionId: String, sessionTitle: String) {
+    fun postRefused(context: Context, sessionId: String, sessionTitle: String, message: String) {
         runCatching {
             ensureChannel(context)
             val openIntent = PendingIntent.getActivity(
@@ -192,7 +207,7 @@ object AlertNotifier {
             )
             val notification = Notification.Builder(context, ALERT_CHANNEL_ID)
                 .setContentTitle(sessionTitle)
-                .setContentText(PROMPT_CHANGED_TEXT)
+                .setContentText(message)
                 .setSmallIcon(android.R.drawable.ic_dialog_info)
                 .setContentIntent(openIntent)
                 .setAutoCancel(true)
@@ -202,12 +217,9 @@ object AlertNotifier {
             (context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager)
                 .notify(alertId(sessionId), notification)
         }.onFailure {
-            FileLogger.log(TAG, "Prompt-changed post FAILED for $sessionId: ${it.message}")
+            FileLogger.log(TAG, "Refusal post FAILED for $sessionId: ${it.message}")
         }
     }
-
-    /** What a refused reply tells the user, on the phone and on the watch. */
-    const val PROMPT_CHANGED_TEXT = "Dotaz se mezitím změnil – otevři aplikaci"
 
     /** Whether the user has notifications for this app switched on at OS level. */
     fun notificationsBlocked(context: Context): Boolean = runCatching {

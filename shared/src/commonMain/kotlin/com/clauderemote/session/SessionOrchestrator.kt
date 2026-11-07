@@ -213,7 +213,7 @@ class SessionOrchestrator(
         { id -> transcriptService.streamOrNull(id) },
         { sid, kind, hint, active, body, prompt -> onClaudeNeedsInput?.invoke(sid, kind, hint, active, body, prompt) },
         { id -> statusService.sessionActivities.value[id] },
-        { id, prompt -> statusService.promptTokens.note(id, prompt) },
+        statusService.promptTokens,
     )
 
     // Per-session terminal output buffer (ring buffer) + pty size tracking.
@@ -346,7 +346,7 @@ class SessionOrchestrator(
 
     // Notification callback when Claude needs attention. [prompt] names the prompt the alert is
     // for (null when no event named one): an actionable notification carries it so its reply can
-    // be checked with [checkReply].
+    // be checked with [sendReply].
     var onClaudeNeedsInput: ((
         sessionId: String,
         kind: com.clauderemote.session.service.NotifyKind,
@@ -2753,29 +2753,68 @@ class SessionOrchestrator(
 
     fun sendClaudeCommand(sessionId: String, command: String) = claudeControl.sendClaudeCommand(sessionId, command)
 
-    /** The prompt the session shows right now, for a view that offers a reply to it (the watch row). */
+    /** The prompt the session shows right now, for a view that offers a reply to it (the test notification). */
     fun currentPrompt(sessionId: String): com.clauderemote.session.service.PromptFingerprint? =
         com.clauderemote.session.service.ReplyGuard.promptShown(
-            statusService.promptTokens.current(sessionId), statusService.currentActivity(sessionId),
+            statusService.promptTokens.current(sessionId)?.prompt, statusService.currentActivity(sessionId),
         )
 
     /**
-     * Whether a reply given outside the app for [notified] may be sent to [sessionId] now: the
-     * session must still show that prompt (see ReplyGuard). Call it right before
-     * [sendClaudeCommand]; a Refuse means send nothing.
+     * Send a reply given outside the app (notification, watch) for [notified] — [text] and Enter
+     * — but only while the session still shows that prompt: first against the app's state, then
+     * against the server's hook event log in the same shell that types the keys (ReplyGuard).
+     * Returns null when sent, else why nothing was sent. Never queues for a reconnect.
      */
-    fun checkReply(
+    suspend fun sendReply(
         sessionId: String,
         notified: com.clauderemote.session.service.PromptFingerprint?,
         reply: com.clauderemote.session.service.ReplyGuard.Reply,
-    ): com.clauderemote.session.service.ReplyGuard.Verdict =
-        com.clauderemote.session.service.ReplyGuard.check(
+        text: String,
+    ): com.clauderemote.session.service.RefuseReason? {
+        val verdict = com.clauderemote.session.service.ReplyGuard.check(
             notified,
             statusService.promptTokens.current(sessionId),
             statusService.currentActivity(sessionId),
             claudeControl.canDeliverNow(sessionId),
             reply,
         )
+        val why = when (verdict) {
+            is com.clauderemote.session.service.ReplyGuard.Verdict.Refuse -> {
+                FileLogger.log(TAG, "Reply $reply to $sessionId refused (${notified?.key}): ${verdict.detail}")
+                verdict.reason
+            }
+            is com.clauderemote.session.service.ReplyGuard.Verdict.Send ->
+                claudeControl.sendCheckedReply(sessionId, verdict.expect, text)?.also {
+                    FileLogger.log(TAG, "Reply $reply to $sessionId refused by the server check (${notified?.key}, ${verdict.expect}): $it")
+                }
+        }
+        if (why == null) FileLogger.log(TAG, "Reply $reply to $sessionId sent (${notified?.key}): ${text.length} chars")
+        return why
+    }
+
+    /** The tab title of [sessionId], for a notification about it. */
+    fun tabTitle(sessionId: String): String? = tabManager.getTab(sessionId)?.tabTitle
+
+    /** [sendReply] for a caller without a coroutine (a BroadcastReceiver, a listener service). */
+    fun sendReplyAsync(
+        sessionId: String,
+        notified: com.clauderemote.session.service.PromptFingerprint?,
+        reply: com.clauderemote.session.service.ReplyGuard.Reply,
+        text: String,
+        onResult: (com.clauderemote.session.service.RefuseReason?) -> Unit,
+    ) {
+        reconnectScope.launch {
+            val why = try {
+                sendReply(sessionId, notified, reply, text)
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                FileLogger.error(TAG, "Reply to $sessionId failed: ${e.message}", e)
+                com.clauderemote.session.service.RefuseReason.NOT_VERIFIABLE
+            }
+            onResult(why)
+        }
+    }
 
     fun switchModel(sessionId: String, model: ClaudeModel) = claudeControl.switchModel(sessionId, model)
 

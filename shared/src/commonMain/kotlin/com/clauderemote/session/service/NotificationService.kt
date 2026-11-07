@@ -29,7 +29,7 @@ private const val TAG = "SessionOrchestrator"
  * connect: the install script rewrites any marker entry that differs from the
  * one it wants.
  */
-private const val MARKER_PATH = "~/.cache/claude-remote/notify"
+internal const val MARKER_PATH = "~/.cache/claude-remote/notify"
 private const val MARKER_DIR = "~/.cache/claude-remote"
 
 /**
@@ -38,7 +38,7 @@ private const val MARKER_DIR = "~/.cache/claude-remote"
  * have reloaded their settings; see the watcher. Remove both this and that half of
  * the tail only when no config on the box carries the /tmp hook any more.
  */
-private const val LEGACY_MARKER_PATH = "/tmp/claude-notify"
+internal const val LEGACY_MARKER_PATH = "/tmp/claude-notify"
 
 /** Rotate the marker file when it passes this many lines, down to [MARKER_KEEP_LINES]. */
 private const val MARKER_MAX_LINES = 1000
@@ -216,8 +216,8 @@ internal class NotificationService(
     // The session's current activity: a live v2 `stop` may only LEAVE an approval, never overwrite
     // the ready state the legacy Stop marker (which lands first) has already set.
     private val activityOf: (String) -> SessionActivity? = { null },
-    // Bridge to statusService.promptTokens: the newest prompt of the session (ReplyGuard).
-    private val notePrompt: (String, PromptFingerprint) -> Unit = { _, _ -> },
+    // statusService.promptTokens: the newest prompt of each session (ReplyGuard).
+    private val promptTokens: PromptTokens = PromptTokens(),
 ) {
     // Prompt detection for notifications — quiescence-based, reads rendered screen state.
     internal val promptDetector = InputPromptDetector().apply {
@@ -484,6 +484,8 @@ internal class NotificationService(
                 false
             } else if (source != null && !dialogDedup.allow(sessionId, source, now, pendingHookApproval, hooksLive)) {
                 // The same dialog was already announced by the other source (hook event vs screen).
+                // Its key names that dialog too, so a reply to either alert stays answerable.
+                prompt?.let { promptTokens.sameDialog(sessionId, it.key) }
                 if (source == PromptDialogDedup.Source.SCREEN && dialogDedup.isHeldByHook(sessionId, pendingHookApproval, now, hooksLive)) {
                     FileLogger.log(TAG, "Suppressed needs-input for $sessionId (the hook approval since $pendingHookApproval it announced is still pending)")
                 } else {
@@ -500,7 +502,7 @@ internal class NotificationService(
                 // a single completion. See NotifyKeys.isDebounceExempt.
                 // Past both "same prompt" gates: this is the session's newest prompt even when the
                 // debounce swallows its alert, so a reply to the previous one no longer matches it.
-                prompt?.let { notePrompt(sessionId, it) }
+                prompt?.let { promptTokens.note(sessionId, it, now) }
                 val last = lastNeedsInputAt[sessionId] ?: 0L
                 if (!NotifyKeys.isDebounceExempt(eventKey) && now - last < notifyDebounceMs) {
                     FileLogger.log(TAG, "Suppressed needs-input for $sessionId (debounce)")
@@ -1003,7 +1005,11 @@ internal class NotificationService(
             }
             // A new dialog replaces the prompt a pending reply was written for NOW, not after the
             // settle delay, and also when no alert follows (the foreground tab, an old event).
-            if (e.ev == "perm" || e.ev == "ask") NotifyKeys.prompt(NotifyKeys.hook(e.ev, e.tmux, e.atMs))?.let { notePrompt(sessionId, it) }
+            // Stamped with when the hook FIRED (device clock, skew-corrected): that is what tells a
+            // late hook of the dialog the screen already saw from the next dialog (PromptTokens.sameDialog).
+            if (e.ev == "perm" || e.ev == "ask") {
+                NotifyKeys.prompt(NotifyKeys.hook(e.ev, e.tmux, e.atMs))?.let { promptTokens.note(sessionId, it, clock() - r.ageMs) }
+            }
             val n = r.notify ?: return@onSessionLane
             kotlinx.coroutines.delay(hookSettleMs)
             if (w.reducer.isSuperseded(e.tmux, e.atMs)) return@onSessionLane
