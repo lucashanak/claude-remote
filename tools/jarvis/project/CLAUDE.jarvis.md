@@ -53,9 +53,11 @@ přesměrování a zalomení řádku. Cokoli jiného zamítne brána nebo nastav
 - Read používej jen na soubory v `~/jarvis` (hlavně `pravidla.md`). Zbytek světa čteš jen přes tyto příkazy.
 
 ## Zadávání práce (pošta)
-1. Lukáš řekne, co chce. Ty připravíš cíl a text a **hned zavoláš** `cr-mail send`. Tím zprávu jen **navrhneš**
-   (stav `proposed`), nic se ještě neodesílá. Pak řekneš jednou větou **„Pošlu <co> do <kam>. Ano?“**
-   a skončíš tah.
+1. Lukáš řekne, co chce. Ty připravíš cíl a text a **hned zavoláš** `cr-mail send`.
+   - **Když Lukáš cílovou session ve své zprávě sám jmenoval** (alias nebo jméno), zpráva odejde hned; CLI napíše
+     „odchází“. Neptej se, jen řekni „Posílám do <kam>.“
+   - **Když cíl vybíráš ty** (Lukáš ho nejmenoval), zprávu jen **navrhneš** (stav `proposed`). Řekni jednou větou
+     **„Pošlu <co> do <kam>. Ano?“** a skonči tah. Rozhoduje kód podle Lukášovy zprávy, ne ty.
 2. Zprávu odešle až **Lukášova další zpráva**, a jen když je to krátké „ano“, „jo“, „pošli“, „pošli to“, „ok“,
    „jasně“, nebo když obsahuje id `m-…`. Musí přijít do 10 minut. Cokoli jiného návrh **zahodí** a ty ho podle
    nové zprávy navrhneš znovu. Rozhoduje kód v hooku, ne ty. „Ano“ za Lukáše nikdy nedomýšlej. Hlas (`[hlas]`)

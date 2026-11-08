@@ -1316,6 +1316,46 @@ class Med2EnterTest(Base):
 class Med4ApprovalTest(Base):
     """MED4: send only proposes; Lukáš's next prompt approves (short yes or the id) or drops."""
 
+    def named(self):
+        # what jarvis-d keeps in status.json: names with their alias/short
+        with open(os.path.join(self.fx.state, "status.json"), "w") as f:
+            json.dump({"sessions": {TARGET: {"alias": "jarvis-test", "short": "jarvis-test"},
+                                    OTHER: {"alias": "RAG", "short": "RAG"}}}, f)
+
+    def test_a_target_lukas_named_goes_out_without_the_extra_yes(self):
+        # Lukáš 2026-11-08: "Pokud je to jednoznačné, mohl by to udělat rovnou"
+        self.named()
+        self.lukas_says("Pošli do jarvis-test, ať pushne rozdělanou práci")
+        rec, why = self.send(approve=False)
+        self.assertIsNone(why)
+        self.assertEqual(rec["state"], "queued")
+        self.assertEqual(self.m.get(rec["id"])["decidedBy"], "named")
+
+    def test_a_target_jarvis_chose_himself_still_asks(self):
+        self.named()
+        self.lukas_says("rozdělanou práci pushnout a odpovědět na review")
+        rec, _ = self.send(approve=False)
+        self.assertEqual(rec["state"], "proposed")
+
+    def test_naming_another_session_approves_nothing_here(self):
+        self.named()
+        self.lukas_says("pošli to do RAG")
+        rec, _ = self.send(approve=False)  # to TARGET
+        self.assertEqual(rec["state"], "proposed")
+
+    def test_a_longer_word_is_not_the_name(self):
+        self.named()
+        self.lukas_says("ty jarvis-testy pusť znovu")
+        rec, _ = self.send(approve=False)
+        self.assertEqual(rec["state"], "proposed")
+
+    def test_named_targets_are_stored_without_the_text(self):
+        self.named()
+        self.lukas_says("Pošli do jarvis-test tajné heslo123")
+        lp = json.load(open(os.path.join(self.fx.state, "last-prompt")))
+        self.assertEqual(lp["named"], [TARGET])
+        self.assertNotIn("heslo123", json.dumps(lp))
+
     def test_a_proposal_is_never_delivered(self):
         rec, _ = self.send(approve=False)
         self.assertEqual(rec["state"], "proposed")

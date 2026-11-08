@@ -483,9 +483,32 @@ class Mail:
         except Exception:  # noqa: BLE001
             silence = quiet = False
         J.atomic_write(self.env.path("last-prompt"), json.dumps(
-            {"id": "p-" + h, "at": now, "by": "lukas", "silence": silence, "quiet": quiet}))
+            {"id": "p-" + h, "at": now, "by": "lukas", "silence": silence, "quiet": quiet,
+             "named": self._named_sessions(prompt)}))
         self.decide_proposals(prompt, prev.get("id") if isinstance(prev, dict) else None, now)
         return None
+
+    def _named_sessions(self, prompt):
+        """Sessions Lukáš named in this prompt by their exact name, alias or short name (whole word, any case).
+        Only the names are kept, never the text. A message to a session he named himself goes out without the extra
+        "Ano?" (Lukáš 2026-11-08: the confirmation is only worth it when Jarvis chose the target). Fails closed: any
+        error = nothing named = the old proposal path."""
+        try:
+            st = J.read_json(self.env.path("status.json"), {}) or {}
+            sessions = st.get("sessions") or {}
+            low = prompt.lower()
+            out = []
+            for name, s in sessions.items():
+                if not isinstance(s, dict):
+                    continue
+                for key in {name, s.get("alias"), s.get("short")}:
+                    if isinstance(key, str) and len(key) >= 3 and re.search(
+                            r"(?<![\w-])" + re.escape(key.lower()) + r"(?![\w-])", low):
+                        out.append(name)
+                        break
+            return sorted(set(out))[:20]
+        except Exception:  # noqa: BLE001
+            return []
 
     def decide_proposals(self, prompt, prev_id, now):
         """proposed -> queued (Lukáš said yes to it) or dropped (anything else)."""
@@ -568,6 +591,7 @@ class Mail:
         base, conflict = self.target_facts(name, now)
         rec = {"v": 1, "id": mid, "from": "jarvis", "to": name, "task": task, "prompt": lp.get("id"),
                "subject": subject_of(clean), "state": "proposed", "created": now, "notBefore": not_before or 0,
+               "named": name in (lp.get("named") or []),
                "expires": max(now, not_before or 0) + EXPIRE_MS, "attempts": 0, "enters": 0, "deliveredAt": None, "pasteAt": None,
                "lastBlock": None, "reply": None, "base": base, "conflict": conflict}
         body = (f"# Zpráva od Jarvise {mid}\n\n"
@@ -586,6 +610,9 @@ class Mail:
             J.atomic_write(self.msg_path(mid), body)
             self.put(rec)
             self.log("proposed", id=mid, to=name, task=task, prompt=rec["prompt"])
+            if rec["named"]:
+                # Lukáš named this target himself in the fresh prompt: his instruction is the approval
+                self.transition(rec, "queued", ev="approved", decidedBy="named")
         return rec, None
 
     def target_facts(self, name, now):

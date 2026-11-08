@@ -114,9 +114,14 @@ def cmd_send(m, a, out):
     if why:
         raise Refused(why)
     later = f" {after_cz}" if after_cz else ""
-    out.write(f"{rec['id']} navržena pro {J.short_name(rec['to'])}{(', odložená' + later) if later else ''}. "
-              f"Zeptej se Lukáše: „Pošlu to do {J.short_name(rec['to'])}{later}. Ano?“ Odejde jen po jeho ano "
-              f"v příští zprávě (do 10 minut), jinak se zahodí.\n")
+    if rec.get("state") == "queued":
+        out.write(f"{rec['id']} odchází do {J.short_name(rec['to'])}{(', odložená' + later) if later else ''}: "
+                  f"Lukáš ji ve své zprávě jmenoval, takže se neptej, jen řekni „Posílám do "
+                  f"{J.short_name(rec['to'])}.“\n")
+    else:
+        out.write(f"{rec['id']} navržena pro {J.short_name(rec['to'])}{(', odložená' + later) if later else ''}. "
+                  f"Zeptej se Lukáše: „Pošlu to do {J.short_name(rec['to'])}{later}. Ano?“ Odejde jen po jeho ano "
+                  f"v příští zprávě (do 10 minut), jinak se zahodí.\n")
     c = rec.get("conflict")
     if c:
         # E1: only information; Lukáš decides with it in front of him
