@@ -688,6 +688,37 @@ class HooksTest(unittest.TestCase):
             r = b.hook(".claude/hooks/prompt-delta.sh", stdin=payload)
             self.assertEqual((r.returncode, r.stdout.strip()), (0, "[jarvis delta] args: delta --max-chars 8000"))
 
+    def test_prompt_delta_drops_the_previous_prompt_without_cr_mail(self):
+        # rev-f2a MED5: with cr-mail missing or broken the previous prompt must still stop authorising a send, and a
+        # stale last-prompt.prev must never survive to approve a proposal
+        b = self.b
+        os.makedirs(b.state, exist_ok=True)
+        lp, prev = os.path.join(b.state, "last-prompt"), os.path.join(b.state, "last-prompt.prev")
+
+        def run(script=None):
+            if script:
+                Box.write(b.path(".claude/hooks/prompt-delta.sh"), script, 0o755)
+            return b.hook(".claude/hooks/prompt-delta.sh", stdin='{"hook_event_name": "UserPromptSubmit"}')
+
+        for body in (None, "exit 2", "kill -9 $$"):
+            if body:
+                Box.write(os.path.join(b.bin, "cr-mail"), f"#!/bin/sh\n{body}\n", 0o755)
+            Box.write(lp, '{"id": "p-old"}', 0o600)
+            Box.write(prev, '{"id": "p-older"}', 0o600)
+            self.assertEqual(run().returncode, 0)
+            self.assertFalse(os.path.exists(lp), body)
+            with open(prev) as f:
+                self.assertEqual(f.read(), '{"id": "p-old"}', body)
+            run()  # no last-prompt to move: the old .prev goes too
+            self.assertFalse(os.path.exists(prev), body)
+        # mutation: the hook without those two lines leaves the old prompt in place
+        text = b.read(".claude/hooks/prompt-delta.sh")
+        mutant = "\n".join(l for l in text.splitlines() if not l.startswith(("mv -f", "rm -f"))) + "\n"
+        self.assertNotEqual(mutant, text)
+        Box.write(lp, '{"id": "p-old"}', 0o600)
+        run(mutant)
+        self.assertTrue(os.path.exists(lp))
+
     def test_hooks_with_the_real_digest_stay_under_the_hook_limit(self):
         # the installed hooks against the real cr_digest.py on an empty fake box: they run and say the daemon is down
         b = self.b

@@ -73,7 +73,7 @@ class Daemon:
         self.good_panes, self.good_at = None, 0
         self.usage, self.usage_at = {}, 0
         self.errors = []
-        self.mail = M.MailWorker(env)
+        self.mail = M.MailWorker(env, log=self.log)
         self.time_left = lambda: 60.0
         self.integrity, self.integrity_at = [], 0
 
@@ -109,7 +109,9 @@ class Daemon:
         self.first = False
         if now - self.integrity_at >= INTEGRITY_EVERY_MS:
             self.integrity_at = now
-            self.integrity = M.integrity(os.path.dirname(os.path.realpath(__file__)), os.path.join(env.home, "jarvis"))
+            # before status.json, so it must never throw: an unreadable install record would otherwise stop the
+            # whole picture every tick (rev-f2a LOW4)
+            self.integrity = self._integrity()
             if self.integrity:
                 self.log("Jarvisovy nástroje se změnily mimo instalaci: " + ", ".join(self.integrity[:8]))
         closed = J.read_closed(env)
@@ -135,6 +137,12 @@ class Daemon:
         except Exception:
             self.log("mail: " + traceback.format_exc(limit=3))
         return status
+
+    def _integrity(self):
+        try:
+            return M.integrity(os.path.dirname(os.path.realpath(__file__)), os.path.join(self.env.home, "jarvis"))
+        except Exception as e:  # noqa: BLE001
+            return [f"(kontrola selhala: {type(e).__name__})"]
 
     def _diff(self, sessions, now, tmux_ok=True):
         """Names whose significant fields changed since the last tick; carries prevState/changedGen forward."""

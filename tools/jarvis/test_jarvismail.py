@@ -188,9 +188,25 @@ class Base(unittest.TestCase):
         with open(os.path.join(self.fx.state, "last-prompt"), "w") as f:
             json.dump({"id": pid, "at": self.fx.clock.ms - int(age_s * 1000)}, f)
 
-    def send(self, text="Oprav timeout v extrakci, hotové až projdou testy.", to=TARGET, m=None, **kw):
-        rec, why = (m or self.m).send(to, text, **kw)
+    def send(self, text="Oprav timeout v extrakci, hotové až projdou testy.", to=TARGET, m=None, approve=True, **kw):
+        """send = a proposal; approve=True plays Lukáš's next prompt "ano" (MED4), as the hook would."""
+        m = m or self.m
+        rec, why = m.send(to, text, **kw)
+        if rec and approve:
+            self.lukas_says("ano")
+            rec = m.get(rec["id"])
         return rec, why
+
+    def lukas_says(self, text, m=None):
+        """What prompt-delta.sh does: move last-prompt to .prev (or drop .prev), then cr-mail prompt-seen."""
+        st = self.fx.state
+        try:
+            os.replace(os.path.join(st, "last-prompt"), os.path.join(st, "last-prompt.prev"))
+        except FileNotFoundError:
+            if os.path.exists(os.path.join(st, "last-prompt.prev")):
+                os.unlink(os.path.join(st, "last-prompt.prev"))
+        self.fx.clock.advance(1)
+        return (m or self.m).prompt_seen({"hook_event_name": "UserPromptSubmit", "prompt": text}, self.fx.clock.ms)
 
     def fold(self):
         return J.fold_events_file(self.env, ignore=JARVIS)
@@ -212,6 +228,7 @@ class DeliveryTest(Base):
         rec, why = self.send()
         self.assertIsNone(why)
         self.assertEqual(rec["state"], "queued")
+        self.assertNotIn("Oprav", self.m.line_of(rec))  # MED3: the target gets a fixed line
         self.assertTrue(M.ID_RE.fullmatch(rec["id"]))
         with open(self.m.msg_path(rec["id"])) as f:
             body = f.read()
@@ -222,13 +239,13 @@ class DeliveryTest(Base):
         self.assertEqual([c[0] for c in w], ["load-buffer", "paste-buffer", "send-keys"])
         self.assertEqual(w[1], ["paste-buffer", "-d", "-b", "crmail-" + rec["id"], "-t", "%2"])  # no -p
         line = self.tp.submitted
-        self.assertTrue(line.startswith(f"[jarvis {rec['id']}] Oprav timeout"), line)
+        self.assertEqual(line, f"[jarvis {rec['id']}] Zpráva od Jarvise · Celé znění: cat {self.m.msg_path(rec['id'])}")
         self.assertIn(f"· Celé znění: cat {self.m.msg_path(rec['id'])}", line)
         self.assertNotIn("\n", line)
         r = self.m.get(rec["id"])
         self.assertEqual((r["state"], r["attempts"]), ("delivered", 1))
         evs = [e["ev"] for e in self.m.ledger()]
-        self.assertEqual(evs, ["queued", "try", "pasted", "enter", "confirmed"])
+        self.assertEqual(evs, ["proposed", "approved", "try", "pasted", "enter", "confirmed"])
         self.assertEqual(self.tm.buffers, {})  # the named buffer is gone (-d)
 
     def test_placeholder_and_cursor_count_as_empty(self):
@@ -491,17 +508,13 @@ class I4ShapeTest(Base):
         self.assertIn("delší než", self.send("x" * 2001)[1])
         self.assertIn("prázdný", self.send("   ")[1])
 
-    def test_omc_mode_words_are_refused(self):
-        for bad in ("spusť ralph na to", "autopilot", "ULW prosím", "ultrawork", "ralplan", "cancelomc",
-                    "použij /team", "ultrathink o tom", "tdd", "deep interview", "auto-pilot"):
-            rec, why = self.send(bad)
-            self.assertIsNone(rec, bad)
-            self.assertIn("režim OMC", why)
-        for i, ok in enumerate(("tým to zkontroluje", "the team wiki", "ralphie", "autopilota")):
-            self.prompt(pid=f"p-ok{i}")  # 3 per prompt and 3 unanswered per target: a new prompt, the old cancelled
-            self.assertIsNotNone(self.send(ok, to=TARGET)[0], ok)
-            for r in self.m.all():
-                self.m.cancel(r["id"])
+    def test_the_pasted_line_is_fixed_whatever_the_text(self):
+        # MED3: no word of Jarvis's text reaches the target's prompt, so no OMC keyword (any version of its list) can
+        rec, why = self.send("spusť ralph, full auto, e2e this, think hard, /team")
+        self.assertIsNone(why)
+        self.deliver(rec)
+        self.assertEqual(self.tp.submitted, f"[jarvis {rec['id']}] Zpráva od Jarvise · Celé znění: cat "
+                                            f"{self.m.msg_path(rec['id'])}")
 
     def test_line_shape(self):
         rec, _ = self.send("a" * 1900)
@@ -561,18 +574,18 @@ class I6ProvenanceTest(Base):
     def test_three_messages_per_prompt(self):
         self.allow(TARGET, OTHER)
         for i in range(2):
-            self.assertIsNone(self.send(f"zpráva {i}")[1])
-        self.assertIsNone(self.send("třetí", to=OTHER)[1])
-        self.assertIn("nejvýš 3", self.send("čtvrtá", to=OTHER)[1])
+            self.assertIsNone(self.send(f"zpráva {i}", approve=False)[1])
+        self.assertIsNone(self.send("třetí", to=OTHER, approve=False)[1])
+        self.assertIn("nejvýš 3", self.send("čtvrtá", to=OTHER, approve=False)[1])
         self.prompt(pid="p-new")
-        self.assertIsNone(self.send("nový pokyn", to=OTHER)[1])
+        self.assertIsNone(self.send("nový pokyn", to=OTHER, approve=False)[1])
 
     def test_three_unanswered_per_target(self):
         for i, p in enumerate(("p-1", "p-2", "p-3")):
             self.prompt(pid=p)
-            self.assertIsNone(self.send(f"zpráva {i}")[1])
+            self.assertIsNone(self.send(f"zpráva {i}", approve=False)[1])
         self.prompt(pid="p-4")
-        self.assertIn("bez odpovědi", self.send("čtvrtá")[1])
+        self.assertIn("bez odpovědi", self.send("čtvrtá", approve=False)[1])
 
     def test_twenty_per_hour(self):
         names = [f"claude-server-t{i}--t{i}" for i in range(8)]
@@ -581,7 +594,7 @@ class I6ProvenanceTest(Base):
         for i in range(7):
             self.prompt(pid=f"p-{i}")
             for j in range(3):
-                why = self.send("x", to=names[(i * 3 + j) % 8])[1]
+                why = self.send("x", to=names[(i * 3 + j) % 8], approve=False)[1]
                 if n < 20:
                     self.assertIsNone(why, n)
                 else:
@@ -704,7 +717,7 @@ class RecoveryTest(Base):
 
     def test_crash_before_paste_requeues_then_delivers(self):
         rec = self.crashed("load-buffer")
-        self.m.recover(self.sessions(), self.fold(), self.fx.clock.ms, first=True)
+        self.m.recover(self.sessions(), self.fold(), self.fx.clock.ms)
         r = self.m.get(rec["id"])
         self.assertEqual((r["state"], r["attempts"]), ("queued", 1))
         self.fx.clock.advance(1)
@@ -714,7 +727,7 @@ class RecoveryTest(Base):
     def test_crash_after_paste_sends_only_enter(self):
         rec = self.crashed("paste-buffer")
         n_paste = len([c for c in self.tm.calls if c[0] == "paste-buffer"])
-        self.m.recover(self.sessions(), self.fold(), self.fx.clock.ms, first=True)
+        self.m.recover(self.sessions(), self.fold(), self.fx.clock.ms)
         self.assertEqual(self.m.get(rec["id"])["state"], "delivered")
         self.assertEqual(len([c for c in self.tm.calls if c[0] == "paste-buffer"]), n_paste)
         self.assertEqual(len(self.tm.keys()), 1)
@@ -724,7 +737,7 @@ class RecoveryTest(Base):
         sid = f"{200:08x}-0000-4000-8000-000000000000"
         self.fx.transcript("/home/u/proj", sid, [{"type": "user", "message": {"content": self.tp.submitted}}])
         before = len(self.tm.calls)
-        self.m.recover(self.sessions(), self.fold(), self.fx.clock.ms, first=True)
+        self.m.recover(self.sessions(), self.fold(), self.fx.clock.ms)
         self.assertEqual(self.m.get(rec["id"])["state"], "delivered")
         self.assertEqual(self.tm.writes()[-1][0], "send-keys")
         self.assertEqual([c[0] for c in self.tm.calls[before:] if c[0] in ("paste-buffer", "send-keys")], [])
@@ -733,7 +746,7 @@ class RecoveryTest(Base):
         rec = self.crashed("load-buffer")
         with self.m.target_lock(TARGET) as got:
             self.assertTrue(got)
-            self.m.recover(self.sessions(), self.fold(), self.fx.clock.ms, first=True)
+            self.m.recover(self.sessions(), self.fold(), self.fx.clock.ms)
         self.assertEqual(self.m.get(rec["id"])["state"], "delivering")
 
     def test_three_attempts_then_give_up(self):
@@ -741,7 +754,7 @@ class RecoveryTest(Base):
         r = self.m.get(rec["id"])
         r["attempts"] = M.MAX_ATTEMPTS
         self.m.put(r)
-        self.m.recover(self.sessions(), self.fold(), self.fx.clock.ms, first=True)
+        self.m.recover(self.sessions(), self.fold(), self.fx.clock.ms)
         r = self.m.get(rec["id"])
         self.assertEqual((r["state"], r["giveUp"]), ("uncertain", True))
         self.m.recover(self.sessions(), self.fold(), self.fx.clock.ms + 10 ** 7)
@@ -751,8 +764,8 @@ class RecoveryTest(Base):
         rec = self.crashed("paste-buffer")
         self.tp.raw = "garbage"
         before = len(self.tm.writes())
-        self.m.recover(self.sessions(), self.fold(), self.fx.clock.ms, first=True)
-        self.assertEqual(self.m.get(rec["id"])["state"], "delivering")
+        self.m.recover(self.sessions(), self.fold(), self.fx.clock.ms)
+        self.assertEqual(self.m.get(rec["id"])["state"], "uncertain")
         self.assertEqual(len(self.tm.writes()), before)
 
 
@@ -904,7 +917,7 @@ class MutationTest(unittest.TestCase):
                [I1TargetTest]),
         "I2": (lambda: _patch_all(M.Mail, ("check_registry", "check_events", "check_screen"), lambda *a, **k: None),
                [I2PromptTest]),
-        "I3": (lambda: mock.patch.object(M.Mail, "_box_is_ours", lambda *a: True), [I3KeysTest]),
+        "I3": (lambda: mock.patch.object(M.Mail, "ready_for_enter", lambda *a: None), [I3KeysTest]),
         "I4": (lambda: mock.patch.object(M, "validate_text", lambda t, *a, **k: (t, None)), [I4ShapeTest]),
         "I5": (lambda: mock.patch.object(M.Mail, "check_hands", lambda *a: None), [I5HandsTest]),
         "I6": (lambda: _patch_all(M.Mail, ("check_provenance", "check_send_limits", "check_paste_limits"),
@@ -1115,9 +1128,10 @@ class PrivateTmuxTest(unittest.TestCase):
         time.sleep(0.3)
         r = self.m.get(rec["id"])
         r["state"] = "delivering"
+        r["pasteAt"] = self.env.now_ms() - 500  # the deliverer died between paste and Enter
         self.m.put(r)
         sessions = J.snapshot(self.env, ancestor_self=False)["sessions"]
-        self.m.recover(sessions, self.fold(), self.env.now_ms(), first=True)
+        self.m.recover(sessions, self.fold(), self.env.now_ms())
         self.assertEqual(self.m.get(rec["id"])["state"], "delivered")
         self.assertEqual(self.keys().count(b"\r"), 1)
 
@@ -1127,6 +1141,391 @@ class PrivateTmuxTest(unittest.TestCase):
         t = self.m.probe(TARGET, self.fold(), self.env.now_ms())
         self.assertIsInstance(t, M.Target)
         self.assertLess(time.monotonic() - t0, 0.2)  # §3.3 step 1: the re-check runs < 200 ms before the paste
+
+
+# ------------------------------------------------------------------------------------------------- rev-f2a fixes
+
+class High1NoDuplicateTest(RecoveryTest):
+    """HIGH1: a message whose paste started is never pasted again (the reviewer's probe_dup.py, as tests)."""
+
+    def pastes(self):
+        return len([c for c in self.tm.calls if c[0] == "paste-buffer"])
+
+    def test_crash_after_enter_without_a_known_transcript(self):
+        rec = self.crashed("send-keys")
+        self.fx.clock.advance(5000)
+        self.m.recover(self.sessions(), self.fold(), self.fx.clock.ms)
+        self.fx.clock.advance(3 * 60)
+        self.m.recover(self.sessions(), self.fold(), self.fx.clock.ms)
+        self.deliver(rec)
+        self.assertEqual((self.pastes(), len(self.tm.keys())), (1, 1))
+
+    def test_crash_after_enter_box_empty_no_work_gives_up(self):
+        self.tp.accept = False  # Enter went out, nothing tells us whether it started a turn
+        rec = self.crashed("send-keys")
+        self.tp.box = ""
+        self.m.recover(self.sessions(), self.fold(), self.fx.clock.ms)
+        r = self.m.get(rec["id"])
+        self.assertEqual((r["state"], r.get("giveUp")), ("uncertain", True))
+        self.fx.clock.advance(10 * 60)
+        self.m.recover(self.sessions(), self.fold(), self.fx.clock.ms)
+        self.deliver(rec)
+        self.assertEqual((self.pastes(), len(self.tm.keys())), (1, 1))
+
+    def test_lukas_deleted_our_line_it_is_never_pasted_again(self):
+        rec, _ = self.send()
+        orig = self.tm.__call__
+
+        def tmux(args):
+            r = orig(args)
+            if args[0] == "paste-buffer":
+                self.tp.box = "lukas typing " + self.tp.box
+            return r
+        self.m.tmux = tmux
+        self.assertEqual(self.deliver(rec), "uncertain")
+        self.m.tmux = self.tm
+        self.tp.box = ""
+        for _ in range(4):
+            self.fx.clock.advance(3 * 60)
+            self.m.recover(self.sessions(), self.fold(), self.fx.clock.ms)
+            self.deliver(rec)
+        self.assertEqual((self.pastes(), len(self.tm.keys())), (1, 0))
+
+    def test_transient_block_after_paste_waits_then_only_enter(self):
+        rec = self.crashed("paste-buffer")
+        self.tp.activity = [self.fx.clock.ms // 1000 - 2]  # Lukáš is typing in that session right now
+        self.m.recover(self.sessions(), self.fold(), self.fx.clock.ms)
+        r = self.m.get(rec["id"])
+        self.assertEqual((r["state"], r.get("giveUp")), ("uncertain", None))
+        self.assertEqual(self.tm.keys(), [])
+        self.tp.activity = []
+        self.fx.clock.advance(3 * 60)
+        self.m.recover(self.sessions(), self.fold(), self.fx.clock.ms)
+        self.assertEqual(self.m.get(rec["id"])["state"], "delivered")
+        self.assertEqual((self.pastes(), len(self.tm.keys())), (1, 1))
+
+    def test_enters_are_capped_across_recovery(self):
+        self.tp.lose_enters = 5
+        rec, _ = self.send()
+        self.assertEqual(self.deliver(rec), "uncertain")  # two Enters, both lost; our line still in the box
+        for _ in range(3):
+            self.fx.clock.advance(3 * 60)
+            self.m.recover(self.sessions(), self.fold(), self.fx.clock.ms)
+        self.assertEqual(len(self.tm.keys()), M.MAX_ENTERS)
+        self.assertTrue(self.m.get(rec["id"])["giveUp"])
+
+
+class Med2EnterTest(Base):
+    """MED2: the Enter checks everything the paste checked, again."""
+
+    def after_paste(self, fn):
+        orig = self.tm.__call__
+
+        def tmux(args):
+            r = orig(args)
+            if args[0] == "paste-buffer":
+                fn()
+            return r
+        self.m.tmux = tmux
+
+    def assertNoEnter(self, reason):
+        rec, _ = self.send()
+        self.assertEqual(self.m.deliver(self.m.get(rec["id"]), self.fold()), "uncertain")
+        self.assertEqual(self.tm.keys(), [])
+        self.assertEqual(self.m.get(rec["id"])["reason"], reason)
+
+    def test_session_started_working(self):
+        self.after_paste(lambda: setattr(self.tp, "working", True))
+        self.assertNoEnter("busy-screen")
+
+    def test_registry_turned_waiting(self):
+        self.after_paste(lambda: self.fx.registry(TARGET, 200, "%2", status="waiting", waiting_for="permission"))
+        self.assertNoEnter("registry")
+
+    def test_copy_mode_entered(self):
+        self.after_paste(lambda: setattr(self.tp, "mode", "1"))
+        self.assertNoEnter("mode")
+
+    def test_client_started_typing(self):
+        self.after_paste(lambda: setattr(self.tp, "activity", [self.fx.clock.ms // 1000]))
+        self.assertNoEnter("client_active")
+
+    def test_switch_turned_off(self):
+        self.after_paste(lambda: open(os.path.join(self.fx.state, "off"), "w").close())
+        self.assertNoEnter("off")
+
+    def test_retry_enter_also_checks(self):
+        self.tp.lose_enters = 1
+        orig = self.tm.__call__
+
+        def tmux(args):
+            r = orig(args)
+            if args[0] == "send-keys":
+                self.tp.mode = "1"
+            return r
+        self.m.tmux = tmux
+        rec, _ = self.send()
+        self.assertEqual(self.m.deliver(self.m.get(rec["id"]), self.fold()), "uncertain")
+        self.assertEqual(len(self.tm.keys()), 1)
+
+
+class Med4ApprovalTest(Base):
+    """MED4: send only proposes; Lukáš's next prompt approves (short yes or the id) or drops."""
+
+    def test_a_proposal_is_never_delivered(self):
+        rec, _ = self.send(approve=False)
+        self.assertEqual(rec["state"], "proposed")
+        self.assertEqual(self.deliver(rec), "proposed")
+        self.assertEqual(self.tm.writes(), [])
+
+    def test_short_yes_approves(self):
+        for yes in ("ano", "Ano.", "jo", "pošli", "Pošli to", "ok", "OK, díky", "jasně"):
+            self.prompt(pid="p-" + yes.replace(" ", "")[:6])
+            rec, _ = self.send(approve=False)
+            self.lukas_says(yes)
+            self.assertEqual(self.m.get(rec["id"])["state"], "queued", yes)
+            self.m.cancel(rec["id"])
+
+    def test_anything_else_drops(self):
+        for other in ("ne", "počkej", "anonym", "ano, ale pošli to spíš do soniox a přidej k tomu ještě test parseru",
+                      "[jarvis wake] ano", "okamžitě ne"):
+            self.prompt(pid="p-" + str(abs(hash(other)))[:6])
+            rec, _ = self.send(approve=False)
+            self.lukas_says(other)
+            self.assertEqual(self.m.get(rec["id"])["state"], "dropped", other)
+
+    def test_naming_the_id_approves_only_that_one(self):
+        self.allow(TARGET, OTHER)
+        a, _ = self.send("první", approve=False)
+        b, _ = self.send("druhá", to=OTHER, approve=False)
+        self.lukas_says(f"pošli jen {a['id']}, tu druhou ne")
+        self.assertEqual((self.m.get(a["id"])["state"], self.m.get(b["id"])["state"]), ("queued", "dropped"))
+
+    def test_late_yes_drops(self):
+        rec, _ = self.send(approve=False)
+        self.fx.clock.advance(11 * 60)
+        self.lukas_says("ano")
+        self.assertEqual(self.m.get(rec["id"])["state"], "dropped")
+
+    def test_yes_two_prompts_later_drops(self):
+        rec, _ = self.send(approve=False)
+        self.lukas_says("co je nového?")
+        self.assertEqual(self.m.get(rec["id"])["state"], "dropped")
+        self.lukas_says("ano")
+        self.assertEqual(self.m.get(rec["id"])["state"], "dropped")
+
+    def test_without_prev_prompt_nothing_is_approved(self):
+        # the hook could not move last-prompt (or cr-mail failed last time): no .prev -> fail closed
+        rec, _ = self.send(approve=False)
+        os.unlink(os.path.join(self.fx.state, "last-prompt"))
+        self.lukas_says("ano")
+        self.assertEqual(self.m.get(rec["id"])["state"], "dropped")
+
+    def test_a_proposal_nobody_answers_is_dropped_after_10_min(self):
+        rec, _ = self.send(approve=False)
+        self.fx.clock.advance(11 * 60)
+        self.m.expire(self.fx.clock.ms)
+        self.assertEqual(self.m.get(rec["id"])["state"], "dropped")
+
+    def test_digest_tells_approval_and_drop(self):
+        a, _ = self.send()
+        b, _ = self.send("druhá", approve=False)
+        self.lukas_says("ne")
+        items, _ = M.digest_items(self.env, 0, self.fx.clock.ms)
+        kinds = {(i["kind"], i["id"]) for i in items}
+        self.assertIn(("mail-approved", a["id"]), kinds)
+        self.assertIn(("mail-dropped", b["id"]), kinds)
+
+
+class Med5PromptTest(Base):
+    def test_previous_prompt_is_gone_even_when_the_payload_is_bad(self):
+        for bad in (None, {"prompt": "x"}, {"hook_event_name": "UserPromptSubmit"}):
+            self.prompt()
+            self.m.prompt_seen(bad, self.fx.clock.ms)
+            self.assertFalse(os.path.exists(os.path.join(self.fx.state, "last-prompt")), bad)
+
+    def test_previous_prompt_is_gone_when_the_caller_is_not_jarvis(self):
+        self.fx.ppids[301] = 300
+        self.mail(self.make_env(pane="%3", my_pid=301)).prompt_seen(
+            {"hook_event_name": "UserPromptSubmit", "prompt": "ano"}, self.fx.clock.ms)
+        self.assertFalse(os.path.exists(os.path.join(self.fx.state, "last-prompt")))
+
+
+class LowFixesTest(Base):
+    def test_low1_per_prompt_count_holds_under_the_lock(self):
+        for i in range(3):
+            self.send(f"z{i}", approve=False, to=TARGET if i < 2 else OTHER) if i < 2 else None
+        self.allow(TARGET, OTHER)
+        self.send("třetí", to=OTHER, approve=False)
+        # a send whose unlocked checks ran before the others were written: the locked re-check must still refuse
+        with mock.patch.object(M.Mail, "_send_checks", lambda self, to, text, task, sessions, now: (OTHER, text)):
+            rec, why = self.m.send(OTHER, "čtvrtá")
+        self.assertIsNone(rec)
+        self.assertIn("nejvýš 3", why)
+
+    def test_low2_ledger_rotation_keeps_counters_and_digest(self):
+        rec, _ = self.send()
+        self.deliver(rec)
+        with mock.patch.object(M, "LEDGER_MAX", 10):
+            with self.m.lock():
+                self.m.log("pasted", id="m-x", to="claude-server-t--t")
+        self.assertTrue(os.path.exists(self.m.ledger_path + ".1"))
+        evs = [e["ev"] for e in self.m.ledger()]
+        self.assertIn("confirmed", evs)
+        self.assertEqual(self.m.check_paste_limits(TARGET, self.fx.clock.ms), "rate-target")
+        items, _ = M.digest_items(self.env, 0, self.fx.clock.ms)
+        self.assertIn(("mail-confirmed", rec["id"]), {(i["kind"], i["id"]) for i in items})
+
+    def test_low3_a_bad_record_does_not_stop_the_mail(self):
+        rec, _ = self.send()
+        for bad in ({"id": "m-20260101T000000-dead"}, {"id": "m-20260101T000000-beef", "to": 5, "state": "queued",
+                                                         "created": 1}):
+            with open(self.m.rec_path(bad["id"]), "w") as f:
+                json.dump(bad, f)
+        logs = []
+        w = M.MailWorker(self.env, mail=self.m, log=logs.append)
+        w.tick({}, self.fold(), self.fx.clock.ms)
+        self.assertEqual(self.m.get(rec["id"])["state"], "delivered")
+
+    def test_low3_one_failing_delivery_does_not_stop_the_others(self):
+        self.allow(TARGET, OTHER)
+        a, _ = self.send("a", to=OTHER)
+        b, _ = self.send("b")
+        logs = []
+        w = M.MailWorker(self.env, mail=self.m, log=logs.append)
+        orig = M.Mail.deliver
+
+        def deliver(m, rec, fold, now=None):
+            if rec["to"] == OTHER:
+                raise KeyError("to")
+            return orig(m, rec, fold, now)
+        with mock.patch.object(M.Mail, "deliver", deliver):
+            w.tick({}, self.fold(), self.fx.clock.ms)
+        self.assertEqual(self.m.get(b["id"])["state"], "delivered")
+        self.assertTrue(any("KeyError" in l for l in logs))
+
+    def test_low4_integrity_failure_never_stops_the_status(self):
+        d = jarvis_d.Daemon(self.env)
+        d.mail.mail = self.m
+        with mock.patch.object(M, "integrity", side_effect=OSError("boom")):
+            st = d.tick()
+        self.assertEqual(st["integrity"], ["(kontrola selhala: OSError)"])
+        self.assertTrue(os.path.exists(os.path.join(self.fx.state, "status.json")))
+
+    def test_low5_recovery_respects_the_time_left(self):
+        rec = RecoveryTest.crashed(self, "paste-buffer")
+        self.m.recover(J.snapshot(self.env, ancestor_self=False)["sessions"], self.fold(), self.fx.clock.ms,
+                       time_left=lambda: 10.0)
+        self.assertEqual(self.m.get(rec["id"])["state"], "delivering")
+        self.assertEqual(self.tm.keys(), [])
+
+    def test_low6_a_stale_fold_is_refreshed_from_the_events(self):
+        rec, _ = self.send()
+        stale = self.fold()
+        self.fx.append_events(ev_line("ask", TARGET, self.fx.clock.ms, 200, "A nebo B?"))
+        self.assertEqual(self.m.deliver(self.m.get(rec["id"]), stale), "ask")
+        self.assertEqual(self.tm.writes(), [])
+
+
+class ReviewMutationTest(unittest.TestCase):
+    """Each rev-f2a fix: its tests fail when the fix is taken out."""
+
+    MUTANTS = {
+        "HIGH1": (lambda: mock.patch.object(M.Mail, "paste_started", staticmethod(lambda rec: False)),
+                  [High1NoDuplicateTest]),
+        "MED2": (lambda: mock.patch.object(M.Mail, "ready_for_enter", _old_box_check), [Med2EnterTest]),
+        "MED3": (lambda: mock.patch.object(M.Mail, "line_of", lambda self, rec: (
+            f"[jarvis {rec['id']}] {rec['subject']} · Celé znění: cat {self.msg_path(rec['id'])}")),
+            [I4ShapeTest, DeliveryTest]),
+        "MED4": (lambda: mock.patch.object(M.Mail, "decide_proposals", _approve_all), [Med4ApprovalTest]),
+        "MED4-regex": (lambda: mock.patch.object(M, "APPROVE", __import__("re").compile("")), [Med4ApprovalTest]),
+        "MED5": (lambda: mock.patch.object(M.Mail, "prompt_seen", _prompt_seen_without_unlink), [Med5PromptTest]),
+        "LOW1": (lambda: mock.patch.object(M.Mail, "check_send_limits", _limits_without_prompt), [LowFixesTest]),
+        "LOW2": (lambda: mock.patch.object(M.Mail, "ledger", _ledger_main_only), [LowFixesTest]),
+        "LOW3": (lambda: _patch_all_values({(M, "valid_rec"): lambda d, mid: isinstance(d, dict) and d.get("id") == mid,
+                                            (M.MailWorker, "_safe"): lambda self, what, fn, *a: fn(*a)}),
+                 [LowFixesTest]),
+        "LOW4": (lambda: mock.patch.object(jarvis_d.Daemon, "_integrity", lambda self: M.integrity("/x", "/y")),
+                 [LowFixesTest]),
+        "LOW5": (lambda: mock.patch.object(M.Mail, "recover", _recover_ignoring_time), [LowFixesTest]),
+        "LOW6": (lambda: mock.patch.object(M.Mail, "fresh_events", lambda self, name, fold: (
+            (fold.s.get(name) if fold else None) or {})), [LowFixesTest]),
+    }
+    # which test each LOW mutant must kill (LowFixesTest holds all of them)
+    KILLS = {"LOW1": "test_low1", "LOW2": "test_low2", "LOW3": "test_low3", "LOW4": "test_low4", "LOW5": "test_low5",
+             "LOW6": "test_low6"}
+
+    def test_every_fix_test_fails_without_the_fix(self):
+        for fix, (patcher, classes) in self.MUTANTS.items():
+            for cls in classes:
+                names = [n for n in unittest.defaultTestLoader.getTestCaseNames(cls)
+                         if n.startswith(self.KILLS.get(fix, ""))]
+                failed = 0
+                with patcher():
+                    for n in names:
+                        res = unittest.TestResult()
+                        cls(n).run(res)
+                        failed += bool(res.failures or res.errors)
+                self.assertGreater(failed, 0, f"{fix}: {cls.__name__} passed the mutant")
+
+    def test_reviewer_probe_ends_with_one_paste_and_one_enter(self):
+        res = unittest.TestResult()
+        High1NoDuplicateTest("test_crash_after_enter_without_a_known_transcript").run(res)
+        self.assertTrue(res.wasSuccessful(), res.failures + res.errors)
+
+
+def _old_box_check(self, t, line):
+    f = self.capture(t)
+    return None if (f and f["box"] and not f["selector"] and f["norm"] == M.norm_box(line)) else "marker-missing"
+
+
+def _approve_all(self, prompt, prev_id, now):
+    with self.lock():
+        for rec in self.all():
+            if rec["state"] == "proposed":
+                self.transition(rec, "queued", ev="approved")
+
+
+_ORIG_PROMPT_SEEN = M.Mail.prompt_seen
+
+
+def _prompt_seen_without_unlink(self, payload, now):
+    with mock.patch.object(M.os, "unlink", lambda p: None):
+        return _ORIG_PROMPT_SEEN(self, payload, now)
+
+
+_ORIG_LIMITS = M.Mail.check_send_limits
+
+
+def _limits_without_prompt(self, name, now, prompt_id=None):
+    return _ORIG_LIMITS(self, name, now, None)
+
+
+def _ledger_main_only(self, since_ms=0, max_bytes=1024 * 1024):
+    out = []
+    for line in J.read_tail(self.ledger_path, max_bytes):
+        try:
+            d = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(d, dict) and isinstance(d.get("at"), int) and d["at"] > since_ms:
+            out.append(d)
+    return out
+
+
+_ORIG_RECOVER = M.Mail.recover
+
+
+def _recover_ignoring_time(self, sessions, fold, now, time_left=lambda: 60.0):
+    return _ORIG_RECOVER(self, sessions, fold, now, lambda: 60.0)
+
+
+def _patch_all_values(mapping):
+    import contextlib
+    stack = contextlib.ExitStack()
+    for (obj, name), fn in mapping.items():
+        stack.enter_context(mock.patch.object(obj, name, fn))
+    return stack
 
 
 if __name__ == "__main__":

@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """cr-mail: Jarvis's mail to other sessions (F2a). The invariants live in jarvismail.py, not here.
 
-    cr-mail send --to <alias|name> [--task t-…] "<text>"   Jarvis only, on a fresh prompt of Lukáš's
+    cr-mail send --to <alias|name> [--task t-…] "<text>"   Jarvis only, on a fresh prompt of Lukáš's: a PROPOSAL,
+                                                             queued only when his next prompt is "ano" or names it
     cr-mail status [<m-id>] [--json]                         the queue, or one message with its reply
     cr-mail inbox [--all] [--json]                           replies and problems of the last 24 h
-    cr-mail cancel <m-id>                                    a message that is queued or uncertain
+    cr-mail cancel <m-id>                                    a message that is proposed, queued or uncertain
     cr-mail reply <m-id> "<text>"                            the ADDRESSEE's explicit reply (overrides the implicit one)
     cr-mail off                                              "Jarvisi, stop": no paste until `cr-mail on`
     cr-mail on                                               Lukáš only (refused inside any Claude session)
@@ -12,8 +13,8 @@
 
 Exit codes: 0 done, 2 refused (the reason, in Czech, on stderr), 1 internal error.
 The text goes as ONE argument: Jarvis's gate lets no heredoc, pipe or `$` through. The CLI checks it again (one line,
-no control characters, ≤ 2000 characters, no OMC mode words) and pastes only one line into the target:
-`[jarvis m-<id>] <subject> · Celé znění: cat <path>`; the full text is in the file.
+no control characters, ≤ 2000 characters) and pastes only one FIXED line into the target:
+`[jarvis m-<id>] Zpráva od Jarvise · Celé znění: cat <path>`; the text itself is only in the file.
 """
 import argparse
 import json
@@ -24,7 +25,7 @@ sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
 import jarvislib as J  # noqa: E402
 import jarvismail as M  # noqa: E402
 
-STATE_CZ = {"queued": "ve frontě", "delivering": "doručuje se", "delivered": "doručeno, čeká na odpověď",
+STATE_CZ = {"proposed": "navrženo, čeká na Lukášovo ano", "dropped": "zahozeno (bez ano)", "queued": "ve frontě", "delivering": "doručuje se", "delivered": "doručeno, čeká na odpověď",
             "uncertain": "NEJISTÉ", "replied": "odpovězeno", "expired": "vypršelo", "cancelled": "zrušeno"}
 BLOCK_CZ = {"busy": "pracuje", "waiting": "čeká na Lukáše", "settling": "právě doběhla", "ask": "otevřený dotaz",
             "perm": "čeká na povolení", "bg": "běží úloha na pozadí", "draft": "rozepsaný vstup",
@@ -55,8 +56,8 @@ def cmd_send(m, a, out):
     rec, why = m.send(a.to, a.text, task=a.task)
     if why:
         raise Refused(why)
-    out.write(f"{rec['id']} ve frontě pro {J.short_name(rec['to'])}; doručí se, až bude nečinná a vstup prázdný. "
-              f"Stav: cr-mail status {rec['id']}\n")
+    out.write(f"{rec['id']} navržena pro {J.short_name(rec['to'])}. Zeptej se Lukáše: „Pošlu to do "
+              f"{J.short_name(rec['to'])}. Ano?“ Odejde jen po jeho ano v příští zprávě (do 10 minut), jinak se zahodí.\n")
 
 
 def cmd_status(m, a, out):

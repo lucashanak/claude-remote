@@ -101,8 +101,6 @@ def _text(v, max_len, what, required=True):
     if v is None and not required:
         return None
     t, why = M.validate_text(v, max_len, what)
-    if why and "OMC" in why:
-        t, why = " ".join(v.split()), None  # a task title is never pasted anywhere; mode words are harmless here
     if why:
         raise Refused(why)
     return t
