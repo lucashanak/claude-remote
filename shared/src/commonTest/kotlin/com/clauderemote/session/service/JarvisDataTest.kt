@@ -98,6 +98,113 @@ class JarvisDataTest {
         assertNull(JarvisData.parseProposals("""{"off": false}"""))
     }
 
+    // ---- F4: every proposal through cr-jarvis ---------------------------------------------------------------------
+
+    // the F4 contract: `cr-jarvis proposals --json` = [{id, kind, target, title, detail, created, expires}]
+    private val jarvisProposalsJson = """
+        [
+         {"id": "x-20261108T101500Z-ab12", "kind": "close", "target": "claude-server-kx-yolo--soniox",
+          "title": "Zavřít soniox: hotovo, čistý strom.", "detail": "INFO: nečinná 3 dny\nVAROVÁNÍ: 2 necommitnuté soubory",
+          "created": 30, "expires": 630},
+         {"id": "m-20261108-0001", "kind": "mail", "target": "claude-server-kx--a", "title": "Zpráva pro a",
+          "detail": "Celé znění", "created": 10, "expires": 99999},
+         {"id": "x-20261108T101600Z-cd34", "kind": "open", "target": "/home/u/kontexta", "title": "Otevřít kontexta",
+          "detail": "účet nekrachni (výchozí podle politiky)", "created": 40, "expires": 640},
+         {"id": "x-20261108T101700Z-ef56", "kind": "restore", "target": "claude-server-kx--pdf", "title": "Obnovit pdf",
+          "created": 50},
+         {"id": "x-1", "kind": "reboot", "target": "box", "title": "?", "detail": "?"},
+         {"id": "x-2; rm -rf ~", "kind": "close", "target": "y", "detail": "d"},
+         {"id": "m-9", "kind": "close", "target": "y", "detail": "a mail id is not an action id"},
+         {"id": "x-3", "kind": "close", "detail": "no target"},
+         "garbage"
+        ]
+    """.trimIndent()
+
+    @Test fun jarvisProposalsMapEveryKnownKindAndDropTheRest() {
+        val ps = JarvisData.parseJarvisProposals(jarvisProposalsJson)!!
+        assertEquals(listOf("m-20261108-0001", "x-20261108T101500Z-ab12", "x-20261108T101600Z-cd34", "x-20261108T101700Z-ef56"), ps.map { it.id })
+        assertEquals(
+            listOf(JarvisProposalKind.MAIL, JarvisProposalKind.CLOSE, JarvisProposalKind.OPEN, JarvisProposalKind.RESTORE),
+            ps.map { it.kind },
+        )
+        assertTrue(ps.all { it.via == JarvisProposalSource.JARVIS })
+        val close = ps[1]
+        assertEquals("claude-server-kx-yolo--soniox", close.to)
+        assertEquals("Zavřít soniox: hotovo, čistý strom.", close.title)
+        assertEquals("INFO: nečinná 3 dny\nVAROVÁNÍ: 2 necommitnuté soubory", close.text)
+        assertEquals(630, close.expiresMs)
+        assertTrue(close.fullText)
+        // no detail: the title is shown, but it is not the whole of what an approval does
+        val restore = ps[3]
+        assertFalse(restore.fullText)
+        assertEquals("Obnovit pdf", restore.text)
+        assertNull(restore.expiresMs)
+        assertFalse(JarvisData.canApprove(restore, seenWhole = true))
+        assertNull(JarvisData.parseJarvisProposals("usage: cr-jarvis {mode,status} ..."))
+        assertNull(JarvisData.parseJarvisProposals("""{"messages": []}"""))
+        assertEquals(emptyList(), JarvisData.parseJarvisProposals("[]"))
+    }
+
+    @Test fun oneExecCarriesBothListsAndAnOlderServerFallsBackToMail() {
+        val mail = """{"off": true, "messages": [{"id": "m-1", "to": "x", "subject": "s", "text": "t", "state": "proposed"}]}"""
+        // new server: cr-jarvis answers, the mail half only says whether mail is off
+        val both = "[{\"id\": \"x-1\", \"kind\": \"close\", \"target\": \"t\", \"detail\": \"d\"}]\n__cr_mail__\n$mail"
+        assertEquals(listOf("x-1"), JarvisData.parseCombinedProposals(both)!!.map { it.id })
+        assertTrue(JarvisData.mailOff(JarvisData.mailHalf(both)))
+        // old server: no `proposals` (usage on stderr, nothing on stdout) → the F3 mail list, decided by cr-mail
+        val old = "\n__cr_mail__\n$mail"
+        val ps = JarvisData.parseCombinedProposals(old)!!
+        assertEquals(listOf("m-1"), ps.map { it.id })
+        assertEquals(JarvisProposalSource.MAIL, ps[0].via)
+        assertTrue(JarvisData.mailOff(JarvisData.mailHalf(old)))
+        assertNull(JarvisData.parseCombinedProposals("\n__cr_mail__\n"))
+        assertNull(JarvisData.parseCombinedProposals(null))
+        assertTrue(JarvisData.PROPOSALS.startsWith("~/.local/bin/cr-jarvis proposals --json"))
+        assertTrue(JarvisData.PROPOSALS.contains("; ~/.local/bin/cr-mail status --json"))
+    }
+
+    @Test fun decisionGoesThroughTheCliThatListedIt() {
+        val close = JarvisData.parseJarvisProposals(jarvisProposalsJson)!!.first { it.kind == JarvisProposalKind.CLOSE }
+        assertEquals(
+            "~/.local/bin/cr-jarvis approve x-20261108T101500Z-ab12 --by app:android-1 2>&1; echo __cr_rc=\$?",
+            JarvisData.decideProposal(close, true, "android-1"),
+        )
+        assertTrue(JarvisData.decideProposal(close, false, "d").contains("cr-jarvis reject x-20261108T101500Z-ab12 --by app:d"))
+        // mail listed by cr-jarvis is decided by cr-jarvis too (it hands it on to cr-mail itself)
+        val mailViaJarvis = JarvisData.parseJarvisProposals(jarvisProposalsJson)!!.first { it.kind == JarvisProposalKind.MAIL }
+        assertTrue(JarvisData.decideProposal(mailViaJarvis, true, "d").contains("cr-jarvis approve m-20261108-0001"))
+        // the F3 fallback keeps cr-mail
+        val fallback = JarvisData.parseProposals("""{"messages": [{"id": "m-1", "to": "x", "text": "t", "state": "proposed"}]}""")!![0]
+        assertTrue(JarvisData.decideProposal(fallback, true, "d").contains("cr-mail approve m-1 --by app:d"))
+        assertFailsWith<IllegalArgumentException> { JarvisData.decideProposal(close.copy(id = "x-1 \$(id)"), true, "d") }
+        assertFailsWith<IllegalArgumentException> { JarvisData.decideProposal(close.copy(id = "t-1"), true, "d") }
+        assertFailsWith<IllegalArgumentException> { JarvisData.decideProposal(close, true, "a;b") }
+        // opening and restoring wait for claude to start; a close or a reject answers at once
+        val open = close.copy(kind = JarvisProposalKind.OPEN)
+        assertEquals(35_000L, JarvisData.decideTimeoutMs(open, true))
+        assertEquals(35_000L, JarvisData.decideTimeoutMs(close.copy(kind = JarvisProposalKind.RESTORE), true))
+        assertEquals(10_000L, JarvisData.decideTimeoutMs(open, false))
+        assertEquals(10_000L, JarvisData.decideTimeoutMs(close, true))
+    }
+
+    @Test fun aLapsedProposalIsNotOfferedAndTheCardWordsEachKind() {
+        val ps = JarvisData.parseJarvisProposals(jarvisProposalsJson)!!
+        val close = ps.first { it.kind == JarvisProposalKind.CLOSE }
+        assertTrue(JarvisData.canApprove(close, seenWhole = true, nowMs = 629))
+        assertFalse(JarvisData.canApprove(close, seenWhole = true, nowMs = 630))
+        assertFalse(JarvisData.canApprove(close, seenWhole = false, nowMs = 0))
+        assertTrue(JarvisData.canApprove(close, seenWhole = true), "no clock, no expiry judged: the server decides")
+        assertEquals("Návrh: zavřít soniox", JarvisData.heading(close))
+        assertEquals("Návrh: otevřít kontexta", JarvisData.heading(ps.first { it.kind == JarvisProposalKind.OPEN }))
+        assertEquals("Návrh: obnovit pdf", JarvisData.heading(ps.first { it.kind == JarvisProposalKind.RESTORE }))
+        assertEquals("Návrh zprávy → a", JarvisData.heading(ps.first { it.kind == JarvisProposalKind.MAIL }))
+        assertEquals("Provést", JarvisData.approveLabel(close))
+        assertEquals("Poslat", JarvisData.approveLabel(ps.first { it.kind == JarvisProposalKind.MAIL }))
+        assertEquals("Zavřel jsem soniox.", JarvisData.approvedNotice(close, "Zavřel jsem soniox."))
+        assertEquals("Provedeno: zavřít soniox", JarvisData.approvedNotice(close, "Hotovo"))
+        assertEquals("Odesláno do fronty: a", JarvisData.approvedNotice(ps.first { it.kind == JarvisProposalKind.MAIL }, ""))
+    }
+
     @Test fun modeParsesAndUnknownIsNormal() {
         assertEquals(JarvisMode(JarvisMode.Kind.NORMAL), JarvisData.parseMode("normal\n"))
         assertEquals(JarvisMode(JarvisMode.Kind.BLOCKING), JarvisData.parseMode("blocking"))

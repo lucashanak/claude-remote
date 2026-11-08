@@ -27,6 +27,14 @@ class WearDataListenerService : WearableListenerService() {
      * znovu — bez akcí, nový dotaz je třeba nejdřív vidět.
      */
     override fun onMessageReceived(messageEvent: MessageEvent) {
+        if (messageEvent.path == PATH_JARVIS_UNDO_RESULT) {
+            val r = runCatching {
+                WEAR_JSON.decodeFromString<WearJarvisUndoResult>(String(messageEvent.data, Charsets.UTF_8))
+            }.getOrNull() ?: return
+            WearLog.i(this, TAG, "Jarvis undo of ${r.tmux}: ${r.text}")
+            JarvisWatchNotifier.postUndoResult(this, r.text)
+            return
+        }
         if (messageEvent.path != PATH_REPLY_REFUSED) return
         val refused = runCatching {
             WEAR_JSON.decodeFromString<WearReplyRefused>(String(messageEvent.data, Charsets.UTF_8))
@@ -390,6 +398,7 @@ class WearDataListenerService : WearableListenerService() {
     companion object {
         private const val TAG = "WearDataListener"
         const val PATH_REPLY_REFUSED = "/reply-refused"
+        const val PATH_JARVIS_UNDO_RESULT = "/jarvis-undo-result"
         const val PATH = "/sessions"
         const val KEY_JSON = "json"
         val WEAR_JSON = Json { ignoreUnknownKeys = true }

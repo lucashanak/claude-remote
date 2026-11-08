@@ -67,7 +67,13 @@ data class WearJarvisInfo(
     val notify: Boolean,
     val buzzAt: Long = 0,
     val alive: Boolean = false,
+    // F4: closes Jarvis announced, offered as "Vrátit" (the phone decides on /jarvis-undo whether it still can).
+    val undo: List<WearJarvisUndo> = emptyList(),
 )
+
+/** Mirror of androidApp's WearJarvisUndo: [tmux] on [serverId], [label] = its alias. */
+@Serializable
+data class WearJarvisUndo(val serverId: String, val tmux: String, val label: String)
 
 /**
  * Process-wide holder for the Soniox config synced from the phone (rides the

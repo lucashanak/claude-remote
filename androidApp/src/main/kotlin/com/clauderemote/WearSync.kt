@@ -100,7 +100,17 @@ data class WearJarvisInfo(
     val notify: Boolean,
     val buzzAt: Long = 0,
     val alive: Boolean = false,
+    /**
+     * F4: closes Jarvis announced among the pending alerts ("Zavřel jsem X."), newest first, at most two — the wrist
+     * offers "Vrátit" for them (sent back on /jarvis-undo). Whether one can still be undone is decided on the phone
+     * from closed.jsonl. Trailing default, wire-compatible with an older watch build (it ignores the field).
+     */
+    val undo: List<WearJarvisUndo> = emptyList(),
 )
+
+/** One "Vrátit" offer on the wrist: [tmux] on [serverId], [label] = its alias. */
+@Serializable
+data class WearJarvisUndo(val serverId: String, val tmux: String, val label: String)
 
 /**
  * Pushes a snapshot of live sessions to the watch companion app via the
@@ -514,6 +524,9 @@ object WearSync {
                 notify = carried && settings.notificationsEnabled,
                 buzzAt = jarvisBuzzAt,
                 alive = jarvisAlive,
+                undo = com.clauderemote.session.JarvisUndo.undoable(f.pending).map { a ->
+                    WearJarvisUndo(a.serverId, a.tmux!!, com.clauderemote.session.JarvisUndo.alias(a.tmux!!))
+                },
             )
         }
         val payload = json.encodeToString<WearSessionsPayload>(

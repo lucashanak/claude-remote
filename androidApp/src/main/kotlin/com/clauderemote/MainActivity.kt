@@ -259,6 +259,7 @@ class MainActivity : FragmentActivity() {
         // A recreated activity (savedInstanceState) still carries the intent it was first started with: replaying it
         // would pull the user back to Jarvis.
         if (savedInstanceState == null) handleQuickAccessIntent(intent)
+        if (savedInstanceState == null) handleJarvisUndoIntent(intent)
 
         val prefs = getSharedPreferences("claude_remote", MODE_PRIVATE)
         if (prefs.getBoolean("biometric_lock_enabled", false)) {
@@ -770,6 +771,26 @@ class MainActivity : FragmentActivity() {
         super.onNewIntent(intent)
         handleSessionIntent(intent)
         handleQuickAccessIntent(intent)
+        handleJarvisUndoIntent(intent)
+    }
+
+    /**
+     * "Vrátit" on Jarvis' merged notification ([JarvisNotifier]): handed to App, which checks closed.jsonl and runs the
+     * "Nedávno zavřené" restore with its dialogs. Consumed like the other extras: a replay from Recents or a
+     * recreation must not restore a second time.
+     */
+    private fun handleJarvisUndoIntent(intent: Intent?) {
+        if (intent == null) return
+        if (intent.flags and Intent.FLAG_ACTIVITY_LAUNCHED_FROM_HISTORY != 0) return
+        val serverId = intent.getStringExtra(EXTRA_UNDO_SERVER)
+        val tmux = intent.getStringExtra(EXTRA_UNDO_TMUX)
+        intent.removeExtra(EXTRA_UNDO_SERVER)
+        intent.removeExtra(EXTRA_UNDO_TMUX)
+        if (serverId.isNullOrBlank() || tmux.isNullOrBlank()) return
+        setIntent(intent)
+        FileLogger.log("MainActivity", "Jarvis undo -> $tmux on $serverId")
+        JarvisNotifier.cancel(applicationContext)
+        sessionOrchestrator.jarvisUndoRequests.value = com.clauderemote.session.JarvisUndoRequest(serverId, tmux)
     }
 
     /**
@@ -791,6 +812,18 @@ class MainActivity : FragmentActivity() {
     }
 
     companion object {
+        const val EXTRA_UNDO_SERVER = "jarvis_undo_server"
+        const val EXTRA_UNDO_TMUX = "jarvis_undo_tmux"
+
+        /** The intent of "Vrátit" for a close Jarvis announced: [tmux] on [serverId]. */
+        fun jarvisUndoIntent(context: android.content.Context, serverId: String, tmux: String): Intent =
+            Intent(context, MainActivity::class.java).apply {
+                action = "com.clauderemote.JARVIS_UNDO"
+                putExtra(EXTRA_UNDO_SERVER, serverId)
+                putExtra(EXTRA_UNDO_TMUX, tmux)
+                flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP
+            }
+
         /** The intent that opens the app on [target]: the running instance gets it in onNewIntent, a cold start in onCreate. */
         fun quickAccessIntent(context: android.content.Context, target: com.clauderemote.session.QuickTarget): Intent =
             Intent(context, MainActivity::class.java).apply {

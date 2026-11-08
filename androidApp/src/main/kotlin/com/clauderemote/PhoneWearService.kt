@@ -24,6 +24,14 @@ data class WearReplyRequest(val sessionId: String, val text: String, val prompt:
 @Serializable
 data class WearApproveRequest(val sessionId: String, val answer: String, val prompt: String? = null)
 
+/** Watch -> phone on /jarvis-undo: "Vrátit" of a close Jarvis announced (F4). */
+@Serializable
+data class WearJarvisUndoRequest(val serverId: String, val tmux: String)
+
+/** Phone -> watch on /jarvis-undo-result: what the undo did, one Czech sentence. */
+@Serializable
+data class WearJarvisUndoResult(val tmux: String, val text: String)
+
 /** Phone -> watch on /reply-refused: the reply was not sent, and why (shown on the wrist). */
 @Serializable
 data class WearReplyRefused(val sessionId: String, val message: String)
@@ -48,6 +56,7 @@ class PhoneWearService : WearableListenerService() {
             // requesting node — a separate channel from /sessions so the
             // routine snapshot push stays small.
             "/history-request" -> handleHistoryRequest(messageEvent.data, messageEvent.sourceNodeId)
+            "/jarvis-undo" -> handleJarvisUndo(messageEvent.data, messageEvent.sourceNodeId)
             // Watch-side log line (see wearApp's WearLog) — piggybacks on the
             // phone's existing LogShipper so watch diagnostics show up in the
             // same server-side log file as the phone's, no new infra needed.
@@ -131,6 +140,40 @@ class PhoneWearService : WearableListenerService() {
             Wearable.getMessageClient(this)
                 .sendMessage(sourceNodeId, "/reply-refused", json.toByteArray(Charsets.UTF_8))
         }
+    }
+
+    /**
+     * "Vrátit" from the wrist (Jarvis F4): the phone checks closed.jsonl and restores the session under its own name
+     * through the same restore as "Nedávno zavřené" ([com.clauderemote.session.SessionOrchestrator.undoJarvisClose]);
+     * anything that needs a choice is left to the app and the sentence says so. The answer goes back on
+     * /jarvis-undo-result. Blocks this listener thread for the restore on purpose, like [answer]: the service may be
+     * unbound as soon as onMessageReceived returns.
+     */
+    private fun handleJarvisUndo(data: ByteArray, sourceNodeId: String) {
+        val req = runCatching {
+            JSON.decodeFromString<WearJarvisUndoRequest>(String(data, Charsets.UTF_8))
+        }.getOrNull() ?: return
+        if (req.serverId.isBlank() || req.tmux.isBlank()) return
+        val orchestrator = OrchestratorHolder.orchestrator
+        val text = if (orchestrator == null) {
+            "Aplikace na telefonu neběží – vrať to z Nedávno zavřených."
+        } else {
+            try {
+                kotlinx.coroutines.runBlocking { orchestrator.undoJarvisClose(req.serverId, req.tmux) }
+            } catch (e: Exception) {
+                FileLogger.log(TAG, "Wear Jarvis undo of ${req.tmux} failed: ${e.message}")
+                "Vrácení se nepovedlo (${e.javaClass.simpleName}) – zkus to z Nedávno zavřených."
+            }
+        }
+        FileLogger.log(TAG, "Wear Jarvis undo of ${req.tmux} on ${req.serverId}: $text")
+        val json = runCatching {
+            JSON.encodeToString<WearJarvisUndoResult>(WearJarvisUndoResult(req.tmux, text))
+        }.getOrNull() ?: return
+        runCatching {
+            Wearable.getMessageClient(this)
+                .sendMessage(sourceNodeId, "/jarvis-undo-result", json.toByteArray(Charsets.UTF_8))
+                .addOnFailureListener { JarvisNotifier.postUndoResult(this, text) }
+        }.onFailure { JarvisNotifier.postUndoResult(this, text) }
     }
 
     private fun handleHistoryRequest(data: ByteArray, sourceNodeId: String) {
