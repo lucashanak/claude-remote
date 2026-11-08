@@ -30,6 +30,11 @@ import com.clauderemote.model.ClaudeMode
 import com.clauderemote.ui.theme.CRType
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.layout.widthIn
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Rect
@@ -109,6 +114,12 @@ fun App(
     onKeyboardModeChange: ((Boolean) -> Unit)? = null,
     /** Move keyboard focus into the terminal view; false while it doesn't exist yet. */
     onFocusTerminal: (() -> Boolean)? = null,
+    /**
+     * Quick-access requests from outside the composition (Android launcher shortcuts and the quick-settings tile):
+     * App takes each non-null value, sets it back to null and opens Jarvis or the Velín. A StateFlow, so a request
+     * made before the first composition (a cold start) waits here instead of being dropped.
+     */
+    quickAccessRequests: kotlinx.coroutines.flow.MutableStateFlow<com.clauderemote.session.QuickTarget?>? = null,
 ) {
     val scope = rememberCoroutineScope()
     // Which chat-mentioned paths the server confirmed are real files.
@@ -380,6 +391,8 @@ fun App(
     // Remote tmux sessions discovered on servers
     var remoteSessions by remember { mutableStateOf<List<RemoteSession>>(emptyList()) }
     var remoteSessionsLoading by remember { mutableStateOf(false) }
+    // The servers whose LAST scan answered (quick access tells "not running" from "no answer" by it).
+    var remoteScanOk by remember { mutableStateOf<Set<String>>(emptySet()) }
     // Stale-tab prune strike counter: tab.id → consecutive successful scans of
     // its server that did NOT contain its tmux session. A tab is forgotten only
     // at 2 strikes (see scanRemoteSessions) so one flaky scan can't delete it.
@@ -452,10 +465,11 @@ fun App(
         }
     }
 
-    fun scanRemoteSessions() {
+    // The scan itself, awaited by quick access (Jarvis is attached only where a fresh scan saw him).
+    suspend fun scanRemoteSessionsNow() {
         val servers = serverList
         if (servers.isEmpty()) return
-        scope.launch {
+        run {
             remoteSessionsLoading = true
             try {
                 // Per-server results; null = the scan FAILED for that server
@@ -484,6 +498,7 @@ fun App(
                 if (perServer.values.any { it != null }) {
                     remoteSessions = perServer.values.filterNotNull().flatten()
                 }
+                remoteScanOk = perServer.filterValues { it != null }.keys
                 // Prune disconnected tabs whose tmux session no longer exists.
                 // Flaky-network guards:
                 //  • a tab is only "confirmed absent" when ITS OWN server's
@@ -539,6 +554,11 @@ fun App(
             }
             remoteSessionsLoading = false
         }
+    }
+
+    fun scanRemoteSessions() {
+        if (serverList.isEmpty()) return
+        scope.launch { scanRemoteSessionsNow() }
     }
 
     // When a tab is permanently closed, drop the matching entry from the
@@ -648,6 +668,76 @@ fun App(
             } catch (e: Exception) {
                 connectionError = e.message
             }
+        }
+    }
+
+    // ── Rychlý přístup: Jarvis a Velín odkudkoli (tlačítko v liště, Ctrl+Shift+J/D, paleta, zkratky, dlaždice) ──
+    // "Jarvis neběží" (or no server answered): a short notice in the snackbar slot, then the Velín.
+    var quickNotice by remember { mutableStateOf<String?>(null) }
+    LaunchedEffect(quickNotice) {
+        if (quickNotice != null) {
+            kotlinx.coroutines.delay(QUICK_NOTICE_MS)
+            quickNotice = null
+        }
+    }
+    // One Jarvis lookup at a time: a second tap while the scan runs would only attach twice (launchSession joins it,
+    // but there is nothing to gain).
+    var jarvisLookup by remember { mutableStateOf(false) }
+
+    fun openVelin() {
+        currentScreen = Screen.VELIN
+    }
+
+    // Jarvis' tab, else attach to where a fresh scan sees him live (the remote-row path, never a new session), else
+    // the notice and the Velín. Reads the flows' current values: a shortcut or a menu may hold an older lambda.
+    fun openJarvis() {
+        if (jarvisLookup) return
+        jarvisLookup = true
+        scope.launch {
+            try {
+                fun routeNow() = com.clauderemote.session.QuickAccess.route(
+                    tabs = tabManager.tabs.value,
+                    hiddenIds = pendingCloses.state.value.hiddenIds,
+                    remote = remoteSessions,
+                    scannedServerIds = remoteScanOk,
+                )
+                var route = routeNow()
+                if (com.clauderemote.session.QuickAccess.needsFreshScan(route, tabManager.tabs.value)) {
+                    scanRemoteSessionsNow()
+                    route = com.clauderemote.session.QuickAccess.settle(routeNow())
+                }
+                FileLogger.log("App", "quick access: Jarvis -> $route")
+                when (route) {
+                    is com.clauderemote.session.JarvisRoute.SwitchTab -> {
+                        // a tab whose close waits out its undo window: opening it is "Vrátit" (as in the Velín)
+                        if (route.reclaim) sessionOrchestrator.reclaimPendingClose(route.tabId)
+                        if (tabManager.getTab(route.tabId) != null) {
+                            switchActiveSession(route.tabId)
+                            currentScreen = Screen.TERMINAL
+                        }
+                    }
+                    is com.clauderemote.session.JarvisRoute.Attach -> attachRemote(route.remote)
+                    else -> {
+                        quickNotice = com.clauderemote.session.QuickAccess.notRunningNotice(remoteScanOk.isNotEmpty())
+                        openVelin()
+                    }
+                }
+            } finally {
+                jarvisLookup = false
+            }
+        }
+    }
+
+    fun openQuick(target: com.clauderemote.session.QuickTarget) = when (target) {
+        com.clauderemote.session.QuickTarget.JARVIS -> openJarvis()
+        com.clauderemote.session.QuickTarget.VELIN -> openVelin()
+    }
+
+    // Requests from outside (launcher shortcuts, the tile): taken once, then cleared.
+    LaunchedEffect(quickAccessRequests) {
+        val requests = quickAccessRequests ?: return@LaunchedEffect
+        requests.collect { t ->
+            if (t != null && requests.compareAndSet(t, null)) openQuick(t)
         }
     }
 
@@ -1046,7 +1136,14 @@ fun App(
                 }
             }
         } else Modifier
-        Box(modifier = Modifier.fillMaxSize().then(invertModifier)) {
+        // Ctrl+Shift+J / Ctrl+Shift+D on every screen; first, so the terminal's own handler never sees them.
+        Box(modifier = Modifier.fillMaxSize().then(invertModifier).onPreviewKeyEvent { e ->
+            when (AppShortcuts.match(e)) {
+                AppShortcut.JARVIS -> { openJarvis(); true }
+                AppShortcut.VELIN -> { openVelin(); true }
+                else -> false
+            }
+        }) {
         Column(
             modifier = Modifier
                 .fillMaxSize()
@@ -1187,7 +1284,8 @@ fun App(
                         onSettings = { currentScreen = Screen.SETTINGS },
                         onViewLog = { currentScreen = Screen.LOG_VIEWER },
                         onHistory = { currentScreen = Screen.HISTORY },
-                        onVelin = { currentScreen = Screen.VELIN },
+                        onVelin = { openVelin() },
+                        onJarvis = { openJarvis() },
                         // Per-account usage IS the usage screen now: with
                         // several seats provisioned, "which account still has
                         // room" is the question being asked, and the
@@ -1727,6 +1825,11 @@ fun App(
                                 "account-usage" -> Screen.ACCOUNT_USAGE
                                 "logs" -> Screen.LOG_VIEWER
                                 "velin" -> Screen.VELIN
+                                // Jarvis decides the screen itself (his tab, or the Velín when he is not running)
+                                "jarvis" -> {
+                                    openJarvis()
+                                    currentScreen
+                                }
                                 "launcher" -> Screen.LAUNCHER
                                 // the palette's "Obnovit zavřenou…": a list over the terminal, the screen stays
                                 "recently-closed" -> {
@@ -1738,6 +1841,8 @@ fun App(
                             }
                         },
                         onReopenClosed = { reopenLastClosed() },
+                        onOpenJarvis = { openJarvis() },
+                        onOpenVelin = { openVelin() },
                         closedPaletteEntries = closedPaletteEntries,
                         onPaletteOpened = { loadRecentlyClosed() },
                         sidePanelFooter = {
@@ -1946,6 +2051,7 @@ fun App(
                             appSettings.velinStartOffered = true
                             velinStartOfferPending = false
                         } else null,
+                        onJarvis = { openJarvis() },
                     )
                 }
 
@@ -2227,11 +2333,14 @@ fun App(
         // Undo snackbar for closed tabs, bottom left, on every screen. FloatingSnackbar for the same reason the
         // dialogs use FloatingDialog: on desktop an in-window overlay would draw under the Raw-view terminal.
         val snackbarTheme = com.clauderemote.ui.theme.CRThemeSnapshot.current()
+        // The quick-access notice ("Jarvis neběží") shares the slot: two floating windows would stack on desktop.
         com.clauderemote.ui.components.FloatingSnackbar(
-            visible = !pendingCloseState.isEmpty,
+            visible = !pendingCloseState.isEmpty || quickNotice != null,
             theme = snackbarTheme,
         ) {
-            PendingCloseSnackbar(
+          Column {
+            quickNotice?.let { QuickNoticeCard(it) }
+            if (!pendingCloseState.isEmpty) PendingCloseSnackbar(
                 state = pendingCloseState,
                 remainingMs = pendingCloses::remainingMs,
                 windowMs = pendingCloses.windowMillis,
@@ -2245,10 +2354,33 @@ fun App(
                 onDismissBlocked = pendingCloses::dismissBlocked,
                 onHover = pendingCloses::setPaused,
             )
+          }
         }
         } // end Box
     }
     }
+}
+
+/** How long the quick-access notice ("Jarvis neběží") stays before it goes by itself. */
+private const val QUICK_NOTICE_MS = 3_500L
+
+/** The quick-access notice in the snackbar slot: one line, the look of the undo snackbar's card. */
+@Composable
+private fun QuickNoticeCard(text: String) {
+    val c = CRTheme.colors
+    val shape = androidx.compose.foundation.shape.RoundedCornerShape(10.dp)
+    Text(
+        text,
+        color = c.text,
+        style = CRType.cardTitle,
+        modifier = Modifier
+            .padding(bottom = 6.dp)
+            .widthIn(min = 200.dp, max = 440.dp)
+            .clip(shape)
+            .background(c.surface2)
+            .border(1.dp, c.border, shape)
+            .padding(horizontal = 14.dp, vertical = 10.dp),
+    )
 }
 
 /** Retries for the account probe — a restored session has no transport yet. */

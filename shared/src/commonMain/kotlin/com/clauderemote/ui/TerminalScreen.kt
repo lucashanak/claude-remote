@@ -263,6 +263,9 @@ fun TerminalScreen(
      * can retry rather than leave keys with nowhere to land.
      */
     onFocusTerminal: (() -> Boolean)? = null,
+    /** Quick access (top-bar Jarvis button, Ctrl+Shift+J / Ctrl+Shift+D caught by the platform first); null hides the button. */
+    onOpenJarvis: (() -> Unit)? = null,
+    onOpenVelin: (() -> Unit)? = null,
 ) {
     val c = CRTheme.colors
     val m = CRTheme.metrics
@@ -517,6 +520,9 @@ fun TerminalScreen(
             )
             AppShortcut.MODEL -> if (!paletteHidden) openPalette("model")
             AppShortcut.EFFORT -> if (!paletteHidden) openPalette("effort")
+            // App catches these first on every screen; here only the ones the platform caught (Android's terminal view)
+            AppShortcut.JARVIS -> onOpenJarvis?.invoke()
+            AppShortcut.VELIN -> onOpenVelin?.invoke()
             AppShortcut.HELP -> showShortcutHelp = !showShortcutHelp
         }
     }
@@ -672,6 +678,8 @@ fun TerminalScreen(
                     onMoreMenu = { moreMenu = true },
                     onOpenDrawer = { showSessionDrawer = true },
                     slim = keyboardMode,
+                    onJarvis = onOpenJarvis,
+                    onVelin = onOpenVelin,
                 )
 
                 // ── Crumb bar (36 dp) ──────────────────────────────────────

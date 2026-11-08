@@ -99,6 +99,18 @@ class AppShortcutsTest {
     }
 
     @Test
+    fun jarvisAndVelinTakeOnlyTheShiftVariants() {
+        assertEquals(AppShortcut.JARVIS, hit(Key.J, ctrl = true, shift = true))
+        assertEquals(AppShortcut.VELIN, hit(Key.D, ctrl = true, shift = true))
+        // Ctrl+J is a newline in Claude's prompt, Ctrl+D is EOF: both stay the terminal's
+        assertNull(hit(Key.J, ctrl = true))
+        assertNull(hit(Key.D, ctrl = true))
+        // Cmd keeps its old set
+        assertNull(hit(Key.J, meta = true))
+        assertNull(hit(Key.D, meta = true))
+    }
+
+    @Test
     fun everyShortcutIsDocumentedWithKeysAndALabel() {
         AppShortcut.entries.forEach {
             assertTrue(it.keys.isNotBlank() && it.label.isNotBlank(), "${it.name} has no help text")

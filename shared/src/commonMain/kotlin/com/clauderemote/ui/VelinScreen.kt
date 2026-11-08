@@ -78,6 +78,8 @@ internal fun VelinScreen(
     onAccountUsage: () -> Unit,
     /** Ask once whether the app should open here (R16); null hides the strip. */
     onStartOffer: ((Boolean) -> Unit)?,
+    /** The top-bar Jarvis button; null hides it. */
+    onJarvis: (() -> Unit)? = null,
 ) {
     val c = CRTheme.colors
     val m = CRTheme.metrics
@@ -195,6 +197,9 @@ internal fun VelinScreen(
                     }
                 },
                 actions = {
+                    if (onJarvis != null) {
+                        JarvisButton(onJarvis = onJarvis, onVelin = null, tint = c.accent, size = 48.dp, iconSize = 22.dp)
+                    }
                     IconButton(onClick = onRefresh) {
                         Icon(Icons.Default.Refresh, "Obnovit", tint = c.textDim)
                     }

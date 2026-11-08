@@ -569,6 +569,24 @@ fun main() = application {
             windowFocused = window.isFocused
             onDispose { window.removeWindowFocusListener(listener) }
         }
+        // Quick access: Ctrl+Shift+J (Jarvis) and Ctrl+Shift+D (Velín) from anywhere in the app, the Raw view's Swing
+        // terminal included — Compose's key handlers never see a key the SwingPanel has focus for, so this catches them
+        // at the AWT level first (the same keys as AppShortcuts; plain Ctrl+J/D stay the terminal's).
+        val quickAccessRequests = androidx.compose.runtime.remember {
+            kotlinx.coroutines.flow.MutableStateFlow<com.clauderemote.session.QuickTarget?>(null)
+        }
+        DisposableEffect(window) {
+            val chord = QuickAccessChord()
+            val dispatcher = java.awt.KeyEventDispatcher { e ->
+                if (e.component?.let { javax.swing.SwingUtilities.getWindowAncestor(it) } !== window &&
+                    e.component !== window) return@KeyEventDispatcher false
+                chord.consume(e)?.let { quickAccessRequests.value = it }
+                chord.swallowed
+            }
+            val kfm = java.awt.KeyboardFocusManager.getCurrentKeyboardFocusManager()
+            kfm.addKeyEventDispatcher(dispatcher)
+            onDispose { kfm.removeKeyEventDispatcher(dispatcher) }
+        }
         // A Compose exception during composition, layout or draw goes to
         // WindowExceptionHandler, whose default shows a modal Swing "Error"
         // dialog and logs NOTHING — the dialog then blocks the EDT, so the app
@@ -625,6 +643,7 @@ fun main() = application {
             )
         ) {
             App(
+                quickAccessRequests = quickAccessRequests,
                 serverStorage = serverStorage,
                 appSettings = appSettings,
                 folderPolicyStorage = folderPolicyStorage,
@@ -1931,5 +1950,55 @@ private object FullscreenClickProbe {
         if (!pendingCompose) return
         pendingCompose = false
         FileLogger.log("FsProbe", "compose press px=(${x.toInt()},${y.toInt()}) dp=(${(x / density).toInt()},${(y / density).toInt()})")
+    }
+}
+
+/**
+ * Ctrl+Shift+J / Ctrl+Shift+D at the AWT level. [consume] returns the target on the press; [swallowed] says whether
+ * the event just seen belongs to the chord — its press, auto-repeats, the KEY_TYPED that follows (Ctrl+J types a
+ * line feed, Ctrl+D an EOT, which the terminal would otherwise receive) and its release.
+ */
+internal class QuickAccessChord {
+    private var held: Int? = null
+    var swallowed = false
+        private set
+
+    fun consume(e: java.awt.event.KeyEvent): com.clauderemote.session.QuickTarget? {
+        swallowed = false
+        val held = held
+        when (e.id) {
+            java.awt.event.KeyEvent.KEY_PRESSED -> {
+                val target = quickAccessTarget(e.keyCode, e.isControlDown, e.isShiftDown, e.isAltDown, e.isMetaDown)
+                if (target == null) {
+                    // any other key ends the chord (Ctrl/Shift themselves repeat while held, so they do not)
+                    if (e.keyCode != java.awt.event.KeyEvent.VK_CONTROL && e.keyCode != java.awt.event.KeyEvent.VK_SHIFT) {
+                        this.held = null
+                    }
+                    return null
+                }
+                // an auto-repeat asks again; harmless (App runs one Jarvis lookup at a time, the Velín is idempotent),
+                // and a release lost to a focus change can never leave the chord deaf
+                swallowed = true
+                this.held = e.keyCode
+                return target
+            }
+            // only while Ctrl+Shift are still down: a release lost to a focus change never eats ordinary typing
+            java.awt.event.KeyEvent.KEY_TYPED -> swallowed = held != null && e.isControlDown && e.isShiftDown
+            java.awt.event.KeyEvent.KEY_RELEASED -> if (held != null && e.keyCode == held) {
+                swallowed = true
+                this.held = null
+            }
+        }
+        return null
+    }
+}
+
+/** Ctrl+Shift+J / Ctrl+Shift+D (no Alt/Meta) as a quick-access target; null for every other key. */
+internal fun quickAccessTarget(keyCode: Int, ctrl: Boolean, shift: Boolean, alt: Boolean, meta: Boolean): com.clauderemote.session.QuickTarget? {
+    if (!ctrl || !shift || alt || meta) return null
+    return when (keyCode) {
+        java.awt.event.KeyEvent.VK_J -> com.clauderemote.session.QuickTarget.JARVIS
+        java.awt.event.KeyEvent.VK_D -> com.clauderemote.session.QuickTarget.VELIN
+        else -> null
     }
 }

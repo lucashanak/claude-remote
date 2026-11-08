@@ -150,6 +150,9 @@ internal fun CRTopBar(
      * one row of chrome that mode keeps.
      */
     slim: Boolean = false,
+    /** The Jarvis button (tap: Jarvis, long press / right click: [onVelin]); null hides it. */
+    onJarvis: (() -> Unit)? = null,
+    onVelin: (() -> Unit)? = null,
 ) {
     val c = CRTheme.colors
     val m = CRTheme.metrics
@@ -322,6 +325,10 @@ internal fun CRTopBar(
                         color = c.textDim
                     )
                 }
+            }
+
+            if (onJarvis != null) {
+                JarvisButton(onJarvis = onJarvis, onVelin = onVelin, tint = c.textDim, size = btn, iconSize = 18.dp)
             }
 
             // More menu

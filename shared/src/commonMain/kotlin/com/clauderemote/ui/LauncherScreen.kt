@@ -84,6 +84,8 @@ fun LauncherScreen(
     onHistory: (() -> Unit)? = null,
     /** Opens the Velín (all sessions by project, and what waits for you). */
     onVelin: (() -> Unit)? = null,
+    /** The top-bar Jarvis button (long press / right click: [onVelin]); null hides it. */
+    onJarvis: (() -> Unit)? = null,
     onUsageDashboard: (() -> Unit)? = null,
     onCheckUpdate: (() -> Unit)? = null,
     serverHealth: Map<String, ServerHealth> = emptyMap(),
@@ -111,6 +113,9 @@ fun LauncherScreen(
                     )
                 },
                 actions = {
+                    if (onJarvis != null) {
+                        JarvisButton(onJarvis = onJarvis, onVelin = onVelin, tint = c.accent, size = 48.dp, iconSize = 22.dp)
+                    }
                     if (onConnectAll != null) {
                         IconButton(onClick = onConnectAll) {
                             Icon(

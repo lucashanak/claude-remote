@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Static launcher shortcuts (long press on the app icon). They go through QuickAccessActivity, not straight to
+     MainActivity: a static shortcut's launch clears the target task, which would destroy MainActivity and with it
+     every live SSH tab. The trampoline lives in its own task, so only that one is cleared. -->
+<shortcuts xmlns:android="http://schemas.android.com/apk/res/android">
+    <shortcut
+        android:shortcutId="jarvis"
+        android:enabled="true"
+        android:icon="@drawable/ic_qa_jarvis"
+        android:shortcutShortLabel="@string/qa_jarvis"
+        android:shortcutLongLabel="@string/qa_jarvis_long">
+        <intent
+            android:action="com.clauderemote.action.JARVIS"
+            android:targetPackage="com.clauderemote.android"
+            android:targetClass="com.clauderemote.QuickAccessActivity" />
+    </shortcut>
+    <shortcut
+        android:shortcutId="velin"
+        android:enabled="true"
+        android:icon="@drawable/ic_qa_velin"
+        android:shortcutShortLabel="@string/qa_velin"
+        android:shortcutLongLabel="@string/qa_velin_long">
+        <intent
+            android:action="com.clauderemote.action.VELIN"
+            android:targetPackage="com.clauderemote.android"
+            android:targetClass="com.clauderemote.QuickAccessActivity" />
+    </shortcut>
+</shortcuts>

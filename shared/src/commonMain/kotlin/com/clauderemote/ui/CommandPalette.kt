@@ -54,7 +54,7 @@ fun buildPaletteActions(
     onReconnect: ((String) -> Unit)?,
     onSwitchModel: (ClaudeModel) -> Unit,
     onSendEscape: () -> Unit,
-    onNavigate: (String) -> Unit, // "settings", "dashboard", "logs", "velin", "launcher"
+    onNavigate: (String) -> Unit, // "settings", "dashboard", "logs", "jarvis", "velin", "launcher"
     /** Effort entries, so Ctrl+Shift+E has something to land on. Null hides them. */
     onSwitchEffort: ((com.clauderemote.model.ClaudeEffort) -> Unit)? = null,
     /** "Obnovit zavřenou" rows (label → restore), newest first; the category is what typing "obnovit" finds. */
@@ -133,7 +133,8 @@ fun buildPaletteActions(
     actions.add(PaletteAction("nav_dashboard", "Open Usage Dashboard", "Navigation") { onNavigate("dashboard") })
     actions.add(PaletteAction("nav_account_usage", "Open Usage by Account", "Navigation") { onNavigate("account-usage") })
     actions.add(PaletteAction("nav_logs", "Open Logs", "Navigation") { onNavigate("logs") })
-    actions.add(PaletteAction("nav_velin", "Open Velín", "Navigation") { onNavigate("velin") })
+    actions.add(PaletteAction("nav_jarvis", "Jarvis", "Navigation", "Ctrl+Shift+J") { onNavigate("jarvis") })
+    actions.add(PaletteAction("nav_velin", "Open Velín", "Navigation", "Ctrl+Shift+D") { onNavigate("velin") })
     actions.add(PaletteAction("nav_launcher", "Back to Launcher", "Navigation") { onNavigate("launcher") })
 
     return actions

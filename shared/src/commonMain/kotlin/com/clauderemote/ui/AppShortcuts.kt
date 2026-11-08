@@ -38,6 +38,10 @@ enum class AppShortcut(val keys: String, val label: String) {
     TOGGLE_KEYBOARD_MODE("Ctrl+Shift+L", "Klávesnicový režim zap / vyp (i na výšku)"),
     MODEL("Ctrl+Shift+M", "Vybrat model"),
     EFFORT("Ctrl+Shift+E", "Vybrat effort"),
+    // Plain Ctrl+J is a newline in Claude's prompt, so Jarvis takes the Shift variant like the rest; Ctrl+Shift+V
+    // is paste in Linux terminals, so the Velín is D (dashboard). Both work on every screen (App handles them).
+    JARVIS("Ctrl+Shift+J", "Jarvis (když neběží: Velín)"),
+    VELIN("Ctrl+Shift+D", "Velín"),
     HELP("Ctrl+Shift+H", "Tahle nápověda"),
 }
 
@@ -93,6 +97,8 @@ object AppShortcuts {
             Key.L -> AppShortcut.TOGGLE_KEYBOARD_MODE
             Key.M -> AppShortcut.MODEL
             Key.E -> AppShortcut.EFFORT
+            Key.J -> AppShortcut.JARVIS
+            Key.D -> AppShortcut.VELIN
             Key.H -> AppShortcut.HELP
             else -> null
         }

@@ -1,4 +1,9 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">Claude Remote</string>
+    <!-- Quick access: launcher shortcuts and the quick-settings tile -->
+    <string name="qa_jarvis">Jarvis</string>
+    <string name="qa_jarvis_long">Otevřít Jarvise</string>
+    <string name="qa_velin">Velín</string>
+    <string name="qa_velin_long">Otevřít Velín</string>
 </resources>

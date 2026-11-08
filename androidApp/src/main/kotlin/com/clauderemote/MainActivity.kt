@@ -92,6 +92,10 @@ class MainActivity : FragmentActivity() {
     // for restore to produce the tab. Replaced (not stacked) when a second
     // notification is tapped before the first one resolves.
     @Volatile private var pendingSwitchJob: kotlinx.coroutines.Job? = null
+    // Quick access (launcher shortcuts, the quick-settings tile): App takes the request and clears it. A StateFlow, so
+    // a request from onCreate waits for the first composition instead of being dropped.
+    private val quickAccessRequests =
+        kotlinx.coroutines.flow.MutableStateFlow<com.clauderemote.session.QuickTarget?>(null)
     @Volatile private var pendingSaveBytes: ByteArray? = null
 
     private val keyFilePicker = registerForActivityResult(
@@ -249,6 +253,9 @@ class MainActivity : FragmentActivity() {
         enableEdgeToEdge()
         super.onCreate(savedInstanceState)
         initApp()
+        // A recreated activity (savedInstanceState) still carries the intent it was first started with: replaying it
+        // would pull the user back to Jarvis.
+        if (savedInstanceState == null) handleQuickAccessIntent(intent)
 
         val prefs = getSharedPreferences("claude_remote", MODE_PRIVATE)
         if (prefs.getBoolean("biometric_lock_enabled", false)) {
@@ -490,6 +497,7 @@ class MainActivity : FragmentActivity() {
             App(
                 hardwareKeyboard = hardwareKeyboard,
                 externalShortcuts = appShortcutEvents,
+                quickAccessRequests = quickAccessRequests,
                 onFocusTerminal = { terminalHandle?.view?.requestFocus() ?: false },
                 onKeyboardModeChange = { on ->
                     // Status bar and gesture strip only while keyboard mode is on;
@@ -697,6 +705,35 @@ class MainActivity : FragmentActivity() {
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         handleSessionIntent(intent)
+        handleQuickAccessIntent(intent)
+    }
+
+    /**
+     * "Jarvis" / "Velín" from a launcher shortcut (through [QuickAccessActivity]) or the quick-settings tile. Consumed
+     * like the notification extra: the same Intent comes back on recreation and from Recents, and replaying it would
+     * yank the user out of wherever they went since.
+     */
+    private fun handleQuickAccessIntent(intent: Intent?) {
+        if (intent == null) return
+        if (intent.flags and Intent.FLAG_ACTIVITY_LAUNCHED_FROM_HISTORY != 0) return
+        val target = com.clauderemote.session.QuickAccess.targetOf(
+            intent.action, intent.getStringExtra(com.clauderemote.session.QuickAccess.EXTRA_TARGET),
+        ) ?: return
+        intent.removeExtra(com.clauderemote.session.QuickAccess.EXTRA_TARGET)
+        intent.action = Intent.ACTION_MAIN
+        setIntent(intent)
+        FileLogger.log("MainActivity", "Quick access -> $target")
+        quickAccessRequests.value = target
+    }
+
+    companion object {
+        /** The intent that opens the app on [target]: the running instance gets it in onNewIntent, a cold start in onCreate. */
+        fun quickAccessIntent(context: android.content.Context, target: com.clauderemote.session.QuickTarget): Intent =
+            Intent(context, MainActivity::class.java).apply {
+                action = Intent.ACTION_MAIN
+                putExtra(com.clauderemote.session.QuickAccess.EXTRA_TARGET, com.clauderemote.session.QuickAccess.extraValue(target))
+                flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP
+            }
     }
 
     /**

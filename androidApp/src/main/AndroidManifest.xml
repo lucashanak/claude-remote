@@ -30,7 +30,33 @@
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
+            <!-- Launcher shortcuts "Jarvis" and "Velín" (long press on the icon) -->
+            <meta-data
+                android:name="android.app.shortcuts"
+                android:resource="@xml/shortcuts" />
         </activity>
+
+        <!-- Trampoline of the launcher shortcuts: its own task, so the shortcut's CLEAR_TASK never hits
+             MainActivity (see QuickAccessActivity). Not exported: only the launcher starts it, via shortcuts.xml. -->
+        <activity
+            android:name="com.clauderemote.QuickAccessActivity"
+            android:exported="false"
+            android:taskAffinity=""
+            android:excludeFromRecents="true"
+            android:noHistory="true"
+            android:theme="@android:style/Theme.NoDisplay" />
+
+        <!-- Quick-settings tile "Jarvis" -->
+        <service
+            android:name="com.clauderemote.JarvisTileService"
+            android:exported="true"
+            android:icon="@drawable/ic_qa_jarvis_glyph"
+            android:label="@string/qa_jarvis"
+            android:permission="android.permission.BIND_QUICK_SETTINGS_TILE">
+            <intent-filter>
+                <action android:name="android.service.quicksettings.action.QS_TILE" />
+            </intent-filter>
+        </service>
 
         <receiver
             android:name="com.clauderemote.ReplyReceiver"
