@@ -464,6 +464,8 @@ fun main() = application {
     // values when it fires, not the values at wiring time.
     LaunchedEffect(Unit) {
         DesktopPresence.install()
+        // Completions muted because Jarvis carried them, said after all if his lease lapses first (MED1).
+        val jarvisMuted = com.clauderemote.session.service.JarvisMutedCompletions<() -> Unit>()
         sessionOrchestrator.onClaudeNeedsInput = { sessionId, kind, hint, isActiveTab, body, _ ->
             // Same suppression rule Android's MainActivity applies: don't notify
             // about a session the user is already looking at. A minimized window
@@ -472,22 +474,33 @@ fun main() = application {
             // never delivers a focus-lost event at all (see DesktopPresence).
             val appForeground =
                 windowFocused && !windowState.isMinimized && DesktopPresence.userPresent
+            // Jarvis carries a session's completions only with the lease of the session's own server.
+            val serverId = tabManager.getTab(sessionId)?.server?.id
+            val viaJarvis = serverId != null &&
+                NotificationPolicy.jarvisCarries(appSettings.alertRouting, sessionOrchestrator.jarvisAlerts.alive(serverId))
+            // Say WHICH session finished and WHAT it said — the phone has
+            // done both since MainActivity:264; the desktop used to show a
+            // fixed "Claude Remote" title and the generic hint, which on a
+            // multi-session desktop identifies nothing.
+            val title = tabManager.getTab(sessionId)?.tabTitle?.takeIf { it.isNotBlank() }
+                ?: "Claude Remote"
+            if (serverId != null && NotificationPolicy.mutedByJarvis(
+                    kind, appForeground, isActiveTab,
+                    appSettings.notificationsEnabled, appSettings.notifyOnTaskComplete, viaJarvis,
+                )
+            ) {
+                jarvisMuted.note(serverId, sessionId) { sendDesktopNotification(title, notificationBody(body, hint)) }
+            }
             if (NotificationPolicy.shouldNotify(
                     kind, appForeground, isActiveTab,
                     appSettings.notificationsEnabled, appSettings.notifyOnTaskComplete,
-                    viaJarvis = NotificationPolicy.jarvisCarries(appSettings.alertRouting, sessionOrchestrator.jarvisAlerts.alive()),
+                    viaJarvis = viaJarvis,
                 )
             ) {
-                // Say WHICH session finished and WHAT it said — the phone has
-                // done both since MainActivity:264; the desktop used to show a
-                // fixed "Claude Remote" title and the generic hint, which on a
-                // multi-session desktop identifies nothing.
-                val title = tabManager.getTab(sessionId)?.tabTitle?.takeIf { it.isNotBlank() }
-                    ?: "Claude Remote"
                 sendDesktopNotification(title, notificationBody(body, hint))
             }
         }
-        // Jarvis F3: a desktop notification only for what may interrupt (block, incident; one per 5 min); the rest
+        // Jarvis F3: a desktop notification only for what may interrupt (block, done, incident; spaced 60 s); the rest
         // waits in the Velín's Jarvis tab. A lapsed lease while routed through him is said once.
         val jarvisBatcher = com.clauderemote.session.service.JarvisAlertBatcher()
         sessionOrchestrator.jarvisAlerts.sink = object : com.clauderemote.session.service.JarvisAlertSink {
@@ -495,7 +508,9 @@ fun main() = application {
                 alert: com.clauderemote.session.service.JarvisAlert,
                 feed: com.clauderemote.session.service.JarvisFeed,
             ) {
-                val post = jarvisBatcher.decide(alert, appSettings.alertRouting, feed.alive, appSettings.notificationsEnabled)
+                val post = jarvisBatcher.decide(
+                    alert, appSettings.alertRouting, sessionOrchestrator.jarvisAlerts.alive(alert.serverId), appSettings.notificationsEnabled,
+                )
                 if (post?.buzz == true) {
                     sendDesktopNotification(
                         com.clauderemote.session.service.JarvisMerged.title(feed),
@@ -506,14 +521,19 @@ fun main() = application {
 
             override fun onCleared() {}
 
-            override fun onLeaseChanged(alive: Boolean) {
-                if (!alive && appSettings.notificationsEnabled &&
+            override fun onLeaseChanged(edge: com.clauderemote.session.service.JarvisLeaseEdge) {
+                if (edge.alive) return
+                val muted = jarvisMuted.takeAfter(edge.serverId, edge.heartbeatAtMs)
+                if (appSettings.notificationsEnabled) muted.forEach { runCatching { it() } }
+                if (edge.watcherConnected && appSettings.notificationsEnabled &&
                     NotificationPolicy.jarvisFailedOpen(appSettings.alertRouting, false)
                 ) {
                     sendDesktopNotification("Jarvis", com.clauderemote.session.service.JarvisMerged.FAIL_OPEN_TEXT)
                 }
             }
         }
+        // The Velín's Jarvis tab marks alerts seen only while someone is at this desktop (rev-f3-app LOW).
+        sessionOrchestrator.jarvisAlerts.presence = { windowFocused && !windowState.isMinimized && DesktopPresence.userPresent }
     }
 
     val appIcon = remember {

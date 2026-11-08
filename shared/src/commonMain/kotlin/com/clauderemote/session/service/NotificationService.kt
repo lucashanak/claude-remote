@@ -881,6 +881,7 @@ internal class NotificationService(
                         }
                     } finally {
                         w.channel = null
+                        jarvis.disconnected(w.serverId)
                         try { ch.disconnect() } catch (_: Exception) {}
                         synchronized(w) {
                             w.live = false

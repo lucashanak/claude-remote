@@ -103,34 +103,56 @@ data class JarvisFeed(
     val pending: List<JarvisAlert> = emptyList(),
 )
 
+/** A lease edge of one server ([JarvisAlertSink.onLeaseChanged]). */
+data class JarvisLeaseEdge(
+    val serverId: String,
+    val alive: Boolean,
+    /** Device time of that server's newest heartbeat (null = none seen): completions muted after it went unsaid. */
+    val heartbeatAtMs: Long?,
+    /**
+     * That server's watcher tail is connected right now. A lapse while it is not is the network, not Jarvis: the
+     * per-session fallback still happens, but "Jarvis neodpovídá" is not said (rev-f3-app LOW).
+     */
+    val watcherConnected: Boolean,
+)
+
 /** Where the hub hands what happened (the platform posts and cancels its notifications). */
 interface JarvisAlertSink {
     /** [alert] is new; [feed] already holds it. */
     fun onAlert(alert: JarvisAlert, feed: JarvisFeed)
     /** The user saw everything ([JarvisAlertHub.acknowledge]) or every pending alert expired. */
     fun onCleared()
-    /** The lease went live or lapsed (edges only). */
-    fun onLeaseChanged(alive: Boolean)
+    /** One server's lease went live or lapsed (edges only). */
+    fun onLeaseChanged(edge: JarvisLeaseEdge)
+    /** This device's alert routing changed: surfaces that copy it (the watch) refresh. */
+    fun onRoutingChanged() {}
 }
 
 /**
- * Jarvis' alerts and heartbeat over all servers. Thread-safe: the watcher tails call [onLine] from IO threads.
+ * Jarvis' alerts and heartbeat lease over all servers. Thread-safe: the watcher tails call [onLine] from IO threads.
  *
  * Dedup by id: the tail replays its last 25 lines on every (re)connect, so an id seen once is never raised again.
- * The first connection of a server in this process has no baseline: an alert older than [FIRST_SIGHTING_GRACE_MS]
- * there is history the user may have seen on an earlier run, so it is recorded and not raised. Later, an alert older
- * than [MAX_AGE_MS] is stale (navrh §3 bod 6: a stale item is not said) — a phone whose socket froze still gets what
- * jarvis-d said a few minutes ago.
+ * The replay of a server's FIRST connection in this process has no baseline: an alert older than
+ * [FIRST_SIGHTING_GRACE_MS] there is history the user may have seen on an earlier run, so it is recorded and not
+ * raised. That window is only the replay: it ends with the first fresh heartbeat (lines after it in the file are
+ * younger than it) or [COLD_WINDOW_MS] after the connect, whichever comes first (rev-f3-app MED3: a late alert of a
+ * long first connection was dropped). Otherwise an alert older than [MAX_AGE_MS] is stale (navrh §3 bod 6).
  *
- * The lease is time on THIS device: the heartbeat's server ms moved by the clock skew the tail learned. A heartbeat
- * replayed at connect carries its own old time, so a replay never makes a dead jarvis-d look alive. No tail, no
- * heartbeat: the lease lapses by itself after [LEASE_MS] — fail-open needs nothing to happen (R11).
+ * The lease is per server and in time of THIS device: the heartbeat's server ms moved by the clock skew the tail
+ * learned. A heartbeat replayed at connect carries its own old time, so a replay never makes a dead jarvis-d look
+ * alive. No tail, no heartbeat: the lease lapses by itself after [LEASE_MS] — fail-open needs nothing to happen (R11).
+ * Jarvis watches the sessions of his own box only, so a session's alerts are carried by the lease of ITS server
+ * (rev-f3-app MED4).
  */
 class JarvisAlertHub(private val clock: () -> Long = { System.currentTimeMillis() }) {
     companion object {
         /** navrh §3 bod 11: a heartbeat younger than 3 min. */
         const val LEASE_MS = 3L * 60 * 1000
         const val FIRST_SIGHTING_GRACE_MS = 2L * 60 * 1000
+        /** How long after a first connect its replay may still arrive. */
+        const val COLD_WINDOW_MS = 5_000L
+        /** A heartbeat this young ends the replay window: jarvis-d writes one a minute. */
+        const val FRESH_HB_MS = 90_000L
         const val MAX_AGE_MS = 30L * 60 * 1000
         /** A pending alert nobody looked at for this long is dropped from the count (it is stale by then). */
         const val PENDING_TTL_MS = 2L * 60 * 60 * 1000
@@ -143,24 +165,44 @@ class JarvisAlertHub(private val clock: () -> Long = { System.currentTimeMillis(
     private val lock = Any()
     private val seen = LinkedHashSet<String>()
     private val heartbeats = HashMap<String, Long>()
-    /** Servers whose watcher connected at least once; a server in [cold] is on its first connection. */
+    /** Servers whose watcher connected at least once; a server in [coldUntil] is in its first connection's replay. */
     private val connectedOnce = HashSet<String>()
-    private val cold = HashSet<String>()
+    private val coldUntil = HashMap<String, Long>()
+    private val watcherUp = HashSet<String>()
     private var pending = ArrayList<JarvisAlert>()
-    private var lastAlive = false
+    private val lastAlive = HashMap<String, Boolean>()
 
     private val _state = MutableStateFlow(JarvisFeed())
     val state: StateFlow<JarvisFeed> = _state
 
     @Volatile var sink: JarvisAlertSink? = null
 
+    /**
+     * Whether the user is at this device (Android: the app in the foreground; desktop: focused, not minimized, not
+     * locked or idle). Showing the Jarvis tab counts as seeing its alerts only then (rev-f3-app LOW).
+     */
+    @Volatile var presence: () -> Boolean = { true }
+
     private var ticker: Job? = null
 
     /** The watcher of [serverId] (re)connected its tail; replayed lines follow. */
     fun connected(serverId: String) {
         synchronized(lock) {
-            if (connectedOnce.add(serverId)) cold.add(serverId) else cold.remove(serverId)
+            watcherUp.add(serverId)
+            if (connectedOnce.add(serverId)) coldUntil[serverId] = clock() + COLD_WINDOW_MS else coldUntil.remove(serverId)
         }
+    }
+
+    /** The watcher of [serverId] lost its tail: a lease lapse from now on is the network's, not Jarvis'. */
+    fun disconnected(serverId: String) {
+        synchronized(lock) { watcherUp.remove(serverId) }
+    }
+
+    private fun isCold(serverId: String, now: Long): Boolean {
+        val until = coldUntil[serverId] ?: return false
+        if (now < until) return true
+        coldUntil.remove(serverId)
+        return false
     }
 
     /**
@@ -171,17 +213,18 @@ class JarvisAlertHub(private val clock: () -> Long = { System.currentTimeMillis(
         val p = JarvisAlertLine.parse(line) ?: return false
         val now = clock()
         var raised: JarvisAlert? = null
-        var lease: Boolean? = null
+        var edges: List<JarvisLeaseEdge> = emptyList()
         val feed = synchronized(lock) {
             when (p) {
                 is JarvisAlertLine.Parsed.Heartbeat -> {
                     val at = p.serverMs + skewMs
                     if (at > (heartbeats[serverId] ?: Long.MIN_VALUE)) heartbeats[serverId] = at
+                    if (now - at < FRESH_HB_MS) coldUntil.remove(serverId)
                 }
                 is JarvisAlertLine.Parsed.Alert -> {
                     val at = p.serverMs + skewMs
                     val age = now - at
-                    val fresh = age <= (if (serverId in cold) FIRST_SIGHTING_GRACE_MS else MAX_AGE_MS)
+                    val fresh = age <= (if (isCold(serverId, now)) FIRST_SIGHTING_GRACE_MS else MAX_AGE_MS)
                     if (seen.add(p.id)) {
                         while (seen.size > SEEN_MAX) seen.remove(seen.first())
                         if (fresh) {
@@ -195,10 +238,10 @@ class JarvisAlertHub(private val clock: () -> Long = { System.currentTimeMillis(
                     }
                 }
             }
-            lease = leaseEdge(now)
+            edges = leaseEdges(now)
             publish(now)
         }
-        lease?.let { sink?.onLeaseChanged(it) }
+        edges.forEach { e -> sink?.onLeaseChanged(e) }
         raised?.let { a ->
             FileLogger.log(TAG, "alert ${a.id} (${a.kind.wire}) from $serverId, ${feed.pending.size} pending")
             sink?.onAlert(a, feed)
@@ -217,24 +260,42 @@ class JarvisAlertHub(private val clock: () -> Long = { System.currentTimeMillis(
         if (had) sink?.onCleared()
     }
 
+    /** [acknowledge] only while the user is at this device ([presence]); true when it did. */
+    fun acknowledgeIfPresent(): Boolean {
+        if (!presence()) return false
+        acknowledge()
+        return true
+    }
+
+    /** This device's routing switch moved. */
+    fun noteRoutingChanged() {
+        sink?.onRoutingChanged()
+    }
+
     /** Re-judges the lease and expires old alerts; the ticker calls it, a test calls it directly. */
     fun tick() {
         val now = clock()
         var cleared = false
-        val lease = synchronized(lock) {
+        val edges = synchronized(lock) {
             val before = pending.size
             pending.removeAll { now - it.atMs > PENDING_TTL_MS }
             cleared = before > 0 && pending.isEmpty()
-            val edge = leaseEdge(now)
+            val e = leaseEdges(now)
             publish(now)
-            edge
+            e
         }
-        lease?.let { sink?.onLeaseChanged(it) }
+        edges.forEach { e -> sink?.onLeaseChanged(e) }
         if (cleared) sink?.onCleared()
     }
 
-    /** The lease now, without waiting for the next tick: the policy asks at the moment an alert is decided. */
-    fun alive(): Boolean = synchronized(lock) { aliveAt(clock()) }
+    /**
+     * The lease of [serverId] now, without waiting for the next tick: the policy asks at the moment an alert is
+     * decided. Null = any server (the watch, which has one switch for every session).
+     */
+    fun alive(serverId: String? = null): Boolean = synchronized(lock) {
+        val now = clock()
+        if (serverId == null) heartbeats.keys.any { aliveAt(it, now) } else aliveAt(serverId, now)
+    }
 
     /** Keeps the lease honest while no line arrives (a dead jarvis-d writes nothing). Started on the first line. */
     fun ensureTicker(scope: CoroutineScope) {
@@ -249,21 +310,58 @@ class JarvisAlertHub(private val clock: () -> Long = { System.currentTimeMillis(
         }
     }
 
-    private fun aliveAt(now: Long): Boolean = heartbeats.values.any { now - it in -LEASE_MS until LEASE_MS }
+    private fun aliveAt(serverId: String, now: Long): Boolean =
+        heartbeats[serverId]?.let { now - it in -LEASE_MS until LEASE_MS } == true
 
-    private fun leaseEdge(now: Long): Boolean? {
-        val alive = aliveAt(now)
-        if (alive == lastAlive) return null
-        lastAlive = alive
-        FileLogger.log(TAG, if (alive) "lease live" else "lease lapsed: no heartbeat for ${LEASE_MS / 1000}s")
-        return alive
+    private fun leaseEdges(now: Long): List<JarvisLeaseEdge> = heartbeats.keys.mapNotNull { id ->
+        val alive = aliveAt(id, now)
+        if (alive == (lastAlive[id] ?: false)) return@mapNotNull null
+        lastAlive[id] = alive
+        FileLogger.log(TAG, if (alive) "lease of $id live" else "lease of $id lapsed: no heartbeat for ${LEASE_MS / 1000}s")
+        JarvisLeaseEdge(id, alive, heartbeats[id], id in watcherUp)
     }
 
     private fun publish(now: Long): JarvisFeed {
         val newest = heartbeats.maxByOrNull { it.value }
-        val feed = JarvisFeed(aliveAt(now), newest?.value, newest?.key, pending.toList())
+        val feed = JarvisFeed(heartbeats.keys.any { aliveAt(it, now) }, newest?.value, newest?.key, pending.toList())
         _state.value = feed
         return feed
+    }
+}
+
+/**
+ * Completions this device did not alert because Jarvis carried them (rev-f3-app MED1). When a server's lease lapses,
+ * what was muted after its last heartbeat was never said by anyone — jarvis-d was already dead — so those are handed
+ * back to be alerted after all. One per session (the newest), at most [MAX], none older than [MAX_AGE_MS].
+ * [T] is whatever the platform needs to post it again.
+ */
+class JarvisMutedCompletions<T>(private val clock: () -> Long = { System.currentTimeMillis() }) {
+    companion object {
+        const val MAX = 50
+        const val MAX_AGE_MS = 30L * 60 * 1000
+    }
+
+    private data class Entry<T>(val serverId: String, val sessionId: String, val atMs: Long, val payload: T)
+
+    private val entries = ArrayList<Entry<T>>()
+
+    @Synchronized
+    fun note(serverId: String, sessionId: String, payload: T) {
+        val now = clock()
+        entries.removeAll { it.sessionId == sessionId || now - it.atMs > MAX_AGE_MS }
+        entries.add(Entry(serverId, sessionId, now, payload))
+        while (entries.size > MAX) entries.removeAt(0)
+    }
+
+    /** Removes and returns [serverId]'s muted completions newer than [sinceMs] (null = all of them), oldest first. */
+    @Synchronized
+    fun takeAfter(serverId: String, sinceMs: Long?): List<T> {
+        val now = clock()
+        val out = entries.filter {
+            it.serverId == serverId && (sinceMs == null || it.atMs > sinceMs) && now - it.atMs <= MAX_AGE_MS
+        }
+        entries.removeAll { it.serverId == serverId }
+        return out.map { it.payload }
     }
 }
 
@@ -286,14 +384,15 @@ enum class AlertRouting {
 data class JarvisPost(val buzz: Boolean)
 
 /**
- * The app's own batching on top of jarvis-d's: whether an alert is posted at all and whether it may buzz. jarvis-d
- * already merges items into one line per batch and keeps one interruption per 5 min; the app guards the same rule
- * once more because several servers (or a replay after a frozen socket) can deliver two batches close together.
- * An incident always buzzes (navrh §3 bod 4); INFO never does and only updates the merged notification quietly.
+ * The app's own batching on top of jarvis-d's: whether an alert is posted at all and whether it may vibrate.
+ * jarvis-d already keeps one interruption per 5 min; repeating that gate here on the phone's clock would silence a
+ * block jarvis-d let through a second early (rev-f3-app MED2). The app only spaces vibrations [BUZZ_GAP_MS] apart —
+ * against several servers or a replay after a frozen socket delivering two batches together — and that holds for an
+ * incident too (one per minute). INFO never vibrates and only updates the merged notification quietly.
  */
 class JarvisAlertBatcher(private val clock: () -> Long = { System.currentTimeMillis() }) {
     companion object {
-        const val BUZZ_GAP_MS = 5L * 60 * 1000
+        const val BUZZ_GAP_MS = 60_000L
     }
 
     private var lastBuzzAt: Long? = null
@@ -305,7 +404,7 @@ class JarvisAlertBatcher(private val clock: () -> Long = { System.currentTimeMil
         if (!alert.kind.urgent) return JarvisPost(buzz = false)
         val now = clock()
         val last = lastBuzzAt
-        val buzz = alert.kind == JarvisAlertKind.INCIDENT || last == null || now - last >= BUZZ_GAP_MS || now < last
+        val buzz = last == null || now - last >= BUZZ_GAP_MS || now < last
         if (buzz) lastBuzzAt = now
         return JarvisPost(buzz)
     }

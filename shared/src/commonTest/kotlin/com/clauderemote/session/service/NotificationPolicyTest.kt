@@ -124,6 +124,20 @@ class NotificationPolicyTest {
     }
 
     @Test
+    fun mutedByJarvisIsOnlyWhatJarvisAloneHeldBack() {
+        // a background completion the user wants, carried by Jarvis: muted, to be said if he lapses (MED1)
+        assertTrue(NotificationPolicy.mutedByJarvis(NotifyKind.COMPLETION, false, false, true, true, viaJarvis = true))
+        // not carried: it alerted itself, nothing to remember
+        assertFalse(NotificationPolicy.mutedByJarvis(NotifyKind.COMPLETION, false, false, true, true, viaJarvis = false))
+        // would not have alerted anyway: completion alerts off, notifications off, the user looks at it
+        assertFalse(NotificationPolicy.mutedByJarvis(NotifyKind.COMPLETION, false, false, true, false, viaJarvis = true))
+        assertFalse(NotificationPolicy.mutedByJarvis(NotifyKind.COMPLETION, false, false, false, true, viaJarvis = true))
+        assertFalse(NotificationPolicy.mutedByJarvis(NotifyKind.COMPLETION, true, true, true, true, viaJarvis = true))
+        // a permission is never muted
+        assertFalse(NotificationPolicy.mutedByJarvis(NotifyKind.PERMISSION, false, false, true, true, viaJarvis = true))
+    }
+
+    @Test
     fun routingDefaultsToPerSessionAndRoundTrips() {
         assertEquals(AlertRouting.PER_SESSION, AlertRouting.of(null))
         assertEquals(AlertRouting.PER_SESSION, AlertRouting.of("garbage"))

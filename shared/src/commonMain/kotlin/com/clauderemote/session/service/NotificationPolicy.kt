@@ -74,6 +74,21 @@ object NotificationPolicy {
     fun jarvisCarries(routing: AlertRouting, jarvisAlive: Boolean): Boolean =
         routing == AlertRouting.VIA_JARVIS && jarvisAlive
 
+    /**
+     * This alert was held back ONLY because Jarvis carries it: without him it would have alerted. Such a completion
+     * is remembered ([JarvisMutedCompletions]) and alerted after all if Jarvis' lease lapses before he said it.
+     */
+    fun mutedByJarvis(
+        kind: NotifyKind,
+        appForeground: Boolean,
+        isActiveTab: Boolean,
+        notificationsEnabled: Boolean,
+        notifyOnTaskComplete: Boolean,
+        viaJarvis: Boolean,
+    ): Boolean = viaJarvis &&
+        !shouldNotify(kind, appForeground, isActiveTab, notificationsEnabled, notifyOnTaskComplete, viaJarvis = true) &&
+        shouldNotify(kind, appForeground, isActiveTab, notificationsEnabled, notifyOnTaskComplete, viaJarvis = false)
+
     /** "Jarvis neodpovídá": routed through Jarvis, but his lease lapsed (the Velín's strip, the one quiet notice). */
     fun jarvisFailedOpen(routing: AlertRouting, jarvisAlive: Boolean): Boolean =
         routing == AlertRouting.VIA_JARVIS && !jarvisAlive

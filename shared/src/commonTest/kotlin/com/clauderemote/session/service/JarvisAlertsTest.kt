@@ -78,11 +78,14 @@ class JarvisAlertsTest {
 
     private class Rec : JarvisAlertSink {
         val alerts = ArrayList<JarvisAlert>()
-        val leases = ArrayList<Boolean>()
+        val edges = ArrayList<JarvisLeaseEdge>()
+        val leases get() = edges.map { it.alive }
         var cleared = 0
+        var routing = 0
         override fun onAlert(alert: JarvisAlert, feed: JarvisFeed) { alerts += alert }
         override fun onCleared() { cleared++ }
-        override fun onLeaseChanged(alive: Boolean) { leases += alive }
+        override fun onLeaseChanged(edge: JarvisLeaseEdge) { edges += edge }
+        override fun onRoutingChanged() { routing++ }
     }
 
     private val min = 60_000L
@@ -163,13 +166,106 @@ class JarvisAlertsTest {
         assertTrue(hub.alive())
     }
 
-    @Test fun anyLiveServerHoldsTheLeaseAndTheNewestNamesTheServer() {
+    @Test fun theLeaseIsPerServerAndAnyLiveOneHoldsTheFeed() {
         val now = 100 * min
         val hub = JarvisAlertHub { now }
         hub.onLine("a", "claude-remote-jarvis hb ${now - 20 * min}", 0)
         hub.onLine("b", "claude-remote-jarvis hb ${now - 10_000}", 0)
         assertTrue(hub.alive())
+        assertTrue(hub.state.value.alive)
         assertEquals("b", hub.state.value.serverId)
+        // MED4: Jarvis on b carries nothing of server a, nor of a server he never spoke from
+        assertTrue(hub.alive("b"))
+        assertFalse(hub.alive("a"))
+        assertFalse(hub.alive("c"))
+    }
+
+    @Test fun leaseEdgesArePerServerWithTheLastHeartbeatAndTheWatcherState() {
+        var now = 100 * min
+        val hub = JarvisAlertHub { now }
+        val rec = Rec().also { hub.sink = it }
+        hub.connected("a")
+        hub.onLine("a", "claude-remote-jarvis hb ${now - 10_000}", 0)
+        hub.onLine("b", "claude-remote-jarvis hb ${now - 10_000}", 0)
+        assertEquals(setOf("a", "b"), rec.edges.filter { it.alive }.map { it.serverId }.toSet())
+        now += 3 * min
+        hub.tick()
+        val lapsed = rec.edges.filter { !it.alive }.associateBy { it.serverId }
+        assertEquals(now - 3 * min - 10_000, lapsed["a"]!!.heartbeatAtMs)
+        assertTrue(lapsed["a"]!!.watcherConnected, "a's tail is up and no heartbeat came: Jarvis is silent")
+        assertFalse(lapsed["b"]!!.watcherConnected, "b's tail never connected: the network, not Jarvis")
+        // LOW: after a dropped tail a lapse is not Jarvis' silence either
+        hub.onLine("a", "claude-remote-jarvis hb $now", 0)
+        hub.disconnected("a")
+        now += 4 * min
+        hub.tick()
+        assertFalse(rec.edges.last { it.serverId == "a" }.watcherConnected)
+    }
+
+    @Test fun theFirstConnectionsWindowEndsAfterTheReplay() {
+        var now = 100 * min
+        val hub = JarvisAlertHub { now }
+        val rec = Rec().also { hub.sink = it }
+        hub.connected("s")
+        // MED3: a long first connection; a socket frozen for 3 min delivers its alert late — no longer dropped
+        now += JarvisAlertHub.COLD_WINDOW_MS
+        hub.onLine("s", line("late", "block", now - 3 * min, "x"), 0)
+        assertEquals(listOf("late"), rec.alerts.map { it.id })
+        // and a fresh heartbeat in the replay ends the window at once (what follows it in the file is younger)
+        val hub2 = JarvisAlertHub { now }
+        val rec2 = Rec().also { hub2.sink = it }
+        hub2.connected("s")
+        hub2.onLine("s", line("old", "block", now - 5 * min, "x"), 0)
+        hub2.onLine("s", "claude-remote-jarvis hb ${now - 30_000}", 0)
+        hub2.onLine("s", line("after", "block", now - 3 * min, "x"), 0)
+        assertEquals(listOf("after"), rec2.alerts.map { it.id })
+    }
+
+    @Test fun acknowledgeIfPresentOnlyWhenTheUserIsThere() {
+        val now = 100 * min
+        val hub = JarvisAlertHub { now }
+        hub.connected("s")
+        hub.onLine("s", line("a", "info", now, "x"), 0)
+        var present = false
+        hub.presence = { present }
+        assertFalse(hub.acknowledgeIfPresent())
+        assertEquals(1, hub.state.value.pending.size, "a minimized desktop saw nothing")
+        present = true
+        assertTrue(hub.acknowledgeIfPresent())
+        assertEquals(0, hub.state.value.pending.size)
+    }
+
+    @Test fun aRoutingChangeReachesTheSink() {
+        val hub = JarvisAlertHub { 1L }
+        val rec = Rec().also { hub.sink = it }
+        hub.noteRoutingChanged()
+        assertEquals(1, rec.routing)
+    }
+
+    // ── muted completions (MED1) ──
+
+    @Test fun mutedCompletionsAfterTheLastHeartbeatAreHandedBackOncePerServer() {
+        var now = 100 * min
+        val m = JarvisMutedCompletions<String> { now }
+        m.note("a", "s1", "s1 before hb")
+        now += 1_000
+        val hb = now
+        now += 1_000
+        m.note("a", "s2", "s2 old")
+        m.note("a", "s2", "s2 newest") // one per session: the newest
+        m.note("a", "s3", "s3")
+        m.note("b", "s4", "s4 other server")
+        assertEquals(listOf("s2 newest", "s3"), m.takeAfter("a", hb))
+        assertEquals(emptyList(), m.takeAfter("a", hb), "handed back once")
+        assertEquals(listOf("s4 other server"), m.takeAfter("b", null))
+    }
+
+    @Test fun mutedCompletionsExpire() {
+        var now = 100 * min
+        val m = JarvisMutedCompletions<String> { now }
+        m.note("a", "s1", "x")
+        now += JarvisMutedCompletions.MAX_AGE_MS + 1
+        assertEquals(emptyList(), m.takeAfter("a", null))
     }
 
     @Test fun acknowledgeClearsPendingAndOldPendingExpires() {
@@ -220,18 +316,27 @@ class JarvisAlertsTest {
         assertNotNull(b.decide(a, AlertRouting.VIA_JARVIS, alive = true, notificationsEnabled = true))
     }
 
-    @Test fun batcherBuzzesAtMostOncePerFiveMinutesExceptForIncidents() {
+    @Test fun batcherSpacesVibrationsBySixtySecondsOnlyNotFiveMinutes() {
         var now = 10 * min
         val b = JarvisAlertBatcher { now }
         fun d(k: JarvisAlertKind) = b.decide(alert(k), AlertRouting.VIA_JARVIS, true, true)!!.buzz
         assertTrue(d(JarvisAlertKind.BLOCK))
+        now += 30_000
+        assertFalse(d(JarvisAlertKind.BLOCK), "a second batch within a minute: quiet update")
+        // MED2: jarvis-d's next batch, 5 min on its clock, may land a little EARLY on the phone's: it still vibrates
         now += 4 * min
-        assertFalse(d(JarvisAlertKind.BLOCK), "second block within 5 min: quiet update")
-        assertTrue(d(JarvisAlertKind.INCIDENT), "an incident always interrupts")
-        now += 4 * min
-        assertFalse(d(JarvisAlertKind.BLOCK), "the incident counts as the interruption")
-        now += 1 * min + 1
         assertTrue(d(JarvisAlertKind.BLOCK))
+    }
+
+    @Test fun anIncidentVibratesAtMostOncePerMinute() {
+        var now = 10 * min
+        val b = JarvisAlertBatcher { now }
+        fun d(k: JarvisAlertKind) = b.decide(alert(k), AlertRouting.VIA_JARVIS, true, true)!!.buzz
+        assertTrue(d(JarvisAlertKind.INCIDENT))
+        now += 10_000
+        assertFalse(d(JarvisAlertKind.INCIDENT), "a burst of incidents is one vibration")
+        now += 50_000
+        assertTrue(d(JarvisAlertKind.INCIDENT))
     }
 
     @Test fun infoNeverBuzzesAndDoesNotSpendTheInterruption() {
@@ -243,14 +348,14 @@ class JarvisAlertsTest {
         assertTrue(d(JarvisAlertKind.BLOCK))
     }
 
-    @Test fun doneVibratesLikeABlockAndSharesItsFiveMinuteGap() {
+    @Test fun doneVibratesLikeABlockAndSharesItsGap() {
         var now = 10 * min
         val b = JarvisAlertBatcher { now }
         fun d(k: JarvisAlertKind) = b.decide(alert(k), AlertRouting.VIA_JARVIS, true, true)!!.buzz
         assertTrue(d(JarvisAlertKind.DONE), "a finished task, a fired watch, a reminder: HNED")
-        now += 2 * min
-        assertFalse(d(JarvisAlertKind.BLOCK), "one interruption per 5 min, done counts")
-        now += 3 * min
+        now += 20_000
+        assertFalse(d(JarvisAlertKind.BLOCK), "done counts as the vibration")
+        now += 40_000
         assertTrue(d(JarvisAlertKind.DONE))
     }
 

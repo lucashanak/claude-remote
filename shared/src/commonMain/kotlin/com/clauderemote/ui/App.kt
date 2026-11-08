@@ -2058,7 +2058,12 @@ fun App(
                         } else null,
                         onJarvis = { openJarvis() },
                         alertRouting = alertRouting,
-                        onAlertRouting = { r -> appSettings.alertRouting = r; alertRouting = r },
+                        onAlertRouting = { r ->
+                            appSettings.alertRouting = r
+                            alertRouting = r
+                            // the watch copies the routing (its completion alerts, the merged notification)
+                            sessionOrchestrator.jarvisAlerts.noteRoutingChanged()
+                        },
                         initialTab = velinTab,
                     )
                 }
