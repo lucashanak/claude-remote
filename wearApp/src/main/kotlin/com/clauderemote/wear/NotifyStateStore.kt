@@ -42,6 +42,11 @@ data class NotifyBaseline(
     // když se opravdu četlo nahlas — jinak by zapnutí předčítání přečetlo
     // zprávu, kterou už uživatel dávno viděl.
     val spokenHash: Int = 0,
+    // Zabzučela epizoda "schválení bez identity" (APPROVAL_UNNAMED)? Jen tehdy
+    // smí následné pojmenování dialogu proběhnout potichu. Když se do ní
+    // potichu přešlo z pojmenovaného dialogu A (odpověď na A a nový dialog B
+    // splynuly v jeden push), nový dialog B zabzučet musí.
+    val unnamedAlerted: Boolean = false,
 )
 
 object NotifyStateStore {

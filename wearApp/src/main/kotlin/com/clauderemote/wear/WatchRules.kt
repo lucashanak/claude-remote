@@ -138,7 +138,10 @@ internal object WatchNotifyDecision {
             val act = if (WaitingRules.isUnnamedApproval(row)) UNNAMED else row.activity
             return Result(
                 Action.Skip,
-                NotifyBaseline(activity = act, notifiedPrompt = row.prompt.takeIf { WaitingRules.isActionable(row) }, notifiedBodyHash = bodyHash),
+                NotifyBaseline(
+                    activity = act, notifiedPrompt = row.prompt.takeIf { WaitingRules.isActionable(row) },
+                    notifiedBodyHash = bodyHash, unnamedAlerted = act == UNNAMED,
+                ),
             )
         }
         val before = prev ?: NotifyBaseline()
@@ -146,8 +149,9 @@ internal object WatchNotifyDecision {
             val keep = before.copy(activity = UNNAMED, notifiedBodyHash = bodyHash)
             return when {
                 // entering it: a new request (a named dialog shown just before turns into it quietly, M3)
-                !showsApproval(before.activity) -> Result(Action.Post(alert = true), keep)
-                before.activity == APPROVAL -> Result(Action.Post(alert = false), keep)
+                !showsApproval(before.activity) -> Result(Action.Post(alert = true), keep.copy(unnamedAlerted = true))
+                // from a named dialog: quietly, and this episode did not vibrate (a dialog named next must, see below)
+                before.activity == APPROVAL -> Result(Action.Post(alert = false), keep.copy(unnamedAlerted = false))
                 bodyHash != before.notifiedBodyHash -> Result(Action.Repair, keep)
                 else -> Result(Action.Skip, keep)
             }
@@ -162,8 +166,10 @@ internal object WatchNotifyDecision {
             activity = row.activity, notifiedPrompt = row.prompt, notifiedBodyHash = bodyHash, spokenHash = before.spokenHash,
         )
         return when {
-            // The phone named the dialog it showed as unnamed a moment ago: Lukáš was alerted already, upgrade quietly.
-            before.activity == UNNAMED && row.prompt != before.notifiedPrompt -> Result(Action.Post(alert = false), announced)
+            // The phone named the dialog it showed as unnamed a moment ago: quietly, but only when that unnamed episode
+            // vibrated. Entered quietly from a named A (A's answer and a new dialog B merged into one push), B is new.
+            before.activity == UNNAMED && before.unnamedAlerted && row.prompt != before.notifiedPrompt ->
+                Result(Action.Post(alert = false), announced)
             row.prompt != before.notifiedPrompt -> Result(Action.Post(alert = true), announced)
             // The same dialog back after the phone briefly called the session something else: shown again, quietly.
             before.activity != APPROVAL -> Result(Action.Post(alert = false), announced)

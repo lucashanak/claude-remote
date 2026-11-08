@@ -78,6 +78,20 @@ class WatchRulesTest {
         assertEquals(Action.Post(alert = false), decide(u.baseline, row(prompt = "PERMISSION:B")).action)
     }
 
+    // recheck MED: A answered and a new dialog B merged into one push, seen unnamed in between: B must vibrate
+    @Test fun aNewDialogAfterAQuietUnnamedEpisodeVibrates() {
+        val a = decide(seen("WORKING", null), row(prompt = "PERMISSION:A"), body = 1)
+        val unnamed = decide(a.baseline, row(prompt = null, text = "Bash: nový příkaz"), body = 2)
+        assertEquals(Action.Post(alert = false), unnamed.action, "turned quietly from A")
+        assertEquals(Action.Post(alert = true), decide(unnamed.baseline, row(prompt = "PERMISSION:B"), body = 2).action)
+        // the same A named again stays quiet
+        assertEquals(Action.Post(alert = false), decide(unnamed.baseline, row(prompt = "PERMISSION:A"), body = 2).action)
+        // the flag survives a repair of the unnamed text
+        val repaired = decide(unnamed.baseline, row(prompt = null), body = 3)
+        assertEquals(Action.Repair, repaired.action)
+        assertEquals(Action.Post(alert = true), decide(repaired.baseline, row(prompt = "PERMISSION:B"), body = 3).action)
+    }
+
     @Test fun aDialogThatEndsIsTakenDown() {
         assertEquals(Action.Cancel, decide(seen("APPROVAL_NEEDED"), row(activity = "WORKING", prompt = "INSTRUCTION:instruction")).action)
         assertEquals(Action.Cancel, decide(seen("APPROVAL_NEEDED"), row(activity = "WAITING_FOR_INPUT", prompt = "READY:s")).action)
