@@ -14,8 +14,9 @@ permissions:
 # concurrently, which computed the same next version and raced on
 # `gh release create/upload` (one run went red). Cancel the older run when a
 # newer push arrives — main is cumulative, so the latest run ships everything.
+# The group is per ref so that a manual run from another branch cannot cancel the run of main.
 concurrency:
-  group: build-and-release
+  group: build-and-release-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -567,51 +568,28 @@ jobs:
   #
   # So gate the RELEASE instead of the push. This waits for the Tests workflow
   # run for this exact SHA and fails if it did not succeed, which blocks the
-  # `release` job below. It costs no wall-clock: the builds take ~7 min and Tests
-  # ~1.5-4 min, so the result is already in by the time the builds finish.
+  # `release` job below. Tests for this SHA started alongside this workflow; the latest measured
+  # Tests run (18faa58) took 14:51, while the other build jobs finished in ~6 min, so this gate is
+  # the longest leg and holds the release back. The wait is a 30 min wall-clock deadline (scripts/ci/tests-gate.sh,
+  # covered by scripts/ci/test-tests-gate.sh), not a poll count.
   tests-passed:
     runs-on: ubuntu-latest
+    timeout-minutes: 35
     steps:
+      - uses: actions/checkout@v4
+
       - name: Require the Tests workflow to have passed for this commit
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          set -euo pipefail
-          API="repos/${{ github.repository }}/actions/workflows/tests.yml/runs?head_sha=${{ github.sha }}"
-          # ~10 min of polling: comfortably longer than a cold Tests run (~4 min),
-          # and still well inside the build jobs this gate runs beside.
-          for i in $(seq 1 60); do
-            RUN=$(gh api "$API" --jq '[.workflow_runs[] | select(.event=="push")] | first // empty' 2>/dev/null || echo "")
-            if [ -n "$RUN" ]; then
-              STATUS=$(echo "$RUN" | jq -r '.status')
-              CONCL=$(echo "$RUN" | jq -r '.conclusion // ""')
-              URL=$(echo "$RUN" | jq -r '.html_url')
-              if [ "$STATUS" = "completed" ]; then
-                case "$CONCL" in
-                  success)
-                    echo "Tests passed for ${{ github.sha }} — $URL"
-                    exit 0 ;;
-                  cancelled|skipped)
-                    # A newer push superseded this commit; that run's own
-                    # concurrency group cancels this release too. Don't publish
-                    # off an unverified commit.
-                    echo "::error::Tests were $CONCL for this commit — $URL"
-                    exit 1 ;;
-                  *)
-                    echo "::error::Tests $CONCL for this commit — refusing to release. $URL"
-                    exit 1 ;;
-                esac
-              fi
-              echo "Tests $STATUS ($i/60) — $URL"
-            else
-              echo "waiting for the Tests run for ${{ github.sha }} to appear ($i/60)"
-            fi
-            sleep 10
-          done
-          echo "::error::Timed out waiting for the Tests workflow on ${{ github.sha }}."
-          exit 1
+          # On main the gate also requires the SHA to still be the head of main (a re-run of an old run
+          # must not publish the newest version with old code).
+          TESTS_GATE_HEAD_BRANCH: ${{ github.ref == 'refs/heads/main' && 'main' || '' }}
+        run: bash scripts/ci/tests-gate.sh "${{ github.sha }}" "${{ github.repository }}" 1800
 
   release:
+    # Only main publishes: a manual run from another ref still builds, but never creates a release.
+    # (It cannot cancel the run of main: the concurrency group is per ref.)
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     needs: [version, tests-passed, build-android, build-macos, build-linux, package-manjaro, build-etserver-linux]
     steps:

@@ -216,8 +216,8 @@ Tests live in their own workflow, `.github/workflows/tests.yml`, as a single
 `test` job: unit tests, the release-variant compiles, then the integration lane.
 
 It is deliberately a **separate workflow with its own concurrency group** so it
-runs alongside `build-and-release` and never delays a release (that workflow
-takes ~7 min; this one ~3). The separate group also matters because the release
+runs alongside `build-and-release` (whose builds are done in ~6 min; this one took 14:51 at
+18faa58, 4:23 of it unit tests and 8:37 integration, and the release gate waits for it). The separate group also matters because the release
 workflow uses `cancel-in-progress` on one shared group — a burst of pushes
 cancelling release runs would otherwise take the test runs down with it.
 
@@ -236,9 +236,13 @@ The release-compile and integration steps run under `if: !cancelled()` so one
 push surfaces every failure at once, instead of making you fix the unit tests
 and push again to discover the integration lane is broken too.
 
-**Trade-off, stated plainly:** nothing here gates the release, so a failing test
-does *not* stop a release from shipping. Make this job a required status check
-on `main` to get that brake back without slowing anything down.
+**The release gate.** `build-and-release.yml` job `tests-passed` runs `scripts/ci/tests-gate.sh SHA REPO 1800`: it polls the
+push-triggered Tests run of that exact commit and succeeds only on `success` (`cancelled`/`skipped`/`failure` fail, no run or
+no result within 30 min of wall-clock fails; every `gh` call is capped at 60 s and API errors are printed, then retried until the
+deadline). On `main` it also fails if the SHA is no longer the head of `main` (a re-run of an old run must not release old code).
+The job has `timeout-minutes: 35`. `release` needs it, and only runs on `main`. `scripts/ci/test-tests-gate.sh`
+tests the script against a `gh` shim (`LIVE=1` adds one read-only API call against a real run); run it after touching the gate.
+Because Tests is now the longest leg, a release lands ~Tests-duration after the push, not ~7 min.
 
 Reports upload as `test-results` even on failure, and the integration harness's
 sshd/tmux/restore logs upload as `integration-diagnostics` when it fails —

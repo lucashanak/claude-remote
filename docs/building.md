@@ -200,3 +200,10 @@ GitHub Secrets required:
 | `ANDROID_KEYSTORE_PASSWORD` | Keystore and key password |
 
 Key alias: `clauderemote`
+
+### Release gate
+
+The `release` job of `.github/workflows/build-and-release.yml` runs only on `refs/heads/main` and needs the `tests-passed`
+job (`scripts/ci/tests-gate.sh`, 30 min wall-clock deadline, job limit 35 min; see `docs/TESTING.md`, section CI). The
+concurrency group is per ref (`build-and-release-<ref>`), so a manual run from another branch neither cancels the run of
+`main` nor releases. Still, do not test the gate with `workflow_dispatch` on `main`: it would cancel the running release.

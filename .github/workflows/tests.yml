@@ -7,14 +7,14 @@ on:
   workflow_dispatch:
 
 # Deliberately a SEPARATE workflow from build-and-release, with its own
-# concurrency group. It runs alongside the release jobs so it never delays a
-# release, and a burst of pushes cancelling release runs (that workflow uses
-# cancel-in-progress on one shared group) can't take the test runs down with it.
+# concurrency group. It runs alongside the release jobs so the builds do not wait for
+# it, and a burst of pushes cancelling release runs (that workflow uses
+# cancel-in-progress per ref) cannot take the test runs down with it.
 #
-# Trade-off, stated plainly: because nothing here gates the release, a failing
-# test does NOT stop a release from shipping. Make this job a required status
-# check on main if you want that brake back — it blocks the merge without
-# slowing the release, since it still runs in parallel.
+# The release is gated on this workflow: build-and-release.yml job `tests-passed`
+# (scripts/ci/tests-gate.sh) waits for the push run of the same SHA and fails the
+# release unless it succeeded. The two still run in parallel; the gate only holds
+# back the final `release` job.
 concurrency:
   group: tests-${{ github.ref }}
   cancel-in-progress: true
