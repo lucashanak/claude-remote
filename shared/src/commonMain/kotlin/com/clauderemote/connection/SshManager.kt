@@ -64,6 +64,7 @@ class SshManager(
         disconnected = false
         this@SshManager.onConnectionLost = onConnectionLost
         ioScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+        pendingPty.set(null)   // C5: a send the previous scope's cancel dropped
         FileLogger.log(TAG, "Connecting to ${server.host}:${server.port} as ${server.username}")
 
         // Note: xterm reset sequences removed — they caused DA response
@@ -224,6 +225,7 @@ class SshManager(
             FileLogger.log(TAG, "Using Cloudflare tunnel proxy for ${server.host}")
             CloudflareProxy(server.host, server.cloudflareToken).also { own.setProxy(it) }
         } else null
+        TransportWriteGuard.forServer(server.useCloudflareProxy, connectTimeout)?.let { own.setSocketFactory(it) }   // C5
         own.connect(connectTimeout)
         cf?.armKeepAlive(own)
         return own
@@ -287,9 +289,26 @@ class SshManager(
     var lastCols = 80; private set
     var lastRows = 24; private set
 
+    /** C5: the size the next pty send carries; non-null while a send is queued (a burst coalesces into its last size). */
+    private val pendingPty = java.util.concurrent.atomic.AtomicReference<Pair<Int, Int>?>(null)
+
+    /**
+     * C5 (trace-lan-umrti): the window-change goes out on [ioScope], never on the caller's thread — the callers are the
+     * layout and the redraw kick on Android's main thread, where a socket write throws (`NetworkOnMainThreadException`)
+     * AFTER JSch has encrypted the packet, and JSch's `setPtySize` swallows it: the transport's cipher is then a packet
+     * ahead of sshd's and the link dies on the next packet. Serialized with the input writes ([writeMutex]); a burst
+     * coalesces into its last size. A failed write closes the transport ([TransportWriteGuard]).
+     */
     fun resize(cols: Int, rows: Int) {
         lastCols = cols; lastRows = rows
-        try { channel?.setPtySize(cols, rows, cols * 8, rows * 16) } catch (_: Exception) {}
+        if (disconnected || channel == null) return
+        if (pendingPty.getAndSet(cols to rows) != null) return   // a send is queued: it takes this size
+        ioScope.launch {
+            writeMutex.withLock {
+                val (c, r) = pendingPty.getAndSet(null) ?: return@withLock
+                try { channel?.setPtySize(c, r, c * 8, r * 16) } catch (_: Exception) { /* JSch swallows its own; the guard saw it */ }
+            }
+        }
     }
 
     suspend fun disconnect() {
@@ -299,7 +318,10 @@ class SshManager(
         // The channel first: the read loop sits in a BLOCKING read of its stream (cancelling the coroutine does
         // not interrupt it), so joining it before the channel is closed waited for the shell to say something -
         // minutes for a quiet one. Closing the channel ends that read at once.
-        try { channel?.disconnect() } catch (_: Exception) {}
+        // C5: every JSch write here goes off the caller's thread (the UI closes a tab from Android's main thread, and
+        // the channel's close packet rides the transport its sibling tabs share); NonCancellable, as before it ran
+        // without a suspension point even for a cancelled caller.
+        withContext(Dispatchers.IO + kotlinx.coroutines.NonCancellable) { try { channel?.disconnect() } catch (_: Exception) {} }
         readJob?.cancelAndJoin()
         readJob = null
         ioScope.coroutineContext[Job]?.cancelAndJoin()
@@ -307,10 +329,10 @@ class SshManager(
             // Shared transport: NEVER disconnect the session — sibling tabs
             // ride it. Release the lease; the pool disconnects it when the
             // last lessee is gone.
-            transportPool?.release(this)
+            withContext(Dispatchers.IO) { transportPool?.release(this@SshManager) }
             leased = false
         } else {
-            try { session?.disconnect() } catch (_: Exception) {}
+            withContext(Dispatchers.IO + kotlinx.coroutines.NonCancellable) { try { session?.disconnect() } catch (_: Exception) {} }
         }
         channel = null
         session = null
@@ -402,6 +424,7 @@ class SshManager(
         sess.setServerAliveInterval(keepAliveMs)
         sess.setServerAliveCountMax(2)
         val cf = if (server.useCloudflareProxy) CloudflareProxy(server.host, server.cloudflareToken).also { sess.setProxy(it) } else null
+        TransportWriteGuard.forServer(server.useCloudflareProxy, 10_000)?.let { sess.setSocketFactory(it) }   // C5
         sess.connect(10_000)
         cf?.armKeepAlive(sess)
         session = sess

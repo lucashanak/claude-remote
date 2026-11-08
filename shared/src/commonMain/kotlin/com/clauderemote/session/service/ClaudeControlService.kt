@@ -21,15 +21,14 @@ private const val TAG = "SessionOrchestrator"
 private val BRACKETED_PASTE = Regex("\u001b\\[200~[\\s\\S]*?(?:\u001b\\[201~|\\z)")
 
 /**
- * User input delivery (mosh-first, ssh-fallback), the offline pending-input
- * queue, and the Claude slash-command control surface (model/effort switching,
+ * User input delivery (mosh-first, ssh-fallback) and the Claude slash-command control surface (model/effort switching,
  * /login flow, escape). A COORDINATOR service composing the already-extracted
  * services. Extracted verbatim from SessionOrchestrator: the ordering, timing
  * (the char-by-char slash-command pacing) and mosh-first/ssh-fallback order are
  * unchanged — a pure move so the public API and runtime behavior stay identical.
  *
- * [onOutput] bridges to the facade's `onTerminalOutput` callback so the queued
- * / flushed / no-connection banners still echo to the active tab.
+ * [onOutput] bridges to the facade's `onTerminalOutput` callback so the "not sent"
+ * banner still echoes to the active tab.
  */
 private const val REPLY_EXEC_MS = 8_000L
 
@@ -42,8 +41,13 @@ internal class ClaudeControlService(
     private val terminalIO: TerminalIOService,
     private val onOutput: (String, String) -> Unit,
 ) {
+    /**
+     * Kolo 5 (decision of the lead): input for a tab without a deliverable route is NEVER sent later — no queue. Three
+     * rounds showed a delayed send cannot be made safe (the prompt token is gone after a loss, the UI sends keys as
+     * "messages", order, a killed process). It is dropped and the terminal says so.
+     */
     private fun warnNoConnection(sessionId: String) {
-        val msg = "\r\n\u001B[31mNo connection — input dropped. Try reconnecting.\u001B[0m\r\n"
+        val msg = "\r\n\u001B[31mNot connected — not sent. Try reconnecting.\u001B[0m\r\n"
         terminalIO.append(sessionId, msg)
         if (tabManager.activeTabId.value == sessionId) {
             onOutput(sessionId, msg)
@@ -51,15 +55,32 @@ internal class ClaudeControlService(
     }
 
     fun sendInput(sessionId: String, data: String) {
+        typeUser(sessionId, data)
+    }
+
+    /** User input [data]; false (nothing sent, said so) without a route. */
+    private fun typeUser(sessionId: String, data: String): Boolean {
         notifications.promptDetector.onUserInput(sessionId)
         // Try ET, then mosh, then SSH.
         val route = route(sessionId)
         if (route == null) {
-            queueInput(sessionId, data)
-            return
+            warnNoConnection(sessionId)   // kolo 5: never queued, never sent later
+            return false
         }
         noteSent(sessionId, data)
         route.text(data)
+        return true
+    }
+
+    /**
+     * Kolo 6 (regression of kolo 5): the terminal emulator's OWN answers to the program (DA, CPR, XTVERSION … — tmux asks
+     * at every attach) are no user input: they go whenever the tab's transport is up, also before the tab is ACTIVE
+     * again (the answer comes one round trip after the attach, inside a reconnect), and never print "not sent". Not
+     * counted as typing (no activity, no prompt-detector reset). The platforms hand them in apart from the keys
+     * (Termux: the emulator's own output; JediTerm: `sendBytes(…, userInput = false)`).
+     */
+    fun sendTerminalReply(sessionId: String, data: ByteArray) {
+        transportRoute(sessionId)?.bytes(data)
     }
 
     fun sendBytes(sessionId: String, data: ByteArray) {
@@ -110,17 +131,33 @@ internal class ClaudeControlService(
      *  an ET session's carrier SSH shell is idle, so a send that goes there
      *  instead of to ET vanishes. */
     private fun route(sessionId: String): InputRoute? {
+        // Kolo 5 (adv N3, N4): only an ACTIVE tab has a route. While it reconnects its new shell is a bare login shell
+        // until the attach (a message typed then ran as a command in $HOME), and an ET client left from before a
+        // hand-off to autoReconnect is no terminal of the tab. (A session without a tab has no transport either.)
+        val status = tabManager.getTab(sessionId)?.status
+        if (status != null && status != com.clauderemote.model.SessionStatus.ACTIVE) return null
+        return transportRoute(sessionId)
+    }
+
+    /** The transport a send would ride, whatever the tab's state (see [route] for what may type into it). */
+    private fun transportRoute(sessionId: String): InputRoute? {
         routeOverride?.let { return it(sessionId) }
         registry.et(sessionId)?.let { if (it.isConnected) return InputRoute(it::sendInput, it::sendBytes) }
         registry.mosh(sessionId)?.let { if (it.isConnected) return InputRoute(it::sendInput, it::sendBytes) }
+        // Kolo 4 (adv N2): the SSH shell of an ET tab is only its carrier (a hidden bash whose output is dropped):
+        // input never goes there
+        if (registry.isEtCarrier(sessionId)) return null
         registry.ssh(sessionId)?.let { if (it.isConnected) return InputRoute(it::sendInput, it::sendBytes) }
         return null
     }
 
     private fun activeInput(sessionId: String): ((String) -> Unit)? = route(sessionId)?.text
 
-    /** Whether a send reaches the session now instead of the offline queue. */
-    fun canDeliverNow(sessionId: String): Boolean = route(sessionId) != null
+    /**
+     * Whether the session's transport is up — the staleness input of `ReplyGuard` for a reply sent over exec, kept as it
+     * was (kolo 5: the replies are unchanged; typing into the tab also needs it ACTIVE, see [route]).
+     */
+    fun canDeliverNow(sessionId: String): Boolean = transportRoute(sessionId) != null
 
     /** Test seam: replaces the exec of [sendCheckedReply] ((serverId, command) -> stdout, null = failed). */
     internal var replyExecOverride: (suspend (String, String) -> String?)? = null
@@ -162,46 +199,37 @@ internal class ClaudeControlService(
         return why
     }
 
-    // ---- Offline input queue ----
 
-    private fun queueInput(sessionId: String, data: String) {
-        val size = notifications.enqueue(sessionId, data)
-        val msg = "\r\n\u001B[33mQueued ($size pending) — will send on reconnect\u001B[0m\r\n"
-        terminalIO.append(sessionId, msg)
-        if (tabManager.activeTabId.value == sessionId) {
-            onOutput(sessionId, msg)
-        }
-    }
-
-    fun clearPendingInputs(sessionId: String) = notifications.clearPendingInputs(sessionId)
-
-    fun flushPendingInputs(sessionId: String) {
-        val queue = notifications.drain(sessionId) ?: return
-        if (queue.isEmpty()) return
-        val send = activeInput(sessionId) ?: return
-        scope.launch {
-            for (input in queue) {
-                send(input)
-                kotlinx.coroutines.delay(300) // small delay between queued messages
-            }
-            val msg = "\r\n\u001B[32mFlushed ${queue.size} queued message(s)\u001B[0m\r\n"
-            terminalIO.append(sessionId, msg)
-            if (tabManager.activeTabId.value == sessionId) {
-                onOutput(sessionId, msg)
-            }
-        }
-    }
-
-    fun sendClaudeCommand(sessionId: String, command: String) {
+    /** False (nothing sent, said so) without a route. */
+    fun sendClaudeCommand(sessionId: String, command: String): Boolean {
         val send = activeInput(sessionId)
         if (send == null) {
-            queueInput(sessionId, command)
-            return
+            warnNoConnection(sessionId)   // kolo 5: never queued, never sent later
+            return false
         }
         FileLogger.log(TAG, "sendClaudeCommand: ${command.length} bytes to $sessionId")
         notifications.promptDetector.onUserInput(sessionId)
         noteSent(sessionId, command)
         send(command)
+        return true
+    }
+
+    /**
+     * Kolo 6 (adv M2, F5): one message of the input bar for ONE tab, fixed by the caller at the moment of the send (the
+     * active tab may change during the typing). A slash command goes key by key, other text as body + Enter (see the
+     * reasons at [sendSlashCommand] and in TerminalScreen). Without a route: one "not sent" line, and once a part did not
+     * go, nothing after it goes — never an Enter alone.
+     */
+    fun sendMessage(sessionId: String, text: String) {
+        scope.launch {
+            if (text.startsWith("/") && !text.contains('\n') && text.length < 64) {
+                sendSlashCommand(sessionId, text)
+            } else {
+                if (!sendClaudeCommand(sessionId, text)) return@launch
+                kotlinx.coroutines.delay(40)
+                sendClaudeCommand(sessionId, "\r")
+            }
+        }
     }
 
     fun switchModel(sessionId: String, model: ClaudeModel) {
@@ -231,20 +259,20 @@ internal class ClaudeControlService(
      */
     private suspend fun sendSlashCommand(sessionId: String, command: String) {
         for (ch in command) {
-            sendInput(sessionId, ch.toString())
+            if (!typeUser(sessionId, ch.toString())) return   // kolo 6 (F5): one "not sent", the rest and Enter stay
             kotlinx.coroutines.delay(15)
         }
         kotlinx.coroutines.delay(60)
-        sendInput(sessionId, "\r")
+        typeUser(sessionId, "\r")
     }
 
     /** Submit a pasted /login auth code: send the code, then a separate Enter so
      *  Claude's prompt doesn't treat code+CR as one paste (which won't submit). */
     fun submitLoginCode(sessionId: String, code: String) {
         scope.launch {
-            sendInput(sessionId, code)
+            if (!typeUser(sessionId, code)) return@launch   // kolo 6: no Enter alone
             kotlinx.coroutines.delay(120)
-            sendInput(sessionId, "\r")
+            typeUser(sessionId, "\r")
         }
     }
 

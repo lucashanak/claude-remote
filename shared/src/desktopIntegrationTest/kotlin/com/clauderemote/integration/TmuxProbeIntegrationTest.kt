@@ -50,13 +50,13 @@ class TmuxProbeIntegrationTest {
         )
 
         assertFalse(
-            probes.probeTmuxSession(manager, requested),
+            kotlinx.coroutines.runBlocking { probes.probeTmuxSession(manager, requested) },   // kolo 4: suspend (runs on IO)
             "probeTmuxSession('$requested') must be FALSE while only '$decoy' exists — " +
                 "a true here is the wrong-session bug (prefix match) coming back",
         )
         // ...and the probe is not simply always-false:
         assertTrue(
-            probes.probeTmuxSession(manager, decoy),
+            kotlinx.coroutines.runBlocking { probes.probeTmuxSession(manager, decoy) },
             "probeTmuxSession('$decoy') must be TRUE for the session that really exists",
         )
     }

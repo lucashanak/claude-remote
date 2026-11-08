@@ -202,8 +202,8 @@ class SessionOrchestrator(
         { id -> gitStatusService.probeOnIdle(id) },
     )
 
-    // Input-prompt detection, needs-input notifications, Stop-hook watcher,
-    // login flow, and the offline pending-input queue. Declared after the
+    // Input-prompt detection, needs-input notifications, Stop-hook watcher and
+    // login flow (no input queue since kolo 5 of batch C). Declared after the
     // services it bridges to (statusService/transcriptService) exist.
     internal val notificationService = com.clauderemote.session.service.NotificationService(
         reconnectScope, connectionRegistry, tabManager, { isInBackground },
@@ -220,8 +220,8 @@ class SessionOrchestrator(
     // Per-session terminal output buffer (ring buffer) + pty size tracking.
     private val terminalIO = com.clauderemote.session.service.TerminalIOService(connectionRegistry)
 
-    // User input delivery (mosh-first, ssh-fallback), the offline pending-input
-    // queue, and the Claude slash-command control surface. Coordinator over the
+    // User input delivery (mosh-first, ssh-fallback; only into an ACTIVE tab, never
+    // queued) and the Claude slash-command control surface. Coordinator over the
     // services above; declared after them since it composes them.
     private val claudeControl = com.clauderemote.session.service.ClaudeControlService(
         reconnectScope, connectionRegistry, tabManager, statusService, notificationService, terminalIO,
@@ -323,9 +323,6 @@ class SessionOrchestrator(
 
     // Per-session git status of the working directory — owned by gitStatusService.
     val gitStatuses: kotlinx.coroutines.flow.StateFlow<Map<String, GitStatus>> get() = gitStatusService.gitStatuses
-
-    // Pending input queue per session (for offline queue feature) — owned by notificationService.
-    val pendingCounts: kotlinx.coroutines.flow.StateFlow<Map<String, Int>> get() = notificationService.pendingCounts
 
     // Per-server reachability for the launcher health dot — owned by serverHealthService.
     val serverHealth: kotlinx.coroutines.flow.StateFlow<Map<String, ServerHealth>> get() = serverHealthService.serverHealth
@@ -538,23 +535,35 @@ class SessionOrchestrator(
      */
     private val lostDuringReconnect = java.util.concurrent.ConcurrentHashMap<String, Pair<ClaudeSession, (String) -> Unit>>()
 
-    /** C4: a transport of [sessionId] that carries its terminal now (ET, mosh or the SSH shell — what input is routed to). */
-    private fun hasLiveTransport(sessionId: String): Boolean =
-        connectionRegistry.et(sessionId)?.isConnected == true ||
-            connectionRegistry.mosh(sessionId)?.isConnected == true ||
+    /**
+     * C4: a transport of [sessionId] that carries its terminal now (ET, mosh or the SSH shell — what input is routed to).
+     * Kolo 3 (adv N5): an ET tab's terminal is its ET client; the SSH shell beside it is only the carrier, whose output is
+     * dropped — a live carrier under a dead ET client is no live terminal. Kolo 4 (adv N2): also once the dead client was
+     * taken out of the registry (its `onDisconnect`): the carrier stays marked as one ([ConnectionRegistry.isEtCarrier]).
+     */
+    private fun hasLiveTransport(sessionId: String): Boolean {
+        connectionRegistry.et(sessionId)?.let { return it.isConnected }
+        if (connectionRegistry.isEtCarrier(sessionId)) return false
+        return connectionRegistry.mosh(sessionId)?.isConnected == true ||
             connectionRegistry.ssh(sessionId)?.isConnected == true
+    }
 
     /**
-     * C4: the end of a reconnect that held [reconnectingSessionIds]. The lock goes first, then the loss recorded meanwhile
-     * is taken: a report after this point runs its own reconnect. A reconnect that ended ACTIVE ([succeeded]) over a
-     * connection that is no longer alive runs [autoReconnect] again (its attempt count and backoff start over, as for any
-     * loss); a failed one has handed the tab to [armReconnectRetry] already.
+     * C4: the end of a reconnect that held [reconnectingSessionIds]. The lock and the loss recorded meanwhile go together
+     * (kolo 3: one critical section — a record is only ever written under that lock, so it is this run's, and a report
+     * after this point takes the lock and runs its own reconnect). A reconnect that ended ACTIVE ([succeeded]) over a
+     * connection that is no longer alive runs [autoReconnect] again, from DISCONNECTED like any loss (its attempt count
+     * and backoff start over); a failed one has handed the tab to [armReconnectRetry] already.
      */
     private fun endReconnect(sessionId: String, succeeded: Boolean) {
-        synchronized(reconnectingSessionIds) { reconnectingSessionIds.remove(sessionId) }
-        val (session, emit) = lostDuringReconnect.remove(sessionId) ?: return
+        val (session, emit) = synchronized(reconnectingSessionIds) {
+            reconnectingSessionIds.remove(sessionId)
+            lostDuringReconnect.remove(sessionId)
+        } ?: return
         if (!succeeded || released || tabManager.getTab(sessionId) == null || hasLiveTransport(sessionId)) return
         FileLogger.log(TAG, "Connection of $sessionId was lost during its reconnect — reconnecting again")
+        tabManager.updateTabStatus(sessionId, SessionStatus.DISCONNECTED)
+        statusService.updateActivity(sessionId, SessionActivity.DISCONNECTED)
         reconnectScope.launch { autoReconnect(session, emit) }
     }
 
@@ -629,6 +638,9 @@ class SessionOrchestrator(
                 dead.map { session ->
                     async {
                         try {
+                            // kolo 3: the list is up to 2 s old (the size wait): a tab healed meanwhile keeps its live shell
+                            val now = tabManager.getTab(session.id) ?: return@async
+                            if (now.status == com.clauderemote.model.SessionStatus.ACTIVE && hasLiveTransport(session.id)) return@async
                             reconnectSession(session.id)
                         } catch (e: CancellationException) {
                             throw e
@@ -1222,9 +1234,15 @@ class SessionOrchestrator(
             }
 
             serverStorage.updateServer(server.withRecentFolder(folder))
-            tabManager.updateTabStatus(sessionId, SessionStatus.ACTIVE)
-            FileLogger.log(TAG, "Session active: $sessionId")
-            statusService.updateActivity(sessionId, SessionActivity.WAITING_FOR_INPUT)
+            // kolo 4 (adv N9): a shell lost during the launch is its autoReconnect's (the launch holds no lock): never
+            // ACTIVE over it — that reconnect sets ACTIVE itself, or hands the tab to the background retry
+            if (tabManager.getTab(sessionId)?.status == SessionStatus.DISCONNECTED) {
+                FileLogger.log(TAG, "Session $sessionId lost its shell during the launch — its reconnect has it")
+            } else {
+                tabManager.updateTabStatus(sessionId, SessionStatus.ACTIVE)
+                FileLogger.log(TAG, "Session active: $sessionId")
+                statusService.updateActivity(sessionId, SessionActivity.WAITING_FOR_INPUT)
+            }
             onSessionActive?.invoke(session)
             attachSessionRuntime(sessionId, session.tmuxSessionName)
             persistLaunched(session)
@@ -1613,13 +1631,14 @@ class SessionOrchestrator(
         isNewTmuxSession: Boolean,
         checkClosedElsewhere: Boolean = false,
         forceSsh: Boolean = false,
+        requireAliveAtEnd: Boolean = false,
     ) {
         // Opt-in Eternal Terminal path: a session that prefers ET runs its
         // terminal through the ET client (resumes over TCP) rather than the raw
         // SSH shell. connectEt reuses this same SSH connection as its carrier,
         // and calls back with forceSsh=true to fall back to plain SSH if the ET
         // path can't be established (avoids recursing back into connectEt).
-        if (session.server.preferEternal && !forceSsh) { connectEt(session, isNewTmuxSession); return }
+        if (session.server.preferEternal && !forceSsh) { connectEt(session, isNewTmuxSession, requireAliveAtEnd); return }
         if (connectSeam?.invoke("ssh", session, isNewTmuxSession, checkClosedElsewhere) == true) return
         // Before the first shell of the server connects: the exec transport carries the port forwards and
         // decides the shell cap of every lease below.
@@ -1787,8 +1806,10 @@ class SessionOrchestrator(
         val (cols, rows) = terminalIO.effectiveSize(session.id)
         sshManager.resize(cols, rows)
         // C4: a shell that died during the connect (its loss report is skipped while a reconnect holds the tab) must
-        // not end ACTIVE: the caller's error path retries (reconnectSession: ERROR + armReconnectRetry)
-        if (!sshManager.isConnected) throw java.io.IOException("the shell of ${session.id} died during the connect")
+        // not end ACTIVE: the caller's error path retries (reconnectSession: ERROR + armReconnectRetry). Kolo 3 (adv N2):
+        // only for the caller holding that lock — a launch holds none, so its loss report was NOT skipped: autoReconnect
+        // heals the tab, and the launch must still end persisted, not as a failed launch
+        if (requireAliveAtEnd && !sshManager.isConnected) throw java.io.IOException("the shell of ${session.id} died during the connect")
     }
 
     /**
@@ -1845,8 +1866,9 @@ class SessionOrchestrator(
         val tmuxSessionName = session.tmuxSessionName
         // Persist session for app-restart and server-reboot recovery.
         sessionStorage?.upsert(SessionStorage.fromClaudeSession(session))
-        connectionRegistry.ssh(session.id)?.let { conn ->
-            launchGuarded("Server-side bookkeeping of $tmuxSessionName") {
+        // kolo 4 (adv N9): not skipped while the tab's shell is being rebuilt (its autoReconnect): the exec path needs no
+        // shell, the legacy one waits for the tab's shell a bounded time
+        launchGuarded("Server-side bookkeeping of $tmuxSessionName") {
                 if (connectionRegistry.execActive(server.id)) {
                     // Over the exec transport: no attached shell needed. When none is usable right now the
                     // step waits for it once instead of being dropped; the push goes out even if the
@@ -1855,6 +1877,10 @@ class SessionOrchestrator(
                     whenExecUp(server.id, "tombstone clear of $tmuxSessionName") { persistence.clearTombstone(server.id, tmuxSessionName) }
                     whenExecUp(server.id, "sessions.json push") { persistence.pushSessionsToServer(server.id) }
                 } else {
+                    val conn = awaitLiveShell(session.id, PERSIST_SHELL_WAIT_MS) ?: run {
+                        FileLogger.log(TAG, "Server-side bookkeeping of $tmuxSessionName skipped: no live shell within ${PERSIST_SHELL_WAIT_MS}ms")
+                        return@launchGuarded
+                    }
                     persistence.ensureRestoreService(conn)
                     // Launching (or deliberately attaching to) this tmux name is
                     // positive intent that it is alive, so drop any tombstone
@@ -1865,7 +1891,66 @@ class SessionOrchestrator(
                     persistence.clearTombstone(conn, tmuxSessionName)
                     persistence.pushSessionsToServer(conn, server.id)
                 }
-            }
+        }
+    }
+
+    /**
+     * Kolo 6 (adv M3, H2): the ET and mosh clients left from before a reconnect stop and leave the registry — they came
+     * first in the input route, so every key went into an old `et` or a dead mosh-client. (A carrier rebuild keeps its ET
+     * client: it does not come here.)
+     */
+    /**
+     * The mosh client [m] of [sessionId] ended. Kolo 6 (adv H2): the dead client leaves the registry (it was the first
+     * route of every key); kolo 7 (adv N6): only the tab's current client speaks for it — one a reconnect already stopped
+     * and replaced writes nothing.
+     */
+    internal fun onMoshClientEnded(sessionId: String, m: com.clauderemote.connection.MoshManager) {
+        if (connectionRegistry.mosh(sessionId) !== m) return
+        connectionRegistry.removeMosh(sessionId)
+        tabManager.updateTabStatus(sessionId, SessionStatus.DISCONNECTED)
+        onSessionDisconnect?.invoke(sessionId)
+    }
+
+    /** Kolo 7 (adv N1): when a reconnect of the tab last ended ACTIVE, and how many losses in a row came soon after one. */
+    private val reconnectedAt = java.util.concurrent.ConcurrentHashMap<String, Long>()
+    private val earlyDeaths = java.util.concurrent.ConcurrentHashMap<String, Int>()
+
+    /**
+     * Kolo 7 (adv N1): the floor of the attempts of an autoReconnect that a loss started. A loss within
+     * [EARLY_DEATH_MS] of a reconnect that ended ACTIVE is a failed attempt, not a fresh start — e.g. an attach that
+     * fails for good behind `|| exit 1` on a slow link (the loss comes after ACTIVE): without this every round began at
+     * attempt 1 with no wait, ~1.6 s apart for ever. Such losses in a row wait 4 s, 8 s, 16 s … (cap 60 s); a connection
+     * that held longer starts the count over.
+     */
+    private fun earlyDeathFloorMs(sessionId: String): Long {
+        val at = reconnectedAt.remove(sessionId)
+        if (at == null || System.currentTimeMillis() - at >= EARLY_DEATH_MS) {
+            earlyDeaths.remove(sessionId)
+            return 0
+        }
+        val n = earlyDeaths.merge(sessionId, 1, Int::plus) ?: 1
+        val floor = ReconnectPolicy.backgroundBaseDelayMs(n + 1)
+        FileLogger.log(TAG, "Connection of $sessionId lost ${System.currentTimeMillis() - at}ms after its reconnect (early death $n in a row) — waiting ${floor}ms")
+        return floor
+    }
+
+    private suspend fun dropOldTerminalClients(sessionId: String) {
+        connectionRegistry.removeEt(sessionId)?.let { e ->
+            try { e.disconnect() } catch (ex: Exception) { FileLogger.log(TAG, "Stopping the old ET client of $sessionId failed: ${ex.message}") }
+        }
+        etLocalPorts.remove(sessionId)
+        connectionRegistry.removeMosh(sessionId)?.let { m ->
+            try { m.disconnect() } catch (ex: Exception) { FileLogger.log(TAG, "Stopping the old mosh client of $sessionId failed: ${ex.message}") }
+        }
+    }
+
+    /** Kolo 4: the tab's connected SSH shell, waited for up to [ms] (null = none, or the tab is gone). */
+    private suspend fun awaitLiveShell(sessionId: String, ms: Long): SshManager? {
+        val end = System.currentTimeMillis() + ms
+        while (true) {
+            connectionRegistry.ssh(sessionId)?.takeIf { it.isConnected }?.let { return it }
+            if (released || tabManager.getTab(sessionId) == null || System.currentTimeMillis() >= end) return null
+            kotlinx.coroutines.delay(250)
         }
     }
 
@@ -2015,7 +2100,9 @@ class SessionOrchestrator(
             )
             // See buildAttachCommand for the attach semantics (single client per
             // device, no -d, manual window sizing, exact target).
-            is TmuxLaunchDecision.Attach -> buildAttachCommand(session.tmuxSessionName)
+            // kolo 6 (adv H1): a failed attach ends the login shell (the transport's loss then goes the usual reconnect
+            // way) — never a bare bash left under an ACTIVE tab, where typed input would run as commands
+            is TmuxLaunchDecision.Attach -> buildAttachCommand(session.tmuxSessionName) + " || exit 1"
             // A relaunch of a session that should exist: if it is there after all (a socket heal), attach it with this
             // device's single-client attach (N1, S2) — never kill it and start it again.
             is TmuxLaunchDecision.Rebuild -> when {
@@ -2154,6 +2241,8 @@ class SessionOrchestrator(
             // will adopt the new UUID; without this the stale UUID stays "confirmed"
             // and the transcript stream tails a file that no longer exists.
             transcriptService.clearConfirmedUuid(session.id)
+            dropOldTerminalClients(session.id)   // kolo 6 (adv M3, H2): this reconnect builds a plain SSH terminal
+            val earlyFloor = earlyDeathFloorMs(session.id)   // kolo 7 (adv N1)
             for (attempt in 1..maxAttempts) {
                 say("\r\n\u001B[33mConnection lost. Reconnecting ($attempt/$maxAttempts)...\u001B[0m\r\n")
                 FileLogger.log(TAG, "Auto-reconnect attempt $attempt/$maxAttempts for ${session.id}")
@@ -2174,7 +2263,7 @@ class SessionOrchestrator(
                 // a gentle escalating retry instead of a battery-draining
                 // connect→die spin. Zero until CF dies early twice in a row, so
                 // a genuine single handover still reconnects instantly.
-                val floor = transportResolver.cfEarlyDeathBackoffMs(session.server)
+                val floor = maxOf(transportResolver.cfEarlyDeathBackoffMs(session.server), earlyFloor)
                 val wait = ReconnectPolicy.foregroundDelayMs(attempt, floor)
                 if (wait > 0) kotlinx.coroutines.delay(wait)
                 // Tab closed during the backoff — stop reconnecting it.
@@ -2244,8 +2333,9 @@ class SessionOrchestrator(
                     // effectiveSize() (last active-view size fallback) to always
                     // apply a correct size and avoid tmux rendering at 80x24.
                     run {
-                        val (cols, rows) = terminalIO.effectiveSize(session.id)
                         kotlinx.coroutines.delay(200) // let tmux attach settle
+                        // kolo 4 (adv N4): the size after the pause — a rotation during it must win
+                        val (cols, rows) = terminalIO.effectiveSize(session.id)
                         sshManager.resize(cols, rows)
                     }
                     // C4: the shell can die during the attempt (its own loss report is skipped above while this runs,
@@ -2264,10 +2354,10 @@ class SessionOrchestrator(
                     // Restart ALL per-session loops, not just watcher+refresh —
                     // usage/git/latency pollers may have died during the outage.
                     attachSessionRuntime(session.id, session.tmuxSessionName)
+                    reconnectedAt[session.id] = System.currentTimeMillis()   // kolo 7 (adv N1)
                     say("\r\n\u001B[32mReconnected!\u001B[0m\r\n")
                     FileLogger.log(TAG, "Auto-reconnect succeeded for ${session.id}")
                     _reconnectStatus.update { it - session.id }
-                    claudeControl.flushPendingInputs(session.id)
                     succeeded = true
                     return
                 } catch (e: SessionClosedElsewhereException) {
@@ -2294,7 +2384,7 @@ class SessionOrchestrator(
         }
     }
 
-    private suspend fun connectMosh(session: ClaudeSession, isNewTmuxSession: Boolean) {
+    private suspend fun connectMosh(session: ClaudeSession, isNewTmuxSession: Boolean, requireAliveAtEnd: Boolean = false) {
         if (connectSeam?.invoke("mosh", session, isNewTmuxSession, false) == true) return
         // Mosh needs DIRECT UDP. Over the Tailscale path (effective host=100.x,
         // no CF proxy) the UDP rides the WireGuard tunnel and mosh's roaming
@@ -2307,7 +2397,7 @@ class SessionOrchestrator(
             val warning = "\r\n\u001B[33mMosh requires direct UDP — falling back to SSH (Cloudflare tunnel)\u001B[0m\r\n"
             terminalIO.append(session.id, warning)
             onTerminalOutput?.invoke(session.id, warning)
-            connectSsh(session, isNewTmuxSession)
+            connectSsh(session, isNewTmuxSession, requireAliveAtEnd = requireAliveAtEnd)
             return
         }
 
@@ -2365,16 +2455,13 @@ class SessionOrchestrator(
             effectiveServer,
             startupCommand = tmuxCmd,
             onOutput = { data -> emit(data) },
-            onDisconnect = {
-                tabManager.updateTabStatus(session.id, SessionStatus.DISCONNECTED)
-                onSessionDisconnect?.invoke(session.id)
-            }
+            onDisconnect = { onMoshClientEnded(session.id, moshManager) }
         )
 
         if (!success) {
             emit("\r\n\u001B[33mMosh connection failed. Falling back to SSH...\u001B[0m\r\n")
             FileLogger.log(TAG, "Mosh failed, falling back to SSH")
-            connectSsh(session, isNewTmuxSession)
+            connectSsh(session, isNewTmuxSession, requireAliveAtEnd = requireAliveAtEnd)
             return
         }
 
@@ -2404,7 +2491,7 @@ class SessionOrchestrator(
      * still does a tmux attach. Making reconnect skip the redraw entirely and
      * let ET replay is the follow-up; requires etserver on the server.
      */
-    private suspend fun connectEt(session: ClaudeSession, isNewTmuxSession: Boolean) {
+    private suspend fun connectEt(session: ClaudeSession, isNewTmuxSession: Boolean, requireAliveAtEnd: Boolean = false) {
         if (connectSeam?.invoke("et", session, isNewTmuxSession, false) == true) return
         val effective = transportResolver.resolveTransport(session.server)
         FileLogger.log(TAG, "Connecting via Eternal Terminal to ${session.server.name} (${effective.host})")
@@ -2432,7 +2519,7 @@ class SessionOrchestrator(
         // catch below degrades to plain SSH.
         val carrierReady = java.util.concurrent.atomic.AtomicBoolean(false)
         val sshManager = SshManager(serverStorage, transportPool = connectionRegistry.transportPool(session.server.id))
-        connectionRegistry.putSsh(session.id, sshManager)
+        connectionRegistry.putSsh(session.id, sshManager, etCarrier = true)   // kolo 4: never the terminal
         transportResolver.setConnectionLabel(session.id, effective, session.server, "ET")
         connectionRegistry.connectGate(session.server.id).withPermit {
             sshManager.connect(
@@ -2575,7 +2662,7 @@ class SessionOrchestrator(
             connectionRegistry.removeEt(session.id)?.disconnect()
             connectionRegistry.ssh(session.id)?.disconnect()
             connectionRegistry.removeSsh(session.id)
-            connectSsh(session, isNewTmuxSession, forceSsh = true)
+            connectSsh(session, isNewTmuxSession, forceSsh = true, requireAliveAtEnd = requireAliveAtEnd)
         }
     }
 
@@ -2603,7 +2690,7 @@ class SessionOrchestrator(
      * tmux redraw). Falls back to a full [autoReconnect] if there's no port to
      * resume or the carrier can't be re-established.
      */
-    private suspend fun reconnectEtCarrier(session: ClaudeSession, emit: (String) -> Unit) {
+    internal suspend fun reconnectEtCarrier(session: ClaudeSession, emit: (String) -> Unit) {
         // Share the SAME per-session reconnect lock as autoReconnect and
         // reconnectSession. Previously this path used its own `etReconnecting`
         // set, so a concurrent autoReconnect/reconnectSession could disconnect and
@@ -2618,11 +2705,20 @@ class SessionOrchestrator(
         // When we degrade to a full autoReconnect we must RELEASE the shared lock
         // first — autoReconnect re-acquires it, and would no-op if we still held it.
         var handedOff = false
+        var succeeded = false
         fun handOffToAutoReconnect() {
             _reconnectStatus.update { it - session.id }
             handedOff = true
-            synchronized(reconnectingSessionIds) { reconnectingSessionIds.remove(session.id) }
-            reconnectScope.launch { autoReconnect(session, emit) }
+            // kolo 3 (adv N5): through endReconnect, so a loss recorded meanwhile is taken too (this full reconnect covers it)
+            endReconnect(session.id, succeeded = false)
+            // kolo 5 (adv N4): the full reconnect builds a plain SSH terminal — the old ET client must go with it, or every
+            // key would still go into that zombie process
+            val oldEt = connectionRegistry.removeEt(session.id)
+            etLocalPorts.remove(session.id)
+            reconnectScope.launch {
+                try { oldEt?.disconnect() } catch (e: Exception) { FileLogger.log(TAG, "Stopping the old ET client of ${session.id} failed: ${e.message}") }
+                autoReconnect(session, emit)
+            }
         }
         try {
             val localPort = etLocalPorts[session.id]
@@ -2642,7 +2738,7 @@ class SessionOrchestrator(
                     connectionRegistry.ssh(session.id)?.disconnect()
                     connectionRegistry.removeSsh(session.id)
                     val sshManager = SshManager(serverStorage, transportPool = connectionRegistry.transportPool(session.server.id))
-                    connectionRegistry.putSsh(session.id, sshManager)
+                    connectionRegistry.putSsh(session.id, sshManager, etCarrier = true)   // kolo 4: never the terminal
                     val effective = transportResolver.resolveTransport(session.server)
                     transportResolver.setConnectionLabel(session.id, effective, session.server, "ET")
                     connectionRegistry.connectGate(session.server.id).withPermit {
@@ -2700,6 +2796,7 @@ class SessionOrchestrator(
                     attachSessionRuntime(session.id, session.tmuxSessionName)
                     _reconnectStatus.update { it - session.id }
                     FileLogger.log(TAG, "ET carrier rebuilt for ${session.id} (localPort=$localPort) — et resuming, no redraw")
+                    succeeded = true
                     return
                 } catch (e: Exception) {
                     FileLogger.error(TAG, "ET carrier reconnect attempt $attempt failed", e)
@@ -2708,7 +2805,8 @@ class SessionOrchestrator(
             // Carrier couldn't be re-established — fall back to a full reconnect.
             handOffToAutoReconnect()
         } finally {
-            if (!handedOff) synchronized(reconnectingSessionIds) { reconnectingSessionIds.remove(session.id) }
+            // kolo 3 (adv N5): a loss of the ET client recorded during the rebuild is looked at, never left lying
+            if (!handedOff) endReconnect(session.id, succeeded)
         }
     }
 
@@ -2833,7 +2931,11 @@ class SessionOrchestrator(
 
     /** Ensure etserver is installed + running on the server; return its port
      *  (null → unsupported arch / no internet / start failed → SSH fallback). */
+    /** Test seam (kolo 4): stands in for [ensureEtServer] (its install script must never run in a test). Null in production. */
+    @Volatile internal var etServerSeam: ((com.jcraft.jsch.Session) -> Int?)? = null
+
     private suspend fun ensureEtServer(jsch: com.jcraft.jsch.Session): Int? {
+        etServerSeam?.let { return it(jsch) }
         // Wrap the whole install in a server-side `timeout 12`: execCapture's
         // 15s client-side withTimeout + runInterruptible unblocks OUR read, but a
         // wedged remote run (e.g. a still-blocked flock) could otherwise leave a
@@ -2854,11 +2956,16 @@ class SessionOrchestrator(
 
     fun sendBytes(sessionId: String, data: ByteArray) = claudeControl.sendBytes(sessionId, data)
 
-    fun clearPendingInputs(sessionId: String) = claudeControl.clearPendingInputs(sessionId)
 
     fun resize(sessionId: String, cols: Int, rows: Int) = terminalIO.resize(sessionId, cols, rows)
 
-    fun sendClaudeCommand(sessionId: String, command: String) = claudeControl.sendClaudeCommand(sessionId, command)
+    fun sendClaudeCommand(sessionId: String, command: String) { claudeControl.sendClaudeCommand(sessionId, command) }
+
+    /** Kolo 6: one message of the input bar for [sessionId] (fixed by the caller at the send), see ClaudeControlService. */
+    fun sendMessage(sessionId: String, text: String) = claudeControl.sendMessage(sessionId, text)
+
+    /** Kolo 6: the terminal emulator's own answers (DA, CPR …) — not user input, see ClaudeControlService. */
+    fun sendTerminalReply(sessionId: String, data: ByteArray) = claudeControl.sendTerminalReply(sessionId, data)
 
     /** The prompt the session shows right now, for a view that offers a reply to it (the test notification). */
     fun currentPrompt(sessionId: String): com.clauderemote.session.service.PromptFingerprint? =
@@ -2977,7 +3084,13 @@ class SessionOrchestrator(
     /**
      * Reconnect a disconnected session. Reuses the same session config.
      */
-    suspend fun reconnectSession(sessionId: String) {
+    suspend fun reconnectSession(sessionId: String): Unit = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+        // C5 kolo 4 (adv N3): off the caller's thread — the Reconnect button calls it from the UI's (main) scope, and the
+        // connect, the probes and the disconnects write to JSch
+        reconnectSessionOnIo(sessionId)
+    }
+
+    private suspend fun reconnectSessionOnIo(sessionId: String) {
         // Single-flight per session across EVERY entry point (manual button,
         // restoreAndReconnect's cold-start loop, the network-callback sweep,
         // AND autoReconnect) — shares the same guard autoReconnect uses. Cold
@@ -3022,6 +3135,7 @@ class SessionOrchestrator(
             // Clean up old connection
             connectionRegistry.ssh(sessionId)?.disconnect()
             connectionRegistry.removeSsh(sessionId)
+            dropOldTerminalClients(sessionId)   // kolo 6 (adv M3, H2)
 
             tabManager.updateTabStatus(sessionId, SessionStatus.CONNECTING)
 
@@ -3032,9 +3146,10 @@ class SessionOrchestrator(
                 // back — the exact scenario mosh exists for. connectMosh still
                 // falls back to SSH internally when no direct-UDP path exists.
                 if (session.connectionType == ConnectionType.MOSH) {
-                    connectMosh(session, false)
+                    connectMosh(session, false, requireAliveAtEnd = true)
                 } else {
-                    connectSsh(session, false, checkClosedElsewhere = true) // attach to existing tmux
+                    // kolo 3: this reconnect holds the tab's lock (its shell's loss report is skipped): check the end
+                    connectSsh(session, false, checkClosedElsewhere = true, requireAliveAtEnd = true) // attach to existing tmux
                 }
                 tabManager.updateTabStatus(sessionId, SessionStatus.ACTIVE)
                 // Clear the DISCONNECTED activity left over from restore/disconnect —
@@ -3049,6 +3164,7 @@ class SessionOrchestrator(
                 // — they may have died during the outage), not just watcher+refresh.
                 attachSessionRuntime(sessionId, session.tmuxSessionName)
                 FileLogger.log(TAG, "Reconnected: $sessionId")
+                reconnectedAt[sessionId] = System.currentTimeMillis()   // kolo 7 (adv N1)
                 succeeded = true
             } catch (e: SessionClosedElsewhereException) {
                 FileLogger.log(TAG, "reconnectSession($sessionId) aborted — closed on another device")
@@ -3132,6 +3248,7 @@ class SessionOrchestrator(
         connectionRegistry.et(sessionId)?.disconnect()
         connectionRegistry.removeEt(sessionId)
         etLocalPorts.remove(sessionId)
+        reconnectedAt.remove(sessionId); earlyDeaths.remove(sessionId)   // kolo 7
         connectionRegistry.ssh(sessionId)?.disconnect()
         connectionRegistry.removeSsh(sessionId)
         connectionRegistry.mosh(sessionId)?.disconnect()
@@ -3140,7 +3257,6 @@ class SessionOrchestrator(
         transcriptService.dispose(sessionId)
         statusService.stopPoller(sessionId)
         notificationService.promptDetector.removeSession(sessionId)
-        notificationService.removePendingInputs(sessionId)
         terminalIO.clearSize(sessionId)
         transportResolver.clearConnectData(sessionId)
         transcriptService.clearConfirmedUuid(sessionId)
@@ -3152,7 +3268,6 @@ class SessionOrchestrator(
         // want the values.
         serverHealthService.clearSession(sessionId)
         gitStatusService.clearSession(sessionId)
-        notificationService.clearPendingCount(sessionId)
         tabManager.removeTab(sessionId)
         // The exec transport lives while the server has a tab: closed only now that the tab is gone, so a
         // reconnect of this very tab (which checked that it exists) cannot start it again afterwards.
@@ -3655,6 +3770,10 @@ class SessionOrchestrator(
         internal const val EXEC_WAVE_WAIT_MS = 3_000L
         /** C4: how long a cold start's reconnects wait for the first size of the terminal view (shared, once per orchestrator). */
         internal const val VIEW_SIZE_WAIT_MS = 2_000L
+        /** Kolo 7 (adv N1): a loss this soon after a reconnect ended ACTIVE counts as an early death. */
+        internal const val EARLY_DEATH_MS = 5_000L
+        /** Kolo 4: how long a launch's legacy server bookkeeping waits for the tab's shell (an autoReconnect after a loss). */
+        internal const val PERSIST_SHELL_WAIT_MS = 30_000L
         /** A one-off operation (restore install, tombstone, manifest push) that found no transport waits this long for the exec transport. */
         internal const val ONE_OFF_WAIT_MS = 60_000L
         /** V16: names a new session's creation tries before it gives up (each taken one moves on to the next free one). */

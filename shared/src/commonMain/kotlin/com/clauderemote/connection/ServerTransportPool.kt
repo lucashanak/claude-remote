@@ -559,9 +559,10 @@ class ServerTransportPool(
             sess.setConfig("StrictHostKeyChecking", "no")
             // Compression: transcript JSONL + terminal output compress 5-10×,
             // and on weak/metered links the payload IS the cost. mwiede jsch
-            // ships a java.util.zip implementation (no jzlib needed); "none"
-            // stays in the list so a server with Compression=no still
-            // negotiates cleanly.
+            // maps zlib@openssh.com / zlib to its bundled jzlib port
+            // (com.jcraft.jsch.jzlib.Compression — no external jzlib jar needed;
+            // the java.util.zip one is opt-in and not used here); "none" stays
+            // in the list so a server with Compression=no still negotiates cleanly.
             sess.setConfig("compression.s2c", "zlib@openssh.com,zlib,none")
             sess.setConfig("compression.c2s", "zlib@openssh.com,zlib,none")
             // Keepalive via the EXPLICIT API (milliseconds!) — see SshManager. The pool-wide
@@ -581,6 +582,8 @@ class ServerTransportPool(
                 FileLogger.log(TAG, "Using Cloudflare tunnel proxy for ${server.host}")
                 CloudflareProxy(server.host, server.cloudflareToken).also { sess.setProxy(it) }
             } else null
+            // C5: a direct socket's failed write closes the transport (never a cipher state a packet ahead of sshd's)
+            TransportWriteGuard.forServer(server.useCloudflareProxy, connectTimeout)?.let { sess.setSocketFactory(it) }
             sess.connect(connectTimeout)
             // C1 (K-2): only now does the keepalive run over the tunnel (no socket to time out)
             cf?.armKeepAlive(sess)

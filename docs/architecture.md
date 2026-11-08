@@ -435,10 +435,10 @@ as before and it delegates to the services.
 | `UsageService` | 5h/week usage %, reset mins, usage tokens, ccusage polling. |
 | `TranscriptService` | Transcript streams (+ `transcriptLock`), context-token tracking, the shared streamd daemon. |
 | `StatusService` | Per-session activity state (`updateActivity`) + OMC remote-status pollers. |
-| `NotificationService` | Input-prompt detection, needs-input notifications, the Stop-hook watcher (and, with `comm_hooks`, the hook-event and forget.log lines), login flow, offline input queue. |
+| `NotificationService` | Input-prompt detection, needs-input notifications, the Stop-hook watcher (and, with `comm_hooks`, the hook-event and forget.log lines), login flow. (No offline input queue since kolo 5 of batch C: input without a route is never sent later.) |
 | `HookCommands` / `HookEventReducer` | Server-side text of the background hooks (`hook-ev.sh`, settings merge, remove, status) and the pure reducer of their events; see [connection.md](connection.md#per-server-bootstrap-and-background-hooks). |
 | `TerminalIOService` | Per-session output ring buffer + pty size tracking. |
-| `ClaudeControlService` | User input send path + offline queue + Claude slash-control (model/effort/login/escape). |
+| `ClaudeControlService` | User input send path (only into an ACTIVE tab; without a route: "Not connected — not sent", no queue) + Claude slash-control (model/effort/login/escape). |
 | `RemoteOpsService` | tmux copy-mode scroll + SFTP upload/download. |
 | `SessionPersistenceService` | Shared `sessions.json`, restore-script install, real-session-id refresh, forget/rename. |
 

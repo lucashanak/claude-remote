@@ -123,6 +123,8 @@ fun SshTerminal(
     onUserInput: (ByteArray) -> Unit,
     onResize: (cols: Int, rows: Int) -> Unit,
     onSingleTap: () -> Unit,
+    /** Kolo 6: the emulator's own answers (DA, CPR …), apart from the user's keys; see SshTerminalSession. */
+    onEmulatorReply: (ByteArray) -> Unit = onUserInput,
     /** See ClauDeTerminalViewClient.onAppShortcutKey. */
     onAppShortcutKey: ((KeyEvent) -> Boolean)? = null,
     onReady: (SshTerminalHandle) -> Unit,
@@ -137,6 +139,7 @@ fun SshTerminal(
                 client = sessionClient,
                 onUserInput = onUserInput,
                 onResize = onResize,
+                onEmulatorReply = onEmulatorReply,
             )
             val view = TerminalView(ctx, null).apply {
                 layoutParams = ViewGroup.LayoutParams(

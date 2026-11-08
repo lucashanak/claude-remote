@@ -16,7 +16,8 @@ actual class MoshManager {
     private var process: Process? = null
     private var readJob: Job? = null
 
-    actual val isConnected: Boolean get() = process != null
+    // kolo 6 (adv H2): a mosh-client that died is no route (its stdin swallowed every key)
+    actual val isConnected: Boolean get() = process?.isAlive == true
 
     actual suspend fun connect(
         server: SshServer,

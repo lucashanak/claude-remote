@@ -254,6 +254,58 @@ class ChannelHealthIntegrationTest {
         assertEquals("alive", out.trim())
     }
 
+    /**
+     * Kolo 3 (overeni testy R2b): the Cloudflare transports [SshManager] opens itself — a standalone shell transport
+     * (no pool) and the cleanup connection — are armed after their handshake: marked as Cloudflare, and a black hole
+     * takes them down by the keepalive (unarmed, only the handshake's 15 s / 10 s limit would).
+     */
+    @Test fun theStandaloneAndCleanupTransportsOfSshManagerAreArmedOverCloudflare() {
+        val f = fx()
+        cloudflareVia(f.port)
+        val server = f.server.copy(id = "cf-standalone", useCloudflareProxy = true)
+        storage.addServer(server)
+        for (cleanup in listOf(false, true)) {
+            val m = SshManager(storage).also { managers += it }
+            m.setKeepAliveInterval(1_000)
+            runBlocking { if (cleanup) m.connectForCleanup(server) else m.connect(server, onOutput = {}, onConnectionLost = {}) }
+            val s = m.getSession()!!
+            assertTrue(ChannelOpen.isCloudflare(s), "armed (cleanup=$cleanup)")
+            Thread.sleep(300)
+            tunnels.last().hole = true
+            val took = downWithin(s, 12_000)
+            assertTrue(took != null && took <= 3_000 + 600, "down by its keepalive (cleanup=$cleanup): $took ms")
+        }
+    }
+
+    /**
+     * Kolo 3 (overeni testy R2c): a fresh connection of [com.clauderemote.connection.SshSessionHelper.withSession] over
+     * Cloudflare is armed after its handshake: marked, and kept alive past the handshake's 10 s limit by its keepalive
+     * (10 s interval, answered).
+     */
+    @Test fun aFreshHelperConnectionOverCloudflareIsArmed() {
+        val f = fx()
+        cloudflareVia(f.port)
+        val server = f.server.copy(id = "cf-fresh", useCloudflareProxy = true)
+        val savedExec = com.clauderemote.connection.SshSessionHelper.execChannelsProvider
+        val savedFallback = com.clauderemote.connection.SshSessionHelper.fallbackRunner
+        com.clauderemote.connection.SshSessionHelper.execChannelsProvider = null
+        com.clauderemote.connection.SshSessionHelper.fallbackRunner = null
+        try {
+            val (armed, out) = runBlocking {
+                com.clauderemote.connection.SshSessionHelper.withSession(server) { sess ->
+                    val marked = ChannelOpen.isCloudflare(sess)
+                    Thread.sleep(12_000)                             // idle past the handshake's limit
+                    marked to (if (sess.isConnected) execReadWithWatchdog(sess, "echo alive", totalMs = 5_000).trim() else "down")
+                }
+            }
+            assertTrue(armed, "marked as Cloudflare")
+            assertEquals("alive", out, "kept alive by its keepalive")
+        } finally {
+            com.clauderemote.connection.SshSessionHelper.execChannelsProvider = savedExec
+            com.clauderemote.connection.SshSessionHelper.fallbackRunner = savedFallback
+        }
+    }
+
     /** Adv 5: a pause inside an SSH packet shorter than the dead limit no longer breaks the stream (no exception in the read). */
     @Test fun aPauseInsideAnSshPacketDoesNotKillTheCloudflareTransport() {
         val f = fx()

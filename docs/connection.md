@@ -37,7 +37,7 @@ All connections go through `SessionOrchestrator`, which coordinates `SshManager`
       (`TunnelKeepAlive`, armed right after connect by `CloudflareProxy.armKeepAlive`) with JSch's public
       `sendKeepAliveMsg`, on JSch's rules (below). Before that the handshake has the proxy's limit of the connect
       timeout (at least 10 s). Before C1 no keepalive ran over Cloudflare at all.
-5. session.connect(timeout)
+5. session.connect(timeout) — a direct (non-Cloudflare) transport rides the socket of `TransportWriteGuard` (C5, below)
 6. Set up port forwarding (if configured):
    ├─ Local ("L"): session.setPortForwardingL(localPort, remoteHost, remotePort)
    └─ Remote ("R"): session.setPortForwardingR(remotePort, remoteHost, localPort)
@@ -66,7 +66,8 @@ fun sendInput(data: String)
 // Send raw bytes (mouse events, special keys)
 fun sendBytes(data: ByteArray)
 
-// Resize PTY (terminal dimensions changed)
+// Resize PTY (terminal dimensions changed). C5: returns at once; the window-change goes out on the manager's IO
+// scope, serialized with the input writes, a burst coalesced into its last size (see "Writes on a direct socket")
 fun resize(cols: Int, rows: Int)
 
 // Upload file via SFTP
@@ -157,7 +158,26 @@ of a new session is bounded the same way (K6-1, `ClaudeConfig.buildFreshCreateCo
 kept) no new session can be created — every launch fails with the server's "timeout: not found". Creation and the
 cleanup let every tmux client write into a temp file (`mktemp`, removed by a `trap` on every way out), never into the
 channel's pipe or a `$(…)` (N7-1); so do the tmux probes of `TmuxProbes` (has-session, the redraw kick's
-list-clients/refresh-client, each bounded by `timeout 3` where coreutils has it): a tmux client hands its stdout to the
+list-clients/refresh-client, each bounded by `timeout 3` where coreutils has it; has-session prints NO only for tmux's
+own answers with status 1, read under `LC_ALL=C` from its stderr in the temp file: "can't find session", "no server
+running" or "error connecting … (No such file or directory)" — also for a LIVE server whose socket file was deleted
+(the 2026-11-02 shape; kolo 6, adv H1: kolo 5's fail-open there led to a plain attach that failed and left a bare
+login shell under an ACTIVE tab). NO leads to Rebuild, whose launch line goes through `tmux-sockheal.sh` (SIGUSR1
+brings the socket back, then the existing session is attached; nothing is killed); ForgetClosedElsewhere on NO stays
+as since 18faa58: only for a tombstoned name, or an untracked one while other live sessions answer (they cannot when
+the socket is gone). Any other failure (tmux missing, a socket path too long, no permission) prints nothing:
+fail-open, kolo 4 adv N8; and the SSH attach line (`buildAttachCommand … || exit 1`, kolo 6) ends the login shell when
+the attach fails, so the loss goes the usual reconnect way instead of a bare bash under an ACTIVE tab. A loss within
+5 s of a reconnect that ended ACTIVE counts as a failed attempt (kolo 7, adv N1: on a slow link the failed attach's
+exit comes after ACTIVE, and every round began at attempt 1 with no wait, ~1.6 s apart for ever): such losses in a row
+wait 4 s, 8 s, 16 s … (cap 60 s); a connection that held longer starts the count over. Not covered (older, in the
+hand-over): an attach that ENDS with status 0 — another client detached ours — and a Rebuild whose `tmux-sockheal.sh`
+refuses (its lock is held) still leave the login shell under the ACTIVE tab. The probes are
+spelled out in both branches of
+`if command -v timeout …; then timeout 3 tmux …; else tmux …; fi`, never a command kept in a shell variable: zsh does
+not word-split an unquoted `$CR_T`, so round 2's `$CR_T tmux has-session` ran `timeout 3` as one command name and
+read NO for a live session (kolo 3, adv N3; `TmuxProbeShellTest` runs the probes under sh and bash with zsh's
+splitting rule, and under zsh where it exists)): a tmux client hands its stdout to the
 server, and a STOPPED server kept that pipe — and sshd's session — open after `timeout` killed the client. Measured
 with SIGSTOP of a private tmux server: the cleanup's channel ends after its 3 s limit, the creation's after 13 s; 70 s
 of a stopped tmux behind 4 probe pollers cost no replacement of the exec transport and no failed interactive `echo`
@@ -316,26 +336,64 @@ suspend fun launchSession(
   route that died early twice in a row raises it, `cfEarlyDeathBackoffMs`), then 2 s, 4 s … (cap 30 s) + 0–500 ms
   jitter (`ReconnectPolicy.foregroundDelayMs`). Each attempt drops the old shell, waits for the exec transport inside
   a wave window, builds a new shell, waits for the prompt, sends Ctrl-C + Enter, attaches tmux
-  (`sendTmuxCommand`, `checkClosedElsewhere = true`) and sends the pty size (`effectiveSize`).
+  (`sendTmuxCommand`, `checkClosedElsewhere = true`) and sends the pty size (`effectiveSize`, read after the 200 ms
+  settle — kolo 4: a rotation during it wins).
 - **Never ACTIVE over a dead shell (C4).** The shell can die during the attempt (measured 2026-11-07: 439 ms after
   its connect); the attach then went nowhere (`sendInput` on a disconnected manager does nothing). Before the tab is
   set ACTIVE and "Reconnected!" is printed, the attempt checks `sshManager.isConnected`; a dead one is a failed attempt
-  (the next one runs). `connectSsh` checks the same at its end, so `reconnectSession` ends in its error path
-  (ERROR + `armReconnectRetry`) and a launch fails readably instead of an ACTIVE tab over nothing.
+  (the next one runs). `connectSsh` checks the same at its end for the caller that holds the tab's lock
+  (`requireAliveAtEnd`: `reconnectSession`, through the ET and mosh fallbacks too), so `reconnectSession` ends in its
+  error path (ERROR + `armReconnectRetry`). A launch holds no lock (kolo 3, adv N2): the loss of its first shell is
+  reported, `autoReconnect` heals the tab, and the launch ends as one that worked — persisted (`persistLaunched`:
+  SessionStorage, tombstone, sessions.json), not as "launch failed" with nothing persisted. Kolo 4 (adv N9): the launch
+  does not set ACTIVE over a tab its reconnect left DISCONNECTED (that reconnect sets ACTIVE, or the background retry
+  has the tab), and its server bookkeeping is not skipped while the tab's shell is being rebuilt: over the exec
+  transport it needs no shell, the legacy way waits for the tab's live shell up to 30 s.
 - **A loss reported during a reconnect is kept (C4).** The shell a reconnect builds reports its own loss while that
   reconnect still holds the lock; the report's `autoReconnect` used to return silently. It now records the loss
-  (`lostDuringReconnect`, under the lock) and `endReconnect` looks at it when the reconnect ends (the lock is released
-  first, so a report after that point runs its own reconnect): a reconnect that ended ACTIVE over a connection that is
-  no longer alive (`hasLiveTransport`: ET, mosh or the SSH shell, the transports input is routed to) runs
-  `autoReconnect` again, with its attempt count and backoff starting over like any loss. A reconnect that failed has
-  handed the tab to the background retry already, so nothing loops.
+  (`lostDuringReconnect`, under the lock) and `endReconnect` looks at it when the reconnect ends (the lock and the
+  record go in one critical section, kolo 3, so a report after that point runs its own reconnect): a reconnect that
+  ended ACTIVE over a connection that is no longer alive (`hasLiveTransport`: the ET client for an ET tab — its carrier
+  shell carries no terminal, also once the dead client was taken out of the registry: the carrier stays marked,
+  `ConnectionRegistry.isEtCarrier`, kolo 4 —, else mosh or the SSH shell) sets the tab and its activity DISCONNECTED
+  and runs `autoReconnect` again,
+  with its attempt count and backoff starting over like any loss. A reconnect that failed has handed the tab to the
+  background retry already, so nothing loops. `reconnectEtCarrier` ends through `endReconnect` too (kolo 3, adv N5).
+- **No input queue (kolo 5, decision of the lead).** Input for a tab without a deliverable route is never sent later:
+  `sendInput`, `sendBytes` and `sendClaudeCommand` print "Not connected — not sent" and keep nothing. Three rounds
+  showed a delayed send cannot be made safe — "1⏎" typed at a frozen dialog answered whatever dialog was open when the
+  tab came back (the background retry reconnects without a bound); the prompt token is gone after a loss; the UI sends
+  keys as "messages"; order; a killed process. Replies from the watch, the notifications and the quick reply are not
+  input of the tab: they go over exec through `sendReply` + `ReplyGuard`, unchanged.
+- **Input only into an ACTIVE tab (kolo 5, adv N3/N4).** `ClaudeControlService.route` gives a route only while the tab
+  is ACTIVE: during a reconnect its new shell is a bare login shell until the attach (a message typed then ran as a
+  command in `$HOME`), and the input never goes into an ET tab's carrier shell. `reconnectSession` and `autoReconnect`
+  stop and remove the old ET and mosh clients first (kolo 6, adv M3/H2; a carrier rebuild that hands the tab to a full
+  reconnect did so since kolo 5), and a mosh client that died leaves the registry (`isConnected` = the process lives),
+  so the rebuilt SSH terminal gets the input, not a zombie `et` or a dead mosh-client. (`canDeliverNow`, the staleness
+  input of `ReplyGuard`, still asks only whether the transport is up.)
+- **The emulator's own answers are no user input (kolo 6).** tmux asks the terminal (DA, XTVERSION, CPR …) at every
+  attach, and the answer comes one round trip later — inside a reconnect, before ACTIVE. Those answers go through
+  `sendTerminalReply`: whenever the transport is up, never "not sent". The platforms hand them in apart from the keys:
+  Termux (`SshTerminalSession`) — what the emulator writes while it processes received bytes (a paste or a mouse
+  report, written outside that, stays user input); JediTerm — `TerminalStarter.sendBytes(…, userInput = false)`.
+- **One message, one tab (kolo 6, adv M2).** The input bar's send (a slash command key by key, other text as body +
+  Enter) runs in `ClaudeControlService.sendMessage` for the tab read once at the send; a part that is not sent prints
+  one "not sent" and stops the rest — never an Enter alone (also for the app's own slash commands and the login code).
+- **Limit (adv M1, open).** ET and mosh clients buffer what they are given and deliver it when their link comes back;
+  such a tab stays ACTIVE until its keepalive notices the loss (ET: its carrier is a pool transport — keepalive
+  10 s in the foreground, 60 s in the background (`setBackgroundMode`), `serverAliveCountMax` 2, dead after 3
+  intervals: ~30 s / ~3 min; mosh: while the mosh-client process lives, no bound). Input typed into a frozen ET or mosh tab in that window can still arrive later. A staleness
+  gate for ET/mosh is in the hand-over, not in this batch.
 - **After 3 failed attempts** "Reconnect failed after 3 attempts", DISCONNECTED, and `armReconnectRetry` keeps calling
   `reconnectSession` (2 s → 60 s + jitter, unbounded) until the tab is ACTIVE or gone.
 - **Safety net (C4).** The network sweep `reconnectDeadTabs` takes DISCONNECTED, ERROR **and ACTIVE tabs without a
   live transport**; `kickRedraw` (a tab shown: switch, back from Chat) of an ACTIVE tab without a live transport calls
   `reconnectSession` instead of kicking a dead shell, so showing a frozen tab heals it. Both go through
-  `reconnectSession`'s single flight, so a reconnect already running is never doubled. A DISCONNECTED tab is not
-  reconnected by a kick: its own reconnect or retry has it.
+  `reconnectSession`'s single flight, so a reconnect already running is never doubled. The sweep's list can be 2 s
+  old (the size wait below): each tab is checked again right before its reconnect, and one that is ACTIVE over a live
+  transport by then is left alone (kolo 3). A DISCONNECTED tab is not reconnected by a kick: its own reconnect or retry
+  has it.
 - **The app's own lines are not tmux's output (C4).** "Connection lost. Reconnecting (n/3)…", "Reconnected!" and
   "Reconnect failed …" are announced to the attach trace (`AttachTrace.ownOutput`) before they are printed, so they do
   not close the `Attach … firstByte` measurement (a dead attach used to read as a 200 ms one).
@@ -345,8 +403,9 @@ suspend fun launchSession(
   at 80x24, and a tab in the background gets no resize until it is shown (none is sent to background tabs on purpose,
   `window-size latest`). `kickRedraw` resizes through `TerminalIOService.resize`, so the tab remembers the size it was
   shown at for its next reconnect.
-- **Limits.** An ET carrier rebuild (`reconnectEtCarrier`) does not look at a loss recorded while it held the lock
-  (the sweep and the kick still catch an ACTIVE tab without a live transport). On the phone measured 2026-11-07
+- **Limits.** The atomic `endReconnect` has no deterministic test (a race inside one critical section, E1/M5f: it
+  would need a hook in production code); the ET carrier path is tested without the ET binary (kolo 4). On the phone
+  measured 2026-11-07
   13:03 the first view size came 9.5 s after the cold start, past the 2 s limit: those tabs still start at 80x24
   until they are shown.
 
@@ -400,12 +459,53 @@ applies to every live transport and to transports connected later; `0` turns it 
 also with `comm_pool` off: the lease is the old one, but a transport connected in the background
 starts with the background interval. A link that stops carrying data is down after interval x 3 (2 unanswered
 keepalives, then the third timeout): ~30 s in the foreground, ~3 min in the background (60 s). The same holds over
-Cloudflare since C1: `TunnelKeepAlive` sends a keepalive after each interval without an incoming byte and closes the
-tunnel after interval x (count + 1) without one, reading `serverAliveInterval` on every 250 ms tick (the background
-switch applies at once). It never throws into JSch's read (round 1 did, and a pause inside an SSH packet broke the
-stream); a pause shorter than the dead limit is harmless. Doze: the clock is monotonic, so a frozen process wakes with
-the time it ran, not the time it slept — the next keepalive's answer keeps it; on a direct socket JSch's read timeout
-fires first after a wake and the count of 2 stays (two keepalives must go unanswered AFTER the wake).
+Cloudflare since C1: `TunnelKeepAlive` sends a keepalive after each interval without an incoming byte, reading
+`serverAliveInterval` on every 250 ms tick (the background switch applies at once), and closes the tunnel once
+`serverAliveCountMax` (2) keepalives SENT since the last byte stayed unanswered for one more interval — JSch's own rule
+on a socket, interval x 3 of silence at a steady interval. Kolo 3 (adv N1): death counts sent keepalives, never the
+idle time against the interval of the moment; the old rule closed every idle healthy tunnel 31-59 s after its last byte
+when `onResume` shortened the interval 60 s -> 10 s (about half the returns from the background), now the first tick
+sends a keepalive instead. It never throws into JSch's read (round 1 did, and a pause inside an SSH packet broke the
+stream); a pause shorter than the dead limit is harmless. Doze and a frozen process: the first tick after the wake sends
+a keepalive (no death without unanswered keepalives); the one case left is a freeze right after the second unanswered
+keepalive, whose answer may still sit unread when the first tick runs. On a direct socket JSch's read timeout fires
+first after a wake and the count of 2 stays (two keepalives must go unanswered AFTER the wake).
+
+**Writes on a direct socket (C5, trace-lan-umrti)**: JSch encrypts and compresses a packet (AES-CTR counter, deflate
+state) before it writes it. A write that throws after that — on Android a socket write from the main thread throws
+`NetworkOnMainThreadException` before a byte leaves — leaves the client's cipher a packet ahead of sshd's, and sshd
+reads the next packet as garbage (`Corrupted padlen`, `Invalid ssh2 packet type: 0`, or a silent RST/FIN). Measured
+2026-11-07 on the phone over Wi-Fi: LAN attach + refit 56 deaths / 17 survivals, Cloudflare 0/18 (the WebSocket only
+queues the bytes; a send that fails there makes OkHttp close the tunnel). `SshManager.resize` was the writer: the
+layout and the redraw kick call it on the main thread, and JSch's `setPtySize` swallows the exception. Now:
+- `resize` sends on the manager's IO scope, serialized with the input writes (`writeMutex`), a burst coalesced into its
+  last size; `disconnect` closes the channel (and a standalone session) off the caller's thread — the UI closes a tab
+  from the main thread, and the channel's close packet rides the transport its sibling tabs share;
+- every direct transport of the app's connection layer (pool, `SshManager`'s standalone and cleanup connections,
+  `SshSessionHelper`'s fresh one) rides the socket of `TransportWriteGuard`: a failed write closes the socket at once —
+  the transport is broken, every channel on it reports its loss and reconnects onto a new one — and logs
+  `Transport write to <ip>:<port> failed on thread <name>: <exception>` once; a write to a socket that was already
+  closed (our own cleanup) says so instead and claims nothing about the cipher (kolo 4, adv N7). Never a transport kept
+  with a broken cipher. JSch applies no connect timeout to a socket from a factory: the guard does, the name lookup
+  included (kolo 4, adv N6: a lookup on a thread of its own, waited for within the connect timeout; kolo 5 tests a
+  lookup that hangs through the seam `TransportWriteGuard.resolverForTest`).
+- the writes the UI could start on the main thread, audited (kolo 3 and 4) and moved off it: `SshManager.resize`
+  and `disconnect` (the channel's close, a standalone session's disconnect, the pool's release of the last lessee),
+  the notify watcher's CLOSE when the last tab of a server is closed (`NotificationService.unregisterNotifyWatcher`,
+  review MEDIUM-1), the whole `reconnectSession` (the Reconnect button runs it from the UI scope, adv N3), the
+  watchdog's and the `finally`'s CLOSE of `execReadWithWatchdog`, the `finally` CLOSE of `PooledRemoteExec.runOnce` and
+  of `GatedExecChannels.use` (kolo 5, adv N5: the account usage screen runs an exec from the UI scope), and the legacy
+  has-session probe on a tab's own shell (`TmuxProbes.probeTmuxSession(SshManager)`, now suspend on IO). Already off
+  it: port forwards (inside `connect` on IO, `reconnectScope`, the exec manager's scope), the watchdog of
+  `PooledRemoteExec.runOnce` (`Dispatchers.Default`), the opens of `ChannelOpen` (a thread of their own), the upload and
+  the SFTP save (IO), the network-callback teardown (ConnectivityThread). Left: `MoshManager` (Android) and
+  `SshKeyManager` open JSch sessions of their own without the guard (on IO, short-lived) — out of this batch.
+Tested against a real sshd (`TransportWriteGuardIntegrationTest`): one failed write inside `setPtySize` and one
+keystroke — sshd ends the connection (the mechanism, without the guard); with the guard the shell reports its loss at
+once and the next lease builds a new working transport (pool, standalone and the helper's fresh connection), and the
+last shell closed from a "main" thread leaves the pool's disconnect to another one; `MainThreadWritesTest` calls the
+other paths from a "main" thread. Limit: the window-change toggle of the redraw fallback (`cols-1`, then `cols` 80 ms
+later) can coalesce into one send under load (no SIGWINCH then; the refresh-client kick is the main path).
 
 **Log lines** (parsed by the metrics extractor, so keep the shape):
 `New transport to <host>:<port> role=shell|exec route=lan|tunnel|cf|unknown (<n> in pool)`,
@@ -580,7 +680,10 @@ channels refused). `ChannelOpen.connect(ch, budgetMs)` is now the one way the ex
   the transport (pending opens included, port forwards not) stay below sshd's `MaxSessions` (assumed 10; unreadable =
   no claim): orphans we do not know of. Not counted: probes with a small budget, an interrupted wait, `channel request:
   timeout` (the OPEN was answered), refusals at the limit. A confirmed open (also a late one) resets the count. The
-  refusal line is aggregated (the first ones, then one per minute);
+  refusal line is aggregated (the first ones, then one per minute). Limit (kolo 3, review LOW): on the exec transport
+  the gate lets at most 8 channels open, against the assumed `MaxSessions` 10, so the refusal rule practically always
+  has "room left": a server with `MaxSessions` below 9 refuses legitimately and two such refusals replace the transport
+  (at most once per spacing, 30 s; a confirmed open between replacements keeps the spacing at 30 s). The dev box has 30;
 - the manager then marks the transport unusable in the pool (`reportDead`); its watch logs `down`, releases it (the
   last lessee disconnects it) and leases a new one — never the same (`!==`). Between two such replacements at least
   30 s (`HEALTH_SWAP_SPACING_MS`), whatever the backoff says, doubling up to 300 s while a replacement brought no

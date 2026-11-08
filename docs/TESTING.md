@@ -190,7 +190,9 @@ on their own and are therefore reduced to existence/type: in `~/.claude` and in 
 `~/.claude-remote/accounts/<a>` — `projects`, `hud`, `backups`, `skills/synced`, `plugins/oh-my-claudecode` and `plugins/synced`,
 `.session-stats.json`, `.claude.json`, `policy-limits.json*`, `remote-settings.json*`, `sessions`, `state`, `cache`, `file-history`,
 `session-env`, `teams`, `mcp-needs-auth-cache.json`, plus the names the brief gave (`history.jsonl`, `statsig`, `todos`,
-`shell-snapshots`); in `~/.claude-remote` — `clients`, `usage`, `sessions.lock`; in `~/.cache/claude-remote` — `notify`.
+`shell-snapshots`); in `~/.claude-remote` — `clients`, `usage`, `sessions.lock`, and of `jarvis/` exactly `status.json` and
+`d-state.json` (the live `jarvis-d` daemon rewrites them every ~5 s, measured with `stat` 2026-11-07; everything else in
+`jarvis/` stays strict); in `~/.cache/claude-remote` — `notify`.
 Trees that were only guessed to be live-written (`paste-cache`, `debug`, `tasks`, `.omc`, `stats-cache.json`,
 `gh-pr-status-cache.json`) are compared strictly; a false alarm there is rerun and, if real, measured and added.
 Also existence/type only: `~/.claude-remote/sessions.json*`, `sessions.restore.json*`, `forgotten*` (the app and the drift script

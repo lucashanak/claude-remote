@@ -22,6 +22,11 @@ class SshTerminalSession(
     client: TerminalSessionClient,
     private val onUserInput: (ByteArray) -> Unit,
     private val onResize: (cols: Int, rows: Int) -> Unit,
+    /**
+     * Kolo 6: the emulator's OWN answers to the program (DA, CPR, XTVERSION … — tmux asks at every attach), written while
+     * it processes the bytes it receives. They are no user input (see `ClaudeControlService.sendTerminalReply`).
+     */
+    private val onEmulatorReply: (ByteArray) -> Unit = onUserInput,
 ) : TerminalSession(
     /* shellPath    = */ "/system/bin/sh",
     /* cwd          = */ "/",
@@ -36,9 +41,35 @@ class SshTerminalSession(
         mShellPid = Int.MAX_VALUE
     }
 
+    /** Kolo 6: true while the emulator processes received bytes (main thread): what it writes then is its own answer. */
+    private var appending = false
+
+    /**
+     * Kolo 6: the emulator's output channel. A write while it processes received bytes is its answer to the program;
+     * any other (a paste, a mouse report — the user's, through the emulator) is user input. Everything else forwards to
+     * the session.
+     */
+    private val emulatorOutput = object : TerminalOutput() {
+        override fun write(data: ByteArray?, offset: Int, count: Int) {
+            if (data == null || count <= 0) return
+            val snapshot = data.copyOfRange(offset, offset + count)
+            if (appending) onEmulatorReply(snapshot) else onUserInput(snapshot)
+        }
+        override fun titleChanged(oldTitle: String?, newTitle: String?) = this@SshTerminalSession.titleChanged(oldTitle, newTitle)
+        override fun onCopyTextToClipboard(text: String?) = this@SshTerminalSession.onCopyTextToClipboard(text)
+        override fun onPasteTextFromClipboard() = this@SshTerminalSession.onPasteTextFromClipboard()
+        override fun onBell() = this@SshTerminalSession.onBell()
+        override fun onColorsChanged() = this@SshTerminalSession.onColorsChanged()
+    }
+
+    private fun appendToEmulator(data: ByteArray) {
+        appending = true
+        try { mEmulator.append(data, data.size) } finally { appending = false }
+    }
+
     /** Create the emulator without forking a subprocess (no JNI). */
     override fun initializeEmulator(columns: Int, rows: Int) {
-        mEmulator = TerminalEmulator(this, columns, rows, transcriptRowsCount, mClient)
+        mEmulator = TerminalEmulator(emulatorOutput, columns, rows, transcriptRowsCount, mClient)
     }
 
     /**
@@ -79,7 +110,7 @@ class SshTerminalSession(
      */
     fun appendDirect(data: ByteArray) {
         if (data.isEmpty() || mEmulator == null) return
-        mEmulator.append(data, data.size)
+        appendToEmulator(data)
         notifyScreenUpdate()
     }
 
@@ -92,7 +123,7 @@ class SshTerminalSession(
         if (mEmulator == null) return
         mMainThreadHandler.post {
             if (mEmulator != null) {
-                mEmulator.append(data, data.size)
+                appendToEmulator(data)
                 notifyScreenUpdate()
             }
         }

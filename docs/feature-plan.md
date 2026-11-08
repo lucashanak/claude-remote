@@ -134,6 +134,9 @@ Claude Remote is a KMP app (Android + Desktop) for remote Claude Code sessions o
 ## Phase 5: Advanced Features
 
 ### 5.1 Offline Input Queue
+**Removed (batch C, kolo 5, 2026-11-07):** a delayed send after a reconnect could answer a different dialog; input without
+a route is now dropped with "Not connected — not sent" (see `docs/connection.md`, Auto-Reconnect). The plan below is history.
+
 **Files:** `SessionOrchestrator.kt`, `SshManager.kt`, `TerminalScreen.kt`
 
 - When disconnected, buffer user input in a queue

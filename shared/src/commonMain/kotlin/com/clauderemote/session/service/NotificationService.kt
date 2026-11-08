@@ -184,8 +184,8 @@ finally:
 
 /**
  * Input-prompt detection, "Claude needs input" notifications, the SHARED
- * per-server Stop-hook watcher, the `/login` OAuth flow surface, and the
- * offline pending-input queue. Extracted verbatim from SessionOrchestrator:
+ * per-server Stop-hook watcher and the `/login` OAuth flow surface (the offline
+ * input queue was removed in kolo 5 of batch C). Extracted verbatim from SessionOrchestrator:
  * the state, timing, ordering, LOCKING and atomic map operations are unchanged
  * — a pure move so the public API and runtime behavior stay identical.
  *
@@ -292,10 +292,6 @@ internal class NotificationService(
         _hookActiveSessions.update { if (active) it + sessionId else it - sessionId }
     }
 
-    // Pending input queue per session (for offline queue feature)
-    private val pendingInputs = java.util.concurrent.ConcurrentHashMap<String, MutableList<String>>()
-    private val _pendingCounts = kotlinx.coroutines.flow.MutableStateFlow<Map<String, Int>>(emptyMap())
-    val pendingCounts: kotlinx.coroutines.flow.StateFlow<Map<String, Int>> = _pendingCounts
 
     private val dialogDedup = PromptDialogDedup()
 
@@ -1168,37 +1164,6 @@ internal class NotificationService(
         }
     }
 
-    // ---- Offline input queue ----
-
-    /**
-     * Enqueue [data] for [sessionId] while offline. Reproduces the orchestrator's
-     * queueInput buffer-append verbatim and returns the new queue size so the
-     * caller can render its "Queued (N pending)" message.
-     */
-    fun enqueue(sessionId: String, data: String): Int {
-        // computeIfAbsent: two concurrent enqueues on a first touch would each
-        // build their own list under getOrPut and one input would be dropped.
-        val queue = pendingInputs.computeIfAbsent(sessionId) { mutableListOf() }
-        queue.add(data)
-        _pendingCounts.update { it + (sessionId to queue.size) }
-        return queue.size
-    }
-
-    /**
-     * Remove and return [sessionId]'s pending queue (flush on reconnect).
-     * Reproduces the orchestrator's `pendingInputs.remove(...)` +
-     * `_pendingCounts.update { it - sessionId }` pair verbatim.
-     */
-    fun drain(sessionId: String): List<String>? =
-        pendingInputs.remove(sessionId)?.also { _pendingCounts.update { it - sessionId } }
-
-    /** Public clear (user cancelled the queue). Reproduces the orchestrator's
-     *  clearPendingInputs body verbatim. */
-    fun clearPendingInputs(sessionId: String) {
-        pendingInputs.remove(sessionId)
-        _pendingCounts.update { it - sessionId }
-    }
-
     // ---- Disconnect teardown helpers (each reproduces one orchestrator line
     // at its exact position; do NOT reorder relative to the facade's teardown). ----
 
@@ -1228,11 +1193,6 @@ internal class NotificationService(
         sessionNotifyChain.remove(sessionId)
     }
 
-    /** Reproduces the disconnect-time `pendingInputs.remove(sessionId)` line. */
-    fun removePendingInputs(sessionId: String) { pendingInputs.remove(sessionId) }
-
-    /** Reproduces the disconnect-time `_pendingCounts.update { it - sessionId }` line. */
-    fun clearPendingCount(sessionId: String) { _pendingCounts.update { it - sessionId } }
 
     /**
      * Unregister [sessionId] from its server's Stop-hook watcher on disconnect —
@@ -1259,7 +1219,13 @@ internal class NotificationService(
                     // the watcher is parked in; closing the channel closes the
                     // piped stream so the read returns and the finally (which
                     // clears the hook-active flags) actually runs.
-                    try { w.channel?.disconnect() } catch (_: Exception) {}
+                    // C5 kolo 4 (review MEDIUM-1): off the caller's thread — the UI closes the last tab of a server from
+                    // Android's main thread, and the CLOSE is a packet on a shared transport
+                    w.channel?.let { c ->
+                        scope.launch(kotlinx.coroutines.Dispatchers.IO + kotlinx.coroutines.NonCancellable) {
+                            try { c.disconnect() } catch (_: Exception) {}
+                        }
+                    }
                 }
             }
         }

@@ -234,7 +234,12 @@ class ParkedTabOpsTest {
         val w = wire(exec)
         val probes = TmuxProbes(w.scope, w.registry, w.tabs, TerminalIOService(w.registry))
         assertEquals(false, probes.probeTmuxSession("s1", "claude-server-old"))
-        assertEquals("tmux has-session -t '=claude-server-old' 2>/dev/null && echo YES || echo NO", exec.calls.last().cmd)
+        // kolo 3: the bounded probe of C1 round 2 (timeout 3 where it exists, spelled out — no command in a variable)
+        val cmd = exec.calls.last().cmd
+        assertEquals(TmuxProbes.hasSessionCmd("claude-server-old"), cmd)
+        assertTrue("then LC_ALL=C timeout 3 tmux has-session -t '=claude-server-old' </dev/null >/dev/null 2>\"\$CR_F\"; " +
+            "else LC_ALL=C tmux has-session -t '=claude-server-old' </dev/null >/dev/null 2>\"\$CR_F\"; fi" in cmd, cmd)
+        assertTrue("echo YES" in cmd && "echo NO" in cmd, cmd)   // what each answer means: TmuxProbeShellTest runs it
         exec.out = "YES\n"
         assertEquals(true, probes.probeTmuxSession("s1", "claude-server-old"))
         exec.out = "" // a channel that closed before answering is not "gone"

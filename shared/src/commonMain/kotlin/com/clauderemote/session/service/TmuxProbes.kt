@@ -8,8 +8,24 @@ import kotlinx.coroutines.launch
 
 private const val TAG = "SessionOrchestrator"
 
-/** C1 round 2: `$CR_T` = `timeout 3` where coreutils `timeout` exists, else nothing (N7-2: a probe must still answer). */
-private const val TMUX_LIMIT = "if command -v timeout >/dev/null 2>&1; then CR_T='timeout 3'; else CR_T=; fi; "
+/**
+ * C1 round 2: `tmux [args]` bounded by `timeout 3` where coreutils `timeout` exists, else plain (N7-2: a probe must still
+ * answer). Kolo 3 (adv N3): spelled out in both branches, never a command kept in a variable — an unquoted `$CR_T` is not
+ * word-split by zsh (the exec's login shell is the server's choice), so `timeout 3` ran as one command name (127) and
+ * every has-session read NO. Same rule as `ReplyGuard.TMUX_CAPPED`. [tmuxArgs] may carry redirections.
+ */
+private fun boundedTmux(tmuxArgs: String, env: String = ""): String =
+    "if command -v timeout >/dev/null 2>&1; then ${env}timeout 3 tmux $tmuxArgs; else ${env}tmux $tmuxArgs; fi"
+
+/**
+ * Kolo 4 (adv N8): what tmux (3.x, `LC_ALL=C`) says on stderr, with status 1, when the session is really not there: no
+ * such session, a socket without a server, or no socket at all (no server ever started / it is gone). Kolo 6 (adv H1):
+ * also for a LIVE server whose socket file was deleted (the 2026-11-02 shape) — NO leads to Rebuild, whose launch line
+ * goes through `tmux-sockheal.sh` (SIGUSR1 brings the socket back, then the existing session is attached; nothing is
+ * killed). Kolo 5 read that case as fail-open, and the plain attach that followed left a bare login shell under an
+ * ACTIVE tab.
+ */
+private const val NO_SESSION_RE = "can't find session|no server running|error connecting to .*\\(No such file or directory\\)"
 
 /** The refresh-client kick's bound: after the permit more than Cloudflare's floor (1.5 s) must be left for the open. */
 private const val REFRESH_MS = 2_500L
@@ -155,12 +171,7 @@ internal class TmuxProbes(
     private suspend fun refreshTmuxClient(conn: SshManager, tmuxName: String, serverId: String? = null): Boolean =
         kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
             try {
-                val escaped = tmuxName.replace("'", "'\\''")
-                // C1 round 2 (adv 3, N7-1 pattern): every tmux client bounded and never on the channel's pipe — a stopped
-                // tmux server keeps a client's stdout, and with it the channel and sshd's session, until it wakes up
-                val refreshCmd = com.clauderemote.session.ClaudeConfig.TMUX_OUT_FILE + " " + TMUX_LIMIT +
-                    "\$CR_T tmux list-clients -t '=$escaped' -F '#{client_name}' </dev/null >\"\$CR_F\" 2>/dev/null; " +
-                    "while IFS= read -r c; do \$CR_T tmux refresh-client -t \"\$c\" </dev/null >/dev/null 2>&1 && echo OK; done <\"\$CR_F\""
+                val cmd = refreshCmd(tmuxName)
                 if (serverId != null && registry.execActive(serverId)) {
                     // Exec transport: a refresh must not cost the attached shell's own channel budget. With the
                     // exec transport down execRead falls back to a tab transport WITH room (counted); no room is
@@ -170,7 +181,7 @@ internal class TmuxProbes(
                     // 2.5 s: what is left after the permit must stay above Cloudflare's floor (1.5 s) for the open; a
                     // tick skipped for want of a permit or of that floor is counted, not an error (review C1-1)
                     val out = try {
-                        registry.execRead(serverId, refreshCmd, totalMs = REFRESH_MS, kind = ExecKind.POLL)
+                        registry.execRead(serverId, cmd, totalMs = REFRESH_MS, kind = ExecKind.POLL)
                     } catch (e: ExecUnavailable) {
                         if (e.reason != ExecUnavailableReason.GATE_TIMEOUT && !e.belowFloor) throw e
                         PollSkipLog.skipped(serverId, PollSkipLog.PROBE)
@@ -183,7 +194,7 @@ internal class TmuxProbes(
                 // no kick here (the SIGWINCH toggle of the caller needs no channel).
                 val run: suspend (com.jcraft.jsch.Session) -> Boolean = { sess ->
                     val ch = sess.openChannel("exec") as com.jcraft.jsch.ChannelExec
-                    ch.setCommand(refreshCmd)
+                    ch.setCommand(cmd)
                     ch.inputStream = null
                     val input = ch.inputStream
                     // keep snappy on cell links; fallback toggle covers failure. C1: ChannelOpen (floor, detached open)
@@ -223,7 +234,11 @@ internal class TmuxProbes(
      * attach that followed landed the user in the wrong conversation instead of
      * rebuilding theirs.
      */
-    fun probeTmuxSession(sshManager: SshManager, sessionName: String): Boolean {
+    suspend fun probeTmuxSession(sshManager: SshManager, sessionName: String): Boolean =
+        // C5 kolo 4 (adv N3): the open, the read and the CLOSE off the caller's thread
+        kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) { probeTmuxSessionBlocking(sshManager, sessionName) }
+
+    private fun probeTmuxSessionBlocking(sshManager: SshManager, sessionName: String): Boolean {
         return try {
             val sshSession = sshManager.getSession() ?: return true
             val ch = sshSession.openChannel("exec") as com.jcraft.jsch.ChannelExec
@@ -266,11 +281,28 @@ internal class TmuxProbes(
     internal companion object {
         /**
          * C1 round 2 (adv 3): bounded and off the channel's pipe (N7-1 pattern). A check cut short (124) prints nothing,
-         * which reads as alive (fail-open): only tmux's own "no such session" is NO.
+         * which reads as alive (fail-open). Kolo 4 (adv N8): only tmux's own "no such session / no server" (status 1 and
+         * [NO_SESSION_RE] on its stderr, kept in the temp file) is NO; any other failure — tmux missing (127), a socket
+         * it cannot reach (too long a path, permissions) — prints nothing: fail-open.
          */
         fun hasSessionCmd(sessionName: String): String =
-            TMUX_LIMIT + "\$CR_T tmux has-session -t '=${sessionName.replace("'", "'\\''")}' </dev/null >/dev/null 2>&1; CR_R=\$?; " +
-                "if [ \$CR_R -eq 0 ]; then echo YES; elif [ \$CR_R -ne 124 ]; then echo NO; fi"
+            com.clauderemote.session.ClaudeConfig.TMUX_OUT_FILE + " " +
+                boundedTmux("has-session -t '=${sessionName.replace("'", "'\\''")}' </dev/null >/dev/null 2>\"\$CR_F\"", env = "LC_ALL=C ") +
+                "; CR_R=\$?; " +
+                "if [ \$CR_R -eq 0 ]; then echo YES; elif [ \$CR_R -eq 1 ] && grep -qE \"$NO_SESSION_RE\" \"\$CR_F\"; then echo NO; fi"
+
+        /**
+         * C1 round 2 (adv 3, N7-1 pattern): every tmux client bounded and never on the channel's pipe — a stopped tmux
+         * server keeps a client's stdout, and with it the channel and sshd's session, until it wakes up. Prints one OK
+         * per client refreshed.
+         */
+        fun refreshCmd(tmuxName: String): String {
+            val escaped = tmuxName.replace("'", "'\\''")
+            return com.clauderemote.session.ClaudeConfig.TMUX_OUT_FILE + " " +
+                boundedTmux("list-clients -t '=$escaped' -F '#{client_name}' </dev/null >\"\$CR_F\" 2>/dev/null") + "; " +
+                "while IFS= read -r c; do " + boundedTmux("refresh-client -t \"\$c\" </dev/null >/dev/null 2>&1") +
+                " && echo OK; done <\"\$CR_F\""
+        }
     }
 
     /** The shell probe behind [probeTranscriptExists]: prints YES or NO. */

@@ -180,7 +180,8 @@ class OrchestratorLaunchModeTest {
     @Test fun anAttachOfALiveSessionIsThePlainSingleClientAttach() {
         val session = tab(claudeSessionId = uuid)
         val (o, cmd) = sent(session, isNew = false, tmuxAlive = true)
-        assertEquals(o.buildAttachCommand(tmux), cmd, "a live session is attached, no anchor")
+        // kolo 6 (adv H1): a failed attach ends the login shell — never a bare bash under an ACTIVE tab
+        assertEquals(o.buildAttachCommand(tmux) + " || exit 1", cmd, "a live session is attached, no anchor")
         assertNotEquals(0, logLines.count { "Attaching to tmux" in it }, "control: the attach is logged")
     }
 

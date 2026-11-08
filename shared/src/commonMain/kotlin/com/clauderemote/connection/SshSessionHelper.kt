@@ -82,6 +82,7 @@ object SshSessionHelper {
         if (server.useCloudflareProxy) {
             sess.setProxy(CloudflareProxy(server.host, server.cloudflareToken).also { freshProxies[sess] = it })
         }
+        TransportWriteGuard.forServer(server.useCloudflareProxy, timeout)?.let { sess.setSocketFactory(it) }   // C5
 
         return sess
     }

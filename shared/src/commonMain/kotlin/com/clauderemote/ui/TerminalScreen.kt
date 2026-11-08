@@ -118,6 +118,11 @@ fun TerminalScreen(
     onNewTab: () -> Unit,
     onMenuOpen: () -> Unit,
     onSendCommand: (String) -> Unit,
+    /**
+     * Kolo 6 (adv M2): one message of the input bar, sent to the tab the caller fixes at the moment of the send (the
+     * key-by-key typing below used to re-read the active tab for every part, so a tab switch moved the rest).
+     */
+    onSendMessage: (String) -> Unit = {},
     onSwitchModel: (ClaudeModel) -> Unit,
     onSwitchEffort: ((com.clauderemote.model.ClaudeEffort) -> Unit)? = null,
     onSendEscape: () -> Unit,
@@ -166,8 +171,6 @@ fun TerminalScreen(
     onCancelLogin: () -> Unit = {},
     onLogin: (() -> Unit)? = null,
     latencyMs: Long? = null,
-    pendingInputCount: Int = 0,
-    onClearPending: (() -> Unit)? = null,
     onNavigate: ((String) -> Unit)? = null,
     invertColors: Boolean = false,
     onToggleInvertColors: (() -> Unit)? = null,
@@ -1547,29 +1550,6 @@ fun TerminalScreen(
                         }
                     }
 
-                    // Pending input indicator
-                    if (pendingInputCount > 0) {
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .background(c.tintYellow)
-                                .padding(horizontal = 12.dp, vertical = 4.dp),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Text(
-                                "$pendingInputCount message(s) queued — will send on reconnect",
-                                style = CRType.bodyDim,
-                                color = c.working
-                            )
-                            if (onClearPending != null) {
-                                TextButton(onClick = onClearPending) {
-                                    Text("Clear", style = CRType.bodyDim, color = c.accent)
-                                }
-                            }
-                        }
-                    }
-
 
                     // ── Prompt input ────────────────────────────────────────
                     // Keyboard mode in Raw view types straight into the terminal,
@@ -1606,20 +1586,9 @@ fun TerminalScreen(
                                 //    the wrong fix: claude in the tmux
                                 //    PTY never negotiated \e[?2004h and
                                 //    rendered '[200~' literally.
-                                scope.launch {
-                                    if (text.startsWith("/") && !text.contains('\n') && text.length < 64) {
-                                        for (ch in text) {
-                                            onSendCommand(ch.toString())
-                                            kotlinx.coroutines.delay(15)
-                                        }
-                                        kotlinx.coroutines.delay(60)
-                                        onSendCommand("\r")
-                                    } else {
-                                        onSendCommand(text)
-                                        kotlinx.coroutines.delay(40)
-                                        onSendCommand("\r")
-                                    }
-                                }
+                                // kolo 6 (adv M2, F5): both strategies run in ClaudeControlService.sendMessage, for
+                                // the tab fixed at this send; a part that is not sent stops the rest (no Enter alone)
+                                onSendMessage(text)
                             },
                             onSendCommand = onSendCommand,
                             onAttachFile = onAttachFile,
@@ -1722,20 +1691,7 @@ fun TerminalScreen(
                     // wrap the payload here but claude in the tmux PTY
                     // never negotiates \e[?2004h, so the markers ended
                     // up in the prompt verbatim.
-                    scope.launch {
-                        if (text.startsWith("/") && !text.contains('\n') && text.length < 64) {
-                            for (ch in text) {
-                                onSendCommand(ch.toString())
-                                kotlinx.coroutines.delay(15)
-                            }
-                            kotlinx.coroutines.delay(60)
-                            onSendCommand("\r")
-                        } else {
-                            onSendCommand(text)
-                            kotlinx.coroutines.delay(40)
-                            onSendCommand("\r")
-                        }
-                    }
+                    onSendMessage(text)   // kolo 6: see PromptInputBar's onSend
                     showExpanded = false
                 },
                 onDismiss = { showExpanded = false },

@@ -194,6 +194,8 @@ internal class LiveFileCanary(
                 // what the drift script keeps below its own output directories: names are still searched, nothing is recorded
                 parts.size >= 3 && REMOTE_LIVE_PREFIXES.any { parts[1].startsWith(it) } -> Tier.NAMES
                 parts[1] in REMOTE_LIVE_NAMES || REMOTE_LIVE_PREFIXES.any { parts[1].startsWith(it) } -> Tier.PRESENCE
+                // the live `jarvis-d` daemon rewrites exactly these two every ~5 s (measured 2026-11-07); the rest of jarvis/ is strict
+                parts.size == 3 && parts[1] == "jarvis" && parts[2] in JARVIS_LIVE_FILES -> Tier.PRESENCE
                 else -> Tier.STRICT
             }
             parts[0] == ".cache" && parts.size >= 3 -> when (parts[2]) {
@@ -675,6 +677,9 @@ internal class LiveFileCanary(
             ".claude.json", ".session-stats.json",
         )
         val CONFIG_LIVE_PREFIXES: List<String> = listOf("policy-limits.json", "remote-settings.json", ".last-", ".session-stats.json")
+
+        /** Files of `~/.claude-remote/jarvis` the live `jarvis-d` daemon rewrites every ~5 s (measured with `stat`, 2026-11-07). */
+        val JARVIS_LIVE_FILES: Set<String> = setOf("status.json", "d-state.json")
 
         /** Entries directly below `~/.claude-remote` rewritten by live clients and the relay (measured). */
         val REMOTE_LIVE_NAMES: Set<String> = setOf("clients", "usage", "sessions.lock")

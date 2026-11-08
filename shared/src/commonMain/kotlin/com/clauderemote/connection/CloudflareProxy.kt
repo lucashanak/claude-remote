@@ -293,11 +293,15 @@ internal class KeepAliveInput(private val pipe: PipedInputStream) : InputStream(
  * The keepalive of a Cloudflare tunnel (C1 round 2). JSch sends its keepalive only when a socket read times out, and a
  * proxy has no socket; so a timer does it with JSch's public `sendKeepAliveMsg`, on JSch's own rules:
  *  - armed ([arm], after the handshake): every interval (`serverAliveInterval`, read on every tick, so the background
- *    interval applies at once) without an incoming byte one keepalive; after `interval x (serverAliveCountMax + 1)`
- *    without any byte the tunnel is dead ([onDead]) — the same ~30 s (10 s x 3) as a direct socket;
+ *    interval applies at once) without an incoming byte one keepalive; the tunnel is dead ([onDead]) once
+ *    `serverAliveCountMax` keepalives SENT since the last byte stayed unanswered for one more interval — JSch's own
+ *    rule on a socket, ~30 s (10 s x 3) without any byte at the foreground interval;
  *  - before that (the handshake): no byte for [handshakeMs] = dead.
- * Bytes are bytes: a reply to the keepalive, a WebSocket frame of any channel. The clock is monotonic, so a process
- * frozen by Doze wakes with the time it ran, not the time it slept (no false death after a wake).
+ * Bytes are bytes: a reply to the keepalive, a WebSocket frame of any channel. Kolo 3 (adv N1): death counts keepalives
+ * that were sent, never the idle time against the CURRENT interval — the return from the background shortens the
+ * interval 60 s -> 10 s, and an idle healthy tunnel (31-59 s without a byte, its next keepalive not yet due) was closed
+ * at once without a single keepalive. The same holds after a process freeze (the clock ran, no tick did): the first
+ * tick after it sends a keepalive instead of declaring the tunnel dead.
  */
 internal class TunnelKeepAlive(
     private val input: KeepAliveInput,
@@ -306,6 +310,10 @@ internal class TunnelKeepAlive(
 ) {
     @Volatile private var session: com.jcraft.jsch.Session? = null
     @Volatile private var lastSentNanos = 0L
+    /** Keepalives sent since the byte at [countedFrom] (the input's last byte when counting started): kolo 3, adv N1. */
+    @Volatile internal var sentSinceByte = 0
+        private set
+    @Volatile private var countedFrom = 0L
     @Volatile private var task: java.util.concurrent.ScheduledFuture<*>? = null
     @Volatile private var over = false
 
@@ -335,12 +343,16 @@ internal class TunnelKeepAlive(
         val interval = try { s.serverAliveInterval } catch (_: Exception) { 0 }
         if (interval <= 0) return
         val count = try { s.serverAliveCountMax } catch (_: Exception) { 1 }.coerceAtLeast(0)
-        if (idleMs >= interval.toLong() * (count + 1)) {
-            dead("no data for ${idleMs}ms (keepalive ${interval}ms x ${count + 1})")
-            return
-        }
+        val last = input.lastByteNanos
+        if (last != countedFrom) { countedFrom = last; sentSinceByte = 0 }   // a byte (or the arm) since: count anew
         if (idleMs >= interval && (now - lastSentNanos) / 1_000_000 >= interval) {
+            // kolo 3 (adv N1): dead only after `count` keepalives sent without an answer and one more interval
+            if (sentSinceByte >= count.coerceAtLeast(1)) {
+                dead("no data for ${idleMs}ms, $sentSinceByte keepalive(s) unanswered (keepalive ${interval}ms x ${count + 1})")
+                return
+            }
             lastSentNanos = now
+            sentSinceByte++
             try { s.sendKeepAliveMsg() } catch (_: Exception) { /* the transport is going down: its read loop says why */ }
         }
     }

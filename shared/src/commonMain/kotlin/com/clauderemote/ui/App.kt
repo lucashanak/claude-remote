@@ -182,7 +182,6 @@ fun App(
     val weekResetMin by sessionOrchestrator.weekResetMin.collectAsState()
     val latencies by sessionOrchestrator.latencies.collectAsState()
     val gitStatuses by sessionOrchestrator.gitStatuses.collectAsState()
-    val pendingCounts by sessionOrchestrator.pendingCounts.collectAsState()
     val serverHealth by sessionOrchestrator.serverHealth.collectAsState()
     val reconnectStatus by sessionOrchestrator.reconnectStatus.collectAsState()
     val loginFlow by sessionOrchestrator.loginFlow.collectAsState()
@@ -1067,7 +1066,11 @@ fun App(
                                     // listed again like a retry (a failed listing is "unavailable", never "0 on server"), and only
                                     // while this server's screen is still shown: never another server's screen (kolo 2)
                                     if (reloadAfterKill(currentScreen == Screen.CONNECT, selectedServer?.id, server.id)) {
-                                        loadConnectListing(server, allowFresh = connectRetryAllowsFresh(execUp))
+                                        // kolo 3: the exec state NOW, after the kill — not the one captured when the screen was drawn
+                                        val execUpNow = connectExecUp(sessionOrchestrator.execManager.state(server.id).value is com.clauderemote.session.service.LinkState.Up) {
+                                            sessionOrchestrator.connectionRegistry.execActive(server.id)
+                                        }
+                                        loadConnectListing(server, allowFresh = connectRetryAllowsFresh(execUpNow))
                                     }
                                 }
                             },
@@ -1234,6 +1237,8 @@ fun App(
                         onSendCommand = { cmd ->
                             activeTabId?.let { sessionOrchestrator.sendClaudeCommand(it, cmd) }
                         },
+                        // kolo 6 (adv M2): the tab is read once, at the send
+                        onSendMessage = { text -> activeTabId?.let { sessionOrchestrator.sendMessage(it, text) } },
                         onAttachFile = if (onPickFile != null) {
                             suspend attachFile@{
                                 val id = activeTabId ?: return@attachFile null
@@ -1429,10 +1434,6 @@ fun App(
                         contextPercent = activeTabId?.let { contextPercents[it] },
                         gitStatus = activeTabId?.let { gitStatuses[it] },
                         latencyMs = activeTabId?.let { latencies[it] },
-                        pendingInputCount = activeTabId?.let { pendingCounts[it] } ?: 0,
-                        onClearPending = activeTabId?.let { id ->
-                            { sessionOrchestrator.clearPendingInputs(id) }
-                        },
                         onNavigate = { target ->
                             // This navigation starts FROM the terminal, so Usage
                             // opened through it must come back here — otherwise

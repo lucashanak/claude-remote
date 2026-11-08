@@ -155,6 +155,11 @@ class SshTtyConnector(
         }
     }
 
+    /** Kolo 6: JediTerm's own answers to the program (`sendBytes(…, userInput = false)`): no user input. */
+    fun writeReply(bytes: ByteArray) {
+        tabManager.activeTabId.value?.let { id -> sessionOrchestrator.sendTerminalReply(id, bytes) }
+    }
+
     override fun isConnected(): Boolean = connected
 
     override fun waitFor(): Int {
@@ -243,6 +248,32 @@ private class FontReinitTermWidget(
         textBuffer: com.jediterm.terminal.model.TerminalTextBuffer,
     ): com.jediterm.terminal.ui.TerminalPanel =
         FontReinitTerminalPanel(settingsProvider, textBuffer, styleState)
+
+    /**
+     * Kolo 6: JediTerm hands the emulator's own answers (DA, CPR …) to `sendBytes(…, userInput = false)` and the keys to
+     * `userInput = true`; both used to reach the connector's `write` alike. The answers now go to
+     * [SshTtyConnector.writeReply]. Built like JediTermWidget's own `createTerminalStarter` (jediterm 3.64).
+     */
+    override fun createTerminalStarter(
+        terminal: com.jediterm.terminal.model.JediTerminal,
+        connector: TtyConnector,
+    ): com.jediterm.terminal.TerminalStarter {
+        val typeAhead = typeAheadManager
+        return object : com.jediterm.terminal.TerminalStarter(
+            terminal, connector,
+            com.jediterm.terminal.TtyBasedArrayDataStream(connector) { typeAhead.onTerminalStateChanged() },
+            typeAhead, executorServiceManager,
+        ) {
+            override fun sendBytes(bytes: ByteArray, userInput: Boolean) {
+                if (!userInput && connector is SshTtyConnector) connector.writeReply(bytes) else super.sendBytes(bytes, userInput)
+            }
+
+            override fun sendString(string: String, userInput: Boolean) {
+                if (!userInput && connector is SshTtyConnector) connector.writeReply(string.toByteArray(StandardCharsets.UTF_8))
+                else super.sendString(string, userInput)
+            }
+        }
+    }
 
     /** Re-reads the font size from the settings provider and re-lays out the grid.
      *  The resulting component resize propagates to the server through
@@ -1400,6 +1431,10 @@ private fun DesktopTerminalView(
                         // the embedded Swing component, so auto-copy during drag gives the
                         // user the clipboard contents without needing the keystroke.
                         override fun copyOnSelect(): Boolean = true
+                        // kolo 7 (adv N3): JediTerm sends the wheel in the alternate screen (tmux mouse off) as arrow keys
+                        // with userInput = false — the path of the emulator's own answers, which passes the ACTIVE gate;
+                        // an arrow up in a bare login shell recalls a command. No wheel-as-arrows (the app sets mouse on).
+                        override fun simulateMouseScrollWithArrowKeysInAlternativeScreen(): Boolean = false
                     }
 
                     val widget = FontReinitTermWidget(settings)

@@ -583,6 +583,23 @@ class LiveFileCanaryTest {
         assertFailsWith<AssertionError> { guard { File(live, ".claude/mcp-needs-auth-cache.json").delete() } }
     }
 
+    /** Kolo 4: the two files the live jarvis daemon rewrites may change; anything else in jarvis/ is still strict. */
+    @Test fun theJarvisDaemonsTwoFilesMayChangeButNothingElseInJarvis() {
+        File(live, ".claude-remote/jarvis").mkdirs()
+        File(live, ".claude-remote/jarvis/status.json").writeText("{\"t\":1}")
+        File(live, ".claude-remote/jarvis/d-state.json").writeText("{\"t\":1}")
+        File(live, ".claude-remote/jarvis/other.json").writeText("{}")
+        guard {
+            File(live, ".claude-remote/jarvis/status.json").writeText("{\"t\":2}")
+            File(live, ".claude-remote/jarvis/d-state.json").writeText("{\"t\":2}")
+        }
+        val e = failure { File(live, ".claude-remote/jarvis/other.json").writeText("{\"t\":2}") }
+        assertTrue(e.message!!.contains("jarvis/other.json") && e.message!!.contains("modified"), e.message)
+        assertTrue(failure { File(live, ".claude-remote/jarvis/new.json").writeText("{}") }.message!!.contains("created"))
+        assertTrue(failure { File(live, ".claude-remote/jarvis/status.json").delete() }.message!!.contains("jarvis/status.json"))
+        assertTrue(failure { File(live, ".claude-remote/jarvis/d-state.json").writeText("[\"$token\"]") }.message!!.contains("test token found in LIVE file"))
+    }
+
     @Test fun aTokenInASmallLiveWrittenFileIsStillFound() {
         File(live, ".claude-remote/sessions.json").writeText("[]")
         val e = failure { File(live, ".claude-remote/sessions.json").writeText("[\"$token\"]") }

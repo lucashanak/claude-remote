@@ -602,6 +602,11 @@ class MainActivity : FragmentActivity() {
                                 AlertNotifier.clear(applicationContext, id)
                             }
                         },
+                        // kolo 6: the emulator's answers to tmux (DA, CPR …) are no user input: they go while the
+                        // transport is up, also during a reconnect's attach
+                        onEmulatorReply = { bytes ->
+                            tabManager.activeTabId.value?.let { id -> sessionOrchestrator.sendTerminalReply(id, bytes) }
+                        },
                         onResize = { cols, rows ->
                             tabManager.activeTabId.value?.let { id ->
                                 sessionOrchestrator.resize(id, cols, rows)

@@ -64,12 +64,23 @@ internal class ConnectionRegistry(
 
     // --- SSH transports ---
     fun ssh(sessionId: String): SshManager? = connections[sessionId]
-    fun putSsh(sessionId: String, mgr: SshManager) { connections[sessionId] = mgr }
-    fun removeSsh(sessionId: String): SshManager? = connections.remove(sessionId)
+    /**
+     * [etCarrier] (kolo 4, adv N2): this shell is only the carrier of the tab's ET client — its output is dropped, so it
+     * is never the tab's terminal: no input goes there and it does not make the tab live. Any other shell put for the
+     * tab (a plain SSH connect, the SSH fallback, autoReconnect) is the terminal again.
+     */
+    fun putSsh(sessionId: String, mgr: SshManager, etCarrier: Boolean = false) {
+        connections[sessionId] = mgr
+        if (etCarrier) etCarriers.add(sessionId) else etCarriers.remove(sessionId)
+    }
+    fun removeSsh(sessionId: String): SshManager? = connections.remove(sessionId).also { etCarriers.remove(sessionId) }
+    /** Kolo 4: the tab's SSH shell is the carrier of its ET client (see [putSsh]). */
+    fun isEtCarrier(sessionId: String): Boolean = sessionId in etCarriers
+    private val etCarriers: MutableSet<String> = java.util.concurrent.ConcurrentHashMap.newKeySet()
     fun containsSsh(sessionId: String): Boolean = connections.containsKey(sessionId)
     fun allSsh(): Collection<SshManager> = connections.values
     fun sshEntries(): Set<Map.Entry<String, SshManager>> = connections.entries
-    fun clearSsh() { connections.clear() }
+    fun clearSsh() { connections.clear(); etCarriers.clear() }
 
     /**
      * Any CONNECTED tab session, for account-wide use. It never returns the exec session: that one

@@ -30,7 +30,9 @@ internal suspend fun execReadWithWatchdog(
     ch.setCommand(cmd)
     ch.inputStream = null
     val input = ch.inputStream
-    val watchdog = launch {
+    // C5 kolo 4 (adv N3): the CLOSE of the channel is a packet on a shared transport — never written on the caller's
+    // thread (UI callers run this from Android's main thread)
+    val watchdog = launch(Dispatchers.IO) {
         kotlinx.coroutines.delay(totalMs)
         com.clauderemote.connection.ChannelOpen.disconnect(ch)
     }
@@ -41,7 +43,9 @@ internal suspend fun execReadWithWatchdog(
         }
     } finally {
         watchdog.cancel()
-        com.clauderemote.connection.ChannelOpen.disconnect(ch)
+        kotlinx.coroutines.withContext(Dispatchers.IO + kotlinx.coroutines.NonCancellable) {
+            com.clauderemote.connection.ChannelOpen.disconnect(ch)
+        }
     }
 }
 
@@ -350,7 +354,8 @@ internal class PooledRemoteExec(
             }
         } finally {
             watchdog.cancel()
-            com.clauderemote.connection.ChannelOpen.disconnect(ch)
+            // C5 kolo 5 (adv N5): the CLOSE off the caller's thread — a UI caller (account usage) runs this from main
+            withContext(Dispatchers.IO + kotlinx.coroutines.NonCancellable) { com.clauderemote.connection.ChannelOpen.disconnect(ch) }
         }
     }
 
@@ -490,7 +495,8 @@ internal class GatedExecChannels(
                 if (e.reason == ExecUnavailableReason.IO) onTransportTrouble(serverId)
                 throw e
             } finally {
-                com.clauderemote.connection.ChannelOpen.disconnect(ch)
+                // C5 kolo 5 (adv N5): off the caller's thread, see PooledRemoteExec.runOnce
+                withContext(Dispatchers.IO + kotlinx.coroutines.NonCancellable) { com.clauderemote.connection.ChannelOpen.disconnect(ch) }
             }
         } finally {
             release(permit)

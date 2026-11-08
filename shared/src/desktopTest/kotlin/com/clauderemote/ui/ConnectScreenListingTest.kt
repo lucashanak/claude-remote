@@ -237,7 +237,12 @@ class ConnectScreenListingTest {
         val block = app.substring(start, app.indexOf("onLoadAccounts", start))
         assertFalse("listSessions" in block, "TmuxManager.listSessions reads a failure as an empty list: $block")
         assertTrue("if (reloadAfterKill(currentScreen == Screen.CONNECT, selectedServer?.id, server.id)) {" in block, block)
-        assertTrue("loadConnectListing(server, allowFresh = connectRetryAllowsFresh(execUp))" in block, "the re-list may connect without exec (N2): $block")
+        assertTrue("loadConnectListing(server, allowFresh = connectRetryAllowsFresh(execUpNow))" in block, "the re-list may connect without exec (N2): $block")
+        // kolo 3 (review C2 x C1): the exec state is read inside the coroutine, after the kill — not captured at composition
+        val reload = block.substring(block.indexOf("if (reloadAfterKill("))
+        assertTrue("val execUpNow = connectExecUp(sessionOrchestrator.execManager.state(server.id).value is com.clauderemote.session.service.LinkState.Up) {" in reload &&
+            "sessionOrchestrator.connectionRegistry.execActive(server.id)" in reload, "read after the kill: $reload")
+        assertFalse(Regex("""\(execUp\)""").containsMatchIn(block), "never the execUp of the composition: $block")
         assertFalse("allowFresh = false" in block || "allowFresh = true" in block, block)
     }
 }
