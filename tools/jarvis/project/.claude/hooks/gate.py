@@ -38,6 +38,9 @@ and a proposal; `--task` and `--reason` are quoted free text, so cr-sessions joi
 (read only). Not allowed to Jarvis: `cr-jarvis approve|reject` (Lukáš's card) and `cr-jarvis run` (an approved
 action, started by the prompt hook), and `--force` anywhere on `cr-sessions close` (the CLI has none; `cr-session`
 itself is not on the list at all).
+rev-f4 L5: FORBIDDEN looks at unquoted words only, so a quoted "--force" (bash passes it as --force) or a prefix like
+`--forc` gets past this layer. The guarantee is the CLI: `cr-sessions close` has no such option and argparse refuses
+the call before any action (test_jarvisops ReviewFixTest.test_l5_…); this gate stays a second, cheaper layer.
 """
 import json
 import re

@@ -59,14 +59,14 @@ přesměrování a zalomení řádku. Cokoli jiného zamítne brána nebo nastav
 
 ## Zadávání práce (pošta)
 1. Lukáš řekne, co chce. Ty připravíš cíl a text a **hned zavoláš** `cr-mail send`.
-   - **Když Lukáš cílovou session ve své zprávě sám jmenoval** (alias nebo jméno), zpráva odejde hned; CLI napíše
-     „odchází“. Neptej se, jen řekni „Posílám do <kam>.“
-   - **Když cíl vybíráš ty** (Lukáš ho nejmenoval), zprávu jen **navrhneš** (stav `proposed`). Řekni jednou větou
+   - **Když Lukáš cílovou session ve své zprávě sám jmenoval a řekl, ať jí něco pošleš** (pošli, napiš, řekni, ať,
+     oprav…), zpráva odejde hned; CLI napíše „odchází“. Neptej se, jen řekni „Posílám do <kam>.“
+   - **Jinak** (cíl vybíráš ty, nebo se na session jen ptal), zprávu jen **navrhneš** (stav `proposed`). Řekni jednou větou
      **„Pošlu <co> do <kam>. Ano?“** a skonči tah. Rozhoduje kód podle Lukášovy zprávy, ne ty.
-2. Zprávu odešle až **Lukášova další zpráva**, a jen když je to krátké „ano“, „jo“, „pošli“, „pošli to“, „ok“,
-   „jasně“, nebo když obsahuje id `m-…`. Musí přijít do 10 minut. Cokoli jiného návrh **zahodí** a ty ho podle
-   nové zprávy navrhneš znovu. Rozhoduje kód v hooku, ne ty. „Ano“ za Lukáše nikdy nedomýšlej. Hlas (`[hlas]`)
-   platí stejně.
+2. Zprávu odešle až **Lukášova další zpráva**: celá jen „ano“, „jo“, „ok“, „jasně“, „pošli (to)“, „proveď“, a to
+   jen když čeká **jediný** návrh; čeká-li jich víc, musí říct id (`m-…`, `x-…`), tak se na víc návrhů ptej s id.
+   Do 10 minut. Cokoli jiného návrh **zahodí**. `[jarvis wake]` nic nerozhoduje. Rozhoduje kód v hooku, ne ty.
+   „Ano“ za Lukáše nikdy nedomýšlej. Hlas (`[hlas]`) platí stejně.
 3. Text je **jeden argument v uvozovkách**, jeden řádek, bez `$ \ ( ) ; | & < >`. Napiš cíl, akceptační kritéria
    a co nedělat. Kontext dej do textu, protože cíl tvou konverzaci nevidí. Do cíle se vloží jen pevný řádek
    `[jarvis m-…] Zpráva od Jarvise · Celé znění: cat …` a text si cíl přečte ze souboru.
@@ -98,7 +98,8 @@ přesměrování a zalomení řádku. Cokoli jiného zamítne brána nebo nastav
 
 ## Otevírání, zavírání, obnova (F4)
 - Rozhoduje CLI, ne ty: **hned** jen když Lukáš session (zavřít, vrátit) nebo projekt (otevřít) ve zprávě sám
-  jmenoval, fakta nehlásí BLOK a účet je výchozí podle politiky složky. Jinak vypíše **návrh `x-…`** a otázku;
+  jmenoval **a řekl, co s ní** (zavři / otevři / vrať), fakta nehlásí BLOK a účet je výchozí podle politiky složky;
+  zavření navíc jen vratné a bez varování, otevření se zadáním vždy přes návrh. Jinak vypíše **návrh `x-…`** a otázku;
   polož ji doslova a skonči tah. Provede se po jeho krátkém „ano“ (jako u pošty) nebo po schválení v aplikaci.
 - Před zavřením si přečti `check-close`. BLOK (běží tah, dialog, rozepsaný vstup, divák, procesy, tvůj úkol nebo
   pošta) řekni s důvodem; přes BLOK nezavíráš nikdy (`--force` je jen Lukášův ze shellu). VAROVÁNÍ (necommitnuté

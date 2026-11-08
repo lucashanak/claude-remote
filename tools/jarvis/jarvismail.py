@@ -85,8 +85,14 @@ FINAL = ("replied", "expired", "cancelled", "dropped")
 MAX_ENTERS = 2
 # rev-f2a MED4: a proposal turns into mail only on Lukáš's NEXT prompt, and only when that prompt is a short "yes" or
 # names the message. Short: "ano, ale pošli to spíš do B" is a new instruction, not a confirmation.
-APPROVE = re.compile(r"^\s*(ano|jo|pošli to|pošli|ok|jasně)\b", re.IGNORECASE)
-APPROVE_MAX = 60
+# rev-f4 M1: a bare yes is the WHOLE prompt ("OK, díky, a co dělá kontexta?" approved three proposals), and it
+# approves only when exactly one proposal (mail or action) waits; with more, Lukáš names the id. The same rule for mail
+# and for actions (jarvisops uses this one).
+APPROVE = re.compile(r"^\s*(ano|jo|ok|jasně|pošli|pošli to|proveď|proveď to|udělej to)\s*[.!]*\s*$", re.IGNORECASE)
+# rev-f4 H1 (lead): naming a session is not asking to send it anything ("kolik žere rag?"). Mail to a named target
+# goes out at once only when the prompt also asks for a message (an imperative); only the flag is kept, never the text.
+SEND_INTENT = re.compile(r"(?<!\w)(?:pošli|napiš|řekni|zadej|předej|vzkaž|pushni|commitni|oprav|udělej|dokonči|"
+                         r"odpověz)(?:te)?(?!\w)|(?<!\w)ať(?!\w)", re.IGNORECASE)
 
 # I7: until the voice readback (F5) exists these names get nothing. Case-insensitive on purpose: `*PROD*` typed by a
 # person as `prod-api` or `Prod` is the same risk; a false refusal costs a sentence, a false pass costs production.
@@ -473,8 +479,11 @@ class Mail:
             self._decide_ops(None, None, now)
             return "not Jarvis's pane" if isinstance(prompt, str) else "no prompt"
         if prompt.lstrip().startswith("[jarvis"):
-            self.decide_proposals(None, None, now)
-            self._decide_ops(None, None, now)
+            # rev-f4 L7: a wake is not Lukáš's answer, so it decides nothing: the proposals wait for his next real
+            # prompt (or their 10 minutes). The previous prompt's id is kept ONLY for that match (`last-prompt.held`);
+            # it never counts as a fresh prompt (I8: last-prompt stays gone, so no send or action can use it).
+            if isinstance(prev, dict) and prev.get("id"):
+                J.atomic_write(self.env.path("last-prompt.held"), json.dumps({"id": prev["id"], "at": prev.get("at")}))
             return None
         h = hashlib.sha256(f"{now}\n{prompt}".encode("utf-8", "replace")).hexdigest()[:12]
         # F3: only whether he asked for silence ("nehlas …") or for a quiet mode ("nerušit …"), never the text:
@@ -485,27 +494,49 @@ class Mail:
             silence, quiet = bool(JA.SILENCE_WORDS.search(prompt)), bool(JA.QUIET_WORDS.search(prompt))
         except Exception:  # noqa: BLE001
             silence = quiet = False
-        # F4: projects (folders) and closed sessions he named, for cr-sessions open / reopen; never the text
-        named_projects, named_closed = [], []
+        # F4: projects (folders) and closed sessions he named, and whether he asked to open / close / restore
+        # (rev-f4 H1); flags and names only, never the text
+        named_projects, named_closed, intents = [], [], {}
         try:
             import jarvisops as JO
             named_projects, named_closed = JO.named_projects(self.env, prompt), JO.named_closed(self.env, prompt)
-        except Exception:  # noqa: BLE001  fails closed: nothing named = a proposal
+            intents = JO.intents(prompt)
+        except Exception:  # noqa: BLE001  fails closed: nothing named, no intent = a proposal
             pass
         J.atomic_write(self.env.path("last-prompt"), json.dumps(
-            {"id": "p-" + h, "at": now, "by": "lukas", "silence": silence, "quiet": quiet,
-             "named": self._named_sessions(prompt), "namedProjects": named_projects, "namedClosed": named_closed}))
+            dict({"id": "p-" + h, "at": now, "by": "lukas", "silence": silence, "quiet": quiet,
+                  "named": self._named_sessions(prompt), "sendIntent": bool(SEND_INTENT.search(prompt)),
+                  "namedProjects": named_projects, "namedClosed": named_closed}, **intents)))
+        held = J.read_json(self.env.path("last-prompt.held"))
+        try:
+            os.unlink(self.env.path("last-prompt.held"))
+        except FileNotFoundError:
+            pass
+        if not isinstance(prev, dict):
+            prev = held  # a wake came in between: the proposals still belong to the prompt before it (L7)
         prev_id = prev.get("id") if isinstance(prev, dict) else None
-        self.decide_proposals(prompt, prev_id, now)
-        self._decide_ops(prompt, prev_id, now)
+        single = self._pending() == 1
+        self.decide_proposals(prompt, prev_id, now, single=single)
+        self._decide_ops(prompt, prev_id, now, single=single)
         return None
 
-    def _decide_ops(self, prompt, prev_id, now):
+    def _pending(self):
+        """How many proposals (mail and actions) wait for Lukáš: a bare yes may approve only a lone one (M1)."""
+        n = sum(1 for r in self.all() if r["state"] == "proposed")
+        try:
+            import jarvisops as JO
+            n += sum(1 for r in JO.Ops(self.env, mail=self).all() if r["state"] == "proposed")
+        except Exception:  # noqa: BLE001  unknown = assume several: then only an id approves
+            n += 2
+        return n
+
+    def _decide_ops(self, prompt, prev_id, now, single=False):
         """F4: the same "ano" decides the action proposals (open / close / restore). A broken jarvisops never costs
         the prompt record or the mail: then its proposals simply expire (fail closed)."""
         try:
             import jarvisops as JO
-            JO.Ops(self.env, mail=self, spawn=getattr(self, "ops_spawn", None)).decide_on_prompt(prompt, prev_id, now)
+            JO.Ops(self.env, mail=self, spawn=getattr(self, "ops_spawn", None)).decide_on_prompt(
+                prompt, prev_id, now, single=single)
         except Exception:  # noqa: BLE001
             pass
 
@@ -531,12 +562,13 @@ class Mail:
         except Exception:  # noqa: BLE001
             return []
 
-    def decide_proposals(self, prompt, prev_id, now):
-        """proposed -> queued (Lukáš said yes to it) or dropped (anything else)."""
-        short_yes = isinstance(prompt, str) and len(prompt.strip()) <= APPROVE_MAX and bool(APPROVE.match(prompt))
+    def decide_proposals(self, prompt, prev_id, now, single=False):
+        """proposed -> queued (Lukáš said yes to it) or dropped (anything else). `single`: exactly one proposal (mail
+        or action) waits, so a bare yes means it (M1)."""
+        short_yes = single and isinstance(prompt, str) and bool(APPROVE.match(prompt))
         with self.lock():
             props = [r for r in self.all() if r["state"] == "proposed"]
-            # a prompt that names ids approves exactly those ("pošli jen m-…, tu druhou ne"); a bare yes, all of them
+            # a prompt that names ids approves exactly those ("pošli jen m-…, tu druhou ne"); a bare yes only a lone one
             named = {r["id"] for r in props if isinstance(prompt, str) and r["id"] in prompt}
             for rec in props:
                 ok = (isinstance(prompt, str) and prev_id is not None and rec.get("prompt") == prev_id
@@ -612,7 +644,7 @@ class Mail:
         base, conflict = self.target_facts(name, now)
         rec = {"v": 1, "id": mid, "from": "jarvis", "to": name, "task": task, "prompt": lp.get("id"),
                "subject": subject_of(clean), "state": "proposed", "created": now, "notBefore": not_before or 0,
-               "named": name in (lp.get("named") or []),
+               "named": name in (lp.get("named") or []) and bool(lp.get("sendIntent")),
                "expires": max(now, not_before or 0) + EXPIRE_MS, "attempts": 0, "enters": 0, "deliveredAt": None, "pasteAt": None,
                "lastBlock": None, "reply": None, "base": base, "conflict": conflict}
         body = (f"# Zpráva od Jarvise {mid}\n\n"

@@ -70,8 +70,19 @@ SERVER = "server"
 ALIAS_RE = re.compile(r"[\w][\w -]{0,39}")
 MODELS = ("DEFAULT", "OPUS", "FABLE", "SONNET", "HAIKU")
 
-APPROVE = re.compile(r"^\s*(ano|jo|ok|jasně|pošli to|pošli|proveď|proveď to|udělej to)\b", re.IGNORECASE)
-APPROVE_MAX = 60
+# rev-f4 H1: naming a session or a project is not asking to act on it ("kolik tokenů žere rag?" closed RAG). An
+# action runs at once only when the prompt both names its target AND asks for that act; the hook keeps the flags only.
+INTENT = {
+    "closeIntent": re.compile(r"(?<!\w)(?:zavři(?:te)?|zavřít|zavřeš|ukonči(?:te)?|ukončit|close|kill)(?!\w)",
+                              re.IGNORECASE),
+    "openIntent": re.compile(r"(?<!\w)(?:otevři(?:te)?|otevřít|spusť(?:te)?|spustit|založ(?:te)?|založit|open)(?!\w)"
+                             r"|(?<!\w)nov(?:ou|á)\s+session", re.IGNORECASE),
+    "reopenIntent": re.compile(r"(?<!\w)(?:vrať(?:te)?|vrátit|obnov(?:te)?|obnovit)(?!\w)", re.IGNORECASE),
+}
+# rev-f4 M1: the targets of every close proposed or run on one prompt of Lukáš's, together
+CLOSE_TARGETS_PER_PROMPT = 5
+# rev-f4 L4: a runner or cr-session must not run as Jarvis's pane / claude / account
+SCRUB_ENV = ("TMUX", "TMUX_PANE", "CLAUDECODE", "CLAUDE_CONFIG_DIR")
 
 # cr-session's REFUSED_BLOCKED codes (cr_blocks) and ours (a task or mail of Jarvis's waits on the session)
 BLOCK_CZ = {"BUSY": "pracuje (běží tah)", "WAITING": "čeká na odpověď nebo povolení",
@@ -83,6 +94,18 @@ CR_BLOCKS = ("BUSY", "WAITING", "BACKGROUND", "DRAFT", "VIEWER", "PROCESSES")
 
 class Refused(Exception):
     pass
+
+
+def intents(prompt):
+    """{closeIntent, openIntent, reopenIntent}: booleans for the hook's last-prompt record (never the text)."""
+    return {k: bool(r.search(prompt)) for k, r in INTENT.items()} if isinstance(prompt, str) else \
+        {k: False for k in INTENT}
+
+
+def scrubbed_env(environ):
+    e = {k: v for k, v in environ.items() if k not in SCRUB_ENV}
+    e.setdefault("PATH", os.environ.get("PATH", "/usr/bin:/bin"))
+    return e
 
 
 def new_id(ms):
@@ -333,10 +356,15 @@ def known_projects(env):
         if rp == home and from_session:
             out[rp] = "~"
             continue
-        if not rp.startswith(home + "/") or rp in banned or not os.path.isdir(rp):
+        if not rp.startswith(home + "/") or banned_folder(rp, banned) or not os.path.isdir(rp):
             continue
         out[rp] = os.path.basename(rp)
     return out
+
+
+def banned_folder(rp, banned):
+    """rev-f4 L6: Jarvis's own project and everything under it (a session there would load his CLAUDE.md and gate)."""
+    return any(rp == b or rp.startswith(b + "/") for b in banned)
 
 
 def project_label(env, folder):
@@ -516,8 +544,7 @@ class CrSession:
     def call(self, *args, timeout=60):
         if self._run is not None:
             return self._run(list(args))
-        e = dict(self.env.environ)
-        e.setdefault("PATH", os.environ.get("PATH", "/usr/bin:/bin"))
+        e = scrubbed_env(self.env.environ)
         e.setdefault("HOME", self.env.home)
         try:
             p = subprocess.run([self.path, *args], capture_output=True, text=True, timeout=timeout, env=e,
@@ -656,10 +683,20 @@ class Ops:
         if n >= PER_PROMPT:
             raise Refused(f"na jeden Lukášův pokyn nejvýš {PER_PROMPT} akce se sessions")
 
+    def close_targets(self, prompt_id):
+        """How many sessions the closes of this prompt already cover (proposed, approved, run): M1."""
+        if not prompt_id:
+            return 0
+        return sum(len(r.get("targets") or []) for r in self.all()
+                   if r["kind"] == "close" and r.get("prompt") == prompt_id and r["state"] not in ("dropped", "rejected", "expired"))
+
     def closes_today(self, now):
         lt = time.localtime(now / 1000)
         midnight = int(time.mktime((lt.tm_year, lt.tm_mon, lt.tm_mday, 0, 0, 0, 0, 0, -1)) * 1000)
-        return sum(1 for e in self.ledger(midnight, 4 * 1024 * 1024) if e.get("ev") == "closed" and e.get("by") == "jarvis")
+        # a reservation (`closing`, written under the lock before cr-session runs) counts as a close: an attempt that
+        # failed afterwards still used its slot (conservative), and two runners never both see 19
+        return len({(e.get("id"), e.get("name")) for e in self.ledger(midnight, 4 * 1024 * 1024)
+                    if e.get("ev") in ("closing", "closed") and e.get("by") == "jarvis"})
 
     # ------------------------------------------------------------------ sessions
 
@@ -762,11 +799,12 @@ class Ops:
             return rec, f"{xid} schválen"
         return self.run(xid)
 
-    def decide_on_prompt(self, prompt, prev_id, now):
+    def decide_on_prompt(self, prompt, prev_id, now, single=False):
         """Lukáš's next prompt decides every action proposal (the mail's MED4 rule): approved only when it was made
         during the PREVIOUS prompt, within 10 minutes, and this prompt is a short yes or names its id; anything else
         drops it. Approved ones run in a detached process, so the hook stays fast."""
-        short_yes = isinstance(prompt, str) and len(prompt.strip()) <= APPROVE_MAX and bool(APPROVE.match(prompt))
+        # M1: a bare yes (the whole prompt) approves only when exactly one proposal, mail or action, waits
+        short_yes = single and isinstance(prompt, str) and bool(self.M.APPROVE.match(prompt))
         go = []
         if not os.path.exists(os.path.join(self.dir, "proposals.json")):
             return go  # nothing was ever proposed: every prompt of Lukáš's must not create files here
@@ -794,13 +832,18 @@ class Ops:
         me = os.path.join(os.path.dirname(os.path.realpath(__file__)), "cr_jarvis.py")
         # the runner sees the same HOME / state dir as this process (env.environ, not os.environ: a test's temp HOME
         # must never send it to the live state)
-        e = dict(self.env.environ)
-        e.setdefault("PATH", os.environ.get("PATH", "/usr/bin:/bin"))
-        subprocess.Popen([sys.executable, "-I", me, "run", xid], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+        e = scrubbed_env(self.env.environ)
+        self._popen([sys.executable, "-I", me, "run", xid], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                          stderr=subprocess.DEVNULL, start_new_session=True, close_fds=True, env=e)
 
+    @staticmethod
+    def _popen(*a, **kw):
+        subprocess.Popen(*a, **kw)
+
     def sweep(self, now):
-        """jarvis-d: proposals past their 10 minutes expire; an approved one nobody started for 30 s runs here."""
+        """jarvis-d: proposals past their 10 minutes expire; an approved one nobody started for 30 s gets the detached
+        runner (rev-f4 M2: never run in the daemon's tick, an open waits seconds and the alerts and mail would wait
+        with it), at most once per 30 s."""
         late = []
         if not os.path.exists(os.path.join(self.dir, "proposals.json")):
             return late  # nothing was ever proposed: no ops/ directory from the daemon's tick
@@ -808,16 +851,20 @@ class Ops:
             for rec in self.all():
                 if rec["state"] == "proposed" and now >= J._int(rec.get("expires")):
                     self.transition(rec, "expired")
-                elif rec["state"] == "approved" and now - J._int(rec.get("updatedAt")) > RUN_STALE_MS:
+                elif rec["state"] == "approved" and now - J._int(rec.get("updatedAt")) > RUN_STALE_MS \
+                        and now - J._int(rec.get("spawnedAt") or 0) > RUN_STALE_MS:
+                    rec["spawnedAt"] = now
+                    self.put(rec)
                     late.append(rec["id"])
                 elif rec["state"] == "running" and now - J._int(rec.get("updatedAt")) > RUNNING_DEAD_MS:
                     self.transition(rec, "failed", message="přerušeno: proces, který akci prováděl, skončil; "
                                                            "ověř stav přes cr-sessions show nebo closed")
         for xid in late:
             try:
-                self.run(xid)
-            except Refused:
-                pass
+                self.spawn(xid)
+            except Exception as e:  # noqa: BLE001
+                with self.lock():
+                    self.log("spawn-failed", id=xid, reason=f"{type(e).__name__}"[:80])
         return late
 
     # ------------------------------------------------------------------ running
@@ -903,9 +950,6 @@ class Ops:
 
     def _do_close(self, name, rec, approved):
         short = J.short_name(name)
-        now = self.env.now_ms()
-        if self.closes_today(now) >= CLOSE_PER_DAY:
-            return False, f"{short}: dnes už {CLOSE_PER_DAY} zavření, víc ne."
         try:
             rep, facts, token = self.check_close(name)
         except Refused as e:
@@ -918,11 +962,17 @@ class Ops:
                            f"nebo ji zavři sám: cr-session close {name} --token … --force")
         # our own BLOKs (a task, mail): Lukáš's yes covers the ones he was told about, never a new one
         new = [b for b in rep["blocks"] if b not in (at_ask.get("blocks") or [])]
-        if new or (not approved and rep["blocks"]):
-            return False, f"{short} nezavřu: {', '.join(BLOCK_CZ[b] for b in (new or rep['blocks']))}."
-        if approved and not at_ask.get("blocks") and at_ask.get("hash") and at_ask["hash"] != rep["hash"]:
-            # §15.6: something changed between the question and the yes (it started, someone opened it, git moved)
+        if new:
+            return False, f"{short} nezavřu: {', '.join(BLOCK_CZ[b] for b in new)}."
+        if not self.same_facts(at_ask, rep):
+            # §15.6 (rev-f4 L2: always): something changed between the question and the yes (it started, someone
+            # opened it, git moved), or the question's facts are unknown
             return False, f"{short} se od otázky změnila ({'; '.join(rep['warn'] + rep['info']) or 'stav'}), zeptej se znovu."
+        # rev-f4 L3: the day's count and its reservation under one lock, so parallel runners never pass 20 together
+        with self.lock():
+            if self.closes_today(self.env.now_ms()) >= CLOSE_PER_DAY:
+                return False, f"{short}: dnes už {CLOSE_PER_DAY} zavření, víc ne."
+            self.log("closing", id=rec["id"], name=name, by="jarvis" if rec.get("decidedBy") != "lukas" else "lukas-shell")
         by = "jarvis" if rec.get("decidedBy") != "lukas" else "lukas-shell"
         rc, out = self.cr.call("close", name, "--token", token, "--by", by,
                                "--reason", f"{rec['id']} {rec.get('decidedBy') or ''}".strip()[:120], timeout=15)
@@ -934,6 +984,11 @@ class Ops:
         return True, f"Zavřel jsem {short}." + ("" if rep["restorable"] else " Konverzaci jsem nenašel, vrátit nepůjde.")
 
     # ---- restore
+
+    @staticmethod
+    def same_facts(at_ask, rep):
+        """The facts Lukáš said yes to are the facts now (the token's hash, no timestamps). Always checked (L2)."""
+        return bool(at_ask.get("hash")) and at_ask["hash"] == rep["hash"]
 
     def _do_restore(self, rec, wait, approved):
         a = rec["args"]
@@ -962,7 +1017,8 @@ class Ops:
             p = self.propose("restore", sug, f"Vrátit {J.short_name(a['name'])} jako {J.short_name(sug)}.",
                              f"Jméno {J.short_name(a['name'])} už nese jiná běžící session. "
                              + (a.get("detail") or ""), dict(a, newName=sug),
-                             (self.mail.last_prompt() or {}).get("id"), self.env.now_ms())
+                             # rev-f4 L1: Lukáš has not seen it yet, so no "ano" may approve it; only its id or the card
+                             None, self.env.now_ms())
             return False, (f"Jméno {J.short_name(a['name'])} je obsazené. Navrhuju {p['id']}: vrátit ji jako "
                            f"{J.short_name(sug)}. Zeptej se Lukáše: „Vrátit ji jako {J.short_name(sug)}? Ano?“"), \
                 {"status": "EXISTS", "proposal": p["id"]}
