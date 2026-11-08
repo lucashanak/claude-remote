@@ -32,7 +32,17 @@ sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
 import jarvislib as J  # noqa: E402
 import jarvismail as M  # noqa: E402
 import jarviswatch as JW  # noqa: E402
-import jarvisalert as JA  # noqa: E402
+
+
+def _ja():
+    """jarvisalert, imported lazily (rev-f3 LOW10): a broken F3 module must never take `cr-mail off` ("Jarvisi,
+    stop"), status or send down with it. None when it does not import."""
+    try:
+        import jarvisalert
+        return jarvisalert
+    except Exception:  # noqa: BLE001
+        return None
+
 
 BY_RE = re.compile(r"app:[A-Za-z0-9._-]{1,64}")
 # --after limit: the 7-day window counts as spent from this much on, then its reset is the one to wait for
@@ -63,7 +73,8 @@ def _row(r, now):
     task = f" · {r['task']}" if r.get("task") else ""
     nb = J._int(r.get("notBefore")) or 0
     if nb > now and r["state"] in ("proposed", "queued"):
-        extra += f" · odloženo do {JA.when_cz(nb, now)}"
+        JA = _ja()
+        extra += " · odloženo do " + (JA.when_cz(nb, now) if JA else J.ago_short(nb - now))
     return (f"{r['id']} → {J.short_name(r['to'])} · {STATE_CZ.get(r['state'], r['state'])}{extra}{task} · "
             f"{_age(now, r.get('created'))} · «{M.data_text(r.get('subject'), 80)}»")
 
@@ -71,6 +82,9 @@ def _row(r, now):
 def after_ms(m, to, after, now):
     """(ms, Czech words) for --after: HH:MM, or `limit` = when the target's account gets its limit back (the weekly
     reset when the week is spent, else the 5-hour one). Refused when the usage cache does not know."""
+    JA = _ja()
+    if JA is None:
+        raise Refused("odložené odeslání teď nejde (modul jarvisalert se nenačetl); pošli bez --after")
     if after != "limit":
         try:
             ms = JA.parse_at(after, now)
@@ -195,8 +209,10 @@ def cmd_on(m, a, out):
 
 
 def decide_refusal(m, a):
-    """None, or why this caller may not approve/reject. The model never gets here: the gate does not let Jarvis call
-    it, and any Claude session (all of them run yolo) is refused, or a working session could say "ano" for Lukáš."""
+    """None, or why this caller may not approve/reject. A guard against MISTAKES, not a wall (rev-f3 LOW4, F2a
+    decision 5): every session runs under the same uid, so a determined one could unset CLAUDECODE or write the queue
+    itself. What it stops: Jarvis (the gate never lets him call it, and his pane is refused here), and any Claude
+    session that runs `cr-mail approve` as it is (CLAUDECODE set), i.e. a working session "saying ano" by accident."""
     if m.env.environ.get("CLAUDECODE"):
         return f"cr-mail {a.cmd} je Lukášovo rozhodnutí z aplikace, ne z Claude session"
     me = J.read_self(m.env)

@@ -250,8 +250,16 @@ def _usage_watch(env, a, now):
     return {"acct": hits[0], "acctName": J.account_short(u.get("account")), "window": window, "below": below}
 
 
-def cmd_remind(env, a, now, by):
+def cmd_remind(env, a, now, by, m=None):
+    """rev-f3 LOW3: a reminder is a vibrating alert with free text, so from Jarvis it needs a fresh prompt of Lukáš's
+    (≤ 10 min) and at most 3 per prompt; Lukáš himself is not limited that way."""
     text = _text(a.text, JA.REMIND_TEXT_MAX, "připomínka")
+    lp = None
+    if by == "jarvis":
+        lp = (m.last_prompt() if m else None) or {}
+        at = J._int(lp.get("at"))
+        if not lp.get("id") or not at or not (-60000 <= now - at <= M.PROMPT_FRESH_MS):
+            raise Refused("připomínku zakládáš jen na čerstvý Lukášův pokyn (do 10 minut)")
     if bool(a.at) == bool(getattr(a, "in_")):
         raise Refused("řekni jedno: --at HH:MM, nebo --in 2h")
     try:
@@ -265,9 +273,14 @@ def cmd_remind(env, a, now, by):
     def guard(rs):
         if sum(1 for r in rs.values() if r["state"] == "open") >= 50:
             return "už je 50 čekajících připomínek; nějakou zruš: cr-task unremind r-…"
+        if lp and sum(1 for e in store.lines() if e.get("ev") == "add" and e.get("prompt") == lp.get("id")) >= 3:
+            return "na jeden Lukášův pokyn nejvýš 3 připomínky"
         return None
     rid = JA.new_id("r", now)
-    why = store.append({"v": 1, "at": now, "ev": "add", "id": rid, "text": text, "due": due, "by": by}, guard)
+    ev = {"v": 1, "at": now, "ev": "add", "id": rid, "text": text, "due": due, "by": by}
+    if lp:
+        ev["prompt"] = lp.get("id")
+    why = store.append(ev, guard)
     if why:
         raise Refused(why)
     return rid, due
@@ -371,7 +384,7 @@ def main(argv=None, env=None, out=None, err=None, mail=None):
             out.write(f"{a.id} zrušena\n")
         elif a.cmd == "remind":
             by = writer(env, m)
-            rid, due = cmd_remind(env, a, now, by)
+            rid, due = cmd_remind(env, a, now, by, m)
             out.write(f"{rid}: připomenu {JA.when_cz(due, now)} (upozornění v aplikaci). Zrušit: cr-task unremind {rid}\n")
         elif a.cmd == "unremind":
             by = writer(env, m)

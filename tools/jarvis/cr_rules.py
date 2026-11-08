@@ -55,6 +55,11 @@ def caller(env, m):
     raise Refused("pravidla „nehlas“ mění jen Lukáš, nebo Jarvis na jeho pokyn; ne pracovní session")
 
 
+def used_by_prompt(m, prompt_id, now):
+    return sum(1 for e in m.ledger(now - 2 * M.PROMPT_FRESH_MS) if e.get("ev") == "rule-add" and prompt_id
+               and e.get("prompt") == prompt_id)
+
+
 def describe(rule, now):
     mt = rule.get("match") or {}
     what = JA.RULE_KIND_CZ.get(mt.get("kind") or "*", "?")
@@ -70,6 +75,8 @@ def cmd_add(env, m, a, now, by, out):
     if not kind:
         raise Refused("--kind je question, task, watch nebo all")
     pat = (a.session or "").strip() or None
+    if pat is None and kind == "*" and by != "lukas":
+        raise Refused("pravidlo na všechno bez --session zapíše jen Lukáš sám (rev-f3 MED2)")
     if pat is None and kind == "*" and not a.everything:
         raise Refused("pravidlo bez --session a --kind by umlčelo všechno kromě povolení a dotazů; to je režim "
                       "„jen blokující“ (cr-jarvis mode blocking). Když to Lukáš opravdu chce: --everything")
@@ -112,22 +119,28 @@ def cmd_add(env, m, a, now, by, out):
 
     def go():
         rules = store.all(now)
-        if lp and sum(1 for r in rules if r.get("prompt") == lp.get("id")) >= PER_PROMPT:
+        # every add counts, an extension too (rev-f3 MED2): counted in the mail ledger, where each one is logged
+        if lp and used_by_prompt(m, lp.get("id"), now) >= PER_PROMPT:
             return None, f"na jeden Lukášův pokyn nejvýš {PER_PROMPT} pravidla"
+        got = None
         for r in rules:
             if r.get("match") == rule["match"]:
-                r["until_ms"] = max(r["until_ms"], rule["until_ms"])  # the same rule again: it lasts longer
+                # the same rule again lasts longer; `created` moves with it so jarvis-d's TTL cap (LOW8) holds
+                r["until_ms"], r["created"] = max(r["until_ms"], rule["until_ms"]), now
+                got = r
                 store.rewrite_raw(rules)
-                return r, None
-        if len(rules) >= JA.RULES_MAX:
-            return None, f"už je {len(rules)} pravidel (nejvýš {JA.RULES_MAX}); nějaké zruš: cr-rules rm n-…"
-        store.rewrite_raw(rules + [rule])  # expired ones are dropped on every write
-        return rule, None
+                break
+        if got is None:
+            if len(rules) >= JA.RULES_MAX:
+                return None, f"už je {len(rules)} pravidel (nejvýš {JA.RULES_MAX}); nějaké zruš: cr-rules rm n-…"
+            store.rewrite_raw(rules + [rule])  # expired ones are dropped on every write
+            got = rule
+        with m.lock():
+            m.log("rule-add", id=got["id"], by=by, prompt=(lp or {}).get("id"), text=describe(got, now))
+        return got, None
     got, why = store.locked(go)
     if why:
         raise Refused(why)
-    with m.lock():
-        m.log("rule-add", id=got["id"], by=by, text=describe(got, now))
     out.write(f"{got['id']}: {describe(got, now)}. Povolení, dotazy a dialogy hlásím dál. "
               f"Přečti to Lukášovi. Odvolat: cr-rules rm {got['id']}\n")
 
@@ -179,7 +192,7 @@ def main(argv=None, env=None, out=None, err=None, mail=None):
     p.add_argument("--session")
     p.add_argument("--kind")
     p.add_argument("--days")
-    p.add_argument("--everything", action="store_true")
+    p.add_argument("--everything", action="store_true", help="Lukáš only: a rule for everything (not perm/ask)")
     p = sub.add_parser("list")
     p.add_argument("--json", action="store_true")
     p.add_argument("--say", action="store_true")

@@ -10,8 +10,11 @@ without --until it lasts until it is switched back. jarvis-d holds back what the
 it afterwards if it is still current; an unreadable or expired file counts as normal (louder, never silent).
 The app's own per-session notifications for permissions and questions do not depend on this (R11, fail-open).
 
-Who: Lukáš from his shell or the app (no CLAUDECODE); Jarvis from his own pane on a fresh prompt of Lukáš's
-(≤ 10 min, the same rule as mail); never another Claude session. Exit codes: 0, 2 refused, 1 internal error.
+Who: Lukáš from his shell or the app (no CLAUDECODE); never another Claude session. Jarvis from his own pane on a
+fresh prompt of Lukáš's (≤ 10 min): `normal` freely (louder); a quiet mode only when that prompt itself asked for one
+("nerušit", "neruš", "dnd", "jen blokující", "jen důležité" — the hook records the flag, never the text), and `dnd`
+only with --until/--for ≤ 12 h (rev-f3 MED1: a quiet mode silences more than any rule). `blocking` has no end time in
+the contract; it still lets every block, task result, reminder and incident through. Exit codes: 0, 2, 1.
 """
 import argparse
 import json
@@ -24,13 +27,14 @@ import jarvismail as M  # noqa: E402
 import jarvisalert as JA  # noqa: E402
 
 FOR_MAX_MS = 24 * 3600 * 1000
+JARVIS_DND_MAX_MS = 12 * 3600 * 1000
 
 
 class Refused(Exception):
     pass
 
 
-def caller(env, m, now):
+def caller(env, m, now, mode=None):
     me = J.read_self(env)
     name, why = m.caller_session()
     if not why and me and name == me:
@@ -38,6 +42,8 @@ def caller(env, m, now):
         at = J._int(lp.get("at"))
         if not lp.get("id") or not at or not (-60000 <= now - at <= M.PROMPT_FRESH_MS):
             raise Refused("režim přepínáš jen na čerstvý Lukášův pokyn (do 10 minut)")
+        if mode in ("dnd", "blocking") and not lp.get("quiet"):
+            raise Refused("Lukášova poslední zpráva o tichém režimu neříká („nerušit“, „jen blokující“); zeptej se ho")
         return "jarvis"
     if not env.environ.get("CLAUDECODE"):
         return "lukas"
@@ -61,7 +67,7 @@ def main(argv=None, env=None, out=None, err=None, mail=None):
     old = os.umask(0o077)
     try:
         if a.mode:
-            by = caller(env, m, now)
+            by = caller(env, m, now, a.mode)
             until = None
             if a.until or a.for_:
                 if a.mode != "dnd":
@@ -74,6 +80,8 @@ def main(argv=None, env=None, out=None, err=None, mail=None):
                     raise Refused(str(e))
                 if until - now > FOR_MAX_MS:
                     raise Refused("nerušit nejvýš 24 hodin dopředu (bez času platí do odvolání)")
+            if by == "jarvis" and a.mode == "dnd" and (until is None or until - now > JARVIS_DND_MAX_MS):
+                raise Refused("nerušit od Jarvise jen s koncem do 12 hodin: --until HH:MM nebo --for 2h")
             JA.write_mode(env, a.mode, until)
             with m.lock():
                 m.log("mode", by=by, text=a.mode + (f" do {JA.when_cz(until, now)}" if until else ""))
