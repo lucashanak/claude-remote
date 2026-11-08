@@ -5,6 +5,8 @@ import com.clauderemote.model.ClaudeMode
 import com.clauderemote.model.ClaudeModel
 import com.clauderemote.model.SshServer
 import com.clauderemote.session.service.BootstrapScript
+import com.clauderemote.session.service.CloseFactsCommands
+import com.clauderemote.session.service.ClosedRecord
 import com.clauderemote.session.service.CommFlags
 import com.clauderemote.session.service.ExecKind
 import com.clauderemote.session.service.ExecResult
@@ -14,6 +16,8 @@ import com.clauderemote.session.service.ManifestCommands
 import com.clauderemote.session.service.Pace
 import com.clauderemote.session.service.RemoteExec
 import com.clauderemote.session.service.ServerBootstrap
+import com.clauderemote.session.service.SessionOpsScript
+import com.clauderemote.session.service.SessionRestore
 import com.clauderemote.session.service.TranscriptService
 import com.clauderemote.session.service.buildNotifyWatcherCommand
 import com.clauderemote.storage.FakeKeyValueStore
@@ -102,6 +106,16 @@ class ExecArgumentSizeTest {
         out["bootstrap, hooks v2 install"] = BootstrapScript.build(installV2 = true)
         out["bootstrap, hooks v2 status"] = BootstrapScript.build(installV2 = false)
         out["streamd install"] = TranscriptService.ENSURE_STREAMD_COMMAND
+        out["close (closeCommand)"] = ManifestCommands.closeCommand(names[0], durable = true, by = "app:android-706cbd7b")
+        out["cr-session install (SessionOpsScript.INSTALL_COMMAND)"] = SessionOpsScript.INSTALL_COMMAND
+        out["restore closed (restoreCommand)"] = SessionRestore.restoreCommand(ClosedRecord(
+            1, "2026-11-06T17:20:03Z", names[0], "11111111-2222-3333-4444-555555555555", "aaaaaaaa-2222-3333-4444-555555555555",
+            null, "/home/lucas/projects/a-rather-long-folder-name/with/depth", "/home/lucas/projects/a-rather-long-folder-name/with/depth",
+            "hanakl-nekrachni-cz", "SONNET", "AUTO", emptyList(), null, null, null, null, "app:android-706cbd7b", true, null,
+        ))
+        out["close facts (closeFactsCommand)"] = CloseFactsCommands.closeFactsCommand(
+            names[0], CloseFactsCommands.selfMarkerFor(names[0], "android-706cbd7b"),
+        )
         return out
     }
 
@@ -118,12 +132,17 @@ class ExecArgumentSizeTest {
         const val LIMIT = 4096
         /** Size at 18faa58 (bytes) -> ceiling. The reconcile grows ~65 B per session (5 019 B at 58). */
         val KNOWN_OVER = mapOf(
-            "reconcile, 58 sessions (reconcileAll)" to 5 * 1024, // 5 019
+            "reconcile, 58 sessions (reconcileAll)" to 6 * 1024, // 5 019; F0 (Jarvis) sekce opened: 5 341
             "hooks v2 status" to 13 * 1024, // 12 469
             "hooks v2 remove" to 13 * 1024, // 12 469
-            "bootstrap, hooks v2 install" to 38 * 1024, // 38 886
+            "bootstrap, hooks v2 install" to 39 * 1024, // 38 886; F0 (Jarvis) CHECK_COMMAND: 39 527
             "bootstrap, hooks v2 status" to 21 * 1024, // 20 777
             "streamd install" to 5 * 1024, // 5 025
+            // F0 (Jarvis) exec requests, size at the merge 8cf7a95 -> ceiling; stdin is the follow-up (predavka-C.md)
+            "close (closeCommand)" to 6 * 1024, // 5 869
+            "cr-session install (SessionOpsScript.INSTALL_COMMAND)" to 40 * 1024, // 40 263
+            "restore closed (restoreCommand)" to 10 * 1024, // 10 189
+            "close facts (closeFactsCommand)" to 7 * 1024, // 6 548
         )
     }
 }

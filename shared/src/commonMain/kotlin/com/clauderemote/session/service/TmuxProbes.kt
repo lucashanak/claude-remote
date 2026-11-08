@@ -302,6 +302,13 @@ internal class TmuxProbes(
                 "while IFS= read -r c; do " + boundedTmux("refresh-client -t \"\$c\" </dev/null >/dev/null 2>&1") +
                 " && echo OK; done <\"\$CR_F\""
         }
+
+        /**
+         * Name of the file under `~/.claude-remote/clients/` holding this device's client tty for [tmuxName]
+         * ([singleClientPreamble]); `CloseFactsCommands` reads it to tell the closing device's own client apart.
+         */
+        fun clientMarkerKey(tmuxName: String, deviceKey: String): String =
+            (deviceKey.take(40) + "-" + tmuxName.takeLast(120)).replace(Regex("[^A-Za-z0-9._-]"), "_")
     }
 
     /** The shell probe behind [probeTranscriptExists]: prints YES or NO. */
@@ -394,14 +401,5 @@ internal class TmuxProbes(
             if (lastLine.isNotEmpty() && lastLine.any { it in promptChars }) return
             kotlinx.coroutines.delay(50)
         }
-    }
-
-    companion object {
-        /**
-         * Name of the file under `~/.claude-remote/clients/` holding this device's client tty for [tmuxName]
-         * ([singleClientPreamble]); `CloseFactsCommands` reads it to tell the closing device's own client apart.
-         */
-        fun clientMarkerKey(tmuxName: String, deviceKey: String): String =
-            (deviceKey.take(40) + "-" + tmuxName.takeLast(120)).replace(Regex("[^A-Za-z0-9._-]"), "_")
     }
 }
