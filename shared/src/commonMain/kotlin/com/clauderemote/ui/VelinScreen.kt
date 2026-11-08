@@ -42,8 +42,8 @@ import com.clauderemote.ui.theme.CRType
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
-/** The two tabs of F0 (Úkoly and Jarvis come with F3). */
-private enum class VelinTab { PREHLED, CEKA }
+/** Přehled and Čeká (F0); Úkoly and Jarvis (F3). */
+internal enum class VelinTab { PREHLED, CEKA, UKOLY, JARVIS }
 
 internal fun VelinState.crStatus(): CRStatus = when (this) {
     VelinState.APPROVAL, VelinState.QUESTION -> CRStatus.Approval
@@ -80,6 +80,11 @@ internal fun VelinScreen(
     onStartOffer: ((Boolean) -> Unit)?,
     /** The top-bar Jarvis button; null hides it. */
     onJarvis: (() -> Unit)? = null,
+    /** This device's alert routing (Jarvis tab's switch) and where a change goes. */
+    alertRouting: com.clauderemote.session.service.AlertRouting = com.clauderemote.session.service.AlertRouting.PER_SESSION,
+    onAlertRouting: (com.clauderemote.session.service.AlertRouting) -> Unit = {},
+    /** The tab to open on (the merged Jarvis notification opens the Jarvis tab). */
+    initialTab: VelinTab = VelinTab.PREHLED,
 ) {
     val c = CRTheme.colors
     val m = CRTheme.metrics
@@ -171,7 +176,36 @@ internal fun VelinScreen(
         }
     }
 
-    var tab by remember { mutableStateOf(VelinTab.PREHLED) }
+    var tab by remember(initialTab) { mutableStateOf(initialTab) }
+    val feed by sessionOrchestrator.jarvisAlerts.state.collectAsState()
+    val jarvis = remember { JarvisPanelState() }
+    val jarvisServer = remember(tabs, remoteSessions, feed.serverId) { sessionOrchestrator.jarvisServer(tabs, remoteSessions) }
+    val expandedTasks = remember { mutableStateListOf<String>() }
+    // Reads on entering a tab (and the refresh below): Jarvis' state changes on his schedule, not the app's.
+    LaunchedEffect(tab, jarvisServer?.id) {
+        when (tab) {
+            VelinTab.UKOLY -> jarvis.loadTasks(sessionOrchestrator, jarvisServer)
+            VelinTab.JARVIS -> jarvis.loadJarvis(sessionOrchestrator, jarvisServer)
+            else -> {}
+        }
+    }
+    // The Jarvis tab shows what was pending when it opened and what came since; being shown is being seen.
+    LaunchedEffect(tab, feed.pending) {
+        if (tab != VelinTab.JARVIS) return@LaunchedEffect
+        jarvis.recentAlerts = (feed.pending + jarvis.recentAlerts).distinctBy { it.id }.take(20)
+        if (feed.pending.isNotEmpty()) sessionOrchestrator.jarvisAlerts.acknowledge()
+    }
+    val refresh: () -> Unit = {
+        onRefresh()
+        when (tab) {
+            VelinTab.UKOLY -> scope.launch { jarvis.taskMail.clear(); jarvis.loadTasks(sessionOrchestrator, jarvisServer) }
+            VelinTab.JARVIS -> scope.launch { jarvis.loadJarvis(sessionOrchestrator, jarvisServer) }
+            else -> {}
+        }
+    }
+    val openTmux: (String?, String) -> Unit = { serverId, tmux ->
+        openTmuxTarget(tabs, remoteSessions, serverId, tmux, onOpenSession, onAttachRemote)
+    }
     val tabsById = remember(tabs) { tabs.associateBy { it.id } }
     val remotesByKey = remember(remoteSessions) {
         remoteSessions.associateBy { "remote:${it.server.id}:${it.tmuxSession.name}" }
@@ -200,34 +234,53 @@ internal fun VelinScreen(
                     if (onJarvis != null) {
                         JarvisButton(onJarvis = onJarvis, onVelin = null, tint = c.accent, size = 48.dp, iconSize = 22.dp)
                     }
-                    IconButton(onClick = onRefresh) {
+                    IconButton(onClick = refresh) {
                         Icon(Icons.Default.Refresh, "Obnovit", tint = c.textDim)
                     }
                 },
             )
         },
     ) { padding ->
+        Column(Modifier.fillMaxSize().padding(padding)) {
+        Column(
+            Modifier.padding(start = m.sectionPad, end = m.sectionPad, top = 8.dp, bottom = 4.dp),
+            verticalArrangement = Arrangement.spacedBy(m.cardGap),
+        ) {
+            if (onStartOffer != null) StartOfferStrip(onStartOffer)
+            Segmented(
+                options = VelinTab.entries.toList(),
+                selected = tab,
+                onSelect = { tab = it },
+                label = {
+                    when (it) {
+                        VelinTab.PREHLED -> "Přehled"
+                        VelinTab.CEKA -> "Čeká ${inbox.size}"
+                        VelinTab.UKOLY -> "Úkoly"
+                        VelinTab.JARVIS -> if (feed.pending.isEmpty()) "Jarvis" else "Jarvis ${feed.pending.size}"
+                    }
+                },
+            )
+        }
+        if (tab == VelinTab.JARVIS) {
+            JarvisPane(
+                state = jarvis, feed = feed, routing = alertRouting, onRouting = onAlertRouting,
+                server = jarvisServer, orch = sessionOrchestrator, scope = scope,
+                jarvisTab = jarvisTabOf(tabs, feed.serverId), now = now,
+                onOpenTmux = { sid, t -> openTmux(sid, t) },
+                onOpenJarvis = onJarvis,
+                modifier = Modifier.padding(start = m.sectionPad, end = m.sectionPad, bottom = 8.dp),
+            )
+        } else
         PullToRefreshBox(
-            isRefreshing = remoteSessionsLoading,
-            onRefresh = onRefresh,
-            modifier = Modifier.fillMaxSize().padding(padding),
+            isRefreshing = remoteSessionsLoading || (tab == VelinTab.UKOLY && jarvis.tasksLoading),
+            onRefresh = refresh,
+            modifier = Modifier.fillMaxSize(),
         ) {
             LazyColumn(
                 modifier = Modifier.fillMaxSize(),
-                contentPadding = PaddingValues(start = m.sectionPad, end = m.sectionPad, top = 8.dp, bottom = 48.dp),
+                contentPadding = PaddingValues(start = m.sectionPad, end = m.sectionPad, top = 4.dp, bottom = 48.dp),
                 verticalArrangement = Arrangement.spacedBy(m.cardGap),
             ) {
-                if (onStartOffer != null) {
-                    item(key = "start_offer") { StartOfferStrip(onStartOffer) }
-                }
-                item(key = "tabs") {
-                    Segmented(
-                        options = VelinTab.entries.toList(),
-                        selected = tab,
-                        onSelect = { tab = it },
-                        label = { if (it == VelinTab.PREHLED) "Přehled" else "Čeká ${inbox.size}" },
-                    )
-                }
                 when (tab) {
                     VelinTab.PREHLED -> overview(
                         rows = rows, inbox = inbox, tabs = tabs, now = now,
@@ -248,8 +301,20 @@ internal fun VelinScreen(
                         onAnswer = ::answer,
                         onOpen = { id -> tabsById[id]?.let(onOpenSession) },
                     )
+                    VelinTab.UKOLY -> tasksList(
+                        state = jarvis, now = now, expanded = expandedTasks.toSet(),
+                        onToggle = { t ->
+                            if (!expandedTasks.remove(t.id)) {
+                                expandedTasks.add(t.id)
+                                if (t.id !in jarvis.taskMail) scope.launch { jarvis.loadTaskMail(sessionOrchestrator, jarvisServer, t.id) }
+                            }
+                        },
+                        onOpenTarget = { tmux -> openTmux(jarvisServer?.id, tmux) },
+                    )
+                    VelinTab.JARVIS -> {}
                 }
             }
+        }
         }
     }
 }

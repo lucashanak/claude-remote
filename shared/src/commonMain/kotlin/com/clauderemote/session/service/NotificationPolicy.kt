@@ -51,15 +51,32 @@ enum class NotifyKind {
  * are what the user must not miss, so those always alert.
  */
 object NotificationPolicy {
+    /**
+     * [viaJarvis] = [jarvisCarries]: Jarvis' batches stand in for this device's completion alerts. Only completions
+     * step aside; a permission or a question always alerts by itself, whether or not Jarvis is alive (navrh §3 bod 11:
+     * the deterministic layer of the app escalates what blocks, even while Jarvis sleeps).
+     */
     fun shouldNotify(
         kind: NotifyKind,
         appForeground: Boolean,
         isActiveTab: Boolean,
         notificationsEnabled: Boolean,
         notifyOnTaskComplete: Boolean,
+        viaJarvis: Boolean = false,
     ): Boolean = notificationsEnabled &&
-        (kind != NotifyKind.COMPLETION || notifyOnTaskComplete) &&
+        (kind != NotifyKind.COMPLETION || (notifyOnTaskComplete && !viaJarvis)) &&
         (!appForeground || !isActiveTab)
+
+    /**
+     * Whether Jarvis carries this device's completion alerts: routed through him AND his heartbeat lease is live.
+     * Without the lease it is per session again at once (R11 fail-open), with nothing to switch back by hand.
+     */
+    fun jarvisCarries(routing: AlertRouting, jarvisAlive: Boolean): Boolean =
+        routing == AlertRouting.VIA_JARVIS && jarvisAlive
+
+    /** "Jarvis neodpovídá": routed through Jarvis, but his lease lapsed (the Velín's strip, the one quiet notice). */
+    fun jarvisFailedOpen(routing: AlertRouting, jarvisAlive: Boolean): Boolean =
+        routing == AlertRouting.VIA_JARVIS && !jarvisAlive
 }
 
 /**

@@ -225,6 +225,15 @@ class AppSettings(private val prefs: KeyValueStore) {
         get() = prefs.getBoolean("notify_on_task_complete", false)
         set(value) = prefs.putBoolean("notify_on_task_complete", value)
 
+    /**
+     * Jarvis F3: "Upozornění: Každá session / Přes Jarvise", per device (the desktop may want what the phone does
+     * not). Default per session, today's behaviour: navrh §3 bod 11 wants the switch on only after a week of jarvis-d
+     * without an outage, so nobody is routed through him by an update.
+     */
+    var alertRouting: com.clauderemote.session.service.AlertRouting
+        get() = com.clauderemote.session.service.AlertRouting.of(prefs.getString("alert_routing", "session"))
+        set(value) = prefs.putString("alert_routing", value.wire)
+
     // Security
     var biometricLockEnabled: Boolean
         get() = prefs.getBoolean("biometric_lock_enabled", false)

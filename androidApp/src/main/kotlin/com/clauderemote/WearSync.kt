@@ -82,6 +82,24 @@ data class WearSessionsPayload(
     // setting, i.e. alert as before. New trailing field (defaulted) to stay
     // wire-compatible with the wearApp copy.
     val completionAlerts: Boolean? = null,
+    // Jarvis F3: the tile's "Jarvis · N" row and the merged notification. Null = no Jarvis heard from in this phone
+    // process (the watch draws no row). New trailing field (defaulted) to stay wire-compatible with the wearApp copy.
+    val jarvis: WearJarvisInfo? = null,
+)
+
+/**
+ * Jarvis' alerts for the watch. [notify]: the phone routes alerts through Jarvis and his lease is live, so the wrist
+ * shows the merged notification; else only the tile's count. [buzzAt]: phone clock of the newest alert the phone's
+ * batcher let vibrate (block/done/incident, at most one per 5 min) — the watch vibrates once when it grows, and a phone
+ * restart cannot rewind it the way a counter would.
+ */
+@Serializable
+data class WearJarvisInfo(
+    val pending: Int,
+    val text: String,
+    val notify: Boolean,
+    val buzzAt: Long = 0,
+    val alive: Boolean = false,
 )
 
 /**
@@ -103,6 +121,10 @@ object WearSync {
     private val json = Json { ignoreUnknownKeys = true }
 
     @Volatile private var appContext: Context? = null
+    @Volatile private var jarvisBuzzAt: Long = 0
+
+    /** The phone's batcher let a Jarvis alert vibrate: the watch vibrates once for it too (navrh §3 bod 10). */
+    fun noteJarvisBuzz() { jarvisBuzzAt = System.currentTimeMillis() }
     @Volatile private var tabManager: TabManager? = null
     @Volatile private var orchestrator: SessionOrchestrator? = null
 
@@ -479,11 +501,23 @@ object WearSync {
         val dictationSilenceMs = prefs.getInt("dictation_silence_ms", 4000).coerceIn(1000, 10000)
         // Through AppSettings, not a raw key: its default is the one the phone's
         // own policy uses, and the two must agree on an untouched switch.
-        val completionAlerts = com.clauderemote.storage.AppSettings(
-            com.clauderemote.storage.PlatformPreferences(ctx),
-        ).notifyOnTaskComplete
+        val settings = com.clauderemote.storage.AppSettings(com.clauderemote.storage.PlatformPreferences(ctx))
+        // Jarvis carrying the completions mutes them on the wrist as on the phone (the same NotificationPolicy rule).
+        val feed = orchestrator?.jarvisAlerts?.state?.value
+        val jarvisAlive = orchestrator?.jarvisAlerts?.alive() == true
+        val carried = com.clauderemote.session.service.NotificationPolicy.jarvisCarries(settings.alertRouting, jarvisAlive)
+        val completionAlerts = settings.notifyOnTaskComplete && !carried
+        val jarvis = feed?.takeIf { it.heartbeatAtMs != null || it.pending.isNotEmpty() }?.let { f ->
+            WearJarvisInfo(
+                pending = f.pending.size,
+                text = com.clauderemote.session.service.JarvisMerged.text(f).take(WATCH_TEXT_MAX),
+                notify = carried && settings.notificationsEnabled,
+                buzzAt = jarvisBuzzAt,
+                alive = jarvisAlive,
+            )
+        }
         val payload = json.encodeToString<WearSessionsPayload>(
-            WearSessionsPayload(sessions, sonioxKey, sonioxVoice, ttsSpeedPct, dictationSilenceMs, completionAlerts),
+            WearSessionsPayload(sessions, sonioxKey, sonioxVoice, ttsSpeedPct, dictationSilenceMs, completionAlerts, jarvis),
         )
         // NOTE: the mutex orders the putDataItem ENQUEUE, not the delivery —
         // the Task is not awaited. Play Services processes a client's calls in

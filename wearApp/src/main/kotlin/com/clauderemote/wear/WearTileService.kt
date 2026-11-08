@@ -77,7 +77,10 @@ class WearTileService : TileService() {
             .setHorizontalAlignment(LayoutElementBuilders.HORIZONTAL_ALIGN_CENTER)
             .addContent(headline(needsAction.size))
 
-        if (needsAction.isEmpty()) {
+        // Jarvis F3: one row with the count of his pending alerts (50-ui §3.6), under the sessions.
+        val jarvis = SessionRepository.jarvis.value?.takeIf { it.pending > 0 }
+
+        if (needsAction.isEmpty() && jarvis == null) {
             column.addContent(spacerHeight(8f))
             column.addContent(
                 Text.Builder(this, "Nic nečeká")
@@ -86,10 +89,20 @@ class WearTileService : TileService() {
                     .build(),
             )
         } else {
-            for (session in needsAction) {
+            for (session in needsAction.take(if (jarvis != null) 2 else 3)) {
                 column.addContent(spacerHeight(6f))
                 column.addContent(sessionRow(session))
             }
+        }
+        if (jarvis != null) {
+            column.addContent(spacerHeight(6f))
+            column.addContent(
+                Text.Builder(this, "✉ Jarvis · ${jarvis.pending}")
+                    .setTypography(Typography.TYPOGRAPHY_BUTTON)
+                    .setColor(ColorBuilders.argb(if (jarvis.alive) COLOR_WAITING else COLOR_MUTED))
+                    .setModifiers(clickModifiers("open_jarvis", launchAction(null)))
+                    .build(),
+            )
         }
 
         // Whole-tile fallback click: tapping anywhere off a row opens the app

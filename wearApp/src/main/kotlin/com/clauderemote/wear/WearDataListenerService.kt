@@ -52,9 +52,11 @@ class WearDataListenerService : WearableListenerService() {
                 SonioxKeyStore.update(payload.sonioxApiKey, payload.sonioxVoice, payload.ttsSpeedPct, payload.dictationSilenceMs)
                 val previousById = SessionRepository.sessions.value.associateBy { it.id }
                 SessionRepository.update(payload.sessions)
+                SessionRepository.updateJarvis(payload.jarvis)
                 WearLog.i(this, TAG, "Updated repository with ${payload.sessions.size} sessions")
                 requestTileUpdate()
                 handleTransitions(payload.sessions, previousById, payload.completionAlerts)
+                JarvisWatchNotifier.update(this, payload.jarvis)
             }.onFailure { e -> WearLog.w(this, TAG, "Failed to parse /sessions payload: ${e.message}") }
         }
         dataEvents.release()

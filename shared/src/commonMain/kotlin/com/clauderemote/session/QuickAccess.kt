@@ -4,8 +4,8 @@ import com.clauderemote.model.ClaudeSession
 import com.clauderemote.model.RemoteSession
 import com.clauderemote.model.SessionStatus
 
-/** Where a one-tap "quick access" goes: Jarvis' tab, or the Velín. */
-enum class QuickTarget { JARVIS, VELIN }
+/** Where a one-tap "quick access" goes: Jarvis' tab, the Velín, or the Velín's Jarvis tab (his merged notification). */
+enum class QuickTarget { JARVIS, VELIN, JARVIS_NEWS }
 
 /** What a tap on Jarvis does, given what this device knows ([QuickAccess.route]). */
 sealed interface JarvisRoute {
@@ -40,7 +40,7 @@ object QuickAccess {
     /** The extra form of the same request ("jarvis" / "velin"), for intents that keep the MAIN action. */
     const val EXTRA_TARGET = "quick_access"
 
-    fun extraValue(target: QuickTarget): String = target.name.lowercase()
+    fun extraValue(target: QuickTarget): String = if (target == QuickTarget.JARVIS_NEWS) "jarvis-news" else target.name.lowercase()
 
     /** The target an intent asks for, or null when it is not a quick-access intent. The action wins over the extra. */
     fun targetOf(action: String?, extra: String?): QuickTarget? = when (action) {
@@ -49,6 +49,7 @@ object QuickAccess {
         else -> when (extra?.trim()?.lowercase()) {
             "jarvis" -> QuickTarget.JARVIS
             "velin", "velín" -> QuickTarget.VELIN
+            "jarvis-news" -> QuickTarget.JARVIS_NEWS
             else -> null
         }
     }

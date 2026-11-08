@@ -475,6 +475,7 @@ fun main() = application {
             if (NotificationPolicy.shouldNotify(
                     kind, appForeground, isActiveTab,
                     appSettings.notificationsEnabled, appSettings.notifyOnTaskComplete,
+                    viaJarvis = NotificationPolicy.jarvisCarries(appSettings.alertRouting, sessionOrchestrator.jarvisAlerts.alive()),
                 )
             ) {
                 // Say WHICH session finished and WHAT it said — the phone has
@@ -484,6 +485,33 @@ fun main() = application {
                 val title = tabManager.getTab(sessionId)?.tabTitle?.takeIf { it.isNotBlank() }
                     ?: "Claude Remote"
                 sendDesktopNotification(title, notificationBody(body, hint))
+            }
+        }
+        // Jarvis F3: a desktop notification only for what may interrupt (block, incident; one per 5 min); the rest
+        // waits in the Velín's Jarvis tab. A lapsed lease while routed through him is said once.
+        val jarvisBatcher = com.clauderemote.session.service.JarvisAlertBatcher()
+        sessionOrchestrator.jarvisAlerts.sink = object : com.clauderemote.session.service.JarvisAlertSink {
+            override fun onAlert(
+                alert: com.clauderemote.session.service.JarvisAlert,
+                feed: com.clauderemote.session.service.JarvisFeed,
+            ) {
+                val post = jarvisBatcher.decide(alert, appSettings.alertRouting, feed.alive, appSettings.notificationsEnabled)
+                if (post?.buzz == true) {
+                    sendDesktopNotification(
+                        com.clauderemote.session.service.JarvisMerged.title(feed),
+                        com.clauderemote.session.service.JarvisMerged.text(feed),
+                    )
+                }
+            }
+
+            override fun onCleared() {}
+
+            override fun onLeaseChanged(alive: Boolean) {
+                if (!alive && appSettings.notificationsEnabled &&
+                    NotificationPolicy.jarvisFailedOpen(appSettings.alertRouting, false)
+                ) {
+                    sendDesktopNotification("Jarvis", com.clauderemote.session.service.JarvisMerged.FAIL_OPEN_TEXT)
+                }
             }
         }
     }

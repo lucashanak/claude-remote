@@ -148,7 +148,9 @@ class HookCommandsSyntaxTest {
         )
         val v2 = buildNotifyWatcherCommand(true)
         assertTrue(v2.startsWith(legacy.substringBefore("tail -q -n 25")), "the notify part and its rotation are unchanged")
-        assertTrue(v2.endsWith("-F ~/'.cache/claude-remote/notify' '/tmp/claude-notify' ~/'.cache/claude-remote/events' ~/'.claude-remote/forget.log'"), v2)
+        assertTrue(v2.endsWith("-F ~/'.cache/claude-remote/notify' '/tmp/claude-notify' ~/'.cache/claude-remote/events' ~/'.claude-remote/forget.log' ~/'.cache/claude-remote/jarvis-alerts'"), v2)
+        // Jarvis F3: the app only reads jarvis-alerts; jarvis-d is its only writer and rotator (the contract).
+        assertTrue(!v2.substringBefore("tail -q").contains("jarvis-alerts"), "the app never creates, chmods or rotates jarvis-alerts")
         assertTrue(v2.contains("-mmin -1440"), "events are rotated at most once per 24 h")
     }
 
