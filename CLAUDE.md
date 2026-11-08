@@ -13,6 +13,23 @@ Details live in `docs/`; this file only points at the places of truth and at the
   with channel headroom (sshd default `MaxSessions 10`; the dev box has 30). Every tab-side channel is counted against its transport
   (`withTabChannel`/`onServerTabChannel`, `TabChannels`); no room = skip the turn, never let sshd refuse. One reserve slot for short
   channels only; transfers never take it. A new channel site without a token is a budget leak.
+- **Channel opening** — every SSH channel open goes through `connection/ChannelOpen.kt`: floor `MIN_OPEN_MS` (cf 1.5 s / lan 0.3 s),
+  the open keeps running detached until confirmed or `OPEN_DEAD_MS`, a late confirmation is closed. JSch 0.2.21 never sends
+  CHANNEL_CLOSE for an open that timed out, so a bare `ch.connect(t)` leaks an sshd slot. A transport is replaced after 3
+  serially-started unanswered full-budget opens or 2 refusals with headroom; health swaps are spaced 30 s → 300 s. Pollers take
+  `ExecKind.POLL` permits (no wait, silent skip, counted in the `poll skipped` line); 2 of 6 SHORT permits stay for interactive work.
+- **Keepalive over Cloudflare** — JSch's keepalive never fires through `CloudflareProxy` (no socket); `TunnelKeepAlive` sends
+  `sendKeepAliveMsg` itself and counts unanswered keepalives, not idle time (the interval switches 60 s ↔ 10 s with foreground state).
+- **Writes to JSch** — never from the Android main thread: a socket write that throws leaves the cipher one packet ahead and sshd
+  drops the link (`Corrupted padlen`, `Invalid ssh2 packet type`). Resize, close and reconnect run on IO; `TransportWriteGuard` closes
+  a direct transport whose write failed.
+- **Input delivery** — user input goes only to an ACTIVE tab; without a route it is dropped with "Not connected — not sent" and never
+  sent later (the offline queue is gone: after a reconnect it could confirm a different dialog). Terminal-emulator replies go through
+  `sendTerminalReply`; watch/notification replies through `ReplyGuard` over exec. A reconnect never ends ACTIVE over a dead shell, the
+  SSH attach line ends with `|| exit 1`, and an early death after "success" counts as a failed attempt (backoff 4 s → 60 s).
+- **Big exec requests** — nothing over 4 KB as an exec argument (`ExecArgumentSizeTest`); larger payloads go over stdin, paced (the
+  80 KB restore installer through cloudflared left a transport that opened no channels). Bootstrap, hooks v2, streamd and reconcile
+  are still capped exceptions.
 - **Fresh launch** — `SessionOrchestrator.launchSession` creates the session first over exec (`ClaudeConfig.buildFreshCreateCommand`:
   `new-session -d -e CR_LAUNCH=<nonce>`), only then adds the tab, which attaches. Never kill or adopt a session that holds the name;
   never let a tab exist before its name is ours. Socket heal: `tmux-sockheal.sh`/`sg_guard` generated in `SessionPersistenceService`.
@@ -38,6 +55,16 @@ Details live in `docs/`; this file only points at the places of truth and at the
   never `mv` over the account path.
 - Debug builds hide release-only compile errors: always also run `:shared:compileReleaseKotlinAndroid :androidApp:compileReleaseKotlin`.
 - Other sessions work on `main` in this same checkout: unpushed work belongs on a branch, or it may be pushed by someone else.
+- The restore installer is marker-driven (`MARKER` in `SessionPersistenceService`): a generator change without a marker bump never
+  reaches a box that has the marker, and a bump rewrites the live scripts on the next launch of any client. Until 2026-11-07 the live
+  box still ran v17.
+- `claude-server-` is hard-coded (`TmuxLaunchDecision`, the push guard in `ManifestCommands`, `drift.sh`): a server named other than
+  `server` gets no drift and no forget. Open.
+- Generated shell: never a variable as the command (`$T tmux …`) — zsh does not word-split it; spell `timeout 3 tmux` in both branches.
+- The ET bootstrap kills every `flock` process of the user older than 30 s on the server — other sessions' locks included. Open bug.
+- Mutation runs: never a glob that matches your own runner (a recursion took the box to load 1400 on 2026-11-07); run mutants
+  serially with `timeout`, and build with `--max-workers=2 -Pkotlin.daemon.jvmargs=-Xmx3g` while other sessions build.
+- `LiveFileCanary` tolerates exactly `~/.claude-remote/jarvis/status.json` and `d-state.json` (rewritten every ~5 s by `jarvis-d`).
 
 ## Build and test
 See `docs/building.md` and `docs/TESTING.md` (gradle 8.11.1 in `~/.local/gradle/`, JDK `~/jdks/jdk-21.0.5+11`; integration tests
