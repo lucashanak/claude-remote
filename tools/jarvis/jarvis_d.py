@@ -19,6 +19,10 @@ Writes, only under JARVIS_STATE_DIR (default ~/.claude-remote/jarvis), each with
 - `d-state.json` the events cursor (inode, offset, ring of recent line hashes) and the per-session event fold;
 - `jarvis-d.log` errors only, capped.
 Events of Jarvis's own session (name in `<state>/self`) are ignored (I8), so its own Stop never shows up as news.
+
+F2a: it is also the mail deliverer (jarvismail.MailWorker): a `stop` of a target with queued mail is tried 1.5 s later
+(2 min for `stop bg`), the whole queue every 60 s, implicit replies and crash recovery every tick. It never wakes
+Jarvis (F3). Every 60 s it compares the installed files with the installer's SHA-256 record (`integrity`).
 """
 import argparse
 import fcntl
@@ -31,6 +35,7 @@ import traceback
 
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
 import jarvislib as J  # noqa: E402
+import jarvismail as M  # noqa: E402
 
 TICK_S = 5
 DURATION_S = 55
@@ -38,6 +43,7 @@ PANES_EVERY_MS = 15000
 USAGE_EVERY_MS = 30000
 GONE_KEEP_MS = 3600 * 1000
 LOG_MAX = 256 * 1024
+INTEGRITY_EVERY_MS = 60000
 # One failed `list-panes` (timeout under load) must not make every session without a live registry record vanish
 # and come back as "zmizela" and "nová": the last good answer stands in for this long, and when there is none,
 # sessions that drop out are carried over unchanged instead of being called gone.
@@ -67,6 +73,9 @@ class Daemon:
         self.good_panes, self.good_at = None, 0
         self.usage, self.usage_at = {}, 0
         self.errors = []
+        self.mail = M.MailWorker(env)
+        self.time_left = lambda: 60.0
+        self.integrity, self.integrity_at = [], 0
 
     def tick(self):
         env = self.env
@@ -82,8 +91,10 @@ class Daemon:
         panes = self.fetched if tmux_ok else (
             self.good_panes if self.good_panes is not None and now - self.good_at <= PANES_STALE_OK_MS else None)
         self_name = J.resolve_self(env, regs, panes, ancestor=False)
-        for e in self.reader.read(env.events_path):
+        new = self.reader.read(env.events_path)
+        for e in new:
             self.fold.apply(e, ignore=self_name)
+        self.mail.on_events(new)
         self.fold.prune(now)
         if now - self.usage_at >= USAGE_EVERY_MS:
             self.usage, self.usage_at = J.read_usage(env, now), now
@@ -96,6 +107,11 @@ class Daemon:
                 sessions[name]["changedGen"] = self.gen
         self.prev = sessions
         self.first = False
+        if now - self.integrity_at >= INTEGRITY_EVERY_MS:
+            self.integrity_at = now
+            self.integrity = M.integrity(os.path.dirname(os.path.realpath(__file__)), os.path.join(env.home, "jarvis"))
+            if self.integrity:
+                self.log("Jarvisovy nástroje se změnily mimo instalaci: " + ", ".join(self.integrity[:8]))
         closed = J.read_closed(env)
         for c in closed:
             c["title"] = J.safe_text(c.get("title"), 100) or None
@@ -107,12 +123,17 @@ class Daemon:
             "eventsRotations": self.reader.rotations,
             "counts": _counts(sessions),
             "inbox": [{"name": s["name"], "short": s["short"], **s["attention"]} for s in J.inbox(sessions)],
-            "usage": self.usage, "closed": closed, "errors": self.errors[-5:],
+            "usage": self.usage, "closed": closed, "errors": self.errors[-5:], "integrity": self.integrity,
             "sessions": sessions,
         }
         J.atomic_write(env.path("status.json"), json.dumps(status, ensure_ascii=False, separators=(",", ":")))
         J.atomic_write(env.path("d-state.json"), json.dumps(
             {"v": 1, "gen": self.gen, "reader": self.reader.state(), "fold": self.fold.s}, separators=(",", ":")))
+        # after status.json: a delivery may wait up to 20 s for its confirmation, the picture must not wait for it
+        try:
+            self.mail.tick(sessions, self.fold, now, self.time_left)
+        except Exception:
+            self.log("mail: " + traceback.format_exc(limit=3))
         return status
 
     def _diff(self, sessions, now, tmux_ok=True):
@@ -207,6 +228,8 @@ def _run(a, env, sleep, monotonic):
             pass  # not the main thread (tests)
         d = Daemon(env)
         end = monotonic() + (0 if a.once else a.duration)
+        # --once (tests, by hand) may finish a delivery; a cron run never starts one it cannot finish before 55 s
+        d.time_left = (lambda: 60.0) if a.once else (lambda: end - monotonic())
         while not stop:
             t0 = monotonic()
             try:

@@ -5,7 +5,9 @@
     "disableAutoMode": "disable",
     "allow": [
       "Bash(cr-sessions:*)",
-      "Bash(cr-digest:*)"
+      "Bash(cr-digest:*)",
+      "Bash(cr-mail:*)",
+      "Bash(cr-task:*)"
     ],
     "deny": [
       "Agent",

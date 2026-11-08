@@ -152,6 +152,8 @@ class Env:
     def __init__(self, environ=None, proc_start=None, ppid=None, tmux_panes=None, now_ms=None, pid_ns=None,
                  proc_table=None, my_pid=None):
         e = os.environ if environ is None else environ
+        # kept for the F2 mail provenance (TMUX_PANE, CLAUDECODE): tests pass their own, never the real one
+        self.environ = e
         self.home = e.get("HOME") or os.path.expanduser("~")
         self.cr = os.path.join(self.home, ".claude-remote")
         # JARVIS_STATE_DIR: everything this layer WRITES (status.json, cursor, the daemon's state) lives here and

@@ -22,6 +22,7 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
 import jarvislib as J  # noqa: E402
+import jarvismail as M  # noqa: E402
 
 STALE_MS = 120 * 1000
 SAY_MAX = 5
@@ -184,8 +185,11 @@ def read_cursor(env):
     return None
 
 
-def write_cursor(env, gen, at):
-    J.atomic_write(env.path("cursor"), json.dumps({"gen": gen, "at": at}))
+def write_cursor(env, gen, at, mail_at=None):
+    d = {"gen": gen, "at": at}
+    if mail_at is not None:
+        d["mailAt"] = mail_at
+    J.atomic_write(env.path("cursor"), json.dumps(d))
 
 
 # ---------------------------------------------------------------------------------------------------------- commands
@@ -211,22 +215,31 @@ def cmd_delta(env, a, now):
                               "text": "", "title": c.get("title"), "ageMs": now - _i(c.get("atMs")), "bg": False})
     items = [i for i in items if not (i["kind"] == "gone" and i["name"] in closed_names)]
     items = sort_items(items)
-    if st and not a.peek:
-        write_cursor(env, gen, _i(st.get("at")))
+    # F2a mail: replies and delivery problems since the last delta. Its own cursor (ledger time), moved even without
+    # the daemon, so a reply is told once. A first delta tells only what came in the last hour.
+    mail_since = _i((cur or {}).get("mailAt")) or _i((cur or {}).get("at")) or now - 3600 * 1000
+    mail, mail_at = M.digest_items(env, mail_since, now)
+    if not a.peek and (st or cur):
+        if st:
+            write_cursor(env, gen, _i(st.get("at")), mail_at)
+        else:
+            write_cursor(env, _i(cur.get("gen")), _i(cur.get("at")), mail_at)
     busy_n = sum(1 for s in vis.values() if s.get("state") == "busy")
     if a.json:
         return _dump({"gen": gen, "from": (cur or {}).get("gen"), "first": first, "warning": warn, "items": items,
-                      "unchanged": len(vis) - len(picked), "busy": busy_n})
+                      "mail": mail, "unchanged": len(vis) - len(picked), "busy": busy_n})
     if a.say:
         notable = [i for i in items if i["kind"] not in ("busy", "cleared", "idle")]
         empty = "Nic nového." + (f" {works_cz(busy_n)}." if busy_n else "")
-        txt = say_list(notable, empty)
+        txt = say_list(notable, empty if not mail else "")
+        if mail:
+            txt = (txt + " " if txt else "") + " ".join(M.mail_say(i) for i in mail[:SAY_MAX])
         return ("Pozor, Jarvisův démon neběží. " + txt) if warn else txt
     head = f"[jarvis delta {'start' if first else str(cur['gen']) + '→' + str(gen)} · {_hm(now)}] {DATA_NOTE}"
     lines = [head] + ([f"⚠ {warn}"] if warn else [])
     main = [i for i in items if i["kind"] != "busy"]
     busy = [i for i in items if i["kind"] == "busy"]
-    body = [line_of(i) for i in main]
+    body = [M.mail_line(i) for i in mail] + [line_of(i) for i in main]
     if busy:
         body.append("~ pracuje: " + ", ".join(i["short"] for i in busy))
     if not body:
@@ -264,6 +277,9 @@ def cmd_brief(env, a, now):
     lines = [f"[jarvis brief · {_hm(now)} · {len(vis)} sessions: {cz}] {DATA_NOTE}"]
     if warn:
         lines.append(f"⚠ {warn}")
+    bad = (st or {}).get("integrity")
+    if bad:
+        lines.append("⚠ Jarvisovy nástroje se změnily mimo instalaci: " + ", ".join(J.safe_name(b, 80) for b in bad[:6]))
     ul = usage_line(usage)
     if ul:
         lines.append("Limity: " + ul)

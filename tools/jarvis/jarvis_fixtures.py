@@ -56,8 +56,9 @@ class Fx:
     def close(self):
         self._td.cleanup()
 
-    def env(self, **kw):
+    def env(self, environ_extra=None, **kw):
         environ = {"HOME": self.home, "JARVIS_STATE_DIR": self.state, "JARVIS_TMUX": ""}
+        environ.update(environ_extra or {})
         # a pid no fixture uses, so the "claude above me" self detection never matches by accident
         kw.setdefault("my_pid", 999999)
         return J.Env(environ=environ, proc_start=lambda pid: self.procs.get(pid), ppid=lambda pid: self.ppids.get(pid),

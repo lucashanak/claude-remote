@@ -32,14 +32,39 @@ class InstallTest(unittest.TestCase):
         lib = os.path.join(self.prefix, "lib", "jarvis")
         cur = os.path.realpath(os.path.join(lib, "current"))
         self.assertTrue(cur.startswith(os.path.realpath(lib) + os.sep))
-        self.assertEqual(sorted(os.listdir(cur)), ["cr_digest.py", "cr_sessions.py", "jarvis_d.py", "jarvislib.py"])
+        self.assertEqual(sorted(os.listdir(cur)), ["SHA256SUMS", "cr_digest.py", "cr_mail.py", "cr_sessions.py",
+                                                   "cr_task.py", "jarvis_d.py", "jarvislib.py", "jarvismail.py"])
         for b, f in (("cr-sessions", "cr_sessions.py"), ("cr-digest", "cr_digest.py"), ("jarvis-d", "jarvis_d.py")):
             p = os.path.join(self.prefix, "bin", b)
             self.assertTrue(os.path.islink(p))
             self.assertEqual(os.path.realpath(p), os.path.join(cur, f))
             self.assertTrue(os.access(p, os.X_OK))
         self.assertIn("* * * * * " + os.path.join(self.prefix, "bin", "jarvis-d"), r.stdout)
-        self.assertEqual(os.listdir(self.home), [])  # nothing outside the prefix
+        # nothing outside the prefix except the default mail allowlist (only the test session)
+        allow = os.path.join(self.home, ".claude-remote", "jarvis", "mail-allow")
+        with open(allow) as f:
+            self.assertEqual([l for l in f.read().splitlines() if not l.startswith("#")],
+                             ["claude-server-jarvis-test--jarvis-test"])
+        self.assertEqual(os.listdir(self.home), [".claude-remote"])
+        self.assertEqual(os.stat(os.path.dirname(allow)).st_mode & 0o777, 0o700)
+        # the release records what it installed, and jarvismail.integrity finds nothing changed
+        import sys
+        sys.path.insert(0, HERE)
+        import jarvismail
+        self.assertEqual(jarvismail.integrity(cur), [])
+        os.chmod(os.path.join(cur, "cr_mail.py"), 0o644)
+        with open(os.path.join(cur, "cr_mail.py"), "a") as f:
+            f.write("# changed\n")
+        self.assertEqual(jarvismail.integrity(cur), [os.path.basename(cur) + "/cr_mail.py"])
+
+    def test_an_existing_allowlist_is_left_alone(self):
+        d = os.path.join(self.home, ".claude-remote", "jarvis")
+        os.makedirs(d)
+        with open(os.path.join(d, "mail-allow"), "w") as f:
+            f.write("claude-server-x--y\n")
+        self.assertEqual(self.install().returncode, 0)
+        with open(os.path.join(d, "mail-allow")) as f:
+            self.assertEqual(f.read(), "claude-server-x--y\n")
 
     def test_installed_command_runs(self):
         self.install()

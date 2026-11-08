@@ -1,0 +1,190 @@
+#!/usr/bin/env python3
+"""cr-mail: Jarvis's mail to other sessions (F2a). The invariants live in jarvismail.py, not here.
+
+    cr-mail send --to <alias|name> [--task t-…] "<text>"   Jarvis only, on a fresh prompt of Lukáš's
+    cr-mail status [<m-id>] [--json]                         the queue, or one message with its reply
+    cr-mail inbox [--all] [--json]                           replies and problems of the last 24 h
+    cr-mail cancel <m-id>                                    a message that is queued or uncertain
+    cr-mail reply <m-id> "<text>"                            the ADDRESSEE's explicit reply (overrides the implicit one)
+    cr-mail off                                              "Jarvisi, stop": no paste until `cr-mail on`
+    cr-mail on                                               Lukáš only (refused inside any Claude session)
+    cr-mail prompt-seen                                      Jarvis's UserPromptSubmit hook (payload on stdin)
+
+Exit codes: 0 done, 2 refused (the reason, in Czech, on stderr), 1 internal error.
+The text goes as ONE argument: Jarvis's gate lets no heredoc, pipe or `$` through. The CLI checks it again (one line,
+no control characters, ≤ 2000 characters, no OMC mode words) and pastes only one line into the target:
+`[jarvis m-<id>] <subject> · Celé znění: cat <path>`; the full text is in the file.
+"""
+import argparse
+import json
+import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+import jarvislib as J  # noqa: E402
+import jarvismail as M  # noqa: E402
+
+STATE_CZ = {"queued": "ve frontě", "delivering": "doručuje se", "delivered": "doručeno, čeká na odpověď",
+            "uncertain": "NEJISTÉ", "replied": "odpovězeno", "expired": "vypršelo", "cancelled": "zrušeno"}
+BLOCK_CZ = {"busy": "pracuje", "waiting": "čeká na Lukáše", "settling": "právě doběhla", "ask": "otevřený dotaz",
+            "perm": "čeká na povolení", "bg": "běží úloha na pozadí", "draft": "rozepsaný vstup",
+            "client_active": "někdo v ní píše", "mode": "copy-mode", "hold": "pozdrženo aplikací",
+            "selector": "otevřený výběr", "busy-screen": "pracuje (obrazovka)", "screen-unknown": "neznámá obrazovka",
+            "dead": "neběží", "no-claude": "bez claude", "off": "pošta vypnutá", "rate": "limit vložení",
+            "rate-target": "limit na cíl", "locked": "doručuje se", "unknown": "neznámý stav",
+            "clients-unknown": "nevím, kdo je připojen"}
+
+
+class Refused(Exception):
+    pass
+
+
+def _age(now, ms):
+    return J.ago_short(now - ms) if ms else "?"
+
+
+def _row(r, now):
+    blk = r.get("lastBlock") if r["state"] == "queued" else None
+    extra = f" · blokuje: {BLOCK_CZ.get(blk, blk)}" if blk else ""
+    task = f" · {r['task']}" if r.get("task") else ""
+    return (f"{r['id']} → {J.short_name(r['to'])} · {STATE_CZ.get(r['state'], r['state'])}{extra}{task} · "
+            f"{_age(now, r.get('created'))} · «{M.data_text(r.get('subject'), 80)}»")
+
+
+def cmd_send(m, a, out):
+    rec, why = m.send(a.to, a.text, task=a.task)
+    if why:
+        raise Refused(why)
+    out.write(f"{rec['id']} ve frontě pro {J.short_name(rec['to'])}; doručí se, až bude nečinná a vstup prázdný. "
+              f"Stav: cr-mail status {rec['id']}\n")
+
+
+def cmd_status(m, a, out):
+    now = m.env.now_ms()
+    if a.id:
+        r = m.get(a.id)
+        if not r:
+            raise Refused(f"zpráva {a.id} neexistuje")
+        if a.json:
+            d = dict(r, reply=M.data_text(r.get("reply"), M.REPLY_MAX))
+            out.write(json.dumps(d, ensure_ascii=False, indent=1) + "\n")
+            return
+        out.write(f"[cr-mail: {M.DATA_NOTE}]\n{_row(r, now)}\n")
+        if r.get("reason"):
+            out.write(f"důvod: {r['reason']}\n")
+        if r.get("reply"):
+            how = "výslovná" if r.get("replyBy") == "explicit" else "poslední zpráva tahu"
+            out.write(f"odpověď ({how}, {_age(now, r.get('replyAt'))}): «{M.data_text(r['reply'], 3000)}»\n")
+        return
+    recs = [r for r in m.all() if r["state"] in M.ACTIVE]
+    if a.json:
+        out.write(json.dumps({"off": m.off(), "messages": recs}, ensure_ascii=False, indent=1) + "\n")
+        return
+    head = "[cr-mail" + (" · VYPNUTO (cr-mail on zapne)" if m.off() else "") + f": {M.DATA_NOTE}]"
+    out.write(head + "\n" + ("\n".join(_row(r, now) for r in recs) if recs else "žádná rozpracovaná pošta") + "\n")
+
+
+def cmd_inbox(m, a, out):
+    now = m.env.now_ms()
+    recs = [r for r in m.all() if r["state"] in ("replied", "uncertain", "expired")
+            and (a.all or now - J._int(r.get("updatedAt")) < 24 * 3600 * 1000)]
+    recs.sort(key=lambda r: -J._int(r.get("updatedAt")))
+    if a.json:
+        out.write(json.dumps([dict(r, reply=M.data_text(r.get("reply"), M.REPLY_MAX)) for r in recs],
+                             ensure_ascii=False, indent=1) + "\n")
+        return
+    lines = [f"[cr-mail inbox: {M.DATA_NOTE}]"]
+    for r in recs:
+        lines.append(_row(r, now))
+        if r.get("reply"):
+            lines.append(f"  «{M.data_text(r['reply'], 300)}»")
+    if len(lines) == 1:
+        lines.append("nic")
+    out.write("\n".join(lines) + "\n")
+
+
+def cmd_cancel(m, a, out):
+    why = m.cancel(a.id)
+    if why:
+        raise Refused(why)
+    out.write(f"{a.id} zrušena\n")
+
+
+def cmd_reply(m, a, out):
+    why = m.reply(a.id, a.text)
+    if why:
+        raise Refused(why)
+    out.write(f"odpověď na {a.id} uložena\n")
+
+
+def cmd_off(m, a, out):
+    m.ensure()
+    J.atomic_write(m.env.path("off"), json.dumps({"at": m.env.now_ms(), "by": "cr-mail off"}) + "\n")
+    with m.lock():
+        m.log("off")
+    out.write("Pošta je vypnutá: nic se nevkládá, fronta čeká. Zapne ji jen Lukáš: cr-mail on\n")
+
+
+def cmd_on(m, a, out):
+    # inside any Claude session (Jarvis included) CLAUDECODE=1: the switch back is Lukáš's own act
+    if m.env.environ.get("CLAUDECODE"):
+        raise Refused("cr-mail on smí jen Lukáš ze svého shellu, ne Claude session")
+    try:
+        os.unlink(m.env.path("off"))
+    except FileNotFoundError:
+        pass
+    with m.lock():
+        m.log("on")
+    out.write("Pošta je zapnutá.\n")
+
+
+def cmd_prompt_seen(m, a, out):
+    try:
+        payload = json.loads(sys.stdin.read(1024 * 1024) or "null")
+    except ValueError:
+        payload = None
+    why = m.prompt_seen(payload, m.env.now_ms())
+    if why:
+        raise Refused(why)
+
+
+def main(argv=None, env=None, out=None, err=None, mail=None):
+    out, err = out or sys.stdout, err or sys.stderr
+    ap = argparse.ArgumentParser(prog="cr-mail", description="Jarvis mail (F2a).")
+    sub = ap.add_subparsers(dest="cmd", required=True)
+    p = sub.add_parser("send")
+    p.add_argument("--to", required=True)
+    p.add_argument("--task")
+    p.add_argument("text")
+    p = sub.add_parser("status")
+    p.add_argument("id", nargs="?")
+    p.add_argument("--json", action="store_true")
+    p = sub.add_parser("inbox")
+    p.add_argument("--all", action="store_true")
+    p.add_argument("--json", action="store_true")
+    p = sub.add_parser("cancel")
+    p.add_argument("id")
+    p = sub.add_parser("reply")
+    p.add_argument("id")
+    p.add_argument("text")
+    sub.add_parser("off")
+    sub.add_parser("on")
+    sub.add_parser("prompt-seen")
+    a = ap.parse_args(argv)
+    env = env or J.Env()
+    m = mail or M.Mail(env)
+    fn = {"send": cmd_send, "status": cmd_status, "inbox": cmd_inbox, "cancel": cmd_cancel, "reply": cmd_reply,
+          "off": cmd_off, "on": cmd_on, "prompt-seen": cmd_prompt_seen}[a.cmd]
+    old = os.umask(0o077)
+    try:
+        fn(m, a, out)
+    except Refused as e:
+        err.write(f"cr-mail: {e}\n")
+        return 2
+    finally:
+        os.umask(old)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

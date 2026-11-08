@@ -6,7 +6,12 @@
 #
 # Always exit 0: exit 2 from UserPromptSubmit BLOCKS the prompt and erases it, so a broken digest must never cost
 # Lukáš his message. A failure becomes one line the model can pass on.
-cat >/dev/null 2>&1 || true
+#
+# F2a: first the payload goes to `cr-mail prompt-seen`, which records this prompt's id and time in <state>/last-prompt.
+# `cr-mail send` needs a prompt of Lukáš's younger than 10 minutes (I6); a prompt that starts with `[jarvis` is not
+# his and cancels the previous one. Before the delta, so a send in this very turn sees it.
+payload="$(head -c 1048576 2>/dev/null)" || payload=""
+printf '%s' "$payload" | "@BIN@/cr-mail" prompt-seen >/dev/null 2>&1 || true
 
 out="$("@BIN@/cr-digest" delta --max-chars 8000 2>/dev/null)"
 rc=$?

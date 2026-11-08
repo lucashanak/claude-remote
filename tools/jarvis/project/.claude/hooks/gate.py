@@ -19,14 +19,18 @@ interpreter (127) lets the call through (f1-spike 4f). So every path that is not
 including our own bugs. The interpreter is called by absolute path with the script as an argument: if this file
 goes missing, python3 itself exits 2 ("can't open file"), which blocks as well.
 
-Extending (F2): add the command and its subcommands to ALLOWED, e.g. "cr-mail": {"reply"}; a command that takes
-free text must take it on stdin, never argv (navrh §5 I6, point 19), so the argument rules below stay as they are.
-F1 is read-only: only the read subcommands of cr-sessions and cr-digest.
+F2a adds cr-mail and cr-task. Their free text (a message, a task title) goes as ONE argument in quotes, because the
+gate lets no heredoc, pipe or `$` through: a token wrapped whole in '…' or "…" may hold spaces, Czech and punctuation
+(TEXT), every other token stays an ARG. Bash takes a quoted word literally (no glob, tilde or brace expansion; the
+line shape already removed `$`, backtick and backslash, the only things double quotes still expand), so the gate
+judges the same words bash will pass. Not allowed to Jarvis: `cr-mail reply` (the addressee's), `cr-mail on`
+(Lukáš's switch) and `cr-mail prompt-seen` (the hook's: it would mint Jarvis a fresh "Lukáš's prompt").
 """
 import json
 import re
 import shlex
 import sys
+import unicodedata
 
 # Tools the model may call at all (f1-spike: with the deny list the model has AskUserQuestion, Bash, Read, ToolSearch
 # and the server-side advisor). Everything else, MCP included, exits 2.
@@ -36,7 +40,11 @@ MODE = "dontAsk"
 ALLOWED = {
     "cr-sessions": frozenset({"list", "show", "tail"}),
     "cr-digest": frozenset({"delta", "brief", "waiting", "usage"}),
+    "cr-mail": frozenset({"send", "status", "inbox", "cancel", "off"}),
+    "cr-task": frozenset({"add", "list", "show", "done", "fail"}),
 }
+# commands whose arguments may be quoted free text
+TEXT_CMDS = frozenset({"cr-mail", "cr-task"})
 HELP = frozenset({"-h", "--help"})
 # Options a subcommand cannot run without. `cr-digest delta` without --peek moves the cursor the UserPromptSubmit hook
 # reads from, so what changed (a perm, an ask) would never reach Lukáš's next delta.
@@ -48,6 +56,34 @@ LINE = re.compile(r"(?:%s)(?: [^;&|$`<>()\\\x00-\x1f\x7f]*)?" % "|".join(re.esca
 # Each argument after shell quoting is removed: session names, numbers and options. No glob, tilde or brace characters,
 # so bash cannot turn one argument into something else.
 ARG = re.compile(r"[\w .,:@%+=/-]+")
+# The inside of one quoted token. LINE has already removed ; & | $ ` < > ( ) \ and control characters.
+TEXT = re.compile(r"[^\x00-\x1f\x7f]{1,2000}")
+
+
+def split_quoted(line):
+    """[(word, quoted)] split on spaces, or None. A quoted token is wrapped WHOLE in one pair of ' or "; a quote
+    anywhere else (`a"b"`, `"a"b`, unbalanced) is refused, so no token is half literal and half expanded."""
+    out, i, n = [], 0, len(line)
+    while i < n:
+        if line[i] == " ":
+            i += 1
+            continue
+        if line[i] in "'\"":
+            q = line[i]
+            j = line.find(q, i + 1)
+            if j < 0 or (j + 1 < n and line[j + 1] != " "):
+                return None
+            out.append((line[i + 1:j], True))
+            i = j + 1
+        else:
+            j = line.find(" ", i)
+            j = n if j < 0 else j
+            w = line[i:j]
+            if "'" in w or '"' in w:
+                return None
+            out.append((w, False))
+            i = j
+    return out
 
 
 def check(cmd):
@@ -58,7 +94,9 @@ def check(cmd):
     # different line than the one bash runs
     line = cmd.rstrip("\n")
     if not LINE.fullmatch(line):
-        return "only one cr-sessions or cr-digest command, without ; & | $ ` < > ( ) \\ or a line break"
+        return "only one cr-sessions, cr-digest, cr-mail or cr-task command, without ; & | $ ` < > ( ) \\ or a line break"
+    if line.split(" ", 1)[0] in TEXT_CMDS:
+        return check_text_cmd(line)
     words = shlex.split(line)  # unbalanced quotes raise -> exit 2
     name, args = words[0], words[1:]
     if name not in ALLOWED:
@@ -71,6 +109,24 @@ def check(cmd):
     need = REQUIRED.get((name, args[0]), frozenset()) - set(args[1:])
     if need:
         return f"{name} {args[0]} needs {' '.join(sorted(need))}"
+    return None
+
+
+def check_text_cmd(line):
+    toks = split_quoted(line)
+    if not toks or toks[0][1]:
+        return "unbalanced or misplaced quotes; put free text in one pair of quotes"
+    if len(toks) != len(shlex.split(line)):
+        return "the quoting is ambiguous"
+    name, args = toks[0][0], toks[1:]
+    if not args or args[0][1] or (args[0][0] not in ALLOWED[name] and args[0][0] not in HELP):
+        return f"{name} takes one of: {', '.join(sorted(ALLOWED[name]))}"
+    for w, quoted in args:
+        if quoted:
+            if not TEXT.fullmatch(w) or any(unicodedata.category(c) in ("Cc", "Cf", "Cs", "Co", "Zl", "Zp") for c in w):
+                return "quoted text must be one line without control or format characters"
+        elif not ARG.fullmatch(w):
+            return f"argument {w[:40]!r} has characters outside letters, digits and . , : @ % + = / - (quote free text)"
     return None
 
 

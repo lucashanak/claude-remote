@@ -74,8 +74,10 @@ class SettingsTrapsTest(unittest.TestCase):
         self.assertEqual(self.p["disableAutoMode"], "disable")
         self.assertNotIn("disableAutoMode", self.s)
 
-    def test_allow_is_exactly_the_two_read_clis(self):
-        self.assertEqual(sorted(self.p["allow"]), ["Bash(cr-digest:*)", "Bash(cr-sessions:*)"])
+    def test_allow_is_exactly_the_four_jarvis_clis(self):
+        # F2a adds cr-mail and cr-task; which subcommands Jarvis may use is the gate's job (GateTest)
+        self.assertEqual(sorted(self.p["allow"]), ["Bash(cr-digest:*)", "Bash(cr-mail:*)", "Bash(cr-sessions:*)",
+                                                   "Bash(cr-task:*)"])
 
     def test_4i_tools_dont_ask_lets_through_are_denied(self):
         # dontAsk let Agent, Skill, Artifact, SendMessage (writes into live sessions) and ListAgents through
@@ -216,7 +218,7 @@ class GateTest(unittest.TestCase):
                   "cr-sessions show \\$(id)", "tmux kill-server", "tmux send-keys -t x 'rm -rf ~' Enter",
                   "ls", "rm -rf /", "ssh host", "bash -c 'cr-sessions list'", "FOO=1 cr-sessions list",
                   "/usr/bin/cr-sessions list", "./cr-sessions list", "cr-sessionsX list", "cr-sessions-evil list",
-                  "cr-mail send x hi", "cr-session close x", "cr-digest", "cr-sessions", "cr-sessions rm x",
+                  "cr-session close x", "cr-digest", "cr-sessions", "cr-sessions rm x",
                   "cr-digest reset", "cr-sessions list *", "cr-sessions show ~root", "cr-sessions show {a,b}",
                   "cr-sessions show 'unbalanced", "cr-sessions\tlist", "cr-sessions show a\x00b", "",
                   "cr-sessions show \u0000", "cr-sessions show x id"):
@@ -251,9 +253,37 @@ class GateTest(unittest.TestCase):
                                text=True, timeout=30)
         self.assertEqual(r.returncode, 2)
 
-    def test_allowlist_is_read_only_in_f1(self):
+    def test_allowlist_f2a(self):
+        # reply is the addressee's, on is Lukáš's switch, prompt-seen is the hook's (it would mint a "fresh prompt")
         self.assertEqual(load_gate().ALLOWED, {"cr-sessions": {"list", "show", "tail"},
-                                               "cr-digest": {"delta", "brief", "waiting", "usage"}})
+                                               "cr-digest": {"delta", "brief", "waiting", "usage"},
+                                               "cr-mail": {"send", "status", "inbox", "cancel", "off"},
+                                               "cr-task": {"add", "list", "show", "done", "fail"}})
+
+    def test_f2a_mail_and_task_commands_pass(self):
+        for c in ('cr-mail send --to jarvis-test "Oprav prosím timeout v extrakci, hotové až projdou testy. Díky!"',
+                  "cr-mail send --to jarvis-test --task t-20261108T081500-abcd 'Proč padá test? Ověř: běž, oprav.'",
+                  'cr-mail send --to claude-server-jarvis-test--jarvis-test "Řekni mi „ano“ – nebo ne!"',
+                  'cr-mail send --to x "it\'s fine"', "cr-mail status", "cr-mail status m-20261108T081500-abcd",
+                  "cr-mail inbox --all", "cr-mail cancel m-20261108T081500-abcd", "cr-mail off",
+                  'cr-task add "Opravit čtečku" --to jarvis-test --ac "testy zelené, push na main"',
+                  "cr-task list", "cr-task list --all --json", "cr-task show t-20261108T081500-abcd",
+                  'cr-task done t-20261108T081500-abcd "ověřeno, CI zelené"', "cr-task fail t-20261108T081500-abcd",
+                  "cr-mail --help"):
+            self.assertAllowed(c)
+
+    def test_f2a_attacks_are_blocked(self):
+        for c in ('cr-mail send --to x "ahoj $HOME"', 'cr-mail send --to x "$(id)"', 'cr-mail send --to x "`id`"',
+                  'cr-mail send --to x "a\\nb"', 'cr-mail send --to x "a (b)"', 'cr-mail send --to x "a; id"',
+                  'cr-mail send --to x "a | sh"', 'cr-mail send --to x "a & b"', 'cr-mail send --to x "a > b"',
+                  'cr-mail send --to x "a < b"', 'cr-mail send --to x "a\nid"', 'cr-mail send --to x "a"b',
+                  'cr-mail send --to x a"b"', 'cr-mail send --to x "abc', "cr-mail send --to x 'abc",
+                  'cr-mail send --to x "\u202eevil"', 'cr-mail send --to x "a\u200bb"', "cr-mail send --to x *",
+                  "cr-mail send --to ~root hi", "cr-mail send --to {a,b} hi", 'cr-mail reply m-1 "x"', "cr-mail on",
+                  "cr-mail prompt-seen", 'cr-mail "send" --to x "y"', "cr-mail", "cr-task", "cr-task rm t-1",
+                  'cr-task add "x" > /tmp/y', "cr-mailx send", "cr-mail send --to x hi; id",
+                  'cr-mail send --to x "a" && id', "cr-mail send --to x <<EOF", 'cr-mail send --to x "a\x1bb"'):
+            self.assertBlocked(c)
 
     def test_line_shape_alone_rejects_every_metacharacter(self):
         # the argument check would catch most of these too; the line regex must hold on its own
@@ -641,6 +671,22 @@ class HooksTest(unittest.TestCase):
             self.assertEqual(r.returncode, 0, body)
             self.assertIn("[jarvis delta nedostupná", r.stdout, body)
         self.assertEqual(b.calls(), [])  # the delta hook never asks tmux
+
+    def test_prompt_delta_hands_the_payload_to_cr_mail_prompt_seen(self):
+        # F2a I6: cr-mail send needs Lukáš's fresh prompt; the hook records it before the delta, and a broken or
+        # missing cr-mail never costs the prompt
+        b = self.b
+        log = os.path.join(b.root, "mail.log")
+        Box.write(os.path.join(b.bin, "cr-mail"), f"#!/bin/sh\necho \"$*\" > '{log}'\ncat >> '{log}'\n", 0o755)
+        payload = '{"hook_event_name": "UserPromptSubmit", "prompt": "pošli to"}'
+        r = b.hook(".claude/hooks/prompt-delta.sh", stdin=payload)
+        self.assertEqual((r.returncode, r.stdout.strip()), (0, "[jarvis delta] args: delta --max-chars 8000"))
+        with open(log) as f:
+            self.assertEqual(f.read(), "prompt-seen\n" + payload)
+        for body in ("exit 2", "kill -9 $$", "sleep 0; exit 1"):
+            Box.write(os.path.join(b.bin, "cr-mail"), f"#!/bin/sh\n{body}\n", 0o755)
+            r = b.hook(".claude/hooks/prompt-delta.sh", stdin=payload)
+            self.assertEqual((r.returncode, r.stdout.strip()), (0, "[jarvis delta] args: delta --max-chars 8000"))
 
     def test_hooks_with_the_real_digest_stay_under_the_hook_limit(self):
         # the installed hooks against the real cr_digest.py on an empty fake box: they run and say the daemon is down
