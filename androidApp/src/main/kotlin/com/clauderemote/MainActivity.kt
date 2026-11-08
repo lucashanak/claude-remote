@@ -782,15 +782,19 @@ class MainActivity : FragmentActivity() {
     private fun handleJarvisUndoIntent(intent: Intent?) {
         if (intent == null) return
         if (intent.flags and Intent.FLAG_ACTIVITY_LAUNCHED_FROM_HISTORY != 0) return
-        val serverId = intent.getStringExtra(EXTRA_UNDO_SERVER)
-        val tmux = intent.getStringExtra(EXTRA_UNDO_TMUX)
-        intent.removeExtra(EXTRA_UNDO_SERVER)
-        intent.removeExtra(EXTRA_UNDO_TMUX)
-        if (serverId.isNullOrBlank() || tmux.isNullOrBlank()) return
-        setIntent(intent)
-        FileLogger.log("MainActivity", "Jarvis undo -> $tmux on $serverId")
+        // only our own action counts (rev-f4-app LOW): any other intent carrying the extras is not "Vrátit"
+        val req = com.clauderemote.session.JarvisUndo.requestFrom(
+            intent.action, intent.getStringExtra(EXTRA_UNDO_SERVER), intent.getStringExtra(EXTRA_UNDO_TMUX),
+        )
+        if (intent.hasExtra(EXTRA_UNDO_SERVER) || intent.hasExtra(EXTRA_UNDO_TMUX)) {
+            intent.removeExtra(EXTRA_UNDO_SERVER)
+            intent.removeExtra(EXTRA_UNDO_TMUX)
+            setIntent(intent)
+        }
+        req ?: return
+        FileLogger.log("MainActivity", "Jarvis undo -> ${req.tmux} on ${req.serverId}")
         JarvisNotifier.cancel(applicationContext)
-        sessionOrchestrator.jarvisUndoRequests.value = com.clauderemote.session.JarvisUndoRequest(serverId, tmux)
+        sessionOrchestrator.jarvisUndoRequests.value = req
     }
 
     /**
@@ -818,7 +822,7 @@ class MainActivity : FragmentActivity() {
         /** The intent of "Vrátit" for a close Jarvis announced: [tmux] on [serverId]. */
         fun jarvisUndoIntent(context: android.content.Context, serverId: String, tmux: String): Intent =
             Intent(context, MainActivity::class.java).apply {
-                action = "com.clauderemote.JARVIS_UNDO"
+                action = com.clauderemote.session.JarvisUndo.INTENT_ACTION
                 putExtra(EXTRA_UNDO_SERVER, serverId)
                 putExtra(EXTRA_UNDO_TMUX, tmux)
                 flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP

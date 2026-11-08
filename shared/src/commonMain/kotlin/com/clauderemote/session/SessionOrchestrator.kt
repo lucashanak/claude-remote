@@ -3451,8 +3451,11 @@ class SessionOrchestrator(
      */
     val jarvisUndoRequests = kotlinx.coroutines.flow.MutableStateFlow<JarvisUndoRequest?>(null)
 
-    /** (server id, tmux name) of headless undos under way: a second tap on the wrist waits for nothing, it is said so. */
-    private val jarvisUndoing = java.util.concurrent.ConcurrentHashMap.newKeySet<Pair<String, String>>()
+    /**
+     * The undos under way — ONE set for all three ways in: [undoJarvisClose] (the watch) and the App's restore of
+     * [jarvisUndoRequests] (the phone notification, the Velín) both hold it for the whole read + restore (MED-1).
+     */
+    val jarvisUndoInFlight = JarvisUndoInFlight()
 
     /**
      * What "Vrátit" of [tmux] on [server] would restore ([JarvisUndo.pick] over the server's `closed.jsonl`). One
@@ -3474,18 +3477,14 @@ class SessionOrchestrator(
     suspend fun undoJarvisClose(serverId: String, tmux: String): String {
         val name = JarvisUndo.alias(tmux)
         val server = serverStorage.getServer(serverId) ?: return "Server, na kterém „$name“ běžela, už v aplikaci není."
-        val key = server.id to tmux
-        if (!jarvisUndoing.add(key)) return "„$name“ už vracím."
-        try {
-            return JarvisUndo.undo(
+        return jarvisUndoInFlight.run(server.id, tmux) {
+            JarvisUndo.undo(
                 tmux, server.name, System.currentTimeMillis() / 1000,
                 read = { readClosedRecords(server) },
                 restore = { record, fresh -> restoreClosed(server, record, freshSessionId = fresh).first },
                 newId = { java.util.UUID.randomUUID().toString() },
             )
-        } finally {
-            jarvisUndoing.remove(key)
-        }
+        } ?: JarvisUndo.busyText(tmux)
     }
 
     /**

@@ -4,6 +4,7 @@ import com.clauderemote.session.service.ClosedRecord
 import com.clauderemote.session.service.JarvisAlert
 import com.clauderemote.session.service.JarvisAlertKind
 import com.clauderemote.session.service.RestoreResult
+import kotlinx.coroutines.async
 import kotlinx.coroutines.runBlocking
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -147,5 +148,70 @@ class JarvisUndoTest {
         assertEquals("Konverzace „soniox“ už běží.", say(RestoreResult.RunningElsewhere(null)))
         assertTrue("přihlášení" in say(RestoreResult.LoginRequired))
         assertTrue("nedorazila" in say(RestoreResult.Unknown), "an unknown result is said as such, never retried")
+    }
+
+    // ---- rev-f4-app fixes ---------------------------------------------------------------------------------------
+
+    @Test fun theNewestRecordIsTheNewestByTimeNotByPlace() {
+        // LOW-1: a list that arrives oldest first must not undo an older Jarvis close past a newer close by the app
+        val oldestFirst = listOf(rec(at = now - 7200, by = "jarvis"), rec(at = now - 60, by = "app:phone-1"))
+        assertTrue("někdo jiný" in assertIs<JarvisUndo.Pick.No>(JarvisUndo.pick(oldestFirst, name, now)).why)
+        val newer = rec(at = now - 60)
+        assertEquals(newer, assertIs<JarvisUndo.Pick.Found>(JarvisUndo.pick(listOf(rec(at = now - 7200), newer), name, now)).record)
+        // a record without a time may be the newest: nothing is undone past it
+        assertIs<JarvisUndo.Pick.No>(JarvisUndo.pick(listOf(rec(at = now - 60), rec(at = null, by = "app:phone-1")), name, now))
+        val untimed = listOf(rec(at = now - 60), rec(at = null, by = "jarvis"))
+        assertTrue("kdy" in assertIs<JarvisUndo.Pick.No>(JarvisUndo.pick(untimed, name, now)).why)
+    }
+
+    @Test fun oneInFlightSetHoldsAnUndoUntilItEnds() = runBlocking {
+        // MED-1: a second "Vrátit" of the same session while the first runs does nothing
+        val f = JarvisUndoInFlight()
+        val started = kotlinx.coroutines.CompletableDeferred<Unit>()
+        val release = kotlinx.coroutines.CompletableDeferred<Unit>()
+        var runs = 0
+        val first = async(kotlinx.coroutines.Dispatchers.Default) {
+            f.run("srv", name) { runs++; started.complete(Unit); release.await(); "first" }
+        }
+        started.await()
+        assertTrue(f.isRunning("srv", name))
+        assertEquals(null, f.run("srv", name) { runs++; "second" })
+        assertEquals("other", f.run("srv", "claude-server-x--other") { "other" }, "another session is not blocked")
+        assertEquals("other", f.run("srv2", name) { "other" }, "nor the same name on another server")
+        release.complete(Unit)
+        assertEquals("first", first.await())
+        assertEquals(1, runs)
+        assertTrue(f.state.value.isEmpty())
+        // a failing undo lets go too
+        runCatching { f.run("srv", name) { error("boom") } }
+        assertTrue(f.tryEnter("srv", name))
+    }
+
+    @Test fun theVelinButtonIsOffWhileItsUndoRuns() {
+        val a = alert(server = "srv")
+        assertEquals(true, JarvisUndo.undoButtonEnabled(a, emptySet()))
+        assertEquals(false, JarvisUndo.undoButtonEnabled(a, setOf("srv" to name)))
+        assertEquals(true, JarvisUndo.undoButtonEnabled(a, setOf("other" to name)))
+        assertEquals(null, JarvisUndo.undoButtonEnabled(alert(text = "soniox doběhla."), emptySet()), "no button at all")
+    }
+
+    @Test fun onlyTheUndoIntentActionCarriesARequest() {
+        // LOW: extras on some other intent are not "Vrátit"
+        assertEquals(JarvisUndoRequest("s", name), JarvisUndo.requestFrom(JarvisUndo.INTENT_ACTION, "s", name))
+        assertEquals(null, JarvisUndo.requestFrom("android.intent.action.MAIN", "s", name))
+        assertEquals(null, JarvisUndo.requestFrom(null, "s", name))
+        assertEquals(null, JarvisUndo.requestFrom(JarvisUndo.INTENT_ACTION, "", name))
+        assertEquals(null, JarvisUndo.requestFrom(JarvisUndo.INTENT_ACTION, "s", null))
+    }
+
+    @Test fun aHeadlessUndoThatDoesNotAnswerIsSaidSoInTime() = runBlocking {
+        // LOW: the watch's undo blocks the phone's listener thread; it must end even when the restore never answers
+        val text = kotlinx.coroutines.withTimeout(5_000) {
+            JarvisUndo.undo(
+                name, "box", now, read = { ClosedRead.Ok(listOf(rec())) },
+                restore = { _, _ -> kotlinx.coroutines.awaitCancellation() }, newId = { "n" }, timeoutMs = 200,
+            )
+        }
+        assertTrue("neodpovědělo včas" in text && "možná" in text, text)
     }
 }

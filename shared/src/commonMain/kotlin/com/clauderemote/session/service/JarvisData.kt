@@ -209,21 +209,41 @@ object JarvisData {
     /** The `cr-mail status --json` half of [PROPOSALS] (for [mailOff]). */
     fun mailHalf(combined: String?): String? = splitProposals(combined).second
 
+    /**
+     * The server's clock at the read ([PROPOSALS] ends with it), epoch ms; null from a server whose `date` has no
+     * `%3N` or an answer cut off. With the device's clock at receipt it gives the skew [expired] corrects by.
+     */
+    fun serverNowMs(combined: String?): Long? {
+        val t = combined ?: return null
+        val i = t.lastIndexOf(NOW_MARK)
+        if (i < 0) return null
+        return t.substring(i + NOW_MARK.length).trim().toLongOrNull()?.takeIf { it > 0 }
+    }
+
     private fun splitProposals(combined: String?): Pair<String?, String?> {
-        val t = combined ?: return null to null
+        val t = combined?.let { c -> c.lastIndexOf(NOW_MARK).let { if (it < 0) c else c.substring(0, it) } } ?: return null to null
         val i = t.indexOf(MAIL_MARK)
         return if (i < 0) t to null else t.substring(0, i) to t.substring(i + MAIL_MARK.length)
     }
 
     /**
      * "Poslat"/"Provést" is enabled only for a proposal whose full text arrived AND was shown whole ([seenWhole]: it
-     * fit, or the user opened "Zobrazit celé"), and that has not lapsed by this device's clock ([nowMs]; the server
-     * refuses a lapsed one anyway, the button only does not offer what cannot work).
+     * fit, or the user opened "Zobrazit celé"), and that has not lapsed ([expired]; the server refuses a lapsed one
+     * anyway, the button only does not offer what cannot work).
      */
-    fun canApprove(p: JarvisProposal, seenWhole: Boolean, nowMs: Long? = null): Boolean =
-        p.fullText && seenWhole && !expired(p, nowMs)
+    fun canApprove(p: JarvisProposal, seenWhole: Boolean, nowMs: Long? = null, skewMs: Long = 0): Boolean =
+        p.fullText && seenWhole && !expired(p, nowMs, skewMs)
 
-    fun expired(p: JarvisProposal, nowMs: Long?): Boolean = nowMs != null && p.expiresMs != null && nowMs >= p.expiresMs
+    /**
+     * Lapsed by the SERVER's clock: `expires` is the server's epoch ms, [nowMs] this device's, [skewMs] = device minus
+     * server as the read measured it ([serverNowMs]) — a phone a few minutes ahead must not kill a live proposal
+     * (rev-f4-app LOW-2). [nowMs] null = not judged (no server time known): the server decides.
+     */
+    fun expired(p: JarvisProposal, nowMs: Long?, skewMs: Long = 0): Boolean =
+        nowMs != null && p.expiresMs != null && nowMs - skewMs >= p.expiresMs
+
+    /** Device minus server clock from a read whose answer arrived at [deviceMs]; null = the server's time unknown. */
+    fun skewMs(combined: String?, deviceMs: Long): Long? = serverNowMs(combined)?.let { deviceMs - it }
 
     /** The card's heading: what approving does, in a few words. */
     fun heading(p: JarvisProposal): String = when (p.kind) {
@@ -280,13 +300,15 @@ object JarvisData {
     const val WATCHES = "${BIN}cr-task watches --json"
     const val MAIL_STATUS = "${BIN}cr-mail status --json"
     private const val MAIL_MARK = "\n__cr_mail__\n"
+    private const val NOW_MARK = "\n__cr_now__ "
 
     /**
      * Every pending proposal and the mail switch in ONE exec (one channel, not two): `cr-jarvis proposals --json`,
      * a marker, `cr-mail status --json`. An older `cr-jarvis` without `proposals` prints usage instead of JSON and the
      * mail half still carries the F3 list ([parseCombinedProposals]).
      */
-    const val PROPOSALS = "${BIN}cr-jarvis proposals --json 2>/dev/null; printf '\\n__cr_mail__\\n'; ${BIN}cr-mail status --json"
+    const val PROPOSALS = "${BIN}cr-jarvis proposals --json 2>/dev/null; printf '\\n__cr_mail__\\n'; ${BIN}cr-mail status --json; " +
+        "printf '\\n__cr_now__ %s\\n' \"\$(date +%s%3N)\""
     const val MODE_READ = "cat ~/.claude-remote/jarvis/mode 2>/dev/null; echo"
 
     fun taskShow(id: String): String {

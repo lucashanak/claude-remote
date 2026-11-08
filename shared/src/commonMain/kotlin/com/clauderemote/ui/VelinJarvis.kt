@@ -54,6 +54,8 @@ internal class JarvisPanelState {
     val taskMail = mutableStateMapOf<String, List<String>>()
 
     var proposals by mutableStateOf<List<JarvisProposal>>(emptyList())
+    /** Device minus server clock at the last proposals read; null = unknown (expiry then not judged here). */
+    var skewMs by mutableStateOf<Long?>(null)
     var mailOff by mutableStateOf(false)
     var mode by mutableStateOf<JarvisMode?>(null)
     var jarvisError by mutableStateOf<String?>(null)
@@ -102,6 +104,7 @@ internal class JarvisPanelState {
                 jarvisError = "Návrhy nejdou načíst (server/Jarvis)"
             } else {
                 proposals = parsed
+                skewMs = JarvisData.skewMs(all, System.currentTimeMillis())
                 mailOff = JarvisData.mailOff(JarvisData.mailHalf(all))
                 jarvisError = null
             }
@@ -280,6 +283,8 @@ internal fun JarvisPane(
     onOpenTmux: (serverId: String, tmux: String) -> Unit,
     onOpenJarvis: (() -> Unit)?,
     onUndoClose: (JarvisAlert) -> Unit,
+    /** Undos under way ([com.clauderemote.session.JarvisUndoInFlight.state]): their button is off. */
+    undoing: Set<Pair<String, String>>,
     modifier: Modifier = Modifier,
 ) {
     val c = CRTheme.colors
@@ -326,11 +331,11 @@ internal fun JarvisPane(
                 }
             }
             state.proposals.forEach { p ->
-                ProposalCard(p, now, busy = p.id in state.deciding) { approve -> scope.launch { state.decide(orch, server, p, approve) } }
+                ProposalCard(p, now, state.skewMs, busy = p.id in state.deciding) { approve -> scope.launch { state.decide(orch, server, p, approve) } }
             }
             if (state.recentAlerts.isNotEmpty()) {
                 Text("NOVINKY · ${state.recentAlerts.size}", style = CRType.sectionH, color = c.textDim)
-                state.recentAlerts.take(12).forEach { a -> AlertLine(a, now, onOpenTmux, onUndoClose) }
+                state.recentAlerts.take(12).forEach { a -> AlertLine(a, now, onOpenTmux, onUndoClose, undoing) }
             }
         }
         if (jarvisTab != null) {
@@ -373,7 +378,7 @@ private fun ModeSelector(mode: JarvisMode?, now: Long, onSet: (JarvisMode.Kind, 
 }
 
 @Composable
-private fun ProposalCard(p: JarvisProposal, now: Long, busy: Boolean, onDecide: (Boolean) -> Unit) {
+private fun ProposalCard(p: JarvisProposal, now: Long, skewMs: Long?, busy: Boolean, onDecide: (Boolean) -> Unit) {
     val c = CRTheme.colors
     CRCard(background = c.tintAccent) {
         Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -396,14 +401,16 @@ private fun ProposalCard(p: JarvisProposal, now: Long, busy: Boolean, onDecide: 
             }
             p.task?.let { Text("úkol $it", style = CRType.monoTiny, color = c.textDim) }
             if (!p.fullText) Text("Celé znění se nenačetlo – schválit jde jen u Jarvise.", style = CRType.bodyDim, color = c.textDim)
-            val expired = JarvisData.expired(p, now)
-            p.expiresMs?.let { exp ->
+            // the server's clock decides (LOW-2): without its time the expiry is not judged here, the server refuses
+            val judgeAt = if (skewMs != null) now else null
+            val expired = JarvisData.expired(p, judgeAt, skewMs ?: 0)
+            if (skewMs != null) p.expiresMs?.let { exp ->
                 Text(
-                    if (expired) "návrh propadl – Jarvis se musí zeptat znovu" else "propadne za ${Velin.formatAge(now, exp).ifBlank { "chvíli" }}",
+                    if (expired) "návrh propadl – Jarvis se musí zeptat znovu" else "propadne za ${Velin.formatAge(now - skewMs, exp).ifBlank { "chvíli" }}",
                     style = CRType.monoTiny, color = if (expired) c.approval else c.textDim,
                 )
             }
-            val canSend = JarvisData.canApprove(p, seenWhole = expanded || !overflows, nowMs = now)
+            val canSend = JarvisData.canApprove(p, seenWhole = expanded || !overflows, nowMs = judgeAt, skewMs = skewMs ?: 0)
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 OutlinedButton(enabled = !busy, onClick = { onDecide(false) }) { Text("Zahodit") }
                 Button(enabled = !busy && canSend, onClick = { onDecide(true) }) { Text(if (busy) "…" else JarvisData.approveLabel(p)) }
@@ -413,7 +420,13 @@ private fun ProposalCard(p: JarvisProposal, now: Long, busy: Boolean, onDecide: 
 }
 
 @Composable
-private fun AlertLine(a: JarvisAlert, now: Long, onOpenTmux: (String, String) -> Unit, onUndoClose: (JarvisAlert) -> Unit) {
+private fun AlertLine(
+    a: JarvisAlert,
+    now: Long,
+    onOpenTmux: (String, String) -> Unit,
+    onUndoClose: (JarvisAlert) -> Unit,
+    undoing: Set<Pair<String, String>>,
+) {
     val c = CRTheme.colors
     val (glyph, color) = when (a.kind) {
         JarvisAlertKind.BLOCK -> "▲" to c.approval
@@ -430,8 +443,11 @@ private fun AlertLine(a: JarvisAlert, now: Long, onOpenTmux: (String, String) ->
         Text(a.text, style = CRType.bodyDim, color = c.text, modifier = Modifier.weight(1f), maxLines = 3, overflow = TextOverflow.Ellipsis)
         Text(Velin.formatAge(a.atMs, now), style = CRType.monoTiny, color = c.textDim)
         // a closed session has nothing to open: its line offers the undo instead (closed.jsonl decides if it still can)
-        if (JarvisUndo.isCloseAlert(a)) {
-            TextButton(onClick = { onUndoClose(a) }) { Text("Vrátit", color = c.accent) }
+        val undo = JarvisUndo.undoButtonEnabled(a, undoing)
+        if (undo != null) {
+            TextButton(enabled = undo, onClick = { onUndoClose(a) }) {
+                Text(if (undo) "Vrátit" else "Vracím…", color = if (undo) c.accent else c.textDim)
+            }
         } else if (a.tmux != null) {
             Text("›", style = CRType.mono, color = c.accent)
         }

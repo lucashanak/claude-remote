@@ -205,6 +205,28 @@ class JarvisDataTest {
         assertEquals("Odesláno do fronty: a", JarvisData.approvedNotice(ps.first { it.kind == JarvisProposalKind.MAIL }, ""))
     }
 
+    @Test fun expiryIsJudgedByTheServersClock() {
+        // LOW-2: `expires` is server time; a phone 5 min ahead must not see a live proposal as lapsed
+        val close = JarvisData.parseJarvisProposals(jarvisProposalsJson)!!.first { it.kind == JarvisProposalKind.CLOSE }
+        val ahead = 300_000L
+        assertFalse(JarvisData.expired(close, nowMs = 629 + ahead, skewMs = ahead))
+        assertTrue(JarvisData.canApprove(close, seenWhole = true, nowMs = 629 + ahead, skewMs = ahead))
+        assertTrue(JarvisData.expired(close, nowMs = 630 + ahead, skewMs = ahead))
+        // a phone behind: lapsed on the server although its own clock says not yet
+        assertTrue(JarvisData.expired(close, nowMs = 640 - 60_000, skewMs = -60_000))
+        assertFalse(JarvisData.expired(close, nowMs = null, skewMs = 0), "no server time, not judged")
+        // the read carries the server's clock after the mail half; the halves still split
+        val mail = """{"off": true, "messages": []}"""
+        val out = "[]\n__cr_mail__\n$mail\n__cr_now__ 1700000000123\n"
+        assertEquals(1_700_000_000_123L, JarvisData.serverNowMs(out))
+        assertEquals(5_000L, JarvisData.skewMs(out, 1_700_000_005_123L))
+        assertTrue(JarvisData.mailOff(JarvisData.mailHalf(out)))
+        assertEquals(emptyList(), JarvisData.parseCombinedProposals(out))
+        assertNull(JarvisData.serverNowMs("[]\n__cr_mail__\n$mail\n__cr_now__ 1700000000N\n"), "a date without %3N")
+        assertNull(JarvisData.skewMs("[]\n__cr_mail__\n$mail", 1))
+        assertTrue(JarvisData.PROPOSALS.endsWith("printf '\\n__cr_now__ %s\\n' \"\$(date +%s%3N)\""))
+    }
+
     @Test fun modeParsesAndUnknownIsNormal() {
         assertEquals(JarvisMode(JarvisMode.Kind.NORMAL), JarvisData.parseMode("normal\n"))
         assertEquals(JarvisMode(JarvisMode.Kind.BLOCKING), JarvisData.parseMode("blocking"))
