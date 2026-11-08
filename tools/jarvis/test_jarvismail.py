@@ -777,13 +777,30 @@ class WorkerTest(Base):
         d.mail.mail = self.m
         return d
 
-    def test_stop_then_delivery_after_1_5s_and_sweep(self):
+    def test_a_fresh_message_to_an_idle_target_goes_on_the_next_tick(self):
+        # an idle target sends no `stop`: waiting for one (or the 60 s sweep) left an approved message lying ~40 s
         d = self.daemon()
         d.tick()  # first tick: the sweep (nothing queued yet)
         rec, _ = self.send()
         self.fx.clock.advance(5)
         d.tick()
-        self.assertEqual(self.m.get(rec["id"])["state"], "queued")  # no stop, no sweep yet
+        self.assertEqual(self.m.get(rec["id"])["state"], "delivered")
+
+    def busy_target(self):
+        self.fx.registry(TARGET, 200, "%2", status="busy", status_at=self.fx.clock.ms - 3000)
+
+    def test_stop_then_delivery_after_1_5s_and_sweep(self):
+        d = self.daemon()
+        d.tick()  # first tick: the sweep (nothing queued yet)
+        self.busy_target()
+        rec, _ = self.send()
+        self.fx.clock.advance(5)
+        d.tick()  # tried once at once, blocked: busy
+        self.assertEqual(self.m.get(rec["id"])["state"], "queued")
+        self.assertIsNotNone(self.m.get(rec["id"])["lastBlock"])
+        self.fx.clock.advance(5)
+        d.tick()
+        self.assertEqual(self.m.get(rec["id"])["state"], "queued")  # blocked once: no stop, no sweep yet
         self.fx.append_events(ev_line("stop", TARGET, self.fx.clock.ms, 200))
         self.fx.registry(TARGET, 200, "%2", status_at=self.fx.clock.ms - 3000)
         self.fx.clock.advance(2)
@@ -793,7 +810,10 @@ class WorkerTest(Base):
     def test_sweep_after_a_rotation_lost_the_stop(self):
         d = self.daemon()
         d.tick()
+        self.busy_target()
         rec, _ = self.send()
+        d.tick()  # blocked: busy
+        self.fx.registry(TARGET, 200, "%2", status_at=self.fx.clock.ms - 3000)  # idle again, its stop gets lost
         # the app rotates the events file (new inode), the stop line is gone
         os.replace(self.fx.events, self.fx.events + ".old")
         open(self.fx.events, "w").close()

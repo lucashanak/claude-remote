@@ -1086,7 +1086,11 @@ class MailWorker:
             if rec["state"] != "queued" or J._int(rec.get("notBefore")) > now:
                 continue
             due = self.due.get(rec["to"])
-            if not (sweep or (due is not None and due <= now)):
+            # A message never tried and never blocked goes on the next tick: an idle target sends no `stop`, so
+            # waiting for one (or for the 60 s sweep) left a just-approved message lying ~40 s for nothing. Once a
+            # check has blocked it, it waits for the target's `stop` or the sweep as before.
+            fresh = not J._int(rec.get("attempts")) and rec.get("lastBlock") is None
+            if not (fresh or sweep or (due is not None and due <= now)):
                 continue
             # a delivery can wait up to 2 x 10 s for its confirmation; never start one the cron run cannot finish
             if time_left_s() < 25:
