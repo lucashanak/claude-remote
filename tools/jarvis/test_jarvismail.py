@@ -643,6 +643,25 @@ class I7HighImpactTest(Base):
         self.assertIsNone(why)
         self.assertEqual(rec["to"], TARGET)
 
+    def test_a_partial_name_is_never_picked_only_offered(self):
+        # Lukáš 2026-11-08: only an exact name or alias; "jarvis-te" matched one session and was taken before
+        rec, why = self.send(to="jarvis-te")
+        self.assertIsNone(rec)
+        self.assertIn("přesně", why)
+        self.assertIn(TARGET, why)  # offered back as a hint
+
+    def test_star_allows_every_claude_server_session_but_not_jarvis_or_high_impact(self):
+        self.allow("*")
+        rec, why = self.send(to=OTHER)
+        self.assertIsNone(why)
+        self.assertEqual(rec["to"], OTHER)
+        self.assertIn("sám sobě", self.send(to=JARVIS)[1])
+
+    def test_star_does_not_open_high_impact_names(self):
+        self.allow("*")
+        self.fx.session("claude-server-PROD-api--x", 400, "%4", pane_pid=399)
+        self.assertIn("vysokým dopadem", self.send(to="claude-server-PROD-api--x")[1])
+
 
 class I8SelfTest(Base):
     def test_jarvis_never_mails_itself(self):

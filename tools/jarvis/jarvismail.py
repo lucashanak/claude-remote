@@ -23,7 +23,7 @@ Files (all under `<state>` = ~/.claude-remote/jarvis, mode 600 / dirs 700):
   mail/ledger.jsonl      append-only: every transition, every refusal (the audit and the delta's source)
   mail/mail.lock         flock for queue + ledger;  mail/target.<sha>.lock  one delivery per target at a time
   mail/out/<id>.line     the one line handed to `tmux load-buffer`
-  mail-allow             target allowlist, one tmux name per line (written by Lukáš)
+  mail-allow             target allowlist, one tmux name per line or `*` = every claude-server-* (written by Lukáš)
   last-prompt            {"id", "at"} of Lukáš's last prompt to Jarvis (written by the UserPromptSubmit hook)
   off                    the switch: no paste while it exists ("Jarvisi, stop")
   hold/<name>            no paste into <name> while it exists (for the app: respawn, account switch)
@@ -394,6 +394,12 @@ class Mail:
             return set()
         return {l.strip() for l in raw.splitlines() if l.strip() and not l.lstrip().startswith("#")}
 
+    def allowed(self, name):
+        """A line `*` allows every claude-server-* session (Lukáš 2026-11-08); Jarvis himself and the I7 names stay
+        refused by their own checks, which run before this one."""
+        allow = self.allowlist()
+        return name in allow or ("*" in allow and name.startswith("claude-server-"))
+
     def last_prompt(self):
         d = J.read_json(self.env.path("last-prompt"))
         return d if isinstance(d, dict) else None
@@ -524,10 +530,15 @@ class Mail:
             return q, None
         if sessions is None:
             sessions = J.snapshot(self.env, ancestor_self=False)["sessions"]
-        import cr_sessions
-        hits = cr_sessions.resolve(sessions, q)
+        # Mail takes only an exact name, alias or short name (Lukáš 2026-11-08): a unique substring ("extrakce") picked
+        # a target nobody named. Close misses are offered back, never chosen.
+        hits = [q] if q in sessions else []
+        for key in ("alias", "short"):
+            if not hits:
+                hits = [n for n, s in sessions.items() if s.get(key) == q]
         if not hits:
-            return None, f"žádná session „{J.safe_name(q)}“"
+            near = sorted(n for n in sessions if q and q in n)[:6]
+            return None, f"žádná session přesně „{J.safe_name(q)}“" + (f" (myslíš: {', '.join(near)}?)" if near else "")
         if len(hits) > 1:
             return None, f"„{J.safe_name(q)}“ je nejednoznačné: " + ", ".join(sorted(hits)[:6])
         return hits[0], None
@@ -579,7 +590,7 @@ class Mail:
             why = check(name)
             if why:
                 return why
-        if name not in self.allowlist():
+        if not self.allowed(name):
             return f"{name} není v ~/.claude-remote/jarvis/mail-allow (seznam píše Lukáš)"
         clean, why = validate_text(text)
         if why:

@@ -29,6 +29,8 @@ přesměrování a zalomení řádku. Cokoli jiného zamítne brána nebo nastav
 
 - `<jméno>` je tmux jméno, alias, krátké jméno z `list` nebo jednoznačný podřetězec. Když je jméno nejednoznačné,
   příkaz skončí kódem 2 a vypíše kandidáty. Zeptej se Lukáše, kterou myslí.
+- **`cr-mail send --to` bere jen přesné tmux jméno, alias nebo krátké jméno**, podřetězec nikdy. Když cíl nesedí,
+  CLI nabídne podobná jména; zeptej se Lukáše, ne hádej. V otázce „Ano?“ vždy jmenuj cíl přesně (alias).
 - `--say` u `cr-digest` vrátí hotové české věty pro hlas. `--json` vrátí strukturovaná data.
 - Read používej jen na soubory v `~/jarvis` (hlavně `pravidla.md`). Zbytek světa čteš jen přes tyto příkazy.
 
@@ -47,7 +49,7 @@ přesměrování a zalomení řádku. Cokoli jiného zamítne brána nebo nastav
    - nevoláš ze svého panu;
    - poslední zpráva od Lukáše je starší než 10 minut;
    - na jeden jeho pokyn už padly 3 zprávy;
-   - cíl není v `mail-allow` (seznam píše Lukáš);
+   - cíl není v `mail-allow` (seznam píše Lukáš; `*` = všechny sessions);
    - cíl je PROD/DB-/deploy/Proxmox;
    - cíl má 3 zprávy bez odpovědi.
 
