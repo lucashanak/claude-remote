@@ -595,7 +595,7 @@ class LiveFileCanaryTest {
         assertFailsWith<AssertionError> { guard { File(live, ".claude/mcp-needs-auth-cache.json").delete() } }
     }
 
-    /** Kolo 4: the two files the live jarvis daemon rewrites may change; anything else in jarvis/ is still strict. */
+    /** Jarvis's state dir is live-written as a whole: rewrites pass; deletion, a test token and a new file still alarm. */
     @Test fun theJarvisDaemonsTwoFilesMayChangeButNothingElseInJarvis() {
         File(live, ".claude-remote/jarvis").mkdirs()
         File(live, ".claude-remote/jarvis/status.json").writeText("{\"t\":1}")
@@ -605,8 +605,11 @@ class LiveFileCanaryTest {
             File(live, ".claude-remote/jarvis/status.json").writeText("{\"t\":2}")
             File(live, ".claude-remote/jarvis/d-state.json").writeText("{\"t\":2}")
         }
-        val e = failure { File(live, ".claude-remote/jarvis/other.json").writeText("{\"t\":2}") }
-        assertTrue(e.message!!.contains("jarvis/other.json") && e.message!!.contains("modified"), e.message)
+        // every file of Jarvis's state dir is live-written (watch-state, cursor, tasks, mail …): a rewrite is no alarm
+        guard { File(live, ".claude-remote/jarvis/other.json").writeText("{\"t\":2}") }
+        // below it (mail/msg, ops) the live Jarvis creates and removes records all the time: only names are watched
+        File(live, ".claude-remote/jarvis/mail/msg").mkdirs()
+        guard { File(live, ".claude-remote/jarvis/mail/msg/m-1.md").writeText("x") }
         assertTrue(failure { File(live, ".claude-remote/jarvis/new.json").writeText("{}") }.message!!.contains("created"))
         assertTrue(failure { File(live, ".claude-remote/jarvis/status.json").delete() }.message!!.contains("jarvis/status.json"))
         assertTrue(failure { File(live, ".claude-remote/jarvis/d-state.json").writeText("[\"$token\"]") }.message!!.contains("test token found in LIVE file"))
