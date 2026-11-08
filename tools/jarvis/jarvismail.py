@@ -373,7 +373,7 @@ class Mail:
         rec["state"] = state
         rec.update({k: v for k, v in kw.items() if k in ("lastBlock", "deliveredAt", "pasteAt", "reason", "reply",
                                                           "replyAt", "replyBy", "attempts", "giveUp", "notBefore",
-                                                          "enters")})
+                                                          "enters", "decidedBy")})
         self.put(rec)
         self.log(ev or state, id=rec["id"], to=rec["to"], **{k: v for k, v in kw.items() if k not in ("reply",)})
 
@@ -474,7 +474,11 @@ class Mail:
             self.decide_proposals(None, None, now)
             return None
         h = hashlib.sha256(f"{now}\n{prompt}".encode("utf-8", "replace")).hexdigest()[:12]
-        J.atomic_write(self.env.path("last-prompt"), json.dumps({"id": "p-" + h, "at": now, "by": "lukas"}))
+        # F3: only whether he asked for silence ("nehlas", "nechci …"), never the text: cr-rules from Jarvis's pane
+        # needs it (cr_rules.py), and nothing else may mint it
+        import jarvisalert as JA
+        J.atomic_write(self.env.path("last-prompt"), json.dumps(
+            {"id": "p-" + h, "at": now, "by": "lukas", "silence": bool(JA.SILENCE_WORDS.search(prompt))}))
         self.decide_proposals(prompt, prev.get("id") if isinstance(prev, dict) else None, now)
         return None
 
@@ -543,8 +547,10 @@ class Mail:
             return None, f"„{J.safe_name(q)}“ je nejednoznačné: " + ", ".join(sorted(hits)[:6])
         return hits[0], None
 
-    def send(self, to, text, task=None, sessions=None):
-        """(record, None) or (None, reason). Every refusal is in the ledger (the metric of refused mail)."""
+    def send(self, to, text, task=None, sessions=None, not_before=None, after_cz=None):
+        """(record, None) or (None, reason). Every refusal is in the ledger (the metric of refused mail).
+        F3 `not_before` (ms): approved, it waits in the queue until then (`--after limit|HH:MM`); it expires 24 h
+        after that, not after the proposal."""
         now = self.env.now_ms()
         why = self._send_checks(to, text, task, sessions, now)
         if isinstance(why, str):
@@ -556,12 +562,13 @@ class Mail:
         mid = now_id("m", now)
         base, conflict = self.target_facts(name, now)
         rec = {"v": 1, "id": mid, "from": "jarvis", "to": name, "task": task, "prompt": lp.get("id"),
-               "subject": subject_of(clean), "state": "proposed", "created": now, "notBefore": 0,
-               "expires": now + EXPIRE_MS, "attempts": 0, "enters": 0, "deliveredAt": None, "pasteAt": None,
+               "subject": subject_of(clean), "state": "proposed", "created": now, "notBefore": not_before or 0,
+               "expires": max(now, not_before or 0) + EXPIRE_MS, "attempts": 0, "enters": 0, "deliveredAt": None, "pasteAt": None,
                "lastBlock": None, "reply": None, "base": base, "conflict": conflict}
         body = (f"# Zpráva od Jarvise {mid}\n\n"
                 f"Od: Jarvis (správce Lukášových sessions), na Lukášův pokyn\n"
                 + (f"Úkol: {task}\n" if task else "")
+                + (f"Odloženo: {after_cz}\n" if after_cz else "")
                 + f"\n{clean}\n\n---\n"
                   f"Odpověz normálně poslední zprávou svého tahu, Jarvis si ji přečte sám. "
                   f"Nebo výslovně: cr-mail reply {mid} \"…\"\n")
@@ -621,6 +628,38 @@ class Mail:
         if why:
             return why
         return name, clean
+
+    def text_of(self, mid):
+        """The message text as Jarvis wrote it (from msg/<id>.md), for the app's proposal card. None when unreadable."""
+        try:
+            with open(self.msg_path(mid), encoding="utf-8") as f:
+                body = f.read(16384)
+        except OSError:
+            return None
+        head, sep, rest = body.partition("\n\n")
+        if sep and rest.startswith("Od:"):  # the header block (Od / Úkol / Odloženo) ends with one blank line
+            head, sep, rest = rest.partition("\n\n")
+        text = rest.split("\n\n---\n", 1)[0].strip() if sep else ""
+        return text or None
+
+    def decide_by_app(self, mid, ok, by):
+        """F3: Lukáš's yes or no from the app's proposal card (`cr-mail approve|reject --by app:<id>`), outside any
+        model. Only a proposal, only within its 10 minutes; the caller checks were done by the CLI."""
+        now = self.env.now_ms()
+        with self.lock():
+            rec = self.get(mid)
+            if not rec:
+                return f"zpráva {mid} neexistuje"
+            if rec["state"] != "proposed":
+                return f"zpráva {mid} je {rec['state']}, rozhodnout jde jen o navrženou"
+            if now - J._int(rec.get("created")) > PROMPT_FRESH_MS:
+                self.transition(rec, "dropped", reason="no-yes")
+                return f"návrh {mid} je starší než 10 minut, zahozen"
+            if ok:
+                self.transition(rec, "queued", ev="approved", decidedBy=by)
+            else:
+                self.transition(rec, "dropped", reason="rejected", decidedBy=by)
+        return None
 
     def line_of(self, rec):
         return f"[jarvis {rec['id']}] {FIXED_SUBJECT} · Celé znění: cat {self.msg_path(rec['id'])}"[:LINE_MAX]

@@ -58,7 +58,7 @@ for v in "$HOME" "$target" "$bindir" "$py"; do
   esac
 done
 [ -x "$py" ] || { echo "install-project.sh: python3 not executable: $py" >&2; exit 1; }
-for c in cr-digest cr-sessions cr-mail cr-task; do
+for c in cr-digest cr-sessions cr-mail cr-task cr-rules cr-jarvis; do
   [ -x "$bindir/$c" ] || echo "install-project.sh: warning: $bindir/$c missing; run tools/jarvis/install.sh first" >&2
 done
 

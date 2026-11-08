@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
-# Install Jarvis's tools (cr-sessions, cr-digest, jarvis-d; F2a: cr-mail, cr-task) for the current user.
+# Install Jarvis's tools (cr-sessions, cr-digest, jarvis-d; F2a: cr-mail, cr-task; F3: cr-rules, cr-jarvis) for the
+# current user.
 #
 #   tools/jarvis/install.sh [--prefix DIR] [--no-test] [--dry-run]
 #
 # PREFIX defaults to ~/.local. Layout:
 #   PREFIX/lib/jarvis/<UTC stamp>-<sha>/   a COPY of the runtime files (never the test files)
 #   PREFIX/lib/jarvis/current              -> that release, swapped atomically (ln + mv -T)
-#   PREFIX/bin/{cr-sessions,cr-digest,jarvis-d,cr-mail,cr-task} -> PREFIX/lib/jarvis/current/<script>.py
+#   PREFIX/bin/{cr-sessions,cr-digest,jarvis-d,cr-mail,cr-task,cr-rules,cr-jarvis} -> PREFIX/lib/jarvis/current/<script>.py
 #   PREFIX/lib/jarvis/<release>/SHA256SUMS  what was installed; jarvis-d and `cr-digest brief` report a file that no
 #                                           longer matches ("Jarvisovy nástroje se změnily mimo instalaci", F2a
 #                                           decision 5: every session has this uid, so this is a tripwire, not a wall)
@@ -36,9 +37,10 @@ while [ $# -gt 0 ]; do
   esac
 done
 
-FILES=(jarvislib.py jarvismail.py jarviswatch.py cr_sessions.py cr_digest.py jarvis_d.py cr_mail.py cr_task.py)
+FILES=(jarvislib.py jarvismail.py jarviswatch.py jarvisalert.py cr_sessions.py cr_digest.py jarvis_d.py cr_mail.py
+       cr_task.py cr_rules.py cr_jarvis.py)
 declare -A BIN=([cr-sessions]=cr_sessions.py [cr-digest]=cr_digest.py [jarvis-d]=jarvis_d.py [cr-mail]=cr_mail.py
-                [cr-task]=cr_task.py)
+                [cr-task]=cr_task.py [cr-rules]=cr_rules.py [cr-jarvis]=cr_jarvis.py)
 state="${JARVIS_STATE_DIR:-$HOME/.claude-remote/jarvis}"
 ALLOW_DEFAULT="claude-server-jarvis-test--jarvis-test"
 

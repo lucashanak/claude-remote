@@ -107,8 +107,14 @@ class DaemonTest(unittest.TestCase):
         D.main(["--once"], env=fx.env())
         self.assertEqual(sorted(os.listdir(fx.home)), before)
         names = sorted(os.listdir(fx.state))
-        self.assertEqual(names, ["d-state.json", "jarvis-d.lock", "status.json"])
+        self.assertEqual(names, ["alerts.lock", "d-state.json", "jarvis-d.lock", "status.json"])
         self.assertEqual(os.stat(os.path.join(fx.state, "status.json")).st_mode & 0o777, 0o600)
+        # F3: outside the state dir only the alerts file next to `events`, and on the first tick only its heartbeat
+        alerts = os.path.join(fx.home, ".cache", "claude-remote", "jarvis-alerts")
+        with open(alerts) as f:
+            self.assertEqual(f.read(), f"claude-remote-jarvis hb {T0}\n")
+        self.assertEqual(os.stat(alerts).st_mode & 0o777, 0o600)
+        self.assertEqual(sorted(os.listdir(os.path.dirname(alerts))), ["events", "jarvis-alerts"])
 
     def test_singleton(self):
         fx = self.fx

@@ -28,6 +28,11 @@ F2b: it checks the watches ("dej vědět, až…", jarviswatch.WatchWorker) and 
 mail, every tick. It is the only caller of `gh` (at most once per 2 min per watch or commit, 15 s timeout, never when
 the run has under 25 s left). Fired watches and proofs go to watches.jsonl, which the delta shows on top; status.json
 carries `watches` {open, fired in the last hour, evidence} for F3, which will wake Jarvis and push to the app.
+
+F3: it is the only writer of `~/.cache/claude-remote/jarvis-alerts` (jarvisalert.AlertWorker: blocks after their
+grace, task results, fired watches, reminders, incidents, batched to one line per 5 min, modes and "nehlas" rules,
+a heartbeat line every ~60 s) and the only one that wakes Jarvis (`[jarvis wake] …`, the mail's checks, ≤ 1 per
+3 min, ≤ 30 a day). status.json carries `alerts` {mode, pending, today's counts} for the brief and the app.
 """
 import argparse
 import fcntl
@@ -42,6 +47,7 @@ sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
 import jarvislib as J  # noqa: E402
 import jarvismail as M  # noqa: E402
 import jarviswatch as JW  # noqa: E402
+import jarvisalert as JA  # noqa: E402
 
 TICK_S = 5
 DURATION_S = 55
@@ -81,6 +87,8 @@ class Daemon:
         self.errors = []
         self.mail = M.MailWorker(env, log=self.log)
         self.watch = JW.WatchWorker(env, log=self.log)
+        # F3: its state rides in d-state.json (no new file rewritten every tick, the live-file canary knows that one)
+        self.alerts = JA.AlertWorker(env, st.get("alerts"), mail=self.mail.mail, log=self.log)
         self.time_left = lambda: 60.0
         self.integrity, self.integrity_at = [], 0
 
@@ -133,11 +141,10 @@ class Daemon:
             "counts": _counts(sessions),
             "inbox": [{"name": s["name"], "short": s["short"], **s["attention"]} for s in J.inbox(sessions)],
             "usage": self.usage, "closed": closed, "errors": self.errors[-5:], "integrity": self.integrity,
-            "watches": self.watch.summary, "sessions": sessions,
+            "watches": self.watch.summary, "alerts": self.alerts.summary, "sessions": sessions,
         }
         J.atomic_write(env.path("status.json"), json.dumps(status, ensure_ascii=False, separators=(",", ":")))
-        J.atomic_write(env.path("d-state.json"), json.dumps(
-            {"v": 1, "gen": self.gen, "reader": self.reader.state(), "fold": self.fold.s}, separators=(",", ":")))
+        self._write_dstate()
         # after status.json: a delivery may wait up to 20 s for its confirmation, the picture must not wait for it
         try:
             self.mail.tick(sessions, self.fold, now, self.time_left)
@@ -148,7 +155,20 @@ class Daemon:
             self.watch.tick(new, sessions, self.fold, self.usage, now, self.time_left)
         except Exception:
             self.log("watch: " + traceback.format_exc(limit=3))
+        # F3, after the watches (a watch fired in this tick is told in this tick): the heartbeat, the alerts, and
+        # the wake, which may wait ~10 s for its confirmation like a delivery. Its state is written at once when it
+        # changed, so a crash right after an alert never tells it twice.
+        try:
+            if self.alerts.tick(new, sessions, self.fold, now, self_name, self.time_left):
+                self._write_dstate()
+        except Exception:
+            self.log("alerts: " + traceback.format_exc(limit=3))
         return status
+
+    def _write_dstate(self):
+        J.atomic_write(self.env.path("d-state.json"), json.dumps(
+            {"v": 1, "gen": self.gen, "reader": self.reader.state(), "fold": self.fold.s, "alerts": self.alerts.state},
+            separators=(",", ":")))
 
     def _integrity(self):
         try:

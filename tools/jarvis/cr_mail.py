@@ -12,6 +12,10 @@
     cr-mail audit [--since 1h] [--json] [--say]              what Jarvis proposed, Lukáš approved, what was delivered
                                                              or refused, with times (+ tasks and watches)
     cr-mail prompt-seen                                      Jarvis's UserPromptSubmit hook (payload on stdin)
+    cr-mail send … --after limit|HH:MM                       F3: approved, it waits until the target account's limit
+                                                             resets (limit) or until that time
+    cr-mail approve|reject <m-id> --by app:<installId>       F3: Lukáš's yes/no from the app's proposal card; refused
+                                                             inside any Claude session (Jarvis's pane above all)
 
 Exit codes: 0 done, 2 refused (the reason, in Czech, on stderr), 1 internal error.
 The text goes as ONE argument: Jarvis's gate lets no heredoc, pipe or `$` through. The CLI checks it again (one line,
@@ -21,12 +25,18 @@ no control characters, ≤ 2000 characters) and pastes only one FIXED line into 
 import argparse
 import json
 import os
+import re
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
 import jarvislib as J  # noqa: E402
 import jarvismail as M  # noqa: E402
 import jarviswatch as JW  # noqa: E402
+import jarvisalert as JA  # noqa: E402
+
+BY_RE = re.compile(r"app:[A-Za-z0-9._-]{1,64}")
+# --after limit: the 7-day window counts as spent from this much on, then its reset is the one to wait for
+WEEK_SPENT = 95
 
 STATE_CZ = {"proposed": "navrženo, čeká na Lukášovo ano", "dropped": "zahozeno (bez ano)", "queued": "ve frontě", "delivering": "doručuje se", "delivered": "doručeno, čeká na odpověď",
             "uncertain": "NEJISTÉ", "replied": "odpovězeno", "expired": "vypršelo", "cancelled": "zrušeno"}
@@ -51,16 +61,48 @@ def _row(r, now):
     blk = r.get("lastBlock") if r["state"] == "queued" else None
     extra = f" · blokuje: {BLOCK_CZ.get(blk, blk)}" if blk else ""
     task = f" · {r['task']}" if r.get("task") else ""
+    nb = J._int(r.get("notBefore")) or 0
+    if nb > now and r["state"] in ("proposed", "queued"):
+        extra += f" · odloženo do {JA.when_cz(nb, now)}"
     return (f"{r['id']} → {J.short_name(r['to'])} · {STATE_CZ.get(r['state'], r['state'])}{extra}{task} · "
             f"{_age(now, r.get('created'))} · «{M.data_text(r.get('subject'), 80)}»")
 
 
-def cmd_send(m, a, out):
-    rec, why = m.send(a.to, a.text, task=a.task)
+def after_ms(m, to, after, now):
+    """(ms, Czech words) for --after: HH:MM, or `limit` = when the target's account gets its limit back (the weekly
+    reset when the week is spent, else the 5-hour one). Refused when the usage cache does not know."""
+    if after != "limit":
+        try:
+            ms = JA.parse_at(after, now)
+        except ValueError as e:
+            raise Refused(f"--after je limit nebo HH:MM ({e})")
+        return ms, f"do {JA.when_cz(ms, now)}"
+    name, why = m.resolve_name(to.strip() if isinstance(to, str) else "")
     if why:
         raise Refused(why)
-    out.write(f"{rec['id']} navržena pro {J.short_name(rec['to'])}. Zeptej se Lukáše: „Pošlu to do "
-              f"{J.short_name(rec['to'])}. Ano?“ Odejde jen po jeho ano v příští zprávě (do 10 minut), jinak se zahodí.\n")
+    s = JW.sessions_now(m.env, now).get(name) or {}
+    acct = s.get("account") or "default"
+    u = J.read_usage(m.env, now).get(acct) or {}
+    if not u or (u.get("ageS") or 0) > 3 * 3600:
+        raise Refused(f"o limitu účtu {J.account_short(s.get('account'))} nemám čerstvá data, řekni čas: --after HH:MM")
+    week = (u.get("sevenDay") or 0) >= WEEK_SPENT
+    ms = J._ts_ms(u.get("sevenDayResets") if week else u.get("fiveHourResets"))
+    if not ms or ms <= now:
+        raise Refused("nevím, kdy se limit obnoví; řekni čas: --after HH:MM")
+    return ms, f"do obnovy {'týdenního' if week else 'pětihodinového'} limitu ({JA.when_cz(ms, now)})"
+
+
+def cmd_send(m, a, out):
+    nb, after_cz = (None, None)
+    if a.after:
+        nb, after_cz = after_ms(m, a.to, a.after, m.env.now_ms())
+    rec, why = m.send(a.to, a.text, task=a.task, not_before=nb, after_cz=after_cz)
+    if why:
+        raise Refused(why)
+    later = f" {after_cz}" if after_cz else ""
+    out.write(f"{rec['id']} navržena pro {J.short_name(rec['to'])}{(', odložená' + later) if later else ''}. "
+              f"Zeptej se Lukáše: „Pošlu to do {J.short_name(rec['to'])}{later}. Ano?“ Odejde jen po jeho ano "
+              f"v příští zprávě (do 10 minut), jinak se zahodí.\n")
     c = rec.get("conflict")
     if c:
         # E1: only information; Lukáš decides with it in front of him
@@ -89,7 +131,10 @@ def cmd_status(m, a, out):
         return
     recs = [r for r in m.all() if r["state"] in M.ACTIVE]
     if a.json:
-        out.write(json.dumps({"off": m.off(), "messages": recs}, ensure_ascii=False, indent=1) + "\n")
+        # F3: the app's proposal card shows the target and the text; texts are Jarvis's, escaped as data anyway
+        rows = [dict(r, short=J.short_name(r["to"]), text=M.data_text(m.text_of(r["id"]), M.TEXT_MAX)
+                     if r["state"] in ("proposed", "queued") else None) for r in recs]
+        out.write(json.dumps({"off": m.off(), "messages": rows}, ensure_ascii=False, indent=1) + "\n")
         return
     head = "[cr-mail" + (" · VYPNUTO (cr-mail on zapne)" if m.off() else "") + f": {M.DATA_NOTE}]"
     out.write(head + "\n" + ("\n".join(_row(r, now) for r in recs) if recs else "žádná rozpracovaná pošta") + "\n")
@@ -149,6 +194,32 @@ def cmd_on(m, a, out):
     out.write("Pošta je zapnutá.\n")
 
 
+def decide_refusal(m, a):
+    """None, or why this caller may not approve/reject. The model never gets here: the gate does not let Jarvis call
+    it, and any Claude session (all of them run yolo) is refused, or a working session could say "ano" for Lukáš."""
+    if m.env.environ.get("CLAUDECODE"):
+        return f"cr-mail {a.cmd} je Lukášovo rozhodnutí z aplikace, ne z Claude session"
+    me = J.read_self(m.env)
+    name, why = m.caller_session()
+    if not why and me and name == me:
+        return f"cr-mail {a.cmd} nejde z Jarvisova panu"
+    if not BY_RE.fullmatch(a.by or ""):
+        return "--by je app:<installId> (písmena, číslice, . _ -)"
+    return None
+
+
+def cmd_decide(m, a, out):
+    why = decide_refusal(m, a)
+    if why:
+        raise Refused(why)
+    if not M.ID_RE.fullmatch(a.id):
+        raise Refused("id zprávy je m-…")
+    why = m.decide_by_app(a.id, a.cmd == "approve", a.by)
+    if why:
+        raise Refused(why)
+    out.write(f"{a.id} {'schválena, je ve frontě' if a.cmd == 'approve' else 'zahozena'}\n")
+
+
 def cmd_audit(m, a, out):
     try:
         span = JW.parse_since(a.since, 3600 * 1000)
@@ -174,7 +245,12 @@ def main(argv=None, env=None, out=None, err=None, mail=None):
     p = sub.add_parser("send")
     p.add_argument("--to", required=True)
     p.add_argument("--task")
+    p.add_argument("--after")
     p.add_argument("text")
+    for c in ("approve", "reject"):
+        p = sub.add_parser(c)
+        p.add_argument("id")
+        p.add_argument("--by", required=True)
     p = sub.add_parser("status")
     p.add_argument("id", nargs="?")
     p.add_argument("--json", action="store_true")
@@ -197,7 +273,8 @@ def main(argv=None, env=None, out=None, err=None, mail=None):
     env = env or J.Env()
     m = mail or M.Mail(env)
     fn = {"send": cmd_send, "status": cmd_status, "inbox": cmd_inbox, "cancel": cmd_cancel, "reply": cmd_reply,
-          "off": cmd_off, "on": cmd_on, "prompt-seen": cmd_prompt_seen, "audit": cmd_audit}[a.cmd]
+          "off": cmd_off, "on": cmd_on, "prompt-seen": cmd_prompt_seen, "audit": cmd_audit, "approve": cmd_decide,
+          "reject": cmd_decide}[a.cmd]
     old = os.umask(0o077)
     try:
         fn(m, a, out)

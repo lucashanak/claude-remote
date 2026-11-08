@@ -12,6 +12,9 @@
     cr-task watches [--all] [--json] [--say]                              open watches (--all: also fired/expired)
     cr-task unwatch <w-id>
     cr-task log [<t-id>] [--since 24h] [--json] [--say]                   the audit: tasks, mail, watches
+    cr-task remind "<text>" --at HH:MM | --in 2h                          F3: a reminder, told by jarvis-d (app alert)
+    cr-task reminders [--all] [--json]                                    open reminders (--all: also fired/cancelled)
+    cr-task unremind <r-id>
 
 F2b: a task delegated through cr-mail with --ac is not "hotovo" when the session merely replies. It is "ke kontrole"
 and `done` needs the evidence (jarviswatch.evidence): a new commit in the target's repo since the mail, pushed, and
@@ -33,6 +36,7 @@ sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
 import jarvislib as J  # noqa: E402
 import jarvismail as M  # noqa: E402
 import jarviswatch as JW  # noqa: E402
+import jarvisalert as JA  # noqa: E402
 
 TITLE_MAX = 300
 AC_MAX = 1000
@@ -246,6 +250,34 @@ def _usage_watch(env, a, now):
     return {"acct": hits[0], "acctName": J.account_short(u.get("account")), "window": window, "below": below}
 
 
+def cmd_remind(env, a, now, by):
+    text = _text(a.text, JA.REMIND_TEXT_MAX, "připomínka")
+    if bool(a.at) == bool(getattr(a, "in_")):
+        raise Refused("řekni jedno: --at HH:MM, nebo --in 2h")
+    try:
+        due = JA.parse_at(a.at, now) if a.at else now + JA.parse_in(a.in_)
+    except ValueError as e:
+        raise Refused(str(e))
+    if due - now > JA.REMIND_MAX_MS:
+        raise Refused("připomínka nejvýš 7 dní dopředu")
+    store = JA.Reminders(env)
+
+    def guard(rs):
+        if sum(1 for r in rs.values() if r["state"] == "open") >= 50:
+            return "už je 50 čekajících připomínek; nějakou zruš: cr-task unremind r-…"
+        return None
+    rid = JA.new_id("r", now)
+    why = store.append({"v": 1, "at": now, "ev": "add", "id": rid, "text": text, "due": due, "by": by}, guard)
+    if why:
+        raise Refused(why)
+    return rid, due
+
+
+def _reminder_line(r, now):
+    st = {"open": "čeká", "fired": "řečena", "cancelled": "zrušena"}[r["state"]]
+    return f"{r['id']} · {st} · {JA.when_cz(r['due'], now)} · «{M.data_text(r.get('text'), 160)}»"
+
+
 def main(argv=None, env=None, out=None, err=None, mail=None):
     out, err = out or sys.stdout, err or sys.stderr
     ap = argparse.ArgumentParser(prog="cr-task", description="Jarvis task ledger (F2a).")
@@ -284,6 +316,15 @@ def main(argv=None, env=None, out=None, err=None, mail=None):
     p.add_argument("--since")
     p.add_argument("--json", action="store_true")
     p.add_argument("--say", action="store_true")
+    p = sub.add_parser("remind")
+    p.add_argument("text")
+    p.add_argument("--at")
+    p.add_argument("--in", dest="in_")
+    p = sub.add_parser("reminders")
+    p.add_argument("--all", action="store_true")
+    p.add_argument("--json", action="store_true")
+    p = sub.add_parser("unremind")
+    p.add_argument("id")
     a = ap.parse_args(argv)
     env = env or J.Env()
     m = mail or M.Mail(env)
@@ -328,6 +369,32 @@ def main(argv=None, env=None, out=None, err=None, mail=None):
             if why:
                 raise Refused(why)
             out.write(f"{a.id} zrušena\n")
+        elif a.cmd == "remind":
+            by = writer(env, m)
+            rid, due = cmd_remind(env, a, now, by)
+            out.write(f"{rid}: připomenu {JA.when_cz(due, now)} (upozornění v aplikaci). Zrušit: cr-task unremind {rid}\n")
+        elif a.cmd == "unremind":
+            by = writer(env, m)
+            if not JA.REMIND_RE.fullmatch(a.id):
+                raise Refused("id připomínky je r-…")
+
+            def guard(rs):
+                r = rs.get(a.id)
+                if not r:
+                    return f"připomínka {a.id} neexistuje"
+                return None if r["state"] == "open" else f"připomínka {a.id} už je {r['state']}"
+            why = JA.Reminders(env).append({"v": 1, "at": now, "ev": "cancelled", "id": a.id, "by": by}, guard)
+            if why:
+                raise Refused(why)
+            out.write(f"{a.id} zrušena\n")
+        elif a.cmd == "reminders":
+            rs = sorted(JA.Reminders(env).fold().values(), key=lambda r: r["due"])
+            sel = [r for r in rs if a.all or r["state"] == "open"]
+            if a.json:
+                out.write(json.dumps(sel, ensure_ascii=False, indent=1) + "\n")
+            else:
+                out.write(f"[cr-task: {M.DATA_NOTE}]\n" + ("\n".join(_reminder_line(r, now) for r in sel)
+                                                          or "žádné čekající připomínky") + "\n")
         elif a.cmd == "watches":
             ws = sorted(JW.Watches(env).all().values(), key=lambda w: -w["created"])
             sel = [w for w in ws if a.all or w["state"] == "open"]

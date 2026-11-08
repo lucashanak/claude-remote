@@ -7,7 +7,9 @@
       "Bash(cr-sessions:*)",
       "Bash(cr-digest:*)",
       "Bash(cr-mail:*)",
-      "Bash(cr-task:*)"
+      "Bash(cr-task:*)",
+      "Bash(cr-rules:*)",
+      "Bash(cr-jarvis:*)"
     ],
     "deny": [
       "Agent",

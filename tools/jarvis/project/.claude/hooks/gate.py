@@ -28,6 +28,10 @@ judges the same words bash will pass. Not allowed to Jarvis: `cr-mail reply` (th
 
 F2b adds `cr-mail audit` and `cr-task watch|watches|unwatch|log` (all read or notify-only), and forbids
 `cr-task done --force` (Lukáš's override of the evidence).
+
+F3 adds `cr-rules add|list|rm` (the CLI itself requires a fresh prompt of Lukáš's asking for silence), `cr-jarvis mode`
+(a fresh prompt of his), `cr-task remind|reminders|unremind` and `cr-digest briefing`. Not allowed to Jarvis:
+`cr-mail approve|reject`, the app's yes/no on a proposal (the CLI refuses Jarvis's pane as well).
 """
 import json
 import re
@@ -42,15 +46,18 @@ MODE = "dontAsk"
 
 ALLOWED = {
     "cr-sessions": frozenset({"list", "show", "tail"}),
-    "cr-digest": frozenset({"delta", "brief", "waiting", "usage"}),
+    "cr-digest": frozenset({"delta", "brief", "waiting", "usage", "briefing"}),
     "cr-mail": frozenset({"send", "status", "inbox", "cancel", "off", "audit"}),
-    "cr-task": frozenset({"add", "list", "show", "done", "fail", "watch", "watches", "unwatch", "log"}),
+    "cr-task": frozenset({"add", "list", "show", "done", "fail", "watch", "watches", "unwatch", "log", "remind",
+                          "reminders", "unremind"}),
+    "cr-rules": frozenset({"add", "list", "rm"}),
+    "cr-jarvis": frozenset({"mode"}),
 }
 # Options Jarvis may never pass. `cr-task done --force` closes a delegated task without its evidence; the CLI refuses
 # it to anyone but Lukáš's own shell already, this is the second layer.
 FORBIDDEN = {("cr-task", "done"): frozenset({"--force"})}
 # commands whose arguments may be quoted free text
-TEXT_CMDS = frozenset({"cr-mail", "cr-task"})
+TEXT_CMDS = frozenset({"cr-mail", "cr-task", "cr-rules"})
 HELP = frozenset({"-h", "--help"})
 # Options a subcommand cannot run without. `cr-digest delta` without --peek moves the cursor the UserPromptSubmit hook
 # reads from, so what changed (a perm, an ask) would never reach Lukáš's next delta.
@@ -100,7 +107,8 @@ def check(cmd):
     # different line than the one bash runs
     line = cmd.rstrip("\n")
     if not LINE.fullmatch(line):
-        return "only one cr-sessions, cr-digest, cr-mail or cr-task command, without ; & | $ ` < > ( ) \\ or a line break"
+        return ("only one cr-sessions, cr-digest, cr-mail, cr-task, cr-rules or cr-jarvis command, without "
+                "; & | $ ` < > ( ) \\ or a line break")
     if line.split(" ", 1)[0] in TEXT_CMDS:
         return check_text_cmd(line)
     words = shlex.split(line)  # unbalanced quotes raise -> exit 2

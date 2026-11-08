@@ -162,6 +162,8 @@ class Env:
         # nowhere else, so a smoke run against live data can point it at a temp dir.
         self.state_dir = e.get("JARVIS_STATE_DIR") or os.path.join(self.cr, "jarvis")
         self.events_path = e.get("JARVIS_EVENTS") or os.path.join(self.home, ".cache", "claude-remote", "events")
+        # F3: what jarvis-d tells the app; next to `events` because the app already tails that directory
+        self.alerts_path = e.get("JARVIS_ALERTS") or os.path.join(self.home, ".cache", "claude-remote", "jarvis-alerts")
         dirs = e.get("JARVIS_CONFIG_DIRS")
         if dirs:
             self.config_dirs = [d for d in dirs.split(":") if d]

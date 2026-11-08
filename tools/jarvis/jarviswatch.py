@@ -605,6 +605,9 @@ AUDIT_MAIL = {
     "proposed": "Jarvis navrhl zprávu", "approved": "Lukáš řekl ano", "dropped": "návrh zahozen (bez ano)",
     "refused": "odmítnuto", "confirmed": "doručeno", "uncertain": "doručení nejisté", "give-up": "doručení vzdáno",
     "cancelled": "zrušeno", "expired": "vypršelo", "reply": "odpověď", "off": "pošta vypnuta", "on": "pošta zapnuta",
+    # F3
+    "mode": "režim Jarvise", "rule-add": "pravidlo nehlas", "rule-rm": "pravidlo nehlas zrušeno",
+    "wake": "Jarvis probuzen výsledkem úkolu",
 }
 AUDIT_TASK = {"add": "úkol založen", "done": "úkol hotovo", "fail": "úkol selhal"}
 AUDIT_WATCH = {"add": "hlídka přidána", "fired": "hlídka splněna", "expired": "hlídka vypršela",
@@ -636,6 +639,9 @@ def audit(env, since_ms, task=None):
         elif ev == "refused":
             text = M.data_text(e.get("reason"), 200)
             who = None
+        elif ev in ("mode", "rule-add", "rule-rm", "wake"):
+            text = M.data_text(e.get("text") or e.get("result") or "", 160)
+            who = WHO.get(e.get("by"))
         else:
             who = None  # "Jarvis navrhl", "Lukáš řekl ano": the actor is in the words already
             if ev in ("uncertain", "give-up") and e.get("reason"):

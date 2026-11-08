@@ -74,10 +74,10 @@ class SettingsTrapsTest(unittest.TestCase):
         self.assertEqual(self.p["disableAutoMode"], "disable")
         self.assertNotIn("disableAutoMode", self.s)
 
-    def test_allow_is_exactly_the_four_jarvis_clis(self):
-        # F2a adds cr-mail and cr-task; which subcommands Jarvis may use is the gate's job (GateTest)
-        self.assertEqual(sorted(self.p["allow"]), ["Bash(cr-digest:*)", "Bash(cr-mail:*)", "Bash(cr-sessions:*)",
-                                                   "Bash(cr-task:*)"])
+    def test_allow_is_exactly_the_jarvis_clis(self):
+        # F2a adds cr-mail and cr-task, F3 cr-rules and cr-jarvis; which subcommands Jarvis may use is the gate's job
+        self.assertEqual(sorted(self.p["allow"]), ["Bash(cr-digest:*)", "Bash(cr-jarvis:*)", "Bash(cr-mail:*)",
+                                                   "Bash(cr-rules:*)", "Bash(cr-sessions:*)", "Bash(cr-task:*)"])
 
     def test_4i_tools_dont_ask_lets_through_are_denied(self):
         # dontAsk let Agent, Skill, Artifact, SendMessage (writes into live sessions) and ListAgents through
@@ -181,7 +181,7 @@ class SettingsTrapsTest(unittest.TestCase):
         with open(os.path.join(SRC, "CLAUDE.jarvis.md"), encoding="utf-8") as f:
             md = f.read()
         self.assertIn("Nikdy nepiš `/effort` ani `/config`", md)
-        self.assertLessEqual(len(md.splitlines()), 175)
+        self.assertLessEqual(len(md.splitlines()), 200)  # F3: wake, mode, rules, reminders, briefing
 
     def test_review5_session_text_never_changes_the_items(self):
         with open(os.path.join(SRC, "CLAUDE.jarvis.md"), encoding="utf-8") as f:
@@ -254,12 +254,37 @@ class GateTest(unittest.TestCase):
         self.assertEqual(r.returncode, 2)
 
     def test_allowlist_f2a(self):
-        # reply is the addressee's, on is Lukáš's switch, prompt-seen is the hook's (it would mint a "fresh prompt")
+        # reply is the addressee's, on is Lukáš's switch, prompt-seen is the hook's (it would mint a "fresh prompt"),
+        # F3: approve/reject are the app's yes/no on a proposal, never Jarvis's
         self.assertEqual(load_gate().ALLOWED, {"cr-sessions": {"list", "show", "tail"},
-                                               "cr-digest": {"delta", "brief", "waiting", "usage"},
+                                               "cr-digest": {"delta", "brief", "waiting", "usage", "briefing"},
                                                "cr-mail": {"send", "status", "inbox", "cancel", "off", "audit"},
                                                "cr-task": {"add", "list", "show", "done", "fail", "watch",
-                                                           "watches", "unwatch", "log"}})
+                                                           "watches", "unwatch", "log", "remind", "reminders",
+                                                           "unremind"},
+                                               "cr-rules": {"add", "list", "rm"},
+                                               "cr-jarvis": {"mode"}})
+
+    def test_f3_commands_pass(self):
+        for c in ('cr-rules add --session music-seeker --kind question "Stopy z music-seeker mi nehlas."',
+                  "cr-rules add --session soniox --kind all --days 3", "cr-rules list", "cr-rules list --say",
+                  "cr-rules rm n-20261108T081500-abcd", "cr-jarvis mode", "cr-jarvis mode dnd --until 15:00",
+                  "cr-jarvis mode dnd --for 2h", "cr-jarvis mode blocking", "cr-jarvis mode normal --json",
+                  'cr-task remind "Zavolat Petrovi kvůli smlouvě" --at 15:30', 'cr-task remind "Pauza" --in 1h30m',
+                  "cr-task reminders", "cr-task reminders --all --json", "cr-task unremind r-20261108T081500-abcd",
+                  "cr-digest briefing morning", "cr-digest briefing evening --say --summary",
+                  'cr-mail send --to jarvis-test --after limit "Až bude limit, pusť testy."',
+                  'cr-mail send --to jarvis-test --after 15:00 "Ve tři pusť testy."'):
+            self.assertAllowed(c)
+
+    def test_f3_attacks_are_blocked(self):
+        for c in ("cr-mail approve m-20261108T081500-abcd --by app:x", "cr-mail reject m-1 --by app:x",
+                  "cr-rules add --session * --kind all", "cr-rules add --session ~ --kind all",
+                  'cr-rules add --session x "a $(id)"', "cr-rules add; id", "cr-rules", "cr-rules clear",
+                  "cr-jarvis", "cr-jarvis mode dnd; id", "cr-jarvis off",
+                  "cr-jarvis mode dnd --until $(date)", 'cr-task remind "x" --at 15:30 > /tmp/y',
+                  "cr-digest briefing morning | sh", "cr-rulesx list", "cr-jarvisx mode"):
+            self.assertBlocked(c)
 
     def test_f2a_mail_and_task_commands_pass(self):
         for c in ('cr-mail send --to jarvis-test "Oprav prosím timeout v extrakci, hotové až projdou testy. Díky!"',
