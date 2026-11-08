@@ -474,11 +474,16 @@ class Mail:
             self.decide_proposals(None, None, now)
             return None
         h = hashlib.sha256(f"{now}\n{prompt}".encode("utf-8", "replace")).hexdigest()[:12]
-        # F3: only whether he asked for silence ("nehlas", "nechci …"), never the text: cr-rules from Jarvis's pane
-        # needs it (cr_rules.py), and nothing else may mint it
-        import jarvisalert as JA
+        # F3: only whether he asked for silence ("nehlas …") or for a quiet mode ("nerušit …"), never the text:
+        # cr-rules and cr-jarvis from Jarvis's pane need them, and nothing else may mint them. A broken jarvisalert
+        # must not cost the prompt record (the mail needs it): then both flags are simply false (fail closed).
+        try:
+            import jarvisalert as JA
+            silence, quiet = bool(JA.SILENCE_WORDS.search(prompt)), bool(JA.QUIET_WORDS.search(prompt))
+        except Exception:  # noqa: BLE001
+            silence = quiet = False
         J.atomic_write(self.env.path("last-prompt"), json.dumps(
-            {"id": "p-" + h, "at": now, "by": "lukas", "silence": bool(JA.SILENCE_WORDS.search(prompt))}))
+            {"id": "p-" + h, "at": now, "by": "lukas", "silence": silence, "quiet": quiet}))
         self.decide_proposals(prompt, prev.get("id") if isinstance(prev, dict) else None, now)
         return None
 

@@ -33,7 +33,7 @@ Waking Jarvis (§3 point 3): a task result that went out is also pasted into Jar
 `[jarvis wake] <sentences>` through the mail's own checks (I1 live claude, I2 idle + settled + empty box + no
 selector, I3 Enter only over exactly our line, I5 no client input in 20 s / copy-mode / hold), never while a mail
 proposal waits for Lukáš's "ano" (a `[jarvis` prompt drops proposals), never with mail off or in dnd; at most once
-per 3 min and 30 times a day. Lukáš writing to Jarvis in the meantime makes it moot (the delta told it).
+per 3 min and 30 times a day. The line is fixed: `[jarvis wake] Výsledek úkolu t-… · cr-task show t-…` (no title). Lukáš writing to Jarvis in the meantime makes it moot (the delta told it).
 """
 import base64
 import datetime
@@ -87,9 +87,15 @@ RULE_TTL_MS = 7 * 86400 * 1000
 RULES_MAX = 50
 REMIND_MAX_MS = 7 * 86400 * 1000
 REMIND_TEXT_MAX = 200
-# a prompt of Lukáš's that asks for silence; cr-rules from Jarvis's pane needs one (see cr_rules.py)
-SILENCE_WORDS = re.compile(r"nehl[aá][sš]|\bnechci\b|přesta[nň]\w*\s+(?:to\s+|mi\s+)?hl[aá]s|neozývej|neotravuj",
+# a prompt of Lukáš's that asks for silence; cr-rules from Jarvis's pane needs one (see cr_rules.py). Imperatives
+# only (rev-f3 MED2): "Proč jsi mi to nehlásil?" or "nechci teď nic měnit" are not a request to be silent.
+SILENCE_WORDS = re.compile(r"\bnehl[aá]s(?:te)?\b|\bnehlásit\b|přesta[nň]\w*\s+(?:to\s+|mi\s+)?hl[aá]sit"
+                           r"|\bneozývej|\bneotravuj|\bnechci\s+(?:to\s+|už\s+)?(?:slyšet|hlásit|to\s+vědět)",
                            re.IGNORECASE)
+# a prompt that asks for a quiet mode; cr-jarvis mode dnd|blocking from Jarvis's pane needs one (rev-f3 MED1)
+QUIET_WORDS = re.compile(r"\bneruš|\bnerušit\b|\bdnd\b|jen\s+blokující|jen\s+důležit", re.IGNORECASE)
+PROMPT_FRESH_MS = 10 * 60 * 1000
+PER_PROMPT = 3
 
 
 def _i(v):
@@ -247,7 +253,11 @@ class Rules(Store):
         out = []
         for d in self.lines():
             m = d.get("match")
-            if not (RULE_RE.fullmatch(str(d.get("id"))) and isinstance(m, dict) and isinstance(d.get("until_ms"), int)):
+            if not (RULE_RE.fullmatch(str(d.get("id"))) and isinstance(m, dict) and isinstance(d.get("until_ms"), int)
+                    and isinstance(d.get("created"), int)):
+                continue
+            # rev-f3 LOW8: a hand-written rule cannot outlive the 7 days nor date itself into the future
+            if d["until_ms"] > d["created"] + RULE_TTL_MS or (now is not None and d["created"] > now + 60000):
                 continue
             if m.get("kind") in NEVER_SILENCED:
                 continue  # hand-edited: such a rule never counts
@@ -428,7 +438,7 @@ class AlertWorker:
     tolerates), so no new file is rewritten every few seconds. `presence()` -> ms of the latest tmux client input or
     None; `mail` is a jarvismail.Mail (its checks and its tmux seam are reused for the wake)."""
 
-    def __init__(self, env, state=None, mail=None, log=None, presence=None):
+    def __init__(self, env, state=None, mail=None, log=None, presence=None, persist=None):
         import jarvismail as M
         self.env = env
         self.M = M
@@ -451,6 +461,9 @@ class AlertWorker:
             "day": st.get("day") if isinstance(st.get("day"), dict) else {},
         }
         self.presence_fn = presence or self._tmux_presence
+        # rev-f3 LOW5: jarvis-d's d-state writer. Called BEFORE an alert line or a wake paste goes out, with the
+        # state that already counts it as done: a crash in between loses at most that one line, never repeats it.
+        self.persist = persist or (lambda: None)
         self.present_at, self.presence_checked = None, 0
         self.hb_at = 0
         self.summary = {}
@@ -689,17 +702,21 @@ class AlertWorker:
 
     def _emit(self, now, mode, sessions, tasks, mails):
         rules = self.rules.all(now)
-        keep, out = [], []
+        keep, incidents = [], []
         for it in self.s["items"]:
             if now - _i(it.get("at")) > EXPIRE_MS.get(it["src"], 3600 * 1000):
                 continue  # stale: never told late
             if self.rules.silenced(it, now, sessions, rules):
                 continue
             if it["src"] == "incident":
-                self._write(now, "incident", it["text"], None)
+                incidents.append(it)
                 continue
             keep.append(it)
         self.s["items"] = keep
+        if incidents:
+            self._persist()
+            for it in incidents:
+                self._write(now, "incident", it["text"], None)
         if now - self.s["lastEmit"] < BATCH_GAP_MS:
             return
         sentences, names, kinds, sent, woke = [], [], [], [], []
@@ -727,12 +744,11 @@ class AlertWorker:
             kinds.append(it["kind"])
             sent.append(("item", id(it)))
             if it.get("wake") and mode != "dnd":
-                woke.append(text)
+                woke.append(it.get("task"))
         if not sentences:
             return
         kind = max(kinds, key=lambda k: SEVERITY[k])
         one = names[0] if len(names) == 1 else None
-        self._write(now, kind, batch_text(sentences), one)
         self.s["lastEmit"] = now
         done_ids = {x[1] for x in sent if x[0] == "item"}
         self.s["items"] = [i for i in self.s["items"] if id(i) not in done_ids]
@@ -741,21 +757,39 @@ class AlertWorker:
                 b = self.s["blocks"][name]
                 b["told"] = True
                 self.s["recent"][name] = {"sig": b["sig"], "at": now}
-        for text in woke:
-            self.s["wake"].append({"text": text, "at": now})
+        for tid in woke:
+            if tid and self.M.TASK_RE.fullmatch(tid):
+                self.s["wake"].append({"task": tid, "at": now})
+        self._count(now, "alerts")
+        self._persist()
+        self._write(now, kind, batch_text(sentences), one)
 
     def _write(self, now, kind, text, name):
+        if kind == "incident":
+            self._count(now, "alerts")
         self.file.write(alert_line(new_id("a", now), kind, now, text, name))
-        self._count(now, "alerts")
+
+    def _persist(self):
+        try:
+            self.persist()
+        except Exception as e:  # noqa: BLE001  a full disk must not stop the alert itself
+            self.log(f"alerts persist: {type(e).__name__}: {e}"[:300])
 
     # ------------------------------------------------------------------ wake
 
     def wake_line(self):
-        texts = [w["text"] for w in self.s["wake"]]
-        body = "; ".join(texts) if len(texts) > 1 else texts[0]
-        line = WAKE_PREFIX + (f"{len(texts)} výsledky úkolů: " if 2 <= len(texts) <= 4 else
-                              f"{len(texts)} výsledků úkolů: " if len(texts) > 4 else "Výsledek úkolu: ") + body
-        return line[:self.M.LINE_MAX]
+        """A FIXED line (rev-f3 LOW6, as mail's I13): task ids and a command, never a title or any other free text,
+        so nothing typed by anyone reaches Jarvis's prompt through a wake."""
+        ids = []
+        for w in self.s["wake"]:
+            t = w.get("task")
+            if isinstance(t, str) and self.M.TASK_RE.fullmatch(t) and t not in ids:
+                ids.append(t)
+        ids = ids[:5]
+        if not ids:
+            return None
+        return (WAKE_PREFIX + "Výsledek úkolu " + ", ".join(ids) + " · "
+                + " · ".join(f"cr-task show {t}" for t in ids))[:self.M.LINE_MAX]
 
     def wake_hold(self, now, mode, self_name):
         """None, or why no wake may go now (§3 point 3 and the brief's limits). The screen checks come after."""
@@ -782,17 +816,18 @@ class AlertWorker:
         if not self.s["wake"] or self.wake_hold(now, mode, self_name) or time_left() < MIN_TIME_LEFT_S:
             return
         line = self.wake_line()
-        if self.M.bad_chars(line) is not None:
+        if not line or self.M.bad_chars(line) is not None:
             self.s["wake"] = []
             return
         m = self.mail
         t = m.probe(self_name, fold, m.env.now_ms())
         if isinstance(t, str):
             return  # not now (busy, a draft, someone typing, copy-mode, mail off …): the next tick tries again
-        res = self.paste(t, line)
         self.s["wake"] = []
         self.s["wakes"].append(now)
         self._count(now, "wakes")
+        self._persist()  # LOW5: counted before the paste, so a crash inside it never pastes a second wake
+        res = self.paste(t, line)
         with m.lock():
             m.log("wake", to=self_name, result=res)
 

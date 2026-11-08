@@ -630,12 +630,14 @@ def cmd_briefing(env, a, now):
     if a.which not in ("morning", "evening"):
         return None
     d = briefing_data(env, a.which, now)
-    summary = llm_summary(env, briefing_text(d)) if a.summary else None
+    summary = llm_summary(env, briefing_text(d)) if a.summary and not a.say else None
     if a.json:
         return _dump(dict(d, summary=summary))
     if a.say:
-        return briefing_say(d) + (f" {summary}" if summary else "")
-    return briefing_text(d) + (f"\nSouhrn (lokální model, jen orientačně): {summary}" if summary else "")
+        # rev-f3 LOW9: the spoken briefing is the deterministic one only; a model's sentence (it mixed up accounts in
+        # the live test) never reaches TTS as if it were a fact
+        return briefing_say(d)
+    return briefing_text(d) + (f"\nPodle lokálního modelu: {summary}" if summary else "")
 
 
 # ---------------------------------------------------------------------------------------------------------- utils

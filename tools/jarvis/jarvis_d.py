@@ -47,7 +47,6 @@ sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
 import jarvislib as J  # noqa: E402
 import jarvismail as M  # noqa: E402
 import jarviswatch as JW  # noqa: E402
-import jarvisalert as JA  # noqa: E402
 
 TICK_S = 5
 DURATION_S = 55
@@ -87,8 +86,17 @@ class Daemon:
         self.errors = []
         self.mail = M.MailWorker(env, log=self.log)
         self.watch = JW.WatchWorker(env, log=self.log)
-        # F3: its state rides in d-state.json (no new file rewritten every tick, the live-file canary knows that one)
-        self.alerts = JA.AlertWorker(env, st.get("alerts"), mail=self.mail.mail, log=self.log)
+        # F3: its state rides in d-state.json (no new file rewritten every tick, the live-file canary knows that one),
+        # written ahead of every alert line and wake (rev-f3 LOW5). Imported lazily (LOW10): a broken jarvisalert
+        # costs the alerts, never the picture, the mail or the watches.
+        self.alerts = None
+        self._alerts_state = st.get("alerts")
+        try:
+            import jarvisalert as JA
+            self.alerts = JA.AlertWorker(env, st.get("alerts"), mail=self.mail.mail, log=self.log,
+                                         persist=self._write_dstate)
+        except Exception:
+            self.log("alerts off: " + traceback.format_exc(limit=3))
         self.time_left = lambda: 60.0
         self.integrity, self.integrity_at = [], 0
 
@@ -141,7 +149,8 @@ class Daemon:
             "counts": _counts(sessions),
             "inbox": [{"name": s["name"], "short": s["short"], **s["attention"]} for s in J.inbox(sessions)],
             "usage": self.usage, "closed": closed, "errors": self.errors[-5:], "integrity": self.integrity,
-            "watches": self.watch.summary, "alerts": self.alerts.summary, "sessions": sessions,
+            "watches": self.watch.summary, "alerts": self.alerts.summary if self.alerts else None,
+            "sessions": sessions,
         }
         J.atomic_write(env.path("status.json"), json.dumps(status, ensure_ascii=False, separators=(",", ":")))
         self._write_dstate()
@@ -159,7 +168,7 @@ class Daemon:
         # the wake, which may wait ~10 s for its confirmation like a delivery. Its state is written at once when it
         # changed, so a crash right after an alert never tells it twice.
         try:
-            if self.alerts.tick(new, sessions, self.fold, now, self_name, self.time_left):
+            if self.alerts and self.alerts.tick(new, sessions, self.fold, now, self_name, self.time_left):
                 self._write_dstate()
         except Exception:
             self.log("alerts: " + traceback.format_exc(limit=3))
@@ -167,7 +176,8 @@ class Daemon:
 
     def _write_dstate(self):
         J.atomic_write(self.env.path("d-state.json"), json.dumps(
-            {"v": 1, "gen": self.gen, "reader": self.reader.state(), "fold": self.fold.s, "alerts": self.alerts.state},
+            {"v": 1, "gen": self.gen, "reader": self.reader.state(), "fold": self.fold.s,
+             "alerts": self.alerts.state if self.alerts else self._alerts_state},
             separators=(",", ":")))
 
     def _integrity(self):
