@@ -163,14 +163,23 @@ When the SSH read loop detects connection loss:
 
 ### Server-side scripts and the tmux socket guard
 
-`SessionPersistenceService.INSTALL_RESTORE_COMMAND` installs three scripts in `~/.claude-remote` on every
-connect whose marker (`claude-remote-restore-v18`) is missing, each written to a temp file and renamed into
-place (never `cat >` over a script a running bash may be reading):
+`SessionPersistenceService.INSTALL_RESTORE_COMMAND` installs three scripts in `~/.claude-remote` (on the first
+launch per server and app run, `persistLaunched`) whose marker (`claude-remote-restore-v18`) is missing, each
+written to a temp file and renamed into place (never `cat >` over a script a running bash may be reading):
 
 - `restore.sh` (boot unit, and drift's self-heal) recreates sessions from the manifest;
 - `drift.sh` (user timer, every minute) reconciles the manifest with live tmux and relaunches what died;
 - `tmux-sockheal.sh`, which the app's tmux anchor (`ClaudeConfig.buildTmuxRunCommand`) runs before any
   command that may create a tmux server.
+
+The installer (~80 KB) is never the exec request itself: it goes on the stdin of the short `INSTALL_RESTORE_EXEC`,
+paced 4 KB / 20 ms like every upload, and runs only once its end line arrived, so a transport lost midway runs
+none of it; it counts as installed only when it exits 0. The restore unit counts as present when it runs our
+`restore.sh` (an earlier check looked for a text the unit never had, so every install rewrote it and ran
+`daemon-reload`). As one ~80 KB request (23 KB compressed) through the Cloudflare tunnel it was followed by an exec
+transport that opened no more channels until it died (dávka C, K-1). `ExecArgumentSizeTest` holds every exec
+request at 4 KB or under, with named exceptions (bootstrap, hooks v2, streamd, the reconcile of many sessions)
+that may not grow.
 
 All three carry the same **socket guard**. A tmux server whose socket file (or whole `/tmp/tmux-<uid>`
 directory) was deleted keeps running but answers nobody; on 2026-11-02 drift then saw no sessions,
@@ -221,7 +230,8 @@ caller (`ClaudeConfig.OnExisting`, V14), who knows what it sends (`TmuxLaunchDec
   name on the same server while the first one is creating (a second tap, quick connect twice, Launch re-armed on
   the Connect screen) joins it (R6-1): it waits for the first launch's tab and switches to it, or ends with the first
   one's error — never a second session; quick connect counts the names being created as this device's own
-  (`SessionOrchestrator.ownTmuxNames`), so it asks for that same name. Only
+  (`SessionOrchestrator.ownTmuxNames`, read once its listing answered, N7-3), so it asks for that same name, and the
+  Connect screen keeps the name its own launch is creating when a listing shows it (H16). Only
   then is the tab added; it attaches the session like any session of this device (`buildAttachCommand`,
   single-client), and a session gone again before that attach is rebuilt by the usual recovery, never launched fresh
   in the tab. Until the tab exists nothing can persist, push, probe, restart, rename or close it. The creation's
@@ -238,9 +248,18 @@ caller (`ClaudeConfig.OnExisting`, V14), who knows what it sends (`TmuxLaunchDec
   names in the server's `sessions.json`, so a session of another device that is not back yet after a reboot keeps
   its name) ∪ the launcher's last scan of the server; the Connect screen adds this device's tabs. A listing that
   fails, is cut short or does not answer (quick connect waits 3 s, the Connect screen 6 s; the server ends the
-  listing itself after 2 s) throws, and the other names stand in — never "nothing is taken". The Connect screen
-  launches a new session only after its listing ended (or timed out), only its last opening writes the result, and
-  picking "New session" again after an existing one gives a free name again. Quick connect stays a fresh claude in
+  listing itself after 2 s) throws, and the other names stand in — never "nothing is taken". On the Connect screen
+  such a listing is "list unavailable" with Retry, never "0 on server" (C2: `ConnectListing.state` is
+  `Loading | Loaded | Failed`; "N on server" only for `Loaded`). Retry opens a connection of its own only when the
+  server has no exec transport up (`allowFresh = !execUp`), and is off while a listing or a launch runs (the launch's
+  8 s debounce; past it the launch's own name is kept and a second Launch joins it, R6-1). A new session waits for a
+  running listing; after a failed one it can be launched, with a warning, since the server checks its name when it
+  creates it (V16); an off Launch stays visible and says why. A kill re-lists only the screen of its own server, and
+  an existing session that is no longer listed is no longer picked. Only the last opening writes the result, picking
+  "New session" again after an existing one gives a free name again, and "Will run" shows the launch's own builder
+  (`tmux new-session -d -s <name>` + `ClaudeConfig.buildLaunchCommand`; an existing session: `tmux attach-session`).
+  A tab attached to an existing session from the Connect screen still carries the screen's folder field, not the
+  session's folder (limit; the manifest's folder is not in the listing). Quick connect stays a fresh claude in
   the default folder: a session of another device or folder under that name gets a number, and a tab this device
   already has open under the name is switched to.
   Limits: a mosh launch on a server without exec routing and without a transport pays one handshake for the

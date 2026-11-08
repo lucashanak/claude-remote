@@ -1092,7 +1092,8 @@ SOCKHEAL_EOF
             systemctl --user daemon-reload 2>/dev/null || true
             echo "OWNED_UNIT_REMOVED"
         fi
-        if ! grep -q "claude-remote-restore" "${'$'}UNIT" 2>/dev/null; then
+        # Present = the unit runs our restore.sh (the unit's content is unchanged, so a written unit stays).
+        if ! grep -qF "claude-remote/restore.sh" "${'$'}UNIT" 2>/dev/null; then
             cat > "${'$'}UNIT" <<UNIT_EOF
 [Unit]
 Description=Claude Remote — restore tmux+claude sessions on boot
@@ -1147,6 +1148,29 @@ DTIMER_EOF
         LINGER=${'$'}(loginctl show-user "${'$'}USER" --property=Linger --value 2>/dev/null || echo unknown)
         echo "LINGER=${'$'}LINGER"
     """.trimIndent()
+
+        /**
+         * The last line of the installer's stdin ([installRestoreStdin]); it appears nowhere in
+         * [INSTALL_RESTORE_COMMAND], so a stdin that ends with it arrived whole.
+         */
+        internal const val INSTALL_RESTORE_END = "# claude-remote-install-end"
+        /** What [INSTALL_RESTORE_EXEC] prints (exit 97) when the installer did not arrive whole: nothing of it ran. */
+        internal const val INSTALL_RESTORE_TRUNCATED = "INSTALL_TRUNCATED"
+
+        /**
+         * The exec request of the install; [INSTALL_RESTORE_COMMAND] itself (~80 KB) goes on the channel's stdin, paced
+         * 4 KB / 20 ms like every upload. Sent as the request itself it was one burst of ~80 KB (23 KB compressed)
+         * through the Cloudflare tunnel, after which the exec transport stopped opening channels until it died
+         * (dávka C, K-1). The script is read to its end and run only when [INSTALL_RESTORE_END] arrived: a transport
+         * lost midway closes the stdin early, and the first half of an installer must not run. It runs in bash (`eval`,
+         * so it is never one argument again), as before on a server whose login shell is bash; the launcher needs bash.
+         */
+        internal const val INSTALL_RESTORE_EXEC =
+            "bash -c 's=\$(cat); case \"\$s\" in *\"$INSTALL_RESTORE_END\") eval \"\$s\";; *) echo $INSTALL_RESTORE_TRUNCATED; exit 97;; esac'"
+
+        /** The stdin of [INSTALL_RESTORE_EXEC]: the installer, then [INSTALL_RESTORE_END]. */
+        internal fun installRestoreStdin(): ByteArray =
+            (INSTALL_RESTORE_COMMAND + "\n" + INSTALL_RESTORE_END + "\n").toByteArray(Charsets.UTF_8)
 
         /**
          * Parse [ManifestCommands.closeState] output. Null means "the probe
@@ -1529,19 +1553,11 @@ DTIMER_EOF
         if (serverId != null && !beginRestoreInstall(serverId)) return
         var ok = false
         try {
-            val out = withContext(Dispatchers.IO) {
-                val sshSession = sshManager.getSession() ?: return@withContext "NO_SESSION"
-                val ch = sshSession.openChannel("exec") as com.jcraft.jsch.ChannelExec
-                ch.setCommand(INSTALL_RESTORE_COMMAND)
-                ch.inputStream = null
-                val input = ch.inputStream
-                ch.connect(15_000)
-                val text = input.bufferedReader().readText().trim()
-                ch.disconnect()
-                text
-            }
-            logRestoreInstall(out)
-            ok = out != "NO_SESSION"
+            val sshSession = sshManager.getSession()
+            // the installer on stdin, paced (K-1), as on the exec transport
+            val res = if (sshSession == null) null else PooledRemoteExec(UngatedExecChannels { sshSession })
+                .run(serverId.orEmpty(), INSTALL_RESTORE_EXEC, installRestoreStdin(), totalMs = 15_000, paceStdin = Pace())
+            ok = restoreInstallRan(res) == true
         } catch (e: Exception) {
             FileLogger.error(TAG, "Restore service install failed: ${e.message}", e)
         } finally {
@@ -1551,25 +1567,38 @@ DTIMER_EOF
 
     /**
      * [ensureRestoreService] by server id, over the exec transport (no tab shell needed). Once per server per app
-     * run, once it succeeded. False = there was no usable transport (nothing was installed, nothing is
-     * remembered): the caller may ask again when one is up.
+     * run, once it succeeded (exit status 0). False = there was no usable transport, or the installer did not arrive
+     * whole (nothing was installed, nothing is remembered): the caller may ask again when one is up. A command that ran
+     * and failed is not remembered either, but true: asking again at once would fail the same way.
      */
     suspend fun ensureRestoreService(serverId: String): Boolean {
         if (!beginRestoreInstall(serverId)) return true
-        var ok = false
+        var ran: Boolean? = null
         try {
-            val out = registry.execRead(serverId, INSTALL_RESTORE_COMMAND, totalMs = 15_000)?.trim() ?: "NO_SESSION"
-            logRestoreInstall(out)
-            ok = out != "NO_SESSION"
+            // the installer on stdin, paced (K-1): never one ~80 KB exec request through the tunnel
+            ran = restoreInstallRan(registry.execRun(serverId, INSTALL_RESTORE_EXEC, stdin = installRestoreStdin(), totalMs = 15_000, paceStdin = Pace()))
         } catch (e: kotlinx.coroutines.CancellationException) {
             throw e
         } catch (e: Exception) {
             FileLogger.error(TAG, "Restore service install failed: ${e.message}", e)
             return true // a real failure of the command: asking again at once would fail the same way
         } finally {
-            endRestoreInstall(serverId, ok)
+            endRestoreInstall(serverId, ran == true)
         }
-        return ok
+        return ran != null
+    }
+
+    /**
+     * Logs one install and judges it: true = it ran to its end (exit status 0: remembered), false = it ran and failed
+     * (not remembered), null = it never ran (no transport, or the installer did not arrive whole: [INSTALL_RESTORE_TRUNCATED]
+     * as the last line, whatever a login banner printed before it).
+     */
+    private fun restoreInstallRan(res: ExecResult?): Boolean? {
+        val out = res?.stdout?.trim() ?: "NO_SESSION"
+        logRestoreInstall(out)
+        if (res == null || out.lineSequence().last().trim() == INSTALL_RESTORE_TRUNCATED) return null
+        if (res.exitStatus != 0) FileLogger.error(TAG, "Restore service install exited with ${res.exitStatus} — not remembered, the next launch installs again", null)
+        return res.exitStatus == 0
     }
 
     private fun logRestoreInstall(out: String) {

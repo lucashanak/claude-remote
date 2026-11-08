@@ -723,7 +723,7 @@ class RestoreScriptIntegrationTest {
     @Test
     fun anInterruptedInstallLeavesNoTempFile() {
         File(fixture.shims, "chmod").apply { writeText("#!/usr/bin/env bash\nexit 1\n") }.setExecutable(true)
-        val r = session.execCapture("bash -s", timeoutMs = 60_000, stdin = SessionPersistenceService.INSTALL_RESTORE_COMMAND.toByteArray())
+        val r = session.execCapture(SessionPersistenceService.INSTALL_RESTORE_EXEC, timeoutMs = 60_000, stdin = SessionPersistenceService.installRestoreStdin())
         assertTrue(r.exit != 0, "precondition: the install must fail when chmod fails: ${r.out}")
         val dir = File(fixture.home, ".claude-remote")
         assertTrue(dir.list()!!.none { it.contains(".tmp.") }, "temp files left: ${dir.list()!!.toList()}")
@@ -1009,8 +1009,8 @@ class RestoreScriptIntegrationTest {
     // ------------------------------------------------------------------ helpers
 
     /**
-     * Install using the REAL production command, piped over stdin so its embedded
-     * heredocs and quoting are transmitted verbatim.
+     * Install using the REAL production request and stdin (the launcher, then the
+     * installer piped over stdin, so its embedded heredocs and quoting are transmitted verbatim).
      *
      * Note we run the constant ourselves rather than calling
      * `installRestoreService(...)`: that method opens its own exec channel with no
@@ -1019,9 +1019,9 @@ class RestoreScriptIntegrationTest {
      */
     private fun install(): String {
         val result = session.execCapture(
-            "bash -s",
+            SessionPersistenceService.INSTALL_RESTORE_EXEC,
             timeoutMs = 60_000,
-            stdin = SessionPersistenceService.INSTALL_RESTORE_COMMAND.toByteArray(),
+            stdin = SessionPersistenceService.installRestoreStdin(),
         )
         assertEquals(0, result.exit, "install command failed:\n${result.out}")
         return result.out
