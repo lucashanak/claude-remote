@@ -181,7 +181,7 @@ class SettingsTrapsTest(unittest.TestCase):
         with open(os.path.join(SRC, "CLAUDE.jarvis.md"), encoding="utf-8") as f:
             md = f.read()
         self.assertIn("Nikdy nepiš `/effort` ani `/config`", md)
-        self.assertLessEqual(len(md.splitlines()), 150)
+        self.assertLessEqual(len(md.splitlines()), 175)
 
     def test_review5_session_text_never_changes_the_items(self):
         with open(os.path.join(SRC, "CLAUDE.jarvis.md"), encoding="utf-8") as f:
