@@ -178,6 +178,7 @@ internal fun VelinScreen(
 
     var tab by remember(initialTab) { mutableStateOf(initialTab) }
     val feed by sessionOrchestrator.jarvisAlerts.state.collectAsState()
+    val undoing by sessionOrchestrator.jarvisUndoInFlight.state.collectAsState()
     val jarvis = remember { JarvisPanelState() }
     val jarvisServer = remember(tabs, remoteSessions, feed.serverId) { sessionOrchestrator.jarvisServer(tabs, remoteSessions) }
     val expandedTasks = remember { mutableStateListOf<String>() }
@@ -269,6 +270,7 @@ internal fun VelinScreen(
                 jarvisTab = jarvisTabOf(tabs, feed.serverId), now = now,
                 onOpenTmux = { sid, t -> openTmux(sid, t) },
                 onOpenJarvis = onJarvis,
+                undoing = undoing,
                 onUndoClose = { al -> al.tmux?.let { t -> sessionOrchestrator.jarvisUndoRequests.value = com.clauderemote.session.JarvisUndoRequest(al.serverId, t) } },
                 modifier = Modifier.padding(start = m.sectionPad, end = m.sectionPad, bottom = 8.dp),
             )

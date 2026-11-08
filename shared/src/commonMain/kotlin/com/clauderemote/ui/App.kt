@@ -841,6 +841,38 @@ fun App(
         }
     }
 
+    // The restore itself, awaited: the row's tap launches it, "Vrátit" of a Jarvis close runs it inside the undo's
+    // in-flight hold, so a second tap anywhere finds it running (rev-f4-app MED-1).
+    suspend fun runClosedRestore(
+        server: SshServer,
+        entry: com.clauderemote.session.ClosedEntry,
+        tmuxName: String = entry.record.tmuxName,
+        sessionId: String? = null,
+        freshSessionId: String? = null,
+    ) {
+        restoringClosed = restoringClosed + entry.key
+        try {
+            val (result, tab) = sessionOrchestrator.restoreClosed(server, entry.record, tmuxName, sessionId, freshSessionId)
+            val action = com.clauderemote.session.RecentlyClosed.actionFor(result, entry.record, server.name)
+            if (action is com.clauderemote.session.RestoreAction.OpenTab && tab != null) {
+                closedListDialog = false
+                currentScreen = Screen.TERMINAL
+                if (action.loginRequired) restoreOutcome = RestoreOutcome(entry, action)
+            } else {
+                restoreOutcome = RestoreOutcome(entry, action)
+            }
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            restoreOutcome = RestoreOutcome(entry, com.clauderemote.session.RestoreAction.Message(
+                "Obnova selhala", e.message ?: e.javaClass.simpleName))
+        } finally {
+            restoringClosed = restoringClosed - entry.key
+            scanRemoteSessions()
+            loadRecentlyClosed()
+        }
+    }
+
     // A restore of [entry] under [tmuxName] (a confirmed new name, a confirmed candidate, a new conversation). The
     // server never kills anything and lifts the tombstone first; the result decides what the user sees next.
     fun restoreClosedEntry(
@@ -857,29 +889,8 @@ fun App(
                 "Server chybí", "Server ${entry.serverName} už v aplikaci není."))
             return
         }
-        restoringClosed = restoringClosed + entry.key
-        scope.launch {
-            try {
-                val (result, tab) = sessionOrchestrator.restoreClosed(server, entry.record, tmuxName, sessionId, freshSessionId)
-                val action = com.clauderemote.session.RecentlyClosed.actionFor(result, entry.record, server.name)
-                if (action is com.clauderemote.session.RestoreAction.OpenTab && tab != null) {
-                    closedListDialog = false
-                    currentScreen = Screen.TERMINAL
-                    if (action.loginRequired) restoreOutcome = RestoreOutcome(entry, action)
-                } else {
-                    restoreOutcome = RestoreOutcome(entry, action)
-                }
-            } catch (e: kotlinx.coroutines.CancellationException) {
-                throw e
-            } catch (e: Exception) {
-                restoreOutcome = RestoreOutcome(entry, com.clauderemote.session.RestoreAction.Message(
-                    "Obnova selhala", e.message ?: e.javaClass.simpleName))
-            } finally {
-                restoringClosed = restoringClosed - entry.key
-                scanRemoteSessions()
-                loadRecentlyClosed()
-            }
-        }
+        restoringClosed = restoringClosed + entry.key   // at once: a second tap before the launch runs sees it
+        scope.launch { runClosedRestore(server, entry, tmuxName, sessionId, freshSessionId) }
     }
 
     // A row's tap: resume its conversation; a record without one starts a new conversation in the same folder and account.
@@ -903,12 +914,26 @@ fun App(
             return
         }
         scope.launch {
-            when (val p = sessionOrchestrator.findJarvisUndo(server, req.tmux)) {
-                is com.clauderemote.session.JarvisUndo.Pick.Found -> startRestore(
-                    com.clauderemote.session.ClosedEntry(server.id, server.name, p.record))
-                is com.clauderemote.session.JarvisUndo.Pick.No -> restoreOutcome =
-                    RestoreOutcome(null, com.clauderemote.session.RestoreAction.Message("Nejde vrátit", p.why))
+            // the same in-flight set as the watch's undo, held over the read AND the restore (MED-1)
+            val ran = sessionOrchestrator.jarvisUndoInFlight.run(server.id, req.tmux) {
+                when (val p = sessionOrchestrator.findJarvisUndo(server, req.tmux)) {
+                    is com.clauderemote.session.JarvisUndo.Pick.Found -> {
+                        val entry = com.clauderemote.session.ClosedEntry(server.id, server.name, p.record)
+                        // a row tap on the same record already restoring it: that one decides
+                        if (entry.key !in restoringClosed) {
+                            restoreOutcome = null
+                            runClosedRestore(
+                                server, entry,
+                                freshSessionId = if (p.fresh) java.util.UUID.randomUUID().toString() else null,
+                            )
+                        }
+                    }
+                    is com.clauderemote.session.JarvisUndo.Pick.No -> restoreOutcome =
+                        RestoreOutcome(null, com.clauderemote.session.RestoreAction.Message("Nejde vrátit", p.why))
+                }
             }
+            if (ran == null) restoreOutcome = RestoreOutcome(null, com.clauderemote.session.RestoreAction.Message(
+                "Už se vrací", com.clauderemote.session.JarvisUndo.busyText(req.tmux)))
         }
     }
 

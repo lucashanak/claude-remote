@@ -159,7 +159,13 @@ class PhoneWearService : WearableListenerService() {
             "Aplikace na telefonu neběží – vrať to z Nedávno zavřených."
         } else {
             try {
-                kotlinx.coroutines.runBlocking { orchestrator.undoJarvisClose(req.serverId, req.tmux) }
+                // the undo has its own limit (JarvisUndo.HEADLESS_TIMEOUT_MS); this one only keeps the listener
+                // thread from ever hanging on something outside it (rev-f4-app LOW)
+                kotlinx.coroutines.runBlocking {
+                    kotlinx.coroutines.withTimeoutOrNull(com.clauderemote.session.JarvisUndo.HEADLESS_TIMEOUT_MS + 10_000) {
+                        orchestrator.undoJarvisClose(req.serverId, req.tmux)
+                    }
+                } ?: "Vracení „${com.clauderemote.session.JarvisUndo.alias(req.tmux)}“ neodpovědělo včas. Session se možná spustila: podívej se do seznamu sessions."
             } catch (e: Exception) {
                 FileLogger.log(TAG, "Wear Jarvis undo of ${req.tmux} failed: ${e.message}")
                 "Vrácení se nepovedlo (${e.javaClass.simpleName}) – zkus to z Nedávno zavřených."
