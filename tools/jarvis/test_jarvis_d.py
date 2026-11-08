@@ -38,7 +38,7 @@ class DaemonTest(unittest.TestCase):
         st = d.tick()
         s = st["sessions"][NAME]
         self.assertEqual((st["gen"], s["changedGen"], s["prevState"], s["state"], s["stopBg"]),
-                         (2, 2, "busy", "idle", True))
+                         (2, 2, "busy", "bg", True))  # a stop with background tasks is not idle (2026-11-08)
         self.assertEqual(st["d_heartbeat"], fx.clock.ms)
 
     def test_state_survives_a_new_cron_run(self):

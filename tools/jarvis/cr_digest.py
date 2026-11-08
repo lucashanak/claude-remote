@@ -64,8 +64,10 @@ def classify(s):
         return "back"
     if s.get("new"):
         return "new"
-    if st == "idle" and prev in ("busy", "waiting", "shell"):
+    if st in ("idle", "bg") and prev in ("busy", "waiting", "shell"):
         return "done"
+    if st == "bg":
+        return "busy"
     if st == "busy":
         return "busy"
     if prev is not None and st == prev:
@@ -291,9 +293,9 @@ def _mail_say(i):
     return s
 
 
-STATE_CZ = {"busy": "pracuje", "idle": "nečinná", "waiting": "čeká", "shell": "shell", "dead": "bez claude",
+STATE_CZ = {"busy": "pracuje", "bg": "pracuje na pozadí", "idle": "nečinná", "waiting": "čeká", "shell": "shell", "dead": "bez claude",
             "missing": "chybí", "unknown": "neznámý", "gone": "zmizela"}
-STATE_ORDER = {"waiting": 0, "busy": 1, "shell": 2, "dead": 3, "missing": 3, "unknown": 4, "idle": 5, "gone": 6}
+STATE_ORDER = {"waiting": 0, "busy": 1, "bg": 1, "shell": 2, "dead": 3, "missing": 3, "unknown": 4, "idle": 5, "gone": 6}
 
 
 def cmd_brief(env, a, now):

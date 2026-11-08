@@ -265,6 +265,25 @@ class RegistryTest(unittest.TestCase):
         s = J.snapshot(fx.env())["sessions"]["claude-server-noreg"]
         self.assertEqual((s["state"], s["pid"], s["noRegistry"]), ("unknown", 72, True))
 
+    def test_claude_without_registry_takes_its_state_from_the_last_hook_event(self):
+        fx = self.fx
+        fx.pane("%9", 70, "claude-server-noreg")
+        fx.ptable = {70: (1, "bash"), 71: (70, "bash"), 72: (71, "claude")}
+        for ev, want in (("work", "busy"), ("perm", "waiting"), ("stop", "idle")):
+            fx.append_events(ev_line(ev, "claude-server-noreg", fx.clock.ms, 72))
+            fx.clock.advance(1)
+            s = J.snapshot(fx.env())["sessions"]["claude-server-noreg"]
+            self.assertEqual((s["state"], s.get("stateInferred")), (want, True), ev)
+
+    def test_a_stop_with_background_tasks_is_not_idle(self):
+        fx = self.fx
+        fx.session("claude-server-bgx", 90, "%11", status="idle")
+        fx.append_events(ev_line("stop", "claude-server-bgx", fx.clock.ms, 90, "bg"))
+        self.assertEqual(J.snapshot(fx.env())["sessions"]["claude-server-bgx"]["state"], "bg")
+        fx.clock.advance(1)
+        fx.append_events(ev_line("stop", "claude-server-bgx", fx.clock.ms, 90))
+        self.assertEqual(J.snapshot(fx.env())["sessions"]["claude-server-bgx"]["state"], "idle")
+
     def test_unknown_registry_status(self):
         self.fx.session("claude-server-u", 80, "%10", status="sleeping")
         self.assertEqual(J.snapshot(self.fx.env())["sessions"]["claude-server-u"]["state"], "unknown")

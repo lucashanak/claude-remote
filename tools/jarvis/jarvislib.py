@@ -33,6 +33,8 @@ EV_PREFIX = "claude-remote-ev "
 KNOWN_EV = ("work", "ask", "askdone", "perm", "stop", "start", "end")
 # Registry `status` values (binary 2.1.319). Anything else is reported as `unknown`, never guessed.
 REG_STATES = ("busy", "idle", "waiting", "shell")
+# A session without a registry record: its last hook event says what it is doing (ask/perm = waiting for Lukáš).
+EVENT_STATE = {"work": "busy", "askdone": "busy", "ask": "waiting", "perm": "waiting", "stop": "idle", "start": "idle"}
 
 # A registry file is a few hundred bytes; anything far bigger is not one and is skipped unread.
 REGISTRY_MAX_BYTES = 65536
@@ -868,6 +870,15 @@ def build_sessions(env, regs, panes, manifest, fold, self_name=None, tr_cache=No
             s["lastEvent"] = {"ev": last["ev"], "ms": last["ms"]} if last else None
             if s["stateSince"] is None and last:
                 s["stateSince"] = last["ms"]
+            if s.get("noRegistry") and last and last["ev"] in EVENT_STATE:
+                # no registry record (claude after a --resume restart can lack one): the last hook event is the only
+                # signal, so take it, marked as inferred, instead of "?"
+                s["state"], s["stateInferred"] = EVENT_STATE[last["ev"]], True
+            stop = fs.get("stop")
+            if s["state"] == "idle" and last and last["ev"] == "stop" and stop and stop.get("bg"):
+                # the turn ended with background tasks (agents, a watched build) still running: not idle, and it
+                # will wake itself; calling it "nečinná" misled Lukáš (2026-11-08)
+                s["state"] = "bg"
             # transcript tail, re-read only when the file changed
             tp = transcript_path(env, cfg, s["cwd"], s["sessionId"])
             s["transcript"] = tp
