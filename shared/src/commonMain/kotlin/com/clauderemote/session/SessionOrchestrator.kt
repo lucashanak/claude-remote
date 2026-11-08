@@ -3284,6 +3284,43 @@ class SessionOrchestrator(
     /** This device's `by` in close records (`app:<installId>`): the rows it closed itself read "zavřeno tady". */
     internal val ownCloseBy: String get() = "app:$deviceKey"
 
+    // ── Jarvis F3: alerts, lease, CLI ─────────────────────────────────────────────────────────────────────────
+
+    /** Jarvis' alerts and heartbeat lease, read off the notify watchers' tails. */
+    val jarvisAlerts: com.clauderemote.session.service.JarvisAlertHub get() = notificationService.jarvis
+
+    /** This installation's id, as `cr-mail approve --by app:<id>` records who confirmed a proposal. */
+    internal val installId: String get() = deviceKey
+
+    /**
+     * The server Jarvis' CLI runs on: the one whose heartbeat is newest, else the server of a Jarvis tab, else the one
+     * a scan saw him on. Null = no server known to have Jarvis.
+     */
+    internal fun jarvisServer(tabs: List<ClaudeSession>, remotes: List<RemoteSession>): SshServer? {
+        val name = QuickAccess.JARVIS_TMUX_NAME
+        val servers = (tabs.map { it.server } + remotes.map { it.server }).associateBy { it.id }
+        jarvisAlerts.state.value.serverId?.let { id -> servers[id]?.let { return it } }
+        return tabs.firstOrNull { it.tmuxSessionName == name }?.server
+            ?: remotes.firstOrNull { it.tmuxSession.name == name }?.server
+    }
+
+    /**
+     * One short exec of a Jarvis CLI command ([com.clauderemote.session.service.JarvisData]) on [server]: the same
+     * path as the closed-records read (whatever transport the server has, a fresh one only when none). Null = no
+     * answer; the caller says "nejde načíst", never "nic".
+     */
+    internal suspend fun jarvisRun(server: SshServer, cmd: String, totalMs: Long = 10_000): String? =
+        withContext(Dispatchers.IO) {
+            try {
+                SshSessionHelper.withSession(server, 5_000) { sess -> execReadWithWatchdog(sess, cmd, totalMs = totalMs) }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                FileLogger.log(TAG, "Jarvis CLI on ${server.name} failed: ${e.javaClass.simpleName}: ${e.message}")
+                null
+            }
+        }
+
     /**
      * Where the "do not adopt" list lives (AppSettings, set by the UI). Null = not wired yet: adoption then adopts
      * nothing, because a hide it cannot read must not be undone by adopting the tab again.

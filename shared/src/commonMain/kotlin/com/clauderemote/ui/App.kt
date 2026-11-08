@@ -131,6 +131,9 @@ fun App(
     }
     // The Velín asks once whether the app should open there; answered, it never asks again.
     var velinStartOfferPending by remember { mutableStateOf(!appSettings.velinStartOffered) }
+    // The Velín's tab to open on, and this device's alert routing (Jarvis F3).
+    var velinTab by remember { mutableStateOf(VelinTab.PREHLED) }
+    var alertRouting by remember { mutableStateOf(appSettings.alertRouting) }
     // Which server's accounts the accounts screen is showing; set when opened
     // from that server's settings, which is the only way in.
     var accountsServerId by remember { mutableStateOf<String?>(null) }
@@ -684,7 +687,8 @@ fun App(
     // but there is nothing to gain).
     var jarvisLookup by remember { mutableStateOf(false) }
 
-    fun openVelin() {
+    fun openVelin(tab: VelinTab = VelinTab.PREHLED) {
+        velinTab = tab
         currentScreen = Screen.VELIN
     }
 
@@ -731,6 +735,7 @@ fun App(
     fun openQuick(target: com.clauderemote.session.QuickTarget) = when (target) {
         com.clauderemote.session.QuickTarget.JARVIS -> openJarvis()
         com.clauderemote.session.QuickTarget.VELIN -> openVelin()
+        com.clauderemote.session.QuickTarget.JARVIS_NEWS -> openVelin(VelinTab.JARVIS)
     }
 
     // Requests from outside (launcher shortcuts, the tile): taken once, then cleared.
@@ -2052,6 +2057,9 @@ fun App(
                             velinStartOfferPending = false
                         } else null,
                         onJarvis = { openJarvis() },
+                        alertRouting = alertRouting,
+                        onAlertRouting = { r -> appSettings.alertRouting = r; alertRouting = r },
+                        initialTab = velinTab,
                     )
                 }
 

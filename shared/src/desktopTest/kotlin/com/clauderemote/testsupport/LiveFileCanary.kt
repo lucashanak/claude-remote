@@ -199,7 +199,8 @@ internal class LiveFileCanary(
                 else -> Tier.STRICT
             }
             parts[0] == ".cache" && parts.size >= 3 -> when (parts[2]) {
-                "events" -> Tier.APPEND
+                // jarvis-alerts: the live jarvis-d appends a heartbeat every 60 s (Jarvis F3), exactly like hooks append events
+                "events", "jarvis-alerts" -> Tier.APPEND
                 in CACHE_LIVE_NAMES -> Tier.PRESENCE
                 else -> Tier.STRICT
             }

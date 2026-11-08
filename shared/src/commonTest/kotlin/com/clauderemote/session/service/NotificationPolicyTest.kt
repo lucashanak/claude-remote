@@ -90,4 +90,43 @@ class NotificationPolicyTest {
         // Shares its hint with the hook `ask` — which is why the kind is typed, not read off the hint.
         assertEquals(NotifyKind.COMPLETION, NotifyKind.ofPrompt(PromptType.INPUT_PROMPT))
     }
+
+    // ── Jarvis F3: routing with fail-open ──
+
+    @Test
+    fun viaJarvisMutesOnlyCompletionsAndNeverAPermissionOrAQuestion() {
+        for (fg in listOf(false, true)) for (active in listOf(false, true)) {
+            val expectBlocking = !fg || !active
+            for (k in listOf(NotifyKind.PERMISSION, NotifyKind.QUESTION)) {
+                assertEquals(
+                    expectBlocking,
+                    NotificationPolicy.shouldNotify(k, fg, active, notificationsEnabled = true, notifyOnTaskComplete = true, viaJarvis = true),
+                    "$k fg=$fg active=$active",
+                )
+            }
+            assertFalse(NotificationPolicy.shouldNotify(NotifyKind.COMPLETION, fg, active, true, true, viaJarvis = true))
+            assertEquals(expectBlocking, NotificationPolicy.shouldNotify(NotifyKind.COMPLETION, fg, active, true, true, viaJarvis = false))
+        }
+    }
+
+    @Test
+    fun jarvisCarriesOnlyWithItsRoutingAndALiveLeaseElseFailsOpen() {
+        assertTrue(NotificationPolicy.jarvisCarries(AlertRouting.VIA_JARVIS, jarvisAlive = true))
+        assertFalse(NotificationPolicy.jarvisCarries(AlertRouting.VIA_JARVIS, jarvisAlive = false))
+        assertFalse(NotificationPolicy.jarvisCarries(AlertRouting.PER_SESSION, jarvisAlive = true))
+        assertFalse(NotificationPolicy.jarvisCarries(AlertRouting.PER_SESSION, jarvisAlive = false))
+        assertTrue(NotificationPolicy.jarvisFailedOpen(AlertRouting.VIA_JARVIS, jarvisAlive = false))
+        assertFalse(NotificationPolicy.jarvisFailedOpen(AlertRouting.VIA_JARVIS, jarvisAlive = true))
+        assertFalse(NotificationPolicy.jarvisFailedOpen(AlertRouting.PER_SESSION, jarvisAlive = false))
+        // the lease lapsed: the completion the user asked for alerts per session again, with nothing switched
+        val carried = NotificationPolicy.jarvisCarries(AlertRouting.VIA_JARVIS, jarvisAlive = false)
+        assertTrue(NotificationPolicy.shouldNotify(NotifyKind.COMPLETION, false, false, true, true, viaJarvis = carried))
+    }
+
+    @Test
+    fun routingDefaultsToPerSessionAndRoundTrips() {
+        assertEquals(AlertRouting.PER_SESSION, AlertRouting.of(null))
+        assertEquals(AlertRouting.PER_SESSION, AlertRouting.of("garbage"))
+        AlertRouting.entries.forEach { assertEquals(it, AlertRouting.of(it.wire)) }
+    }
 }

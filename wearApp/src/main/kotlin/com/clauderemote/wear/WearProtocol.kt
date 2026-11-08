@@ -56,6 +56,17 @@ data class WearSessionsPayload(
     // an older phone without the setting, alert as before. See
     // [WearDataListenerService.isQuietCompletion].
     val completionAlerts: Boolean? = null,
+    // Jarvis F3 (mirror of androidApp's WearJarvisInfo): the tile's "Jarvis · N" row and the merged notification.
+    val jarvis: WearJarvisInfo? = null,
+)
+
+@Serializable
+data class WearJarvisInfo(
+    val pending: Int,
+    val text: String,
+    val notify: Boolean,
+    val buzzAt: Long = 0,
+    val alive: Boolean = false,
 )
 
 /**
@@ -103,6 +114,14 @@ object SessionRepository {
     // and it's genuinely empty" — both render as an empty list otherwise.
     private val _hasLoaded = MutableStateFlow(false)
     val hasLoaded: StateFlow<Boolean> = _hasLoaded
+
+    // Jarvis' alerts as the last push carried them (null = the phone has heard nothing of Jarvis).
+    private val _jarvis = MutableStateFlow<WearJarvisInfo?>(null)
+    val jarvis: StateFlow<WearJarvisInfo?> = _jarvis
+
+    fun updateJarvis(info: WearJarvisInfo?) {
+        _jarvis.value = info
+    }
 
     fun update(payload: List<WearSessionInfo>) {
         _sessions.value = payload

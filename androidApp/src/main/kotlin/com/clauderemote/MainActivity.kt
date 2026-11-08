@@ -410,6 +410,9 @@ class MainActivity : FragmentActivity() {
                     isActiveTab = isActiveTab,
                     notificationsEnabled = appSettings.notificationsEnabled,
                     notifyOnTaskComplete = appSettings.notifyOnTaskComplete,
+                    viaJarvis = com.clauderemote.session.service.NotificationPolicy.jarvisCarries(
+                        appSettings.alertRouting, sessionOrchestrator.jarvisAlerts.alive(),
+                    ),
                 )
             ) {
                 FileLogger.log("Notify", "Sending alert for '$title'")
@@ -447,6 +450,38 @@ class MainActivity : FragmentActivity() {
                         }
                     }
                 }
+            }
+        }
+
+        // Jarvis F3: his alerts arrive on the notify tail; one merged notification, the watch gets the count.
+        val jarvisBatcher = com.clauderemote.session.service.JarvisAlertBatcher()
+        sessionOrchestrator.jarvisAlerts.sink = object : com.clauderemote.session.service.JarvisAlertSink {
+            override fun onAlert(
+                alert: com.clauderemote.session.service.JarvisAlert,
+                feed: com.clauderemote.session.service.JarvisFeed,
+            ) {
+                val post = jarvisBatcher.decide(alert, appSettings.alertRouting, feed.alive, appSettings.notificationsEnabled)
+                if (post != null) {
+                    JarvisNotifier.post(applicationContext, feed, post.buzz)
+                    if (post.buzz) WearSync.noteJarvisBuzz()
+                }
+                WearSync.pushNow()
+            }
+
+            override fun onCleared() {
+                JarvisNotifier.cancel(applicationContext)
+                WearSync.pushNow()
+            }
+
+            override fun onLeaseChanged(alive: Boolean) {
+                if (alive) {
+                    JarvisNotifier.cancelFailOpen(applicationContext)
+                } else if (appSettings.notificationsEnabled &&
+                    com.clauderemote.session.service.NotificationPolicy.jarvisFailedOpen(appSettings.alertRouting, false)
+                ) {
+                    JarvisNotifier.postFailOpen(applicationContext)
+                }
+                WearSync.pushNow()
             }
         }
 

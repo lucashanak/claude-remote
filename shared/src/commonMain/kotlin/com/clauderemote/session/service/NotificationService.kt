@@ -72,6 +72,9 @@ private const val EVENTS_ROTATE_MIN_INTERVAL_MIN = 1440
  * at most once per 24 h, BEFORE `tail` starts so it never sees a truncation).
  * `tail -n 25` is per file, so the Stop replay is never starved by the others.
  *
+ * Jarvis' alerts (F3) ride the same tail, never a channel of their own. The app only reads that file: jarvis-d is its
+ * only writer and its only rotator, and `-F` follows the rename. A box without Jarvis just has no such file.
+ *
  * BOTH marker paths are tailed: the old /tmp file is still appended to by
  * claude-local sessions (their own settings carry the legacy hook) and by sessions
  * that have not reloaded settings since the move. `-q` suppresses the
@@ -93,7 +96,8 @@ internal fun buildNotifyWatcherCommand(withHooks: Boolean): String {
         "if [ -z \"\$(find $ev.rotated -mmin -$EVENTS_ROTATE_MIN_INTERVAL_MIN 2>/dev/null)\" ] && " +
         "[ \"\$(wc -l < $ev)\" -gt $MARKER_MAX_LINES ]; then " +
         "tail -n $MARKER_KEEP_LINES $ev > $ev.rot && mv $ev.rot $ev && chmod 600 $ev && touch $ev.rotated; fi; " +
-        "tail -q -n 25 -F $marker ${shellQuote(LEGACY_MARKER_PATH)} $ev ${shellQuote(FORGET_LOG_PATH)}"
+        "tail -q -n 25 -F $marker ${shellQuote(LEGACY_MARKER_PATH)} $ev ${shellQuote(FORGET_LOG_PATH)} " +
+        shellQuote(JARVIS_ALERTS_PATH)
 }
 
 /**
@@ -223,6 +227,8 @@ internal class NotificationService(
     // Every applied hook event of a session: `end` (Claude exited, the pane is back at its shell)
     // with when it fired (device clock), any other event with null (Claude runs again).
     private val onClaudeEnded: (sessionId: String, endedAtMs: Long?) -> Unit = { _, _ -> },
+    /** Jarvis' alerts and heartbeat lease, fed from the same tail (F3). */
+    internal val jarvis: JarvisAlertHub = JarvisAlertHub(),
 ) {
     // Prompt detection for notifications — quiescence-based, reads rendered screen state.
     internal val promptDetector = InputPromptDetector().apply {
@@ -826,6 +832,7 @@ internal class NotificationService(
                             }
                         }
                         attempt = 0
+                        if (hooksOn) jarvis.connected(w.serverId)
                         // Offset (ms) between this device's clock and the server's,
                         // learned from the "claude-remote-clock <epoch>" line the
                         // channel emits first (echo runs before tail, so it always
@@ -856,6 +863,16 @@ internal class NotificationService(
                                 }
                                 if (line.startsWith("[") && line.contains("] forget:")) {
                                     dispatchForgetLine(w, line, clockSkewMs ?: 0L)
+                                    continue
+                                }
+                                if (line.startsWith(JarvisAlertLine.PREFIX + " ")) {
+                                    // No clock line yet means no skew to judge an age by: the clock probe is echoed
+                                    // before tail starts, so this only guards a malformed probe.
+                                    if (!jarvis.onLine(w.serverId, line, clockSkewMs ?: 0L)) {
+                                        FileLogger.log(TAG, "Jarvis alert line not understood: ${line.take(120)}")
+                                    } else {
+                                        jarvis.ensureTicker(scope)
+                                    }
                                     continue
                                 }
                             }

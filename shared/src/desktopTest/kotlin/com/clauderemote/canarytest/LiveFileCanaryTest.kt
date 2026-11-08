@@ -272,6 +272,18 @@ class LiveFileCanaryTest {
         guard { File(live, ".claude-remote/logs/x.log").appendText("line three\n"); File(live, ".cache/claude-remote/events").appendText("e3\n") }
     }
 
+    @Test fun jarvisAlertsIsAppendTierLikeEvents() {
+        val f = File(live, ".cache/claude-remote/jarvis-alerts")
+        // absent before: must stay absent (APPEND keeps that rule)
+        assertTrue(failure { f.writeText("claude-remote-jarvis hb 1\n") }.message!!.contains("did not exist"))
+        f.writeText("claude-remote-jarvis hb 1\n")
+        // the live jarvis-d appends a heartbeat every 60 s: no alarm (STRICT would raise one)
+        guard { f.appendText("claude-remote-jarvis hb 2\n") }
+        // but truncating or rewriting it still is one
+        val trunc = failure { f.writeText("x\n") }
+        assertTrue(trunc.message!!.contains("jarvis-alerts") && trunc.message!!.contains("truncated or rewritten"), trunc.message)
+    }
+
     @Test fun credentialsFileIsCheckedBySizeMtimeInodeAndNeverOpened() {
         val cred = File(live, ".claude-remote/accounts/x/.credentials.json").apply { writeText("secret") }
         // rewritten to a different size: caught (before: only the name was looked at)
