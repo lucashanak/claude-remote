@@ -51,12 +51,18 @@ class PhoneWearService : WearableListenerService() {
             "/ping" -> FileLogger.log(TAG, "Wear ping received")
             "/reply" -> handleReply(messageEvent.data, messageEvent.sourceNodeId)
             "/approve" -> handleApprove(messageEvent.data, messageEvent.sourceNodeId)
-            // Lazy history: the watch asks for a session's recent messages when
-            // it opens a detail screen. Answered on /history-reply back to the
+            // Lazy history: an OLDER watch build asks for a session's recent
+            // messages when it opens a detail screen (the Jarvis-only watch of
+            // 2026-11-08 has none; kept so an un-updated watch keeps working). Answered on /history-reply back to the
             // requesting node — a separate channel from /sessions so the
             // routine snapshot push stays small.
             "/history-request" -> handleHistoryRequest(messageEvent.data, messageEvent.sourceNodeId)
             "/jarvis-undo" -> handleJarvisUndo(messageEvent.data, messageEvent.sourceNodeId)
+            // The watch as a Jarvis remote (2026-11-08): its Čeká page asks for the proposals and decides them, its
+            // Jarvis page asks "Co je nového?". Each runs the Velín's CLI path on Jarvis' server and answers the node.
+            "/jarvis-proposals-request" -> handleJarvisProposals(messageEvent.sourceNodeId)
+            "/jarvis-decide" -> handleJarvisDecide(messageEvent.data, messageEvent.sourceNodeId)
+            "/jarvis-news-request" -> handleJarvisNews(messageEvent.sourceNodeId)
             // Watch-side log line (see wearApp's WearLog) — piggybacks on the
             // phone's existing LogShipper so watch diagnostics show up in the
             // same server-side log file as the phone's, no new infra needed.
@@ -182,6 +188,65 @@ class PhoneWearService : WearableListenerService() {
         }.onFailure { JarvisNotifier.postUndoResult(this, text) }
     }
 
+    /**
+     * The Jarvis requests of the watch block this listener thread for their exec, like [handleJarvisUndo]: the service
+     * may be unbound as soon as onMessageReceived returns. Each has an outer limit above the exec's own, so the thread
+     * never hangs on something outside it; null = that limit hit.
+     */
+    private fun <T> jarvisCall(what: String, limitMs: Long, block: suspend (com.clauderemote.session.SessionOrchestrator) -> T): T? {
+        val orchestrator = OrchestratorHolder.orchestrator ?: return null
+        return try {
+            kotlinx.coroutines.runBlocking { kotlinx.coroutines.withTimeoutOrNull(limitMs) { block(orchestrator) } }
+        } catch (e: Exception) {
+            FileLogger.log(TAG, "Wear Jarvis $what failed: ${e.javaClass.simpleName}: ${e.message}")
+            null
+        }
+    }
+
+    private fun sendToWatch(sourceNodeId: String, path: String, json: String) {
+        runCatching {
+            Wearable.getMessageClient(this).sendMessage(sourceNodeId, path, json.toByteArray(Charsets.UTF_8))
+                .addOnFailureListener { e -> FileLogger.log(TAG, "Wear $path not delivered: ${e.message}") }
+        }
+    }
+
+    private fun handleJarvisProposals(sourceNodeId: String) {
+        val r = jarvisCall("proposals", 20_000) { it.jarvisWatchProposals() }
+            ?: com.clauderemote.session.wear.WatchProposals(false, NO_APP)
+        FileLogger.log(TAG, "Wear Jarvis proposals: ok=${r.ok} ${r.items.size}")
+        sendToWatch(sourceNodeId, "/jarvis-proposals", JSON.encodeToString(r))
+    }
+
+    /**
+     * Not on this listener thread: an approved open or restore takes up to 35 s, and the listener would hold every other
+     * message from the watch back meanwhile (its Ano/Ne included). [DECIDE] runs it on a process-wide IO scope and the
+     * sentence goes back on /jarvis-decide-result, like /jarvis-undo-result. A process killed in between loses the
+     * answer: the watch then says "Telefon neodpověděl – stav ověř ve Velínu" after its own timeout.
+     */
+    private fun handleJarvisDecide(data: ByteArray, sourceNodeId: String) {
+        val req = runCatching {
+            JSON.decodeFromString<com.clauderemote.session.wear.WatchDecideRequest>(String(data, Charsets.UTF_8))
+        }.getOrNull() ?: return
+        if (req.id.isBlank()) return
+        val app = applicationContext
+        val started = DECIDE.submit(req) { r ->
+            FileLogger.log(TAG, "Wear Jarvis decide ${req.id} approve=${req.approve}: ${r.ok} ${r.text}")
+            runCatching {
+                Wearable.getMessageClient(app)
+                    .sendMessage(sourceNodeId, "/jarvis-decide-result", JSON.encodeToString(r).toByteArray(Charsets.UTF_8))
+                    .addOnFailureListener { e -> FileLogger.log(TAG, "Wear /jarvis-decide-result not delivered: ${e.message}") }
+            }
+        }
+        if (!started) FileLogger.log(TAG, "Wear Jarvis decide ${req.id}: already running, the first one answers")
+    }
+
+    private fun handleJarvisNews(sourceNodeId: String) {
+        val r = jarvisCall("news", 25_000) { it.jarvisWatchNews() }
+            ?: com.clauderemote.session.wear.WatchNews(false, NO_APP)
+        FileLogger.log(TAG, "Wear Jarvis news: ok=${r.ok} ${r.text.length} chars")
+        sendToWatch(sourceNodeId, "/jarvis-news", JSON.encodeToString(r))
+    }
+
     private fun handleHistoryRequest(data: ByteArray, sourceNodeId: String) {
         val req = runCatching {
             JSON.decodeFromString<WearHistoryRequest>(String(data, Charsets.UTF_8))
@@ -209,6 +274,15 @@ class PhoneWearService : WearableListenerService() {
 
     companion object {
         private const val TAG = "PhoneWearService"
+        private const val NO_APP = "Telefon neodpověděl (aplikace neběží nebo server mlčí)."
+
+        /** Process-wide, not the service's: the service may be unbound as soon as onMessageReceived returns. */
+        private val DECIDE = com.clauderemote.session.wear.WatchDecideRelay(
+            kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.SupervisorJob() + kotlinx.coroutines.Dispatchers.IO),
+        ) { req ->
+            OrchestratorHolder.orchestrator?.jarvisWatchDecide(req.id, req.approve, req.textHash)
+                ?: com.clauderemote.session.wear.WatchDecideResult(req.id, false, "$NO_APP Stav ověř ve Velínu.")
+        }
         private val JSON = Json { ignoreUnknownKeys = true }
         // Per-message clamp — keeps a 10-message reply well within a sane
         // MessageClient payload without truncating mid-conversation context.

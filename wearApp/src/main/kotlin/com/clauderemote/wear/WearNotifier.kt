@@ -14,12 +14,10 @@ import androidx.core.app.RemoteInput
 import androidx.core.content.ContextCompat
 
 /**
- * Turns a session's flip to WAITING_FOR_INPUT/APPROVAL_NEEDED into an
- * actionable watch notification — the "notifikace-first" flow: the user
- * answers Claude straight from the notification (Y/N buttons for approval,
- * an inline RemoteInput reply for input) WITHOUT opening the app. This is
- * the tier above the read-aloud TTS in [WearDataListenerService]: TTS tells
- * you something needs you, the notification lets you act on it in place.
+ * Turns a session's open dialog (perm/ask, [WaitingRules.isActionable]) into an
+ * actionable watch notification — the "notifikace-first" flow: Lukáš answers
+ * straight from the notification (Ano/Ne, and for a question an inline reply)
+ * WITHOUT opening the app. A finished turn never gets one (2026-11-08).
  *
  * All the actual sending is delegated to [WearActionReceiver] via broadcast
  * PendingIntents — a BroadcastReceiver is a documented background-activity-
@@ -120,25 +118,22 @@ object WearNotifier {
 
     /**
      * Posts (or replaces — stable id keyed on the session) the notification
-     * for a session that's waiting on the user. Shape depends on the kind of
-     * wait: APPROVAL_NEEDED gets Y/N action buttons + a full-screen wake,
-     * WAITING_FOR_INPUT gets an inline text reply.
+     * for a session's open dialog: Ano/Ne, a question also an inline answer,
+     * plus a full-screen wake.
      *
      * [silentUpdate] mapuje na `setOnlyAlertOnce` — na už vyvěšenou
      * notifikaci se jen přepíše text, bez druhého bzučení (oprava
-     * zastaralého těla). Na PRVNÍM vyvěšení nemá flag žádný efekt, takže jím
-     * nelze omylem ztišit celý první alert.
+     * zastaralého těla). [silent] ztiší i PRVNÍ vyvěšení: tentýž dialog
+     * ukázaný znovu poté, co ho telefon chvíli hlásil jinak, nebzučí.
      * [bodyOverride] používá chybová cesta z [WearActionReceiver] —
      * notifikace se vrátí i s napsaným textem, aby šlo odeslání zopakovat.
-     * [replacesActivity] je aktivita, ve které notifikace pro tuhle session
-     * právě visí (null = nevisí / nevíme) — viz kanálový trik níž.
      */
     fun notifySession(
         context: Context,
         session: WearSessionInfo,
         silentUpdate: Boolean = false,
         bodyOverride: String? = null,
-        replacesActivity: String? = null,
+        silent: Boolean = false,
     ) {
         ensureChannels(context)
         // notify() is a silent no-op without POST_NOTIFICATIONS on API 33+;
@@ -153,7 +148,7 @@ object WearNotifier {
         val contentPending = PendingIntent.getActivity(
             context,
             requestCode(session.id, "content"),
-            deepLinkIntent(context, session.id),
+            openAppIntent(context),
             PendingIntent.FLAG_UPDATE_CURRENT or immutableFlag(),
         )
 
@@ -161,13 +156,10 @@ object WearNotifier {
         // Normální obsah přepisuje případné odmítnutí od telefonu.
         if (bodyOverride == null) refusalShownAt.remove(session.id)
 
-        val channel = channelFor(session.activity)
-        val builder = NotificationCompat.Builder(context, channel)
+        val builder = NotificationCompat.Builder(context, CHANNEL_APPROVAL)
             // A mipmap (color launcher icon) as the status-bar small icon
             // isn't the textbook monochrome silhouette, but it's the only
-            // in-repo icon and matches the app's identity; InstallResultReceiver
-            // uses android.R.drawable.ic_dialog_info instead — kept ours on the
-            // app icon deliberately so these read as "from Claude Remote".
+            // in-repo icon and matches the app's identity.
             .setSmallIcon(R.mipmap.ic_launcher)
             .setContentTitle(session.title)
             .setContentText(body)
@@ -175,34 +167,15 @@ object WearNotifier {
             .setContentIntent(contentPending)
             .setAutoCancel(true)
             .setOnlyAlertOnce(silentUpdate)
+            .setSilent(silent)
 
-        when (session.activity) {
-            "APPROVAL_NEEDED" -> buildApproval(context, builder, session)
-            "WAITING_FOR_INPUT" -> buildReply(context, builder, session)
-        }
+        buildApproval(context, builder, session)
+        if (WaitingRules.dialogKind(session.prompt) == WaitingRules.DialogKind.QUESTION) buildReply(context, builder, session)
 
-        // Kanál už vyvěšené notifikace NELZE změnit tím, že se na stejné id
-        // vyvěsí znovu — tenhle projekt to má draze zaplacené na telefonu
-        // (viz AlertNotifier kdoc: alert zůstal tiše viset na LOW kanálu a
-        // nikdy nezazvonil). Přesně to potká upgrade WAITING -> APPROVAL:
-        // tlačítka Ano/Ne i full-screen intent by naskočily, ale eskalace na
-        // IMPORTANCE_HIGH ne. Když se kanál mění, notifikaci proto nejdřív
-        // zruš, ať vznikne opravdu nový záznam.
-        // ...jenže zrušení + vyvěšení je z pohledu systému NOVÁ notifikace,
-        // takže setOnlyAlertOnce už nic neztiší. Ruš proto jen při
-        // eskalaci, kde o zabzučení stojíme (WAITING -> APPROVAL). Opačný
-        // směr (APPROVAL -> WAITING při přepnutí tabu na telefonu) nechej
-        // viset na původním kanálu a jen tiše přepiš obsah — tam by nový
-        // záznam znamenal bzučení za degradaci požadavku.
-        val channelChanged = replacesActivity != null && channelFor(replacesActivity) != channel
-        if (channelChanged && !silentUpdate) {
-            NotificationManagerCompat.from(context).cancel(notifId)
-        }
         NotificationManagerCompat.from(context).notify(notifId, builder.build())
         WearLog.i(
             context, TAG,
-            "Posted notification for ${session.id} (${session.activity}) " +
-                "silentUpdate=$silentUpdate channelChanged=$channelChanged",
+            "Posted notification for ${session.id} (${session.activity}) silentUpdate=$silentUpdate silent=$silent",
         )
     }
 
@@ -265,7 +238,7 @@ object WearNotifier {
                 PendingIntent.getActivity(
                     context,
                     requestCode(sessionId, "content"),
-                    deepLinkIntent(context, sessionId),
+                    openAppIntent(context),
                     PendingIntent.FLAG_UPDATE_CURRENT or immutableFlag(),
                 )
             )
@@ -292,15 +265,11 @@ object WearNotifier {
     }
 
     /**
-     * Deep-link back into the running app on a specific session. singleTop +
-     * FLAG_ACTIVITY_CLEAR_TOP so tapping this reuses the existing task rather
-     * than stacking Activities; MainActivity reads "session_id" in onCreate/
-     * onNewIntent and routes to it via [NavRequest].
+     * Back into the app (its Čeká page) — singleTop + FLAG_ACTIVITY_CLEAR_TOP
+     * so a tap reuses the existing task rather than stacking Activities.
      */
-    fun deepLinkIntent(context: Context, sessionId: String): Intent =
-        Intent(context, MainActivity::class.java)
-            .putExtra(EXTRA_SESSION_ID, sessionId)
-            .addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP)
+    fun openAppIntent(context: Context): Intent =
+        Intent(context, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP)
 
     private fun buildApproval(context: Context, builder: NotificationCompat.Builder, session: WearSessionInfo) {
         builder.setPriority(NotificationCompat.PRIORITY_HIGH)
@@ -317,10 +286,9 @@ object WearNotifier {
         // Full-screen intent → WakeAndConfirmActivity trampoline wakes an
         // asleep/ambient screen (system fires it immediately when off/locked,
         // degrades to a heads-up when the screen's already on). It hands off
-        // to the app's deep-link so the user lands on the session if they'd
-        // rather read the full context before answering.
+        // to the app's Čeká page, where the whole text can be read first.
         val wakeIntent = Intent(context, WakeAndConfirmActivity::class.java).apply {
-            putExtra(WakeAndConfirmActivity.EXTRA_CONFIRM_INTENT, deepLinkIntent(context, session.id))
+            putExtra(WakeAndConfirmActivity.EXTRA_CONFIRM_INTENT, openAppIntent(context))
             addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
         }
         val fullScreenPending = PendingIntent.getActivity(
@@ -345,15 +313,11 @@ object WearNotifier {
                 "canUseFullScreenIntent() false — approval for ${session.id} falls back to heads-up only",
             )
         }
-
-        // I approval jde diktovat: Soniox nejde spustit z notifikace (chce
-        // appku v popředí + mic), tak deep-linkni do detailu a rovnou nastartuj.
-        addDictateAction(context, builder, session)
     }
 
     private fun buildReply(context: Context, builder: NotificationCompat.Builder, session: WearSessionInfo) {
         val remoteInput = RemoteInput.Builder(KEY_REPLY_TEXT)
-            .setLabel("Odpověď pro Claude")
+            .setLabel("Odpověď na otázku")
             .build()
 
         val replyIntent = Intent(context, WearActionReceiver::class.java).apply {
@@ -377,28 +341,6 @@ object WearNotifier {
                 .addRemoteInput(remoteInput)
                 .build()
         )
-        // Soniox streaming diktát jako doplňková volba vedle systémového
-        // RemoteInputu ("Odpovědět" = Google hlas/klávesnice).
-        addDictateAction(context, builder, session)
-    }
-
-    /**
-     * "🎤 Diktovat" — na rozdíl od ostatních akcí getActivity (ne broadcast):
-     * chceme appku v POPŘEDÍ kvůli mic streamu. Deep-linkne do detailu session
-     * s [EXTRA_START_DICTATION], MainActivity pak přes [NavRequest] řekne UI, ať
-     * po otevření spustí Soniox diktování (viz SessionDetailScreen).
-     */
-    private fun addDictateAction(context: Context, builder: NotificationCompat.Builder, session: WearSessionInfo) {
-        val dictateIntent = deepLinkIntent(context, session.id).putExtra(EXTRA_START_DICTATION, true)
-        val dictatePending = PendingIntent.getActivity(
-            context,
-            requestCode(session.id, "dictate"),
-            dictateIntent,
-            PendingIntent.FLAG_UPDATE_CURRENT or immutableFlag(),
-        )
-        builder.addAction(
-            NotificationCompat.Action.Builder(0, "🎤 Diktovat", dictatePending).build()
-        )
     }
 
     private fun approvePending(context: Context, sessionId: String, answer: String, prompt: String?): PendingIntent {
@@ -417,9 +359,6 @@ object WearNotifier {
             PendingIntent.FLAG_UPDATE_CURRENT or immutableFlag(),
         )
     }
-
-    private fun channelFor(activity: String): String =
-        if (activity == "APPROVAL_NEEDED") CHANNEL_APPROVAL else CHANNEL_WAITING
 
     // Distinct request codes per (session, action) — a shared code would let
     // one session's PendingIntent overwrite another's extras on FLAG_UPDATE_CURRENT.
@@ -442,10 +381,6 @@ object WearNotifier {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) PendingIntent.FLAG_MUTABLE else 0
 
     const val EXTRA_SESSION_ID = "session_id"
-    // Set by the "🎤 Diktovat" action so MainActivity knows to auto-start
-    // Soniox dictation once it routes to the session (a plain tap on the body
-    // just opens the session without it).
-    const val EXTRA_START_DICTATION = "start_dictation"
     const val EXTRA_ANSWER = "answer"
     // WearSessionInfo.prompt vyvěšené notifikace — vrací se telefonu k ověření.
     const val EXTRA_PROMPT = "prompt"

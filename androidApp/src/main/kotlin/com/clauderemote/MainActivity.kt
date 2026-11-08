@@ -406,7 +406,8 @@ class MainActivity : FragmentActivity() {
             // detection itself as the event; the Stop path needs no mark
             // because its resolved body already moves the stamp.
             if (notifBody == null) WearSync.markPromptEvent(sessionId)
-            WearSync.pushNow()
+            // Urgent (a radio wake) only for perm/ask: a finished turn never alerts the wrist (2026-11-08).
+            WearSync.pushNow(urgent = com.clauderemote.session.wear.WatchPushUrgency.needsInputUrgent(kind))
 
             // Jarvis carries a session's completions only with the lease of the session's OWN server (he watches his box).
             val serverId = tab?.server?.id
@@ -484,12 +485,15 @@ class MainActivity : FragmentActivity() {
                     JarvisNotifier.post(applicationContext, feed, post.buzz)
                     if (post.buzz) WearSync.noteJarvisBuzz()
                 }
-                WearSync.pushNow()
+                // Urgent only when the watch vibrates for it too (block/done/incident the batcher let through).
+                WearSync.pushNow(
+                    urgent = com.clauderemote.session.wear.WatchPushUrgency.jarvisAlertUrgent(alert.kind, post?.buzz == true),
+                )
             }
 
             override fun onCleared() {
                 JarvisNotifier.cancel(applicationContext)
-                WearSync.pushNow()
+                WearSync.pushNow(urgent = false)
             }
 
             override fun onLeaseChanged(edge: com.clauderemote.session.service.JarvisLeaseEdge) {
@@ -506,11 +510,11 @@ class MainActivity : FragmentActivity() {
                         JarvisNotifier.postFailOpen(applicationContext)
                     }
                 }
-                WearSync.pushNow()
+                WearSync.pushNow(urgent = false)
             }
 
             override fun onRoutingChanged() {
-                WearSync.pushNow()
+                WearSync.pushNow(urgent = false)
             }
         }
         sessionOrchestrator.jarvisAlerts.presence = { isAppInForeground }

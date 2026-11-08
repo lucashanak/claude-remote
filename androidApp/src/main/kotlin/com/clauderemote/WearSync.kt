@@ -106,6 +106,13 @@ data class WearJarvisInfo(
      * from closed.jsonl. Trailing default, wire-compatible with an older watch build (it ignores the field).
      */
     val undo: List<WearJarvisUndo> = emptyList(),
+    /**
+     * Jarvis' tab on this phone (2026-11-08): the watch's "Diktovat Jarvisovi" answers it on /reply with an INSTRUCTION
+     * identity, the same path and the same ReplyGuard as any answer from the wrist. Null = no tab here.
+     */
+    val sessionId: String? = null,
+    /** His newest alerts (at most 5, newest first) for the watch's Jarvis page and the tile's one sentence. */
+    val recent: List<com.clauderemote.session.wear.WatchJarvis.Recent> = emptyList(),
 )
 
 /** One "Vrátit" offer on the wrist: [tmux] on [serverId], [label] = its alias. */
@@ -114,9 +121,12 @@ data class WearJarvisUndo(val serverId: String, val tmux: String, val label: Str
 
 /**
  * Pushes a snapshot of live sessions to the watch companion app via the
- * Wearable Data Layer, so a Wear session list stays current without the
- * watch having to poll. Process-scoped like [OrchestratorHolder] /
- * [KeepAliveService] — started once from MainActivity.
+ * Wearable Data Layer, so the watch stays current without polling. Since
+ * 2026-11-08 the watch shows only Jarvis and the dialogs waiting for an
+ * Ano/Ne: rows other than an approval go without their text (an older watch
+ * build still gets its list), and Jarvis' block carries his tab and recent
+ * alerts. Process-scoped like [OrchestratorHolder] / [KeepAliveService] —
+ * started once from MainActivity.
  */
 object WearSync {
     private const val TAG = "WearSync"
@@ -298,8 +308,8 @@ object WearSync {
      * the summariser: the first write goes out with whatever summaries are
      * already cached, and a second write follows if fresh ones arrive in time.
      */
-    fun pushNow() {
-        scope.launch { push(urgent = true) }
+    fun pushNow(urgent: Boolean = true) {
+        scope.launch { push(urgent = urgent) }
     }
 
     /**
@@ -477,19 +487,24 @@ object WearSync {
                 lastMessageAt.getOrPut(tab.id) { System.currentTimeMillis() }
             }
             rows += com.clauderemote.session.wear.WatchUrgencyRow(tab.id, previousActivity, activity, changedAt)
+            // Only an approval carries its text to the wrist (2026-11-08: the watch shows Jarvis and what waits for an
+            // Ano/Ne, never a session list or a per-session "hotovo"). The other rows stay, without text and with a
+            // zero stamp, so an older watch build still draws its list and never sees a "new message" to buzz for;
+            // the payload sheds ~2 KB per waiting session, and no LLM summary is made for a row the wrist never shows.
+            val withText = com.clauderemote.session.wear.WatchJarvis.carriesText(activity)
             WearSessionInfo(
                 id = tab.id,
                 title = tab.tabTitle,
                 status = tab.status.name,
                 activity = activity,
-                lastMessage = display,
-                lastMessageAt = changedAt,
-                summary = if (llmEnabled) cachedSummary(tab.id, activity, display) else null,
+                lastMessage = display.takeIf { withText },
+                lastMessageAt = if (withText) changedAt else 0L,
+                summary = if (llmEnabled && withText) cachedSummary(tab.id, activity, display) else null,
                 // Only when it actually differs from lastMessage. The watch
                 // prefers notifyBody and falls back to lastMessage, so an
                 // identical copy changes nothing on the wrist and only costs
                 // its own length in a payload with a hard 100 KB ceiling.
-                notifyBody = resolvedText?.takeIf { it != liveText },
+                notifyBody = resolvedText?.takeIf { withText && it != liveText },
                 // Judged against the activity of THIS row, so the watch never
                 // offers Ano/Ne bound to a ready prompt or the reverse.
                 prompt = com.clauderemote.session.service.ReplyGuard
@@ -512,12 +527,15 @@ object WearSync {
         // Through AppSettings, not a raw key: its default is the one the phone's
         // own policy uses, and the two must agree on an untouched switch.
         val settings = com.clauderemote.storage.AppSettings(com.clauderemote.storage.PlatformPreferences(ctx))
-        // Jarvis carrying the completions mutes them on the wrist as on the phone (the same NotificationPolicy rule).
         val feed = orchestrator?.jarvisAlerts?.state?.value
         val jarvisAlive = orchestrator?.jarvisAlerts?.alive() == true
         val carried = com.clauderemote.session.service.NotificationPolicy.jarvisCarries(settings.alertRouting, jarvisAlive)
-        val completionAlerts = settings.notifyOnTaskComplete && !carried
-        val jarvis = feed?.takeIf { it.heartbeatAtMs != null || it.pending.isNotEmpty() }?.let { f ->
+        // A session's finished turn never alerts the wrist, whatever the phone's own setting (2026-11-08): the watch
+        // shows only Jarvis' merged notification and actionable perm/ask. Sent as false, not dropped, because an
+        // older watch build reads exactly this field to stay quiet on a completion.
+        val completionAlerts = false
+        val jarvisTab = runCatching { orchestrator?.jarvisTabIdForWatch() }.getOrNull()
+        val jarvis = feed?.takeIf { it.heartbeatAtMs != null || it.pending.isNotEmpty() || jarvisTab != null }?.let { f ->
             WearJarvisInfo(
                 pending = f.pending.size,
                 text = com.clauderemote.session.service.JarvisMerged.text(f).take(WATCH_TEXT_MAX),
@@ -527,6 +545,8 @@ object WearSync {
                 undo = com.clauderemote.session.JarvisUndo.undoable(f.pending).map { a ->
                     WearJarvisUndo(a.serverId, a.tmux!!, com.clauderemote.session.JarvisUndo.alias(a.tmux!!))
                 },
+                sessionId = jarvisTab,
+                recent = com.clauderemote.session.wear.WatchJarvis.recent(f.pending),
             )
         }
         val payload = json.encodeToString<WearSessionsPayload>(

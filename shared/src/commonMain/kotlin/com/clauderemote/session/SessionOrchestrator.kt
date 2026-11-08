@@ -3321,6 +3321,84 @@ class SessionOrchestrator(
             }
         }
 
+    // ── Jarvis on the watch (2026-11-08): the wrist's Čeká and Jarvis pages, through the Velín's CLI paths ────────
+
+    /** (server id, the name in its `jarvis/self`), read once per server; null = not read yet. */
+    @Volatile private var jarvisSelf: Pair<String, String>? = null
+    @Volatile private var jarvisSelfTriedAtMs = 0L
+
+    /**
+     * Jarvis' tab on this device, for the watch's dictated instruction (sent on /reply like any answer from the wrist,
+     * with an INSTRUCTION identity, so ReplyGuard decides exactly as for a working session). The name is
+     * `~/.claude-remote/jarvis/self` of Jarvis' server, the fixed one until that was read; the read runs in the
+     * background at most every 10 min until it answers, so a /sessions push never waits on it. Null = no tab.
+     */
+    fun jarvisTabIdForWatch(): String? {
+        val tabs = pendingCloses.state.value.visibleOf(tabManager.tabs.value)
+        val server = jarvisServer(tabs, emptyList())
+        val known = jarvisSelf?.takeIf { it.first == server?.id }
+        val now = System.currentTimeMillis()
+        if (server != null && known == null && now - jarvisSelfTriedAtMs > 10 * 60_000L) {
+            jarvisSelfTriedAtMs = now
+            reconnectScope.launch {
+                val out = jarvisRun(server, com.clauderemote.session.wear.WatchJarvis.SELF_READ)
+                if (out != null) jarvisSelf = server.id to com.clauderemote.session.wear.WatchJarvis.selfName(out)
+            }
+        }
+        val name = known?.second ?: QuickAccess.JARVIS_TMUX_NAME
+        return tabs.firstOrNull { it.tmuxSessionName == name && (server == null || it.server.id == server.id) }?.id
+    }
+
+    /** The proposals for the watch's Čeká page: the Velín's read ([JarvisData.PROPOSALS]) on Jarvis' server. */
+    suspend fun jarvisWatchProposals(): com.clauderemote.session.wear.WatchProposals {
+        val server = jarvisServer(tabManager.tabs.value, emptyList())
+            ?: return com.clauderemote.session.wear.WatchProposals(false, "Jarvis není na žádném známém serveru")
+        val all = jarvisRun(server, com.clauderemote.session.service.JarvisData.PROPOSALS)
+        return com.clauderemote.session.wear.WatchJarvis.proposals(
+            com.clauderemote.session.service.JarvisData.parseCombinedProposals(all),
+            com.clauderemote.session.service.JarvisData.serverNowMs(all),
+        )
+    }
+
+    /**
+     * "Poslat"/"Provést"/"Zahodit" from the wrist: read the proposals again, check that this one still waits with the
+     * very text the wrist showed ([com.clauderemote.session.wear.WatchJarvis.refusal]), then the Velín's own decision
+     * (`cr-jarvis|cr-mail approve|reject <id> --by app:<installId>`).
+     */
+    suspend fun jarvisWatchDecide(id: String, approve: Boolean, textHash: Int): com.clauderemote.session.wear.WatchDecideResult {
+        fun answer(ok: Boolean, text: String) = com.clauderemote.session.wear.WatchDecideResult(id, ok, text)
+        val server = jarvisServer(tabManager.tabs.value, emptyList()) ?: return answer(false, "Jarvis není na žádném známém serveru")
+        val all = jarvisRun(server, com.clauderemote.session.service.JarvisData.PROPOSALS)
+        val list = com.clauderemote.session.service.JarvisData.parseCombinedProposals(all)
+            ?: return answer(false, "Návrhy nejdou načíst (server/Jarvis)")
+        val p = list.firstOrNull { it.id == id }
+        com.clauderemote.session.wear.WatchJarvis.refusal(p, approve, textHash, com.clauderemote.session.service.JarvisData.serverNowMs(all))
+            ?.let { return answer(false, it) }
+        p!!
+        val r = com.clauderemote.session.service.JarvisData.parseRun(
+            jarvisRun(
+                server,
+                com.clauderemote.session.service.JarvisData.decideProposal(p, approve, installId),
+                totalMs = com.clauderemote.session.service.JarvisData.decideTimeoutMs(p, approve),
+            ),
+        )
+        FileLogger.log(TAG, "Watch ${if (approve) "approved" else "rejected"} Jarvis proposal $id: ok=${r.ok}")
+        return answer(
+            r.ok,
+            if (!r.ok) r.message else if (approve) com.clauderemote.session.service.JarvisData.approvedNotice(p, r.message) else "Zahozeno",
+        )
+    }
+
+    /** "Co je nového?" from the wrist: `cr-digest delta --peek --say` on Jarvis' server (the cursor is not moved). */
+    suspend fun jarvisWatchNews(): com.clauderemote.session.wear.WatchNews {
+        val server = jarvisServer(tabManager.tabs.value, emptyList())
+            ?: return com.clauderemote.session.wear.WatchNews(false, "Jarvis není na žádném známém serveru")
+        val r = com.clauderemote.session.service.JarvisData.parseRun(
+            jarvisRun(server, com.clauderemote.session.wear.WatchJarvis.NEWS, totalMs = 15_000),
+        )
+        return com.clauderemote.session.wear.WatchNews(r.ok, r.message.take(com.clauderemote.session.wear.WatchJarvis.NEWS_MAX))
+    }
+
     /**
      * Where the "do not adopt" list lives (AppSettings, set by the UI). Null = not wired yet: adoption then adopts
      * nothing, because a hide it cannot read must not be undone by adopting the tab again.

@@ -51,11 +51,8 @@ data class WearSessionsPayload(
     // Silence tolerance (ms) for on-watch dictation, mirrored from the phone.
     // Trailing default keeps compat with older phone builds (ignoreUnknownKeys).
     val dictationSilenceMs: Int = 4000,
-    // Phone setting "hlásit i dokončení práce". False = a finished turn
-    // (WAITING_FOR_INPUT) must not post a new buzzing notification; null =
-    // an older phone without the setting, alert as before. See
-    // [WearDataListenerService.isQuietCompletion].
-    val completionAlerts: Boolean? = null,
+    // `completionAlerts` (the phone's "hlásit i dokončení") is no longer read: a finished turn never alerts the wrist
+    // (2026-11-08). The phone still sends it, as false, for older watch builds; ignoreUnknownKeys drops it here.
     // Jarvis F3 (mirror of androidApp's WearJarvisInfo): the tile's "Jarvis · N" row and the merged notification.
     val jarvis: WearJarvisInfo? = null,
 )
@@ -69,7 +66,15 @@ data class WearJarvisInfo(
     val alive: Boolean = false,
     // F4: closes Jarvis announced, offered as "Vrátit" (the phone decides on /jarvis-undo whether it still can).
     val undo: List<WearJarvisUndo> = emptyList(),
+    // Jarvis' tab on the phone: "Diktovat Jarvisovi" answers it on /reply (INSTRUCTION identity). Null = none / older phone.
+    val sessionId: String? = null,
+    // His newest alerts, newest first (≤ 5): the Jarvis page and the tile's sentence. Older phone = none.
+    val recent: List<WearJarvisRecent> = emptyList(),
 )
+
+/** Mirror of shared's WatchJarvis.Recent: one of Jarvis' alerts (Czech, one sentence, no paths). [atMs] = phone clock. */
+@Serializable
+data class WearJarvisRecent(val id: String, val kind: String, val text: String, val atMs: Long = 0)
 
 /** Mirror of androidApp's WearJarvisUndo: [tmux] on [serverId], [label] = its alias. */
 @Serializable
@@ -100,11 +105,12 @@ object SonioxKeyStore {
 }
 
 /**
- * Process-wide holder for the latest synced session list. Written by
+ * Process-wide holder for the latest synced snapshot. Written by
  * [WearDataListenerService] (system-invoked per data change, not a
  * long-lived component you can hold a reference to) and by MainActivity's
- * one-shot initial fetch on launch; read by the SessionList UI via
- * `collectAsState()`.
+ * one-shot initial fetch on launch; read by the Čeká page and the tile.
+ * The rows are no longer a list on the wrist: only those waiting for an
+ * Ano/Ne are shown ([WaitingRules]).
  */
 object SessionRepository {
     private val _sessions = MutableStateFlow<List<WearSessionInfo>>(emptyList())
@@ -133,39 +139,5 @@ object SessionRepository {
         _sessions.value = payload
         _lastSyncElapsed.value = android.os.SystemClock.elapsedRealtime()
         _hasLoaded.value = true
-    }
-}
-
-/**
- * One-shot bridge from a notification/deep-link tap to the Compose UI's
- * session selection. MainActivity (which owns the Intent) writes the tapped
- * session id here; `WearApp()` collects it and opens that session, then
- * clears it — clearing matters so a later swipe-back to the list doesn't get
- * yanked straight back into the same session by a stale value.
- */
-object NavRequest {
-    val requestedSessionId = MutableStateFlow<String?>(null)
-
-    // Session id for which the "🎤 Diktovat" notification action asked us to
-    // auto-start Soniox dictation on open. Keyed by id (not a bare bool) so a
-    // flag left over from one session can't fire on another. Consumed by
-    // SessionDetailScreen once it fires the dictation — NOT by consume() below,
-    // which only clears the nav target (WearApp calls it right after selecting
-    // the session, long before the detail screen gets a chance to read this).
-    val startDictation = MutableStateFlow<String?>(null)
-
-    fun request(id: String?, startDictation: Boolean = false) {
-        if (!id.isNullOrBlank()) {
-            requestedSessionId.value = id
-            if (startDictation) this.startDictation.value = id
-        }
-    }
-
-    fun consume() {
-        requestedSessionId.value = null
-    }
-
-    fun consumeStartDictation() {
-        startDictation.value = null
     }
 }

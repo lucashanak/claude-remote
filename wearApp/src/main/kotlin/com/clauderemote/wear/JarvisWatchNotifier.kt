@@ -99,7 +99,11 @@ object JarvisWatchNotifier {
         }.apply()
         val flags = PendingIntent.FLAG_UPDATE_CURRENT or (if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) PendingIntent.FLAG_IMMUTABLE else 0)
         val open = PendingIntent.getActivity(
-            context, NOTIF_ID, Intent(context, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP), flags,
+            context, NOTIF_ID,
+            Intent(context, MainActivity::class.java)
+                .putExtra(OpenPage.EXTRA_PAGE, OpenPage.PAGE_EXTRA_JARVIS)
+                .addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP),
+            flags,
         )
         val dismissed = PendingIntent.getBroadcast(
             context, NOTIF_ID, Intent(context, JarvisDismissReceiver::class.java).putExtra(EXTRA_KEY, key), flags,

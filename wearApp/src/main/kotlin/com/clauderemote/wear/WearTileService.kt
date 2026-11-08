@@ -18,17 +18,19 @@ import com.google.common.util.concurrent.ListenableFuture
 
 /**
  * The glanceable tile — swipe from the watch face and see, WITHOUT opening the
- * app, exactly what Claude is blocked on: how many sessions need the user and
- * (up to three) which ones. This is the product thesis "co čeká na uživatele"
- * at its cheapest interaction cost; the app and the notifikace-first flow
- * ([WearNotifier]) are the tiers above it once the user decides to act.
+ * app, what Jarvis has for Lukáš (2026-11-08: "na hodinky jen Jarvise"):
+ * "Jarvis · N čeká" (his pending alerts, the same N as his merged
+ * notification), his newest news in one sentence (an alert's text: Czech, no
+ * paths, no ids), and how many dialogs wait for an Ano/Ne. A tap opens the
+ * app on its Čeká page. No session rows any more.
  *
  * ProtoLayout (Java-builder API), NOT Compose — Tiles render in the system's
  * process from a serialized layout, so Compose is not available here.
  * [SessionRepository] is process-global and shared with the running app +
  * [WearDataListenerService], so the tile reads live data for free — except on
  * a cold process the system spun up JUST for this request, where the repo is
- * still empty (hence the "Otevřít appku" fallback).
+ * still empty (hence the "Otevřít appku" fallback; the news sentence comes from
+ * [JarvisRecentStore], which is persisted).
  */
 class WearTileService : TileService() {
 
@@ -58,133 +60,62 @@ class WearTileService : TileService() {
         )
 
     private fun buildLayout(sessions: List<WearSessionInfo>): LayoutElement {
+        val jarvis = SessionRepository.jarvis.value
+        val recent = JarvisRecentStore.load(this)
         // Cold process woken only for this request → repo hasn't been synced
         // yet. Nothing to show; offer opening the app, which fetches on launch.
-        if (sessions.isEmpty() && !SessionRepository.hasLoaded.value) {
+        if (!SessionRepository.hasLoaded.value && recent.isEmpty()) {
             return centeredMessage("Otevřít Claude Remote")
         }
-
-        // Needs-action = what the user is actually being waited on. APPROVAL
-        // ranks above WAITING (it blocks Claude harder), then cap at 3 to fit
-        // the watch face.
-        val needsAction = sessions
-            .filter { it.activity == "APPROVAL_NEEDED" || it.activity == "WAITING_FOR_INPUT" }
-            .sortedBy { if (it.activity == "APPROVAL_NEEDED") 0 else 1 }
-            .take(3)
+        val pending = jarvis?.pending ?: 0
+        val asks = WaitingRules.askCount(sessions)
 
         val column = LayoutElementBuilders.Column.Builder()
             .setWidth(DimensionBuilders.expand())
             .setHorizontalAlignment(LayoutElementBuilders.HORIZONTAL_ALIGN_CENTER)
-            .addContent(headline(needsAction.size))
-
-        // Jarvis F3: one row with the count of his pending alerts (50-ui §3.6), under the sessions.
-        val jarvis = SessionRepository.jarvis.value?.takeIf { it.pending > 0 }
-
-        if (needsAction.isEmpty() && jarvis == null) {
-            column.addContent(spacerHeight(8f))
-            column.addContent(
-                Text.Builder(this, "Nic nečeká")
-                    .setTypography(Typography.TYPOGRAPHY_CAPTION1)
-                    .setColor(ColorBuilders.argb(COLOR_MUTED))
+            .addContent(
+                Text.Builder(this, "Jarvis · $pending čeká")
+                    .setTypography(Typography.TYPOGRAPHY_TITLE2)
+                    .setColor(ColorBuilders.argb(if (jarvis?.alive == true) COLOR_WAITING else COLOR_MUTED))
                     .build(),
             )
-        } else {
-            for (session in needsAction.take(if (jarvis != null) 2 else 3)) {
-                column.addContent(spacerHeight(6f))
-                column.addContent(sessionRow(session))
-            }
-        }
-        if (jarvis != null) {
+            .addContent(spacerHeight(6f))
+            .addContent(
+                Text.Builder(this, recent.firstOrNull()?.text ?: "Klid, pane.")
+                    .setTypography(Typography.TYPOGRAPHY_CAPTION1)
+                    .setColor(ColorBuilders.argb(COLOR_TEXT))
+                    .setMaxLines(3)
+                    .setOverflow(LayoutElementBuilders.TEXT_OVERFLOW_ELLIPSIZE_END)
+                    .build(),
+            )
+        if (asks > 0) {
             column.addContent(spacerHeight(6f))
             column.addContent(
-                Text.Builder(this, "✉ Jarvis · ${jarvis.pending}")
+                Text.Builder(this, "▲ $asks ke schválení")
                     .setTypography(Typography.TYPOGRAPHY_BUTTON)
-                    .setColor(ColorBuilders.argb(if (jarvis.alive) COLOR_WAITING else COLOR_MUTED))
-                    .setModifiers(clickModifiers("open_jarvis", launchAction(null)))
+                    .setColor(ColorBuilders.argb(COLOR_APPROVAL))
                     .build(),
             )
         }
 
-        // Whole-tile fallback click: tapping anywhere off a row opens the app
-        // on the list (no specific session).
+        // The whole tile opens the app on its Čeká page.
         return LayoutElementBuilders.Box.Builder()
             .setWidth(DimensionBuilders.expand())
             .setHeight(DimensionBuilders.expand())
-            .setModifiers(clickModifiers("open_list", launchAction(null)))
+            .setModifiers(clickModifiers("open_app", launchAction()))
             .addContent(column.build())
             .build()
     }
 
-    private fun headline(count: Int): LayoutElement {
-        if (count == 0) {
-            return Text.Builder(this, "Vše hotovo ✓")
-                .setTypography(Typography.TYPOGRAPHY_TITLE2)
-                .setColor(ColorBuilders.argb(COLOR_WAITING))
-                .build()
-        }
-        return LayoutElementBuilders.Row.Builder()
-            .setVerticalAlignment(LayoutElementBuilders.VERTICAL_ALIGN_BOTTOM)
-            .addContent(
-                Text.Builder(this, count.toString())
-                    .setTypography(Typography.TYPOGRAPHY_DISPLAY1)
-                    .setColor(ColorBuilders.argb(COLOR_TEXT))
-                    .build(),
-            )
-            .addContent(spacerWidth(4f))
-            .addContent(
-                Text.Builder(this, "čeká")
-                    .setTypography(Typography.TYPOGRAPHY_TITLE3)
-                    .setColor(ColorBuilders.argb(COLOR_MUTED))
+    private fun launchAction(): ActionBuilders.LaunchAction =
+        ActionBuilders.LaunchAction.Builder()
+            .setAndroidActivity(
+                ActionBuilders.AndroidActivity.Builder()
+                    .setPackageName(packageName)
+                    .setClassName(MainActivity::class.java.name)
                     .build(),
             )
             .build()
-    }
-
-    private fun sessionRow(session: WearSessionInfo): LayoutElement {
-        val approval = session.activity == "APPROVAL_NEEDED"
-        // ▲ = approval (blocking yes/no), ✎ = waiting for typed input; colored
-        // to match the notification urgency tiers (red vs. blue).
-        val glyph = if (approval) "▲" else "✎"
-        val glyphColor = if (approval) COLOR_APPROVAL else COLOR_WAITING
-
-        return LayoutElementBuilders.Row.Builder()
-            .setWidth(DimensionBuilders.expand())
-            .setVerticalAlignment(LayoutElementBuilders.VERTICAL_ALIGN_CENTER)
-            // Per-row deep-link: same "session_id" extra WearNotifier uses, so
-            // MainActivity routes straight to this session via NavRequest.
-            .setModifiers(clickModifiers("open_${session.id}", launchAction(session.id)))
-            .addContent(
-                Text.Builder(this, glyph)
-                    .setTypography(Typography.TYPOGRAPHY_TITLE3)
-                    .setColor(ColorBuilders.argb(glyphColor))
-                    .build(),
-            )
-            .addContent(spacerWidth(6f))
-            .addContent(
-                Text.Builder(this, session.title)
-                    .setTypography(Typography.TYPOGRAPHY_BUTTON)
-                    .setColor(ColorBuilders.argb(COLOR_TEXT))
-                    .setMaxLines(1)
-                    .setOverflow(LayoutElementBuilders.TEXT_OVERFLOW_ELLIPSIZE_END)
-                    .build(),
-            )
-            .build()
-    }
-
-    private fun launchAction(sessionId: String?): ActionBuilders.LaunchAction {
-        val activity = ActionBuilders.AndroidActivity.Builder()
-            .setPackageName(packageName)
-            .setClassName(MainActivity::class.java.name)
-        if (sessionId != null) {
-            activity.addKeyToExtraMapping(
-                WearNotifier.EXTRA_SESSION_ID,
-                ActionBuilders.AndroidStringExtra.Builder().setValue(sessionId).build(),
-            )
-        }
-        return ActionBuilders.LaunchAction.Builder()
-            .setAndroidActivity(activity.build())
-            .build()
-    }
 
     private fun clickModifiers(id: String, action: ActionBuilders.LaunchAction): ModifiersBuilders.Modifiers =
         ModifiersBuilders.Modifiers.Builder()
@@ -200,7 +131,7 @@ class WearTileService : TileService() {
         LayoutElementBuilders.Box.Builder()
             .setWidth(DimensionBuilders.expand())
             .setHeight(DimensionBuilders.expand())
-            .setModifiers(clickModifiers("open_list", launchAction(null)))
+            .setModifiers(clickModifiers("open_app", launchAction()))
             .addContent(
                 Text.Builder(this, text)
                     .setTypography(Typography.TYPOGRAPHY_TITLE3)
@@ -211,9 +142,6 @@ class WearTileService : TileService() {
 
     private fun spacerHeight(dp: Float): LayoutElement =
         LayoutElementBuilders.Spacer.Builder().setHeight(DimensionBuilders.dp(dp)).build()
-
-    private fun spacerWidth(dp: Float): LayoutElement =
-        LayoutElementBuilders.Spacer.Builder().setWidth(DimensionBuilders.dp(dp)).build()
 
     companion object {
         // No bitmap resources, so the version never has to change; still must

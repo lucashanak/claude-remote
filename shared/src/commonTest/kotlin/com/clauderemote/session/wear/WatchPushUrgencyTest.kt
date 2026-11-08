@@ -30,25 +30,51 @@ class WatchPushUrgencyTest {
         assertFalse(WatchPushUrgency.isUrgentEdge(waiting, "IDLE", 9, 5))
     }
 
-    @Test fun anEdgeIntoWaitingIsUrgentOnlyWithAMovedMessage() {
-        assertTrue(WatchPushUrgency.isUrgentEdge(working, waiting, messageAt = 9, lastAttentionMessageAt = 5), "a new answer")
-        assertTrue(WatchPushUrgency.isUrgentEdge(working, waiting, messageAt = 9, lastAttentionMessageAt = null), "never seen waiting")
-        assertFalse(
-            WatchPushUrgency.isUrgentEdge(working, waiting, messageAt = 5, lastAttentionMessageAt = 5),
-            "a silence drop or an empty Enter: the watch skips it as a stale flip",
-        )
+    // 2026-11-08 (Jarvis-only watch): a finished turn never alerts the wrist, so it never wakes the radio either.
+    @Test fun aFinishedTurnIsNeverUrgent() {
+        assertFalse(WatchPushUrgency.isUrgentEdge(working, waiting, messageAt = 9, lastAttentionMessageAt = 5), "a new answer")
+        assertFalse(WatchPushUrgency.isUrgentEdge(working, waiting, messageAt = 9, lastAttentionMessageAt = null))
         assertFalse(WatchPushUrgency.isUrgentEdge(approval, waiting, 5, 5), "the dialog was answered, nothing new to say")
+        assertFalse(WatchPushUrgency.isAttentionState(waiting))
+        assertFalse(WatchPushUrgency.needsInputUrgent(com.clauderemote.session.service.NotifyKind.COMPLETION))
+        val t = WatchUrgencyTracker()
+        t.note(listOf(WatchUrgencyRow("s", working, waiting, 100)), 0)
+        assertEquals(emptySet(), t.claim(setOf("s"), 0, urgentAnyway = false))
+        assertNull(t.deferredUntilMs())
     }
 
-    @Test fun theTrackerUsesTheMessageStampOfTheLastAttentionBuild() {
+    // ...and no perm/ask is dropped by that: every way a dialog reaches the phone still makes an urgent push.
+    @Test fun everyDialogStaysUrgent() {
+        // entering a dialog from anything (working, a finished turn, idle, a reconnect) is an edge
+        for (from in listOf(working, waiting, "IDLE", "DISCONNECTED")) {
+            assertTrue(WatchPushUrgency.isUrgentEdge(from, approval, 1, null), from)
+        }
+        assertTrue(WatchPushUrgency.isAttentionState(approval))
+        // the second dialog of one turn has no edge (APPROVAL -> APPROVAL): its alert's pushNow is urgent
+        assertTrue(WatchPushUrgency.needsInputUrgent(com.clauderemote.session.service.NotifyKind.PERMISSION))
+        assertTrue(WatchPushUrgency.needsInputUrgent(com.clauderemote.session.service.NotifyKind.QUESTION), "ask")
+        // a tracker that also saw finished turns still delivers the dialog edge
         val t = WatchUrgencyTracker()
-        t.note(listOf(WatchUrgencyRow("s", null, waiting, 100)), 0)
-        t.note(listOf(WatchUrgencyRow("s", waiting, working, 100)), 1_000)
-        t.note(listOf(WatchUrgencyRow("s", working, waiting, 100)), 2_000)
-        assertEquals(emptySet(), t.claim(setOf("s"), 2_000, urgentAnyway = false), "same message as when it last waited")
-        t.note(listOf(WatchUrgencyRow("s", waiting, working, 100)), 3_000)
-        t.note(listOf(WatchUrgencyRow("s", working, waiting, 300)), 4_000)
-        assertEquals(setOf("s"), t.claim(setOf("s"), 4_000, urgentAnyway = false), "a new answer")
+        t.note(listOf(WatchUrgencyRow("a", working, waiting, 1), WatchUrgencyRow("b", working, approval, 1)), 0)
+        assertEquals(setOf("b"), t.claim(setOf("a", "b"), 0, urgentAnyway = false))
+    }
+
+    @Test fun aJarvisAlertIsUrgentOnlyWhenItVibrates() {
+        for (kind in com.clauderemote.session.service.JarvisAlertKind.entries) {
+            assertFalse(WatchPushUrgency.jarvisAlertUrgent(kind, buzz = false), "$kind held back by the 5 min batcher")
+        }
+        assertTrue(WatchPushUrgency.jarvisAlertUrgent(com.clauderemote.session.service.JarvisAlertKind.BLOCK, true))
+        assertTrue(WatchPushUrgency.jarvisAlertUrgent(com.clauderemote.session.service.JarvisAlertKind.DONE, true))
+        assertTrue(WatchPushUrgency.jarvisAlertUrgent(com.clauderemote.session.service.JarvisAlertKind.INCIDENT, true))
+        assertFalse(WatchPushUrgency.jarvisAlertUrgent(com.clauderemote.session.service.JarvisAlertKind.INFO, true), "info never")
+    }
+
+    @Test fun aDialogAgainIsUrgentStampOrNot() {
+        val t = WatchUrgencyTracker()
+        t.note(listOf(WatchUrgencyRow("s", null, approval, 100)), 0)
+        t.note(listOf(WatchUrgencyRow("s", approval, working, 100)), 1_000)
+        t.note(listOf(WatchUrgencyRow("s", working, approval, 100)), 2_000)
+        assertEquals(setOf("s"), t.claim(setOf("s"), 2_000, urgentAnyway = false))
     }
 
     @Test fun theBudgetIsOneUrgentPushPer10sInAll() {
@@ -140,7 +166,7 @@ class WatchPushUrgencyTest {
             }
         t.note(listOf(WatchUrgencyRow("a", working, approval, 1)), 0)
         assertNull(write("a waits", setOf("a"), 0))
-        t.note(listOf(WatchUrgencyRow("b", working, waiting, 7)), 2_000)
+        t.note(listOf(WatchUrgencyRow("b", working, approval, 7)), 2_000)
         assertEquals(WatchPushUrgency.BUDGET_MS, write("a, b wait", setOf("a", "b"), 2_000), "held back until the budget allows one")
         assertEquals(WatchPushUrgency.BUDGET_MS, write("a, b wait", setOf("a", "b"), 5_000), "and so is every write before then")
         assertEquals(listOf("a waits" to true), delivered, "b's row was not written before the scheduled write")

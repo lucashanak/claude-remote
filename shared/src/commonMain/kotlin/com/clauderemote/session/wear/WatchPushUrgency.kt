@@ -17,11 +17,13 @@ data class WatchUrgencyRow(val sessionId: String, val previous: String?, val cur
  * activity churn of many streaming sessions made that the biggest battery cost of the feature.
  * But the push that carries "this session now waits for you" is the one the user is waiting for,
  * and as a routine item Play Services delivered it 91 s late (`stop` 14:41:07, watch flip
- * 14:42:38). So urgent exactly where the watch will announce something (WearDataListenerService):
- * - a session ENTERS APPROVAL_NEEDED (the watch always alerts a new request);
- * - a session ENTERS WAITING_FOR_INPUT with a `lastMessageAt` other than the one it had the last
- *   time it was seen waiting: a flip without a new message (silence drop, empty Enter, a
- *   flapping statusline) is dropped by the watch as a "stale flip" and wakes nothing.
+ * 14:42:38). So urgent exactly where the watch will vibrate NOW:
+ * - a session ENTERS APPROVAL_NEEDED (perm or ask: the watch alerts every new dialog);
+ * - pushNow() of a perm/ask alert ([needsInputUrgent]): the second dialog of one turn stays in
+ *   APPROVAL_NEEDED and has no edge, its alert path is what carries it;
+ * - a Jarvis alert the phone let vibrate ([jarvisAlertUrgent]: block, done, incident).
+ * Since 2026-11-08 a finished turn (WAITING_FOR_INPUT) never alerts the wrist, so it is never
+ * urgent: it rides the routine, batched delivery like any other row change.
  * At most one urgent push per [BUDGET_MS] in all, outside pushNow() (urgent anyway).
  */
 object WatchPushUrgency {
@@ -29,17 +31,28 @@ object WatchPushUrgency {
     /** An edge the budget deferred rides a later push for at most this long. */
     const val PENDING_MAX_MS = 60_000L
 
-    private val ATTENTION = setOf(SessionActivity.WAITING_FOR_INPUT.name, SessionActivity.APPROVAL_NEEDED.name)
+    private val ATTENTION = setOf(SessionActivity.APPROVAL_NEEDED.name)
 
     fun isAttentionState(activity: String): Boolean = activity in ATTENTION
 
-    /** [lastAttentionMessageAt] = the session's `lastMessageAt` when a build last saw it waiting (null = never). */
+    /**
+     * Only an edge INTO an open dialog. [messageAt] / [lastAttentionMessageAt] decided the WAITING
+     * edge before 2026-11-08 and are kept for the callers' shape; a finished turn is never urgent now.
+     */
+    @Suppress("UNUSED_PARAMETER")
     fun isUrgentEdge(previous: String?, current: String, messageAt: Long, lastAttentionMessageAt: Long?): Boolean =
-        previous != null && previous != current && when (current) {
-            SessionActivity.APPROVAL_NEEDED.name -> true
-            SessionActivity.WAITING_FOR_INPUT.name -> messageAt != lastAttentionMessageAt
-            else -> false
-        }
+        previous != null && previous != current && current == SessionActivity.APPROVAL_NEEDED.name
+
+    /** pushNow() of a needs-input alert: urgent for a dialog (perm, ask), routine for a finished turn. */
+    fun needsInputUrgent(kind: com.clauderemote.session.service.NotifyKind): Boolean =
+        kind != com.clauderemote.session.service.NotifyKind.COMPLETION
+
+    /**
+     * The push of a Jarvis alert: urgent exactly when the phone's batcher let it vibrate ([buzz], which it does only
+     * for block, done and incident, at most once per 5 min) — that is when the watch vibrates too (buzzAt grew).
+     * Everything else Jarvis changes (an info, a cleared count, the lease, the routing) only updates the wrist.
+     */
+    fun jarvisAlertUrgent(kind: com.clauderemote.session.service.JarvisAlertKind, buzz: Boolean): Boolean = buzz && kind.urgent
 }
 
 /**

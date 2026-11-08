@@ -63,18 +63,28 @@ fun sendApprove(context: Context, sessionId: String, answer: String, prompt: Str
     sendToPhone(context, "/approve", json.toByteArray(Charsets.UTF_8), onResult)
 }
 
-/**
- * Best-effort ask for a session's recent history (see WearHistory.kt). The
- * phone answers on /history-reply, which the open detail screen listens for.
- * Fire-and-forget like the rest — never blocks the UI or the actions.
- */
-fun sendHistoryRequest(context: Context, sessionId: String, onResult: (String) -> Unit = {}) {
-    val json = MESSAGING_JSON.encodeToString<WearHistoryRequest>(WearHistoryRequest(sessionId))
-    sendToPhone(context, "/history-request", json.toByteArray(Charsets.UTF_8), onResult)
-}
-
 /** "Vrátit" of a Jarvis close: the phone checks closed.jsonl, restores, and answers on /jarvis-undo-result. */
 fun sendJarvisUndo(context: Context, serverId: String, tmux: String, onResult: (String) -> Unit = {}) {
     val json = MESSAGING_JSON.encodeToString<WearJarvisUndoRequest>(WearJarvisUndoRequest(serverId, tmux))
     sendToPhone(context, "/jarvis-undo", json.toByteArray(Charsets.UTF_8), onResult)
 }
+
+/** The Čeká page asks for Jarvis' proposals; the phone answers on /jarvis-proposals (see [JarvisWatchStore]). */
+fun sendJarvisProposalsRequest(context: Context, onResult: (String) -> Unit = {}) =
+    sendToPhone(context, "/jarvis-proposals-request", ByteArray(0), onResult)
+
+/**
+ * "Poslat"/"Provést"/"Zahodit" of a proposal card. [textHash] = hash of the text the card showed: the phone reads the
+ * proposals again and approves only that very text. Answered on /jarvis-decide-result.
+ */
+fun sendJarvisDecide(context: Context, id: String, approve: Boolean, textHash: Int, onResult: (String) -> Unit = {}) {
+    val json = MESSAGING_JSON.encodeToString<WearJarvisDecideRequest>(WearJarvisDecideRequest(id, approve, textHash))
+    sendToPhone(context, "/jarvis-decide", json.toByteArray(Charsets.UTF_8), onResult)
+}
+
+/** "Co je nového?": the phone runs `cr-digest delta --peek --say` and answers on /jarvis-news. */
+fun sendJarvisNewsRequest(context: Context, onResult: (String) -> Unit = {}) =
+    sendToPhone(context, "/jarvis-news-request", ByteArray(0), onResult)
+
+/** The identity of a dictated instruction for Jarvis (ReplyGuard's INSTRUCTION: queued while he works). */
+const val JARVIS_INSTRUCTION_PROMPT = "INSTRUCTION:instruction"
