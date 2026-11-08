@@ -73,6 +73,8 @@ android {
 }
 
 dependencies {
+    // JVM unit tests of pure decisions (JarvisWatchDecision); no Android in them.
+    testImplementation(kotlin("test-junit"))
     // Plain AndroidX Compose (not JetBrains Compose Multiplatform, not used by
     // `shared`) — Wear Compose isn't offered as a KMP artifact. Deliberately
     // no `project(":shared")` dependency: the watch talks to the phone only

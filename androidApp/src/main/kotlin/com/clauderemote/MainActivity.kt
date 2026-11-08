@@ -203,6 +203,9 @@ class MainActivity : FragmentActivity() {
 
     @Volatile private var isAppInForeground = false
 
+    /** Completions muted because Jarvis carried them, re-posted if his lease lapses first (Jarvis F3, MED1). */
+    private val jarvisMuted = com.clauderemote.session.service.JarvisMutedCompletions<() -> Unit>()
+
     /**
      * Whether the OS has notifications for this app switched off. Compose
      * state, not a plain read: the user leaves for system settings, flips it,
@@ -404,15 +407,28 @@ class MainActivity : FragmentActivity() {
             if (notifBody == null) WearSync.markPromptEvent(sessionId)
             WearSync.pushNow()
 
+            // Jarvis carries a session's completions only with the lease of the session's OWN server (he watches his box).
+            val serverId = tab?.server?.id
+            val viaJarvis = serverId != null && com.clauderemote.session.service.NotificationPolicy.jarvisCarries(
+                appSettings.alertRouting, sessionOrchestrator.jarvisAlerts.alive(serverId),
+            )
+            if (serverId != null && com.clauderemote.session.service.NotificationPolicy.mutedByJarvis(
+                    kind, fg, isActiveTab, appSettings.notificationsEnabled, appSettings.notifyOnTaskComplete, viaJarvis,
+                )
+            ) {
+                // Said after all if Jarvis' lease lapses before he says it (rev-f3-app MED1).
+                jarvisMuted.note(serverId, sessionId) {
+                    AlertNotifier.post(applicationContext, sessionId, title, alertText, alertText, prompt = prompt)
+                    dialogAlerts.posted(sessionId, kind)
+                }
+            }
             if (com.clauderemote.session.service.NotificationPolicy.shouldNotify(
                     kind = kind,
                     appForeground = fg,
                     isActiveTab = isActiveTab,
                     notificationsEnabled = appSettings.notificationsEnabled,
                     notifyOnTaskComplete = appSettings.notifyOnTaskComplete,
-                    viaJarvis = com.clauderemote.session.service.NotificationPolicy.jarvisCarries(
-                        appSettings.alertRouting, sessionOrchestrator.jarvisAlerts.alive(),
-                    ),
+                    viaJarvis = viaJarvis,
                 )
             ) {
                 FileLogger.log("Notify", "Sending alert for '$title'")
@@ -460,7 +476,9 @@ class MainActivity : FragmentActivity() {
                 alert: com.clauderemote.session.service.JarvisAlert,
                 feed: com.clauderemote.session.service.JarvisFeed,
             ) {
-                val post = jarvisBatcher.decide(alert, appSettings.alertRouting, feed.alive, appSettings.notificationsEnabled)
+                val post = jarvisBatcher.decide(
+                    alert, appSettings.alertRouting, sessionOrchestrator.jarvisAlerts.alive(alert.serverId), appSettings.notificationsEnabled,
+                )
                 if (post != null) {
                     JarvisNotifier.post(applicationContext, feed, post.buzz)
                     if (post.buzz) WearSync.noteJarvisBuzz()
@@ -473,17 +491,28 @@ class MainActivity : FragmentActivity() {
                 WearSync.pushNow()
             }
 
-            override fun onLeaseChanged(alive: Boolean) {
-                if (alive) {
+            override fun onLeaseChanged(edge: com.clauderemote.session.service.JarvisLeaseEdge) {
+                if (edge.alive) {
                     JarvisNotifier.cancelFailOpen(applicationContext)
-                } else if (appSettings.notificationsEnabled &&
-                    com.clauderemote.session.service.NotificationPolicy.jarvisFailedOpen(appSettings.alertRouting, false)
-                ) {
-                    JarvisNotifier.postFailOpen(applicationContext)
+                } else {
+                    // What Jarvis was trusted with after his last heartbeat went unsaid: alert it now (MED1).
+                    val muted = jarvisMuted.takeAfter(edge.serverId, edge.heartbeatAtMs)
+                    if (appSettings.notificationsEnabled) muted.forEach { runCatching { it() } }
+                    // Only a connected tail without heartbeats is Jarvis' silence; a dropped network is not (LOW).
+                    if (edge.watcherConnected && appSettings.notificationsEnabled &&
+                        com.clauderemote.session.service.NotificationPolicy.jarvisFailedOpen(appSettings.alertRouting, false)
+                    ) {
+                        JarvisNotifier.postFailOpen(applicationContext)
+                    }
                 }
                 WearSync.pushNow()
             }
+
+            override fun onRoutingChanged() {
+                WearSync.pushNow()
+            }
         }
+        sessionOrchestrator.jarvisAlerts.presence = { isAppInForeground }
 
         // Screen-state reader for the new color-aware prompt detector. The primary
         // terminal emulator reflects ONLY the currently-active tab, so we return

@@ -122,9 +122,9 @@ internal class JarvisPanelState {
         }
     }
 
-    suspend fun setMode(orch: SessionOrchestrator, server: SshServer?, kind: JarvisMode.Kind, until: String?) {
+    suspend fun setMode(orch: SessionOrchestrator, server: SshServer?, kind: JarvisMode.Kind, forMinutes: Int?) {
         server ?: return
-        val r = JarvisData.parseRun(orch.jarvisRun(server, JarvisData.setMode(kind, until)))
+        val r = JarvisData.parseRun(orch.jarvisRun(server, JarvisData.setMode(kind, forMinutes)))
         notice = if (r.ok) null else r.message
         orch.jarvisRun(server, JarvisData.MODE_READ)?.let { mode = JarvisData.parseMode(it) }
     }
@@ -252,12 +252,13 @@ private fun TaskRow(
 /** "do kdy" of Nerušit: an hour from now, until the morning, until cancelled. */
 private enum class DndSpan(val label: String) { HOUR("1 h"), MORNING("do 7:00"), FOREVER("dokud nezruším") }
 
-private fun dndUntil(span: DndSpan): String? = when (span) {
-    DndSpan.HOUR -> {
-        val cal = java.util.Calendar.getInstance().apply { add(java.util.Calendar.HOUR_OF_DAY, 1) }
-        "%02d:%02d".format(cal.get(java.util.Calendar.HOUR_OF_DAY), cal.get(java.util.Calendar.MINUTE))
+/** As a duration from now, computed on THIS device's clock and zone (the server reads clock times in UTC). */
+private fun dndForMinutes(span: DndSpan): Int? = when (span) {
+    DndSpan.HOUR -> 60
+    DndSpan.MORNING -> {
+        val cal = java.util.Calendar.getInstance()
+        JarvisData.minutesUntil(cal.get(java.util.Calendar.HOUR_OF_DAY), cal.get(java.util.Calendar.MINUTE), 7)
     }
-    DndSpan.MORNING -> "07:00"
     DndSpan.FOREVER -> null
 }
 
@@ -344,7 +345,7 @@ internal fun JarvisPane(
 }
 
 @Composable
-private fun ModeSelector(mode: JarvisMode?, now: Long, onSet: (JarvisMode.Kind, String?) -> Unit) {
+private fun ModeSelector(mode: JarvisMode?, now: Long, onSet: (JarvisMode.Kind, Int?) -> Unit) {
     val c = CRTheme.colors
     var menu by remember { mutableStateOf(false) }
     Column {
@@ -356,7 +357,7 @@ private fun ModeSelector(mode: JarvisMode?, now: Long, onSet: (JarvisMode.Kind, 
         )
         DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
             DndSpan.entries.forEach { span ->
-                DropdownMenuItem(text = { Text("Nerušit ${span.label}") }, onClick = { menu = false; onSet(JarvisMode.Kind.DND, dndUntil(span)) })
+                DropdownMenuItem(text = { Text("Nerušit ${span.label}") }, onClick = { menu = false; onSet(JarvisMode.Kind.DND, dndForMinutes(span)) })
             }
         }
         if (mode?.mode == JarvisMode.Kind.DND && mode.untilMs != null) {
@@ -375,11 +376,23 @@ private fun ProposalCard(p: JarvisProposal, now: Long, busy: Boolean, onDecide: 
                 Text("Návrh zprávy → ${shortName(p.to)}", style = CRType.cardTitle, color = c.text, modifier = Modifier.weight(1f))
                 Text(Velin.formatAge(p.createdMs, now), style = CRType.monoTiny, color = c.textDim)
             }
-            Text(p.text.ifBlank { "(text neznámý)" }, style = CRType.mono, color = c.text, maxLines = 8, overflow = TextOverflow.Ellipsis)
+            // "Poslat" sends the WHOLE message: it unlocks only once the whole text was on screen (rev-f3-app MED6).
+            var expanded by remember(p.id) { mutableStateOf(false) }
+            var overflows by remember(p.id) { mutableStateOf(true) }
+            Text(
+                p.text.ifBlank { "(text neznámý)" }, style = CRType.mono, color = c.text,
+                maxLines = if (expanded) Int.MAX_VALUE else 8, overflow = TextOverflow.Ellipsis,
+                onTextLayout = { if (!expanded) overflows = it.hasVisualOverflow },
+            )
+            if (overflows && !expanded) {
+                TextButton(onClick = { expanded = true }) { Text("Zobrazit celé", color = c.accent) }
+            }
             p.task?.let { Text("úkol $it", style = CRType.monoTiny, color = c.textDim) }
+            if (!p.fullText) Text("Celé znění se nenačetlo – poslat jde jen z Jarvise.", style = CRType.bodyDim, color = c.textDim)
+            val canSend = JarvisData.canApprove(p, seenWhole = expanded || !overflows)
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 OutlinedButton(enabled = !busy, onClick = { onDecide(false) }) { Text("Zahodit") }
-                Button(enabled = !busy, onClick = { onDecide(true) }) { Text(if (busy) "…" else "Poslat") }
+                Button(enabled = !busy && canSend, onClick = { onDecide(true) }) { Text(if (busy) "…" else "Poslat") }
             }
         }
     }

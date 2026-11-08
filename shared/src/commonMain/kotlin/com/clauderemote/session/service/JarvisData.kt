@@ -51,6 +51,11 @@ data class JarvisProposal(
     val text: String,
     val createdMs: Long?,
     val task: String?,
+    /**
+     * [text] is the full wording (`text` of the CLI), not just the subject: only then may "Poslat" approve it — an
+     * approval sends the whole message, so Lukáš must have seen the whole message (rev-f3-app MED6).
+     */
+    val fullText: Boolean = false,
 )
 
 /** `~/.claude-remote/jarvis/mode`: `normal | blocking | dnd[:<ms until>]`. */
@@ -137,12 +142,19 @@ object JarvisData {
             val o = e as? JsonObject ?: return@mapNotNull null
             if (o.str("state") != "proposed") return@mapNotNull null
             val id = o.str("id")?.takeIf { MAIL_ID.matches(it) } ?: return@mapNotNull null
+            val full = o.str("text")
             JarvisProposal(
-                id = id, to = o.str("to") ?: "?", text = o.str("text") ?: o.str("subject") ?: "",
-                createdMs = o.num("created"), task = o.str("task"),
+                id = id, to = o.str("to") ?: "?", text = full ?: o.str("subject") ?: "",
+                createdMs = o.num("created"), task = o.str("task"), fullText = full != null,
             )
         }.sortedBy { it.createdMs ?: 0L }
     }
+
+    /**
+     * "Poslat" is enabled only for a proposal whose full text arrived AND was shown whole ([seenWhole]: it fit, or the
+     * user opened "Zobrazit celé").
+     */
+    fun canApprove(p: JarvisProposal, seenWhole: Boolean): Boolean = p.fullText && seenWhole
 
     /** Whether Jarvis' mail is switched off (`cr-mail off`): nothing pastes, an approval would only queue. */
     fun mailOff(text: String?): Boolean =
@@ -168,7 +180,6 @@ object JarvisData {
     private val TASK_ID = Regex("t-[A-Za-z0-9-]{1,40}")
     private val MAIL_ID = Regex("m-[A-Za-z0-9-]{1,40}")
     private val INSTALL_ID = Regex("[A-Za-z0-9-]{1,40}")
-    private val HHMM = Regex("([01]?[0-9]|2[0-3]):[0-5][0-9]")
 
     /** Exit status as the last line, stderr folded in: a refusal's reason is what the user is shown. */
     private const val RC = "__cr_rc="
@@ -192,11 +203,28 @@ object JarvisData {
         return checked("${BIN}cr-mail ${if (approve) "approve" else "reject"} $id --by app:$installId")
     }
 
-    /** `cr-jarvis mode normal|blocking|dnd [--until HH:MM]`; [until] only with DND. */
-    fun setMode(kind: JarvisMode.Kind, until: String? = null): String {
-        val u = until?.takeIf { kind == JarvisMode.Kind.DND }
-        require(u == null || HHMM.matches(u)) { "not HH:MM" }
-        return checked("${BIN}cr-jarvis mode ${kind.wire}" + (u?.let { " --until $it" } ?: ""))
+    /**
+     * `cr-jarvis mode normal|blocking|dnd [--for <duration>]`; [forMinutes] only with DND. Always a DURATION, never a
+     * clock time: the server reads `--until HH:MM` in its own time zone (UTC), the phone's 7:00 is not its 7:00
+     * (rev-f3-app HIGH). Null = until cancelled (allowed to Lukáš; Jarvis himself gets at most 12 h on the server).
+     */
+    fun setMode(kind: JarvisMode.Kind, forMinutes: Int? = null): String {
+        val m = forMinutes?.takeIf { kind == JarvisMode.Kind.DND }
+        require(m == null || m in 1..24 * 60) { "duration out of range" }
+        return checked("${BIN}cr-jarvis mode ${kind.wire}" + (m?.let { " --for ${forArg(it)}" } ?: ""))
+    }
+
+    /** 90 → `1h30m`, 60 → `1h`, 45 → `45m` (the CLI's `parse_in`). */
+    fun forArg(minutes: Int): String {
+        val h = minutes / 60
+        val m = minutes % 60
+        return (if (h > 0) "${h}h" else "") + (if (m > 0 || h == 0) "${m}m" else "")
+    }
+
+    /** Minutes from [nowHour]:[nowMinute] (local) to the next [hour]:00 local, 1..1440. */
+    fun minutesUntil(nowHour: Int, nowMinute: Int, hour: Int): Int {
+        val d = ((hour * 60 - (nowHour * 60 + nowMinute)) % 1440 + 1440) % 1440
+        return if (d == 0) 1440 else d
     }
 
     /** Morning before noon, evening after: the briefing that fits the hour the button is pressed. */

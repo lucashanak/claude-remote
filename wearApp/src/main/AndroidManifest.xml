@@ -68,6 +68,11 @@
             android:name="com.clauderemote.wear.WearActionReceiver"
             android:exported="false" />
 
+        <!-- Jarvis F3: the merged Jarvis notification was swiped away (remembered until a new alert). -->
+        <receiver
+            android:name="com.clauderemote.wear.JarvisDismissReceiver"
+            android:exported="false" />
+
         <!-- Handles the PackageInstaller session result (self-update). -->
         <receiver
             android:name="com.clauderemote.wear.InstallResultReceiver"

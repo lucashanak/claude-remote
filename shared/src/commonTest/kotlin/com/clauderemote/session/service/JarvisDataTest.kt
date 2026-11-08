@@ -65,6 +65,19 @@ class JarvisDataTest {
         assertEquals("fired", ws[2].state)
     }
 
+    @Test fun onlyAProposalWithItsFullTextShownWholeMayBeSent() {
+        val json = """{"messages": [
+            {"id": "m-1", "to": "x", "subject": "jen předmět", "state": "proposed", "created": 1},
+            {"id": "m-2", "to": "x", "subject": "s", "text": "celé", "state": "proposed", "created": 2}]}"""
+        val (subjectOnly, full) = JarvisData.parseProposals(json)!!
+        assertFalse(subjectOnly.fullText)
+        assertTrue(full.fullText)
+        // MED6: an approval sends the whole message; a subject is not the whole message
+        assertFalse(JarvisData.canApprove(subjectOnly, seenWhole = true))
+        assertFalse(JarvisData.canApprove(full, seenWhole = false))
+        assertTrue(JarvisData.canApprove(full, seenWhole = true))
+    }
+
     @Test fun proposalsAreOnlyTheProposedMessagesOldestFirstTextPreferred() {
         val json = """
             {"off": false, "messages": [
@@ -111,12 +124,25 @@ class JarvisDataTest {
         assertEquals("~/.local/bin/cr-task show t-1 --json", JarvisData.taskShow("t-1"))
     }
 
-    @Test fun modeCommandTakesUntilOnlyForDnd() {
-        assertTrue(JarvisData.setMode(JarvisMode.Kind.DND, "07:00").startsWith("~/.local/bin/cr-jarvis mode dnd --until 07:00 "))
+    @Test fun modeCommandSendsADurationNeverAClockTime() {
+        // HIGH: the server reads --until HH:MM in UTC; the phone's 7:00 is not its 7:00
+        assertTrue(JarvisData.setMode(JarvisMode.Kind.DND, 60).startsWith("~/.local/bin/cr-jarvis mode dnd --for 1h 2>&1"))
+        assertTrue(JarvisData.setMode(JarvisMode.Kind.DND, 90).startsWith("~/.local/bin/cr-jarvis mode dnd --for 1h30m 2>&1"))
         assertTrue(JarvisData.setMode(JarvisMode.Kind.DND, null).startsWith("~/.local/bin/cr-jarvis mode dnd 2>&1"))
-        assertTrue(JarvisData.setMode(JarvisMode.Kind.NORMAL, "07:00").startsWith("~/.local/bin/cr-jarvis mode normal 2>&1"))
-        assertFailsWith<IllegalArgumentException> { JarvisData.setMode(JarvisMode.Kind.DND, "7:00; id") }
-        assertFailsWith<IllegalArgumentException> { JarvisData.setMode(JarvisMode.Kind.DND, "25:00") }
+        assertTrue(JarvisData.setMode(JarvisMode.Kind.NORMAL, 60).startsWith("~/.local/bin/cr-jarvis mode normal 2>&1"))
+        assertFalse(JarvisData.setMode(JarvisMode.Kind.DND, 60).contains("--until"))
+        assertFailsWith<IllegalArgumentException> { JarvisData.setMode(JarvisMode.Kind.DND, 0) }
+        assertFailsWith<IllegalArgumentException> { JarvisData.setMode(JarvisMode.Kind.DND, 24 * 60 + 1) }
+        assertEquals("45m", JarvisData.forArg(45))
+        assertEquals("2h", JarvisData.forArg(120))
+        assertEquals("10h5m", JarvisData.forArg(605))
+    }
+
+    @Test fun minutesUntilTheMorningAreLocal() {
+        assertEquals(8 * 60, JarvisData.minutesUntil(23, 0, 7))
+        assertEquals(30, JarvisData.minutesUntil(6, 30, 7))
+        assertEquals(24 * 60 - 1, JarvisData.minutesUntil(7, 1, 7))
+        assertEquals(24 * 60, JarvisData.minutesUntil(7, 0, 7))
     }
 
     @Test fun briefingPicksMorningOrEvening() {
