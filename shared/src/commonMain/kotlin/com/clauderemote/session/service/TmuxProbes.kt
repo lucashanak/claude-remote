@@ -151,8 +151,7 @@ internal class TmuxProbes(
         // 1:1 with (device, tmux session) so two tabs can't share a marker.
         // Truncate each part separately so a long tmux name can never eat the
         // device part (which is what keeps devices from sharing a marker).
-        val key = (deviceKey.take(40) + "-" + tmuxName.takeLast(120))
-            .replace(Regex("[^A-Za-z0-9._-]"), "_")
+        val key = clientMarkerKey(tmuxName, deviceKey)
         return "CRD=\"\$HOME/.claude-remote/clients\"; mkdir -p \"\$CRD\" 2>/dev/null; " +
             "CRF=\"\$CRD/$key\"; CRT=\$(cat \"\$CRF\" 2>/dev/null); " +
             "[ -n \"\$CRT\" ] && tmux list-clients -t '=$escaped' -F '#{client_tty}' 2>/dev/null " +
@@ -395,5 +394,14 @@ internal class TmuxProbes(
             if (lastLine.isNotEmpty() && lastLine.any { it in promptChars }) return
             kotlinx.coroutines.delay(50)
         }
+    }
+
+    companion object {
+        /**
+         * Name of the file under `~/.claude-remote/clients/` holding this device's client tty for [tmuxName]
+         * ([singleClientPreamble]); `CloseFactsCommands` reads it to tell the closing device's own client apart.
+         */
+        fun clientMarkerKey(tmuxName: String, deviceKey: String): String =
+            (deviceKey.take(40) + "-" + tmuxName.takeLast(120)).replace(Regex("[^A-Za-z0-9._-]"), "_")
     }
 }

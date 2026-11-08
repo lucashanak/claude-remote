@@ -89,6 +89,16 @@ class AppShortcutsTest {
     }
 
     @Test
+    fun shiftTReopensTheLastClosedSessionAndPlainTStaysTheTerminals() {
+        assertEquals(AppShortcut.REOPEN_CLOSED, hit(Key.T, ctrl = true, shift = true))
+        assertEquals(AppShortcut.REOPEN_CLOSED, hit(Key.T, meta = true, shift = true))
+        // Ctrl+T is Claude's todo list / readline transpose; Cmd+T stays free on macOS
+        assertNull(hit(Key.T, ctrl = true))
+        assertNull(hit(Key.T, meta = true))
+        assertNull(hit(Key.T, ctrl = true, shift = true, down = false))
+    }
+
+    @Test
     fun everyShortcutIsDocumentedWithKeysAndALabel() {
         AppShortcut.entries.forEach {
             assertTrue(it.keys.isNotBlank() && it.label.isNotBlank(), "${it.name} has no help text")

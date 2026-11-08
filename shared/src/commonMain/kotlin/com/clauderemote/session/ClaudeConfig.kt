@@ -104,26 +104,9 @@ object ClaudeConfig {
         resume: Boolean,
         accountSlug: String? = null,
     ): String {
-        // Local models launch the `claude-local` wrapper (which sets the
-        // gateway env server-side); everything else launches plain `claude`.
-        val claudeArgs = mutableListOf(if (model.isLocal) "claude-local" else "claude")
-
-        if (model.cliValue != null) {
-            claudeArgs.add("--model")
-            claudeArgs.add(model.cliValue)
-        }
-
-        when (mode) {
-            ClaudeMode.AUTO_ACCEPT -> { claudeArgs.add("--permission-mode"); claudeArgs.add("acceptEdits") }
-            ClaudeMode.AUTO -> { claudeArgs.add("--permission-mode"); claudeArgs.add("auto") }
-            ClaudeMode.PLAN, ClaudeMode.NORMAL -> {}
-            ClaudeMode.YOLO -> {}
-        }
-
-        claudeArgs.add(
-            if (mode == ClaudeMode.YOLO) "--dangerously-skip-permissions"
-            else "--allow-dangerously-skip-permissions"
-        )
+        val claudeArgs = mutableListOf(claudeBinary(model))
+        claudeArgs += modelArgs(model)
+        claudeArgs += modeArgs(mode)
 
         // Session-id flag: --resume reuses an existing conversation UUID,
         // --session-id forces a NEW session to use a deterministic UUID.
@@ -139,6 +122,27 @@ object ClaudeConfig {
         }
 
         return configDirPrefix(accountSlug) + claudeArgs.joinToString(" ")
+    }
+
+    /**
+     * The pieces of [claudeInvocation], also the source of `cr-session`'s model and mode tables
+     * (`SessionOpsScript`), so a session the script opens gets the flags an app launch would.
+     * Local models launch the `claude-local` wrapper (which sets the gateway env server-side);
+     * everything else launches plain `claude`.
+     */
+    internal fun claudeBinary(model: ClaudeModel): String = if (model.isLocal) "claude-local" else "claude"
+
+    internal fun modelArgs(model: ClaudeModel): List<String> =
+        if (model.cliValue != null) listOf("--model", model.cliValue) else emptyList()
+
+    internal fun modeArgs(mode: ClaudeMode): List<String> {
+        val permission = when (mode) {
+            ClaudeMode.AUTO_ACCEPT -> listOf("--permission-mode", "acceptEdits")
+            ClaudeMode.AUTO -> listOf("--permission-mode", "auto")
+            ClaudeMode.PLAN, ClaudeMode.NORMAL -> emptyList()
+            ClaudeMode.YOLO -> emptyList()
+        }
+        return permission + (if (mode == ClaudeMode.YOLO) "--dangerously-skip-permissions" else "--allow-dangerously-skip-permissions")
     }
 
     fun buildTmuxLaunchCommand(
@@ -353,33 +357,7 @@ object ClaudeConfig {
         // claudeCmd already contains the single-quoted `cd '<folder>'`, so the
         // launch hung at the bash continuation prompt and Claude never started.
         fun sq(s: String) = "'" + s.replace("'", "'\\''") + "'"
-        // Anchor the tmux SERVER under the user systemd slice BEFORE creating a
-        // session: a raw SSH-exec'd `tmux new-session` otherwise parents the
-        // server under the ephemeral SSH login scope, so it dies when that scope
-        // is torn down (the mid-life mass-death root cause). If NO server is
-        // running yet, create it (with a keepalive __anchor__ session) via
-        // `systemd-run --user --scope`, which parents the forked tmux server
-        // under user-1000.slice so it survives this SSH session's teardown; the
-        // real session below then attaches to that anchored server. If a server
-        // already exists we attach as-is. Best-effort (`|| true`): if systemd-run
-        // is unavailable we silently fall back to today's behavior.
-        //   --unit=claude-tmux-server: a FIXED scope name, so a second
-        //     concurrent create attempt fails cleanly at the systemd level
-        //     ("unit already exists") instead of spawning a competing transient
-        //     scope, and the unbounded run-*.scope leak stops (11 leaked scopes
-        //     holding ~150 processes had to be reaped by hand).
-        //   --property=LimitCORE=infinity: the server deaths are tmux SIGSEGV
-        //     (status=11/SEGV), so let it dump a core for the backtrace.
-        // Kill existing session with same name to avoid -A reattaching
-        // and sending keystrokes into a running program
-        //
-        // SOCKET GUARD first (installed with restore.sh/drift.sh, marker v18): when a tmux server is alive on the
-        // default socket path but its socket file is gone, `tmux list-sessions` below fails and this command would
-        // start a SECOND server next to it — on 2026-11-02 that duplicated every session. The helper exits
-        //   0  nothing to heal: everything below as before;
-        //   3  the socket was unusable and is back (SIGUSR1 / chmod 700);
-        //   anything else  refused (the helper printed why): NOTHING below runs and the command fails.
-        // Absent helper (older server install): the previous behaviour.
+        // Socket guard, anchored server and options, then the create: see the pieces below.
         // A session of this name that EXISTS is never killed and created again (V14), whatever the guard's exit:
         //  - OnExisting.Attach (a relaunch: Rebuild, `attach || relaunch`, resume) attaches it (R5, N1): this tab may
         //    have healed the socket (3), or another tab or a drift tick healed it a moment earlier (0), and the
@@ -390,7 +368,6 @@ object ClaudeConfig {
         //    session, a bare shell or a dead pane under this tab's folder, account and manifest entry), no kill (that
         //    killed live work). Nor in the race: no kill-session, so new-session fails on a name taken meanwhile.
         // The detached login pane is never attached and keeps the old path (its point is a fresh `claude auth login`).
-        val heal = "\"$SOCKHEAL_SCRIPT\""
         val target = sq("=" + tmuxSessionName)
         val existing = when {
             detached -> ""
@@ -399,47 +376,118 @@ object ClaudeConfig {
             else -> "elif tmux has-session -t $target 2>/dev/null; then " +
                 "echo ${sq("claude-remote: tmux session $tmuxSessionName already exists — not killing it, not attaching it; start the new session under another name")} >&2; false; "
         }
-        return "export XDG_RUNTIME_DIR=\${XDG_RUNTIME_DIR:-/run/user/\$(id -u)}; " +
-                "CR_SG=0; [ -x $heal ] && { $heal; CR_SG=\$?; }; " +
-                "if [ \$CR_SG -ne 0 ] && [ \$CR_SG -ne 3 ]; then " +
-                "echo \"claude-remote: not starting a tmux server (socket guard exit \$CR_SG, see ~/.claude-remote/sockheal.log)\" >&2; false; " +
+        // `-t '=name'`: plain `-t` prefix-matches, so killing "proj--cashy"
+        // would also hit a live "proj--cashy-2" (measured on tmux 3.5a).
+        // `=` forces an exact-name match for a target-session.
+        // Never for a fresh launch (Refuse): in a tab or detached (V16), a taken name fails new-session.
+        return socketGuardHead() +
                 existing +
                 "else " +
-                // No --unit=<fixed name> and no --property=LimitCORE: a scope does
-                // NOT accept LimitCORE ("Unknown assignment"), which made the whole
-                // systemd-run fail, and a leftover unit of a fixed name makes it
-                // fail silently too — either way `|| true` then let the CALLER
-                // create the server in its own (possibly short-lived) cgroup.
-                "tmux list-sessions >/dev/null 2>&1 || systemd-run --user --scope --quiet tmux new-session -d -x 200 -y 50 -s __anchor__ sleep infinity >/dev/null 2>&1 || true; " +
-                // exit-empty off: keep the server alive when a kill-session/recreate
-                // momentarily drops it to 0 sessions (else the whole server exits).
-                "tmux set-option -g exit-empty off 2>/dev/null || true; " +
-                // CRASH GUARD. Core dump (tmux 3.5a, ~/core):
-                //   SIGSEGV clients_calculate_size() <- default_window_size()
-                //           <- spawn_window() <- cmd_new_session_exec()
-                // tmux died WHILE CREATING a session, sizing the new window from the
-                // attached clients. `window-size manual` is NOT the cure — it is the
-                // POISON: proven minimal repro on 3.5a, a config containing only
-                // `set -g window-size manual` makes `tmux new-session` print "server
-                // exited unexpectedly", while `latest` works. This app used to send
-                // that option on every launch AND every attach, which is exactly why
-                // "creating a session" reliably killed the whole server and all its
-                // sessions. So: never set window-size at all (leave tmux's default),
-                // and pass explicit -x/-y plus default-size so the new window's size
-                // never has to be derived from a client.
-                "tmux set-option -g default-size 200x50 2>/dev/null || true; " +
-                // `-t '=name'`: plain `-t` prefix-matches, so killing "proj--cashy"
-                // would also hit a live "proj--cashy-2" (measured on tmux 3.5a).
-                // `=` forces an exact-name match for a target-session.
-                // Never for a fresh launch (Refuse): in a tab or detached (V16), a taken name fails new-session.
-                (if (onExisting is OnExisting.Refuse) "" else "tmux kill-session -t $target 2>/dev/null; ") +
-                "tmux set-option -g history-limit 100000 2>/dev/null; " +
-                "tmux new-session ${if (detached) "-d " else ""}-x 200 -y 50 -s ${sq(tmuxSessionName)} " +
-                (if (launchNonce != null) "-e $LAUNCH_ENV=$launchNonce " else "") +
-                "\\; set-option -g mouse on " +
-                "\\; set-option -g history-limit 100000 " +
-                "\\; send-keys ${sq(claudeCmd)} Enter; fi"
+                optionsPreludeBody() +
+                (if (onExisting is OnExisting.Refuse) "" else killExistingBody(target)) +
+                createBody(sq(tmuxSessionName), sq(claudeCmd), detached, launchNonce) +
+                "; fi"
     }
+
+    /*
+     * The pieces of [buildTmuxRunCommand] (Jarvis F0, R3 = 3c). The app composes them exactly as before (pinned byte for
+     * byte by TmuxRunGoldenTest); `cr-session` (SessionOpsScript) composes the guard, the prelude and the create over the
+     * shell variables `$NAME` / `$CMD` — never [killExistingBody]: a taken name fails `new-session` and is reported as
+     * EXISTS, a live session is never killed. Each piece ends with "; " except [createBody], whose `send-keys` chain the
+     * caller closes.
+     */
+
+    /** `"$NAME"`: the session name as `cr-session` holds it. */
+    internal const val NAME_WORD = "\"\$NAME\""
+    /** `"=$NAME"`: exact-match target of [NAME_WORD]. */
+    internal const val TARGET_WORD = "\"=\$NAME\""
+    /** `"$CMD"`: the pane's launch command as `cr-session` holds it. */
+    internal const val CMD_WORD = "\"\$CMD\""
+
+    /**
+     * SOCKET GUARD first (installed with restore.sh/drift.sh, marker v18): when a tmux server is alive on the
+     * default socket path but its socket file is gone, `tmux list-sessions` below fails and this command would
+     * start a SECOND server next to it — on 2026-11-02 that duplicated every session. The helper exits
+     *   0  nothing to heal: everything below as before;
+     *   3  the socket was unusable and is back (SIGUSR1 / chmod 700);
+     *   anything else  refused (the helper printed why): NOTHING below runs and the command fails.
+     * Absent helper (older server install): the previous behaviour.
+     * Opens an `if`: the caller adds its `elif` branches, then `else <prelude> <create>; fi`.
+     */
+    internal fun socketGuardHead(): String {
+        val heal = "\"$SOCKHEAL_SCRIPT\""
+        return "export XDG_RUNTIME_DIR=\${XDG_RUNTIME_DIR:-/run/user/\$(id -u)}; " +
+            "CR_SG=0; [ -x $heal ] && { $heal; CR_SG=\$?; }; " +
+            "if [ \$CR_SG -ne 0 ] && [ \$CR_SG -ne 3 ]; then " +
+            "echo \"claude-remote: not starting a tmux server (socket guard exit \$CR_SG, see ~/.claude-remote/sockheal.log)\" >&2; false; "
+    }
+
+    /**
+     * The server-wide options every creator sets before `new-session`: the anchored server, `exit-empty off`,
+     * `default-size`. All `-g`, all idempotent, and never `window-size` (see the crash guard below; a syntax test
+     * enforces it).
+     */
+    internal fun optionsPreludeBody(): String =
+        // Anchor the tmux SERVER under the user systemd slice BEFORE creating a
+        // session: a raw SSH-exec'd `tmux new-session` otherwise parents the
+        // server under the ephemeral SSH login scope, so it dies when that scope
+        // is torn down (the mid-life mass-death root cause). If NO server is
+        // running yet, create it (with a keepalive __anchor__ session) via
+        // `systemd-run --user --scope`, which parents the forked tmux server
+        // under user-1000.slice so it survives this SSH session's teardown; the
+        // real session below then attaches to that anchored server. If a server
+        // already exists we attach as-is. Best-effort (`|| true`): if systemd-run
+        // is unavailable we silently fall back to today's behavior.
+        // No --unit=<fixed name> and no --property=LimitCORE: a scope does
+        // NOT accept LimitCORE ("Unknown assignment"), which made the whole
+        // systemd-run fail, and a leftover unit of a fixed name makes it
+        // fail silently too — either way `|| true` then let the CALLER
+        // create the server in its own (possibly short-lived) cgroup.
+        "tmux list-sessions >/dev/null 2>&1 || systemd-run --user --scope --quiet tmux new-session -d -x 200 -y 50 -s __anchor__ sleep infinity >/dev/null 2>&1 || true; " +
+            // exit-empty off: keep the server alive when a kill-session/recreate
+            // momentarily drops it to 0 sessions (else the whole server exits).
+            "tmux set-option -g exit-empty off 2>/dev/null || true; " +
+            // CRASH GUARD. Core dump (tmux 3.5a, ~/core):
+            //   SIGSEGV clients_calculate_size() <- default_window_size()
+            //           <- spawn_window() <- cmd_new_session_exec()
+            // tmux died WHILE CREATING a session, sizing the new window from the
+            // attached clients. `window-size manual` is NOT the cure — it is the
+            // POISON: proven minimal repro on 3.5a, a config containing only
+            // `set -g window-size manual` makes `tmux new-session` print "server
+            // exited unexpectedly", while `latest` works. This app used to send
+            // that option on every launch AND every attach, which is exactly why
+            // "creating a session" reliably killed the whole server and all its
+            // sessions. So: never set window-size at all (leave tmux's default),
+            // and pass explicit -x/-y plus default-size so the new window's size
+            // never has to be derived from a client.
+            "tmux set-option -g default-size 200x50 2>/dev/null || true; "
+
+    /**
+     * `cr-session`'s create (open, restore): the socket guard, the prelude and [createBody] over `$NAME` / `$CMD`,
+     * detached, with no kill — what [buildTmuxRunCommand] sends for a detached fresh launch, over variables. A taken
+     * name makes it fail; the caller then reports EXISTS.
+     */
+    internal fun detachedCreateBody(): String = socketGuardHead() + "else " + optionsPreludeBody() + createBody() + "; fi"
+
+    /**
+     * Kill a session of the name before creating it (the app's relaunch path, to avoid `-A` reattaching and sending
+     * keystrokes into a running program). [target] is an exact-match target word (`'=name'` or [TARGET_WORD]).
+     * Never used by `cr-session`.
+     */
+    internal fun killExistingBody(target: String = TARGET_WORD): String = "tmux kill-session -t $target 2>/dev/null; "
+
+    /**
+     * `new-session` of [name] (a shell word: `'name'` or [NAME_WORD]) and `send-keys` of [cmd] (`'cmd'` or [CMD_WORD])
+     * into its pane. [detached] for an exec channel (no TTY); [launchNonce] sets [LAUNCH_ENV] (V16). A taken name
+     * makes `new-session` fail atomically.
+     */
+    internal fun createBody(name: String = NAME_WORD, cmd: String = CMD_WORD, detached: Boolean = true, launchNonce: String? = null): String =
+        "tmux set-option -g history-limit 100000 2>/dev/null; " +
+            "tmux new-session ${if (detached) "-d " else ""}-x 200 -y 50 -s $name " +
+            (if (launchNonce != null) "-e $LAUNCH_ENV=$launchNonce " else "") +
+            "\\; set-option -g mouse on " +
+            "\\; set-option -g history-limit 100000 " +
+            "\\; send-keys $cmd Enter"
 
     /**
      * Restart the Claude Code process IN PLACE while keeping the conversation.

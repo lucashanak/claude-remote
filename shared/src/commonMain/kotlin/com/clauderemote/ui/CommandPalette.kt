@@ -54,9 +54,11 @@ fun buildPaletteActions(
     onReconnect: ((String) -> Unit)?,
     onSwitchModel: (ClaudeModel) -> Unit,
     onSendEscape: () -> Unit,
-    onNavigate: (String) -> Unit, // "settings", "dashboard", "logs", "launcher"
+    onNavigate: (String) -> Unit, // "settings", "dashboard", "logs", "velin", "launcher"
     /** Effort entries, so Ctrl+Shift+E has something to land on. Null hides them. */
     onSwitchEffort: ((com.clauderemote.model.ClaudeEffort) -> Unit)? = null,
+    /** "Obnovit zavřenou" rows (label → restore), newest first; the category is what typing "obnovit" finds. */
+    restoreClosed: List<Pair<String, () -> Unit>> = emptyList(),
 ): List<PaletteAction> {
     val actions = mutableListOf<PaletteAction>()
 
@@ -113,6 +115,11 @@ fun buildPaletteActions(
     actions.add(PaletteAction("new_session", "New session", "Sessions", "Ctrl+N") {
         onNewTab()
     })
+    // The list with details (who closed it, title) and its own retry: a dialog of the app.
+    actions.add(PaletteAction("restore_closed_list", "Obnovit zavřenou…", "Obnovit zavřenou") { onNavigate("recently-closed") })
+    restoreClosed.forEachIndexed { i, (label, run) ->
+        actions.add(PaletteAction("restore_closed_$i", "Obnovit: $label", "Obnovit zavřenou", if (i == 0) "Ctrl+Shift+T" else "") { run() })
+    }
 
     // Terminal controls
     actions.add(PaletteAction("escape", "Send Escape", "Terminal", "Esc") { onSendEscape() })
@@ -126,6 +133,7 @@ fun buildPaletteActions(
     actions.add(PaletteAction("nav_dashboard", "Open Usage Dashboard", "Navigation") { onNavigate("dashboard") })
     actions.add(PaletteAction("nav_account_usage", "Open Usage by Account", "Navigation") { onNavigate("account-usage") })
     actions.add(PaletteAction("nav_logs", "Open Logs", "Navigation") { onNavigate("logs") })
+    actions.add(PaletteAction("nav_velin", "Open Velín", "Navigation") { onNavigate("velin") })
     actions.add(PaletteAction("nav_launcher", "Back to Launcher", "Navigation") { onNavigate("launcher") })
 
     return actions

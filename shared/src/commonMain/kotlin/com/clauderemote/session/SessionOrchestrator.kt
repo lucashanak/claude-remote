@@ -215,6 +215,7 @@ class SessionOrchestrator(
         { id -> statusService.sessionActivities.value[id] },
         statusService.promptTokens,
         { sid -> onDialogAnswered?.invoke(sid) },
+        { sid, endedAt -> statusService.markClaudeEnded(sid, endedAt) },
     )
 
     // Per-session terminal output buffer (ring buffer) + pty size tracking.
@@ -226,6 +227,9 @@ class SessionOrchestrator(
     private val claudeControl = com.clauderemote.session.service.ClaudeControlService(
         reconnectScope, connectionRegistry, tabManager, statusService, notificationService, terminalIO,
     ) { sid, data -> onTerminalOutput?.invoke(sid, data) }
+
+    /** Test seam: the reply path's own route and exec fakes (`routeOverride`, `replyExecOverride`). */
+    internal val claudeControlForTest get() = claudeControl
 
     private val remoteOps = com.clauderemote.session.service.RemoteOpsService(
         reconnectScope, connectionRegistry, tabManager,
@@ -251,6 +255,8 @@ class SessionOrchestrator(
         { id, act -> statusService.updateActivity(id, act) },
         ::disconnectSession,
         { sid, tmux -> onSessionForgotten?.invoke(sid, tmux) },
+        // read at close time: deviceKey is set by startLogShipping after construction
+        closedBy = { "app:$deviceKey" },
     )
 
     // Tailscale/Cloudflare/direct transport selection + per-session connection
@@ -618,11 +624,14 @@ class SessionOrchestrator(
      */
     override fun reconnectDeadTabs(reason: String) {
         if (released) return
+        // A parked tab (adopted from opened.d) waits for the user's first tap: no shell until then.
         // C4: and ACTIVE without a live transport — a reconnect that ended over a shell which died during it left one
+        val parked = _parkedTabs.value
         val dead = tabManager.tabs.value.filter {
-            it.status == com.clauderemote.model.SessionStatus.DISCONNECTED ||
-                it.status == com.clauderemote.model.SessionStatus.ERROR ||
-                (it.status == com.clauderemote.model.SessionStatus.ACTIVE && !hasLiveTransport(it.id))
+            it.id !in parked && (
+                it.status == com.clauderemote.model.SessionStatus.DISCONNECTED ||
+                    it.status == com.clauderemote.model.SessionStatus.ERROR ||
+                    (it.status == com.clauderemote.model.SessionStatus.ACTIVE && !hasLiveTransport(it.id)))
         }
         if (dead.isEmpty()) return
         synchronized(reconnectSweepLock) {
@@ -896,6 +905,14 @@ class SessionOrchestrator(
      * (then the marker only survives within this app run).
      */
     @Volatile private var deviceKey: String = "proc-" + Random.nextInt(1 shl 24).toString(16)
+
+    /**
+     * This device's client marker for [tmuxName], the file [buildAttachCommand]'s preamble writes: the close facts
+     * read it to leave our own attached client out of "someone else is watching". Same [deviceKey] as the attach, so
+     * the two cannot disagree.
+     */
+    internal fun ownClientMarker(tmuxName: String): String =
+        com.clauderemote.session.service.CloseFactsCommands.selfMarkerFor(tmuxName, deviceKey)
 
     /**
      * Start shipping FileLogger output to the server (one remote file per
@@ -2967,6 +2984,16 @@ class SessionOrchestrator(
     /** Kolo 6: the terminal emulator's own answers (DA, CPR …) — not user input, see ClaudeControlService. */
     fun sendTerminalReply(sessionId: String, data: ByteArray) = claudeControl.sendTerminalReply(sessionId, data)
 
+    /** Every session's newest prompt with its text and age (Velín inbox); the reply check reads the same state. */
+    internal val shownPrompts: kotlinx.coroutines.flow.StateFlow<Map<String, com.clauderemote.session.service.PromptTokens.Shown>>
+        get() = statusService.promptTokens.shown
+
+    /** Sessions whose Claude exited (hook `end`, no event since), with when (device ms). */
+    val claudeEndedAt: kotlinx.coroutines.flow.StateFlow<Map<String, Long>> get() = statusService.claudeEndedAt
+
+    /** When [sessionId]'s activity last changed (device ms), or null. */
+    fun activitySinceMs(sessionId: String): Long? = statusService.activitySinceMs(sessionId)
+
     /** The prompt the session shows right now, for a view that offers a reply to it (the test notification). */
     fun currentPrompt(sessionId: String): com.clauderemote.session.service.PromptFingerprint? =
         com.clauderemote.session.service.ReplyGuard.promptShown(
@@ -3018,6 +3045,10 @@ class SessionOrchestrator(
             }
         }
         if (why == null) FileLogger.log(TAG, "Reply $reply to $sessionId sent (${notified?.key}): ${text.length} chars")
+        // Answering a session whose close is still in its undo window means keeping it ("Vrátit"), not answering it
+        // and having it killed seconds later. Only once the keys reached the pane: a refused answer (another
+        // prompt by now, nothing to verify against) must not bring back a session the user closed.
+        if (replyReachedThePane(why)) reclaimPendingClose(sessionId)
         return why
     }
 
@@ -3101,6 +3132,8 @@ class SessionOrchestrator(
         // producing spurious "ET carrier SSH not connected" failures that only
         // a manual retry (landing after the race window) would clear.
         if (released) return
+        // the first connect of a parked tab ends its parking: from now on it is a tab like any other
+        if (sessionId in _parkedTabs.value) _parkedTabs.update { it - sessionId }
         synchronized(reconnectingSessionIds) {
             if (!reconnectingSessionIds.add(sessionId)) {
                 FileLogger.log(TAG, "Skipping reconnectSession for $sessionId — already reconnecting")
@@ -3196,6 +3229,46 @@ class SessionOrchestrator(
     suspend fun forgetSession(sessionId: String, userInitiated: Boolean = false) =
         persistence.forgetSession(sessionId, userInitiated)
 
+    /**
+     * The user's tab closes, held for the undo window before [forgetSession] runs (Jarvis F0a). Lives here, not in
+     * the UI, because the platform has to reach it when the user leaves the app (Android `onStop`, desktop window
+     * close) to run the pending closes at once. Its timers run in [reconnectScope]: when [shutdown] cancels that
+     * scope the pending closes simply never happen, the same outcome as the process dying in the window.
+     */
+    val pendingCloses = PendingCloses(
+        reconnectScope,
+        // join(): the job behind it is the server side (tombstone, kill); flush() waits on it before an exit.
+        forget = { id ->
+            // closed here = never adopt the marker this name had (a later open or restore of it writes a new one)
+            tabManager.getTab(id)?.let { suppressAdoption(it.server.id, it.tmuxSessionName) }
+            persistence.forgetSession(id, userInitiated = true)?.join()
+        },
+        // The server's close facts (R6 = 6d), read the way every read-only command is: exec transport first, a
+        // live tab of the server otherwise, null (= close) when neither is there.
+        closeCheck = com.clauderemote.session.service.CloseFactsCheck(
+            read = { serverId, cmd, totalMs -> connectionRegistry.execRead(serverId, cmd, totalMs) },
+            selfMarker = ::ownClientMarker,
+        )::check,
+    )
+
+    /**
+     * The user asked for [sessionId] from outside the tab bar (a notification tap, Velín, History, an answer that
+     * reached the pane — [sendReply] calls it):
+     * if its close is still waiting out the undo window, that is "Vrátit". They want this session, and a tab hidden by
+     * a pending close would otherwise be switched straight away from by App's hidden-tab guard, then killed. Not done
+     * in [switchTab]: that also runs after a close went through, onto whatever tab [TabManager.removeTab] picked,
+     * which may be another pending one. True when a close was undone.
+     */
+    internal fun replyReachedThePane(why: com.clauderemote.session.service.RefuseReason?): Boolean =
+        why == null || why == com.clauderemote.session.service.RefuseReason.MAYBE_SENT ||
+            why == com.clauderemote.session.service.RefuseReason.TYPED_NOT_SENT
+
+    fun reclaimPendingClose(sessionId: String): Boolean {
+        val undone = pendingCloses.undo(sessionId) ?: return false
+        FileLogger.log(TAG, "Close of ${undone.sessionId} undone: the session was opened again within its undo window")
+        return true
+    }
+
     suspend fun renameTmuxSession(sessionId: String, oldName: String, newName: String) =
         persistence.renameTmuxSession(sessionId, oldName, newName)
 
@@ -3205,6 +3278,215 @@ class SessionOrchestrator(
      * CONNECTING). Caller triggers reconnectSession() for each.
      */
     fun restorePersistedTabs(): List<ClaudeSession> = persistence.restorePersistedTabs()
+
+    // ── Nedávno zavřené, obnova a adopce opened.d (Jarvis F0b/F0c, §3.9, §15.4, §15.13) ─────────────────────
+
+    /** This device's `by` in close records (`app:<installId>`): the rows it closed itself read "zavřeno tady". */
+    internal val ownCloseBy: String get() = "app:$deviceKey"
+
+    /**
+     * Where the "do not adopt" list lives (AppSettings, set by the UI). Null = not wired yet: adoption then adopts
+     * nothing, because a hide it cannot read must not be undone by adopting the tab again.
+     */
+    @Volatile internal var hiddenAdoptionsStore: HiddenAdoptionsStore? = null
+
+    private val _parkedTabs = kotlinx.coroutines.flow.MutableStateFlow<Map<String, String>>(emptyMap())
+
+    /**
+     * Tabs adopted from `opened.d` that have not been opened yet (session id → the marker's `by`). They have no shell:
+     * the reconnect sweeps skip them, the first [reconnectSession] (the user's tap) ends the parking.
+     */
+    val parkedTabs: StateFlow<Map<String, String>> = _parkedTabs
+
+    /** (server id, tmux name) of restores under way: their tab comes from the restore, never from adoption. */
+    private val restoringNames = java.util.concurrent.ConcurrentHashMap.newKeySet<Pair<String, String>>()
+
+    /** The newest marker mtime seen per (server id, tmux name): a hide stamps at least that (server clock). */
+    private val markerMtimes = java.util.concurrent.ConcurrentHashMap<Pair<String, String>, Long>()
+
+    private val adoptLock = Any()
+
+    /**
+     * The tail of [server]'s `closed.jsonl`, NEWEST FIRST ([ClosedRead.Ok]); [ClosedRead.Unknown] = no answer or a
+     * read cut off — the UI says "nejde načíst", never "nic". One short exec on whatever transport the server has;
+     * without one, a fresh connection only when [allowFresh] (else [ClosedRead.Skipped]).
+     */
+    internal suspend fun readClosedRecords(server: SshServer, allowFresh: Boolean = true): ClosedRead =
+        withContext(Dispatchers.IO) {
+            try {
+                val out = SshSessionHelper.withSession(server, 5_000, allowFresh = allowFresh) { sess ->
+                    execReadWithWatchdog(sess, ManifestCommands.readClosed(RecentlyClosed.READ_LIMIT), totalMs = 10_000)
+                }
+                com.clauderemote.session.service.ClosedRecords.parseRead(out)?.let { ClosedRead.Ok(it) } ?: ClosedRead.Unknown
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: ExecUnavailable) {
+                // withSession refused before running anything: no transport and no fresh handshake wanted
+                if (!allowFresh && e.reason == ExecUnavailableReason.NOT_UP) return@withContext ClosedRead.Skipped
+                FileLogger.log(TAG, "closed.jsonl read of ${server.name} failed: ${e.reason}: ${e.message}")
+                ClosedRead.Unknown
+            } catch (e: Exception) {
+                FileLogger.log(TAG, "closed.jsonl read of ${server.name} failed: ${e.javaClass.simpleName}: ${e.message}")
+                ClosedRead.Unknown
+            }
+        }
+
+    /**
+     * Restore [record] on [server] under [tmuxName] ([SessionRestore.restoreCommand]; [sessionId] = a confirmed
+     * candidate, [freshSessionId] = a new conversation in the same folder and account). The server side never kills
+     * anything (a taken name is [RestoreResult.Exists]) and lifts the tombstones before the start. A running result
+     * ([RestoreResult.Restored], [RestoreResult.LoginRequired]) gets its tab the way any session is opened here:
+     * [launchSession] of the existing name, which persists it, clears the tombstone and pushes the manifest.
+     *
+     * Never retried here: an answer that did not arrive is [RestoreResult.Unknown] (the session may run), and a
+     * second try could only end in "taken" anyway.
+     */
+    internal suspend fun restoreClosed(
+        server: SshServer,
+        record: com.clauderemote.session.service.ClosedRecord,
+        tmuxName: String = record.tmuxName,
+        sessionId: String? = null,
+        freshSessionId: String? = null,
+    ): Pair<com.clauderemote.session.service.RestoreResult, ClaudeSession?> = withContext(Dispatchers.IO) {
+        val key = server.id to tmuxName
+        restoringNames.add(key)
+        try {
+            val cmd = try {
+                com.clauderemote.session.service.SessionRestore.restoreCommand(record, tmuxName, sessionId, freshSessionId)
+            } catch (e: IllegalArgumentException) {
+                return@withContext com.clauderemote.session.service.RestoreResult.Refused(e.message ?: "invalid record") to null
+            }
+            var sent = false
+            val out = try {
+                SshSessionHelper.withSession(server, 10_000) { sess ->
+                    sent = true
+                    execReadWithWatchdog(sess, cmd, totalMs = RecentlyClosed.RESTORE_EXEC_MS)
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                FileLogger.log(TAG, "Restore of $tmuxName on ${server.name} failed (sent=$sent): ${e.javaClass.simpleName}: ${e.message}")
+                // before the command went out nothing ran; after it, nobody knows
+                return@withContext (if (sent) com.clauderemote.session.service.RestoreResult.Unknown
+                    else com.clauderemote.session.service.RestoreResult.Failed("server nedostupný")) to null
+            }
+            val result = com.clauderemote.session.service.SessionRestore.parse(out)
+            FileLogger.log(TAG, "Restore of ${record.tmuxName} as $tmuxName on ${server.name}: $result")
+            val running = result is com.clauderemote.session.service.RestoreResult.Restored ||
+                result == com.clauderemote.session.service.RestoreResult.LoginRequired
+            if (!running) return@withContext result to null
+            val folder = record.restoreFolder ?: return@withContext result to null
+            // The conversation the pane resumed, not the registry's id from the answer: the tab's Restart and rebuild
+            // resume this id, so it must be one with a transcript (the script says which one it took when it fell
+            // back to the launch id).
+            val resumeId = freshSessionId
+                ?: (result as? com.clauderemote.session.service.RestoreResult.Restored)?.resumedId
+                ?: sessionId ?: record.sessionId ?: record.launchSessionId
+            val tab = try {
+                launchSession(
+                    server = server,
+                    folder = folder,
+                    mode = record.claudeMode,
+                    model = record.claudeModel,
+                    connectionType = ConnectionType.SSH,
+                    tmuxSessionName = tmuxName,
+                    isNewTmuxSession = false,
+                    resumeClaudeSessionId = resumeId,
+                    accountSlug = record.account,
+                )
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                // the session runs on the server; the tab's attach failed: it stays in the list (and can be adopted)
+                FileLogger.error(TAG, "Restored $tmuxName but its tab did not attach", e)
+                null
+            }
+            result to tab
+        } finally {
+            restoringNames.remove(key)
+        }
+    }
+
+    /**
+     * "Skrýt z tohoto zařízení": the tab leaves THIS device only — no tombstone, no kill, no manifest push (the
+     * session stays live, so pushMerge keeps its manifest entry for the other devices) — and its marker is not
+     * adopted again. The session shows up here as a detached remote row, as any session without a tab does.
+     */
+    fun hideFromThisDevice(sessionId: String) {
+        val tab = tabManager.getTab(sessionId) ?: return
+        FileLogger.log(TAG, "Hiding ${tab.tmuxSessionName} (tab $sessionId) from this device: no tombstone, no kill")
+        suppressAdoption(tab.server.id, tab.tmuxSessionName)
+        _parkedTabs.update { it - sessionId }
+        sessionStorage?.remove(sessionId)
+        launchGuarded("Hide of ${tab.tmuxSessionName}") { disconnectSession(sessionId) }
+    }
+
+    /** Never adopt the marker [tmuxName] has now (hidden or closed here). */
+    private fun suppressAdoption(serverId: String, tmuxName: String) {
+        val store = hiddenAdoptionsStore ?: return
+        val now = System.currentTimeMillis() / 1000
+        try {
+            val stamp = HiddenAdoptions.stamp(now, markerMtimes[serverId to tmuxName])
+            store.save(HiddenAdoptions.parse(store.load()).pruned(now).with(serverId, tmuxName, stamp).serialize())
+        } catch (e: Exception) {
+            FileLogger.error(TAG, "Saving the hide of $tmuxName failed", e)
+        }
+    }
+
+    /**
+     * One reconcile round of [serverId] ([ExecServerReconciler] `onRound`): adopt its `opened.d` markers as parked
+     * tabs ([OpenedAdoption.select]) and keep the parked tabs' conversation id in step with the manifest (they are
+     * not registered with the reconciler until they connect).
+     */
+    private fun adoptOpened(serverId: String, snap: com.clauderemote.session.service.ReconcileSnapshot) {
+        snap.opened?.forEach { m -> markerMtimes.merge(serverId to m.tmuxName, m.mtimeEpochS) { a, b -> maxOf(a, b) } }
+        val store = hiddenAdoptionsStore ?: return
+        val server = serverStorage.getServer(serverId) ?: return
+        synchronized(adoptLock) {
+            val live = tabManager.tabs.value
+            _parkedTabs.update { p -> p.filterKeys { id -> live.any { it.id == id } } }
+            val own = ownTmuxNames(serverId) + restoringNames.filter { it.first == serverId }.map { it.second }
+            val picks = OpenedAdoption.select(
+                serverId, snap.opened, snap.tmuxNames, snap.manifest, snap.tombstoned, own,
+                HiddenAdoptions.parse(store.load()), System.currentTimeMillis() / 1000,
+            )
+            for (a in picks) adoptParked(server, a)
+            for ((id, _) in _parkedTabs.value) {
+                val tab = tabManager.getTab(id) ?: continue
+                if (tab.server.id != serverId) continue
+                val uuid = snap.manifestUuid(tab.tmuxSessionName) ?: continue
+                if (uuid != tab.claudeSessionId) {
+                    tabManager.updateClaudeSessionId(id, uuid)
+                    tabManager.getTab(id)?.let { sessionStorage?.upsert(SessionStorage.fromClaudeSession(it)) }
+                }
+            }
+        }
+    }
+
+    /** A parked tab of [a]: the manifest entry as it is, no shell, not selected; persisted like any tab (never pushed here). */
+    private fun adoptParked(server: SshServer, a: Adoption) {
+        val e = a.entry
+        val id = generateId()
+        val tab = ClaudeSession(
+            id = id,
+            server = server,
+            folder = e.folder,
+            mode = e.mode,
+            model = e.model,
+            tmuxSessionName = e.tmuxSessionName,
+            connectionType = e.connectionType,
+            status = SessionStatus.DISCONNECTED,
+            alias = e.alias.ifBlank { TmuxNameParser.parse(e.tmuxSessionName, server.name).alias },
+            claudeSessionId = e.claudeSessionId,
+            accountSlug = e.accountSlug,
+        )
+        FileLogger.log(TAG, "Adopting ${e.tmuxSessionName} on ${server.name} as a parked tab $id (marker by=${a.marker.by})")
+        terminalIO.initBuffer(id)
+        tabManager.addTab(tab, activate = false)
+        statusService.updateActivity(id, SessionActivity.DISCONNECTED)
+        sessionStorage?.upsert(SessionStorage.fromClaudeSession(tab))
+        _parkedTabs.update { it + (id to a.marker.by.orEmpty()) }
+    }
 
 
     suspend fun disconnectSession(sessionId: String) {
@@ -3728,7 +4010,7 @@ class SessionOrchestrator(
                 serverName = { serverStorage.getServer(it)?.name ?: it },
             )
         }
-        reg.reconciler = persistence.newExecReconciler()
+        reg.reconciler = persistence.newExecReconciler(onRound = { serverId, snap -> adoptOpened(serverId, snap) })
         // withSession (history scan, folder browser, command fetcher, ...) holds a SHORT permit on the exec transport
         com.clauderemote.connection.SshSessionHelper.execChannelsProvider = { serverId -> reg.activeExecChannels(serverId) }
         notificationService.closures = persistence

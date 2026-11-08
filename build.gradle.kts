@@ -44,6 +44,10 @@ subprojects {
         val tmuxPath = tmuxTmpDirPath // locals only: a doFirst lambda must not capture the script object (configuration cache)
         environment.remove("TMUX")
         environment.remove("TMUX_PANE")
+        // The tests also run inside a live Claude session, whose CLAUDE_CONFIG_DIR points at a real
+        // account directory: a fake `claude` that honours it writes into the live registry (it did,
+        // 2026-11-07). The messaging socket/token variables would let a test reach the session itself.
+        System.getenv().keys.filter { it.startsWith("CLAUDE") }.forEach { environment.remove(it) }
         environment("TMUX_TMPDIR", tmuxTmpDirPath)
         environment("HOME", homePath)
         environment("PATH", shimDirPath + File.pathSeparator + (System.getenv("PATH") ?: "/usr/local/bin:/usr/bin:/bin"))

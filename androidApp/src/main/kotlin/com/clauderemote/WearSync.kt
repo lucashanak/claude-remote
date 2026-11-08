@@ -233,7 +233,8 @@ object WearSync {
         this.tabManager = tabManager
         this.orchestrator = orchestrator
         collectorJob = scope.launch {
-            combine(tabManager.tabs, orchestrator.sessionActivities) { tabs, activities -> tabs to activities }
+            // pendingCloses: a tab hidden by a pending close leaves the watch at once and comes back on "Vrátit".
+            combine(tabManager.tabs, orchestrator.sessionActivities, orchestrator.pendingCloses.state) { tabs, activities, _ -> tabs to activities }
                 .debounce(DEBOUNCE_MS)
                 // Not urgent: sessionActivities churns continuously while
                 // Claude streams across many sessions, and .setUrgent() forces
@@ -406,7 +407,9 @@ object WearSync {
     ): List<WearSessionInfo> {
         val activities = orch.sessionActivities.value
         val rows = ArrayList<com.clauderemote.session.wear.WatchUrgencyRow>()
-        return tm.tabs.value.map { tab ->
+        // Not the tabs whose close waits out its undo window: closed for the user already, so the wrist must not
+        // offer to answer them (prune() above still keeps their state, an undo brings them back as they were).
+        return orch.pendingCloses.state.value.visibleOf(tm.tabs.value).map { tab ->
             val activity = (activities[tab.id] ?: com.clauderemote.model.SessionActivity.IDLE).name
             // A session that has just STARTED working again has moved past the
             // completion whose body we pinned. Edge, not level: at the moment

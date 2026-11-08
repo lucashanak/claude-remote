@@ -110,6 +110,8 @@ internal fun SessionSidePanel(
     accountTags: Map<String, AccountTag> = emptyMap(),
     /** Sessions answering with Fable get a small badge. */
     fableSessionIds: Set<String> = emptySet(),
+    /** Under the "New session" button: "Nedávno zavřené" (§3.9). */
+    footer: (@Composable () -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
     val c = CRTheme.colors
@@ -362,6 +364,7 @@ internal fun SessionSidePanel(
                     Text("New session", style = CRType.bodyDim, color = c.accent)
                 }
             }
+            if (footer != null) item(key = "footer_closed") { footer() }
         }
     }
 }

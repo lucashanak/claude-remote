@@ -20,6 +20,7 @@ import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
@@ -68,6 +69,11 @@ fun SessionContextSheet(
     onReconnect: () -> Unit,
     onClose: () -> Unit,
     onDismiss: () -> Unit,
+    /**
+     * "Skrýt z tohoto zařízení": the tab leaves this device only, the session keeps running everywhere else.
+     * Null hides the row.
+     */
+    onHide: (() -> Unit)? = null,
 ) {
     val c = CRTheme.colors
     Dialog(
@@ -102,6 +108,10 @@ fun SessionContextSheet(
                     MenuRow(Icons.Default.Edit, "Rename", c.text, onRename)
                 }
                 MenuRow(Icons.Default.Refresh, "Reconnect", c.text, onReconnect)
+                // Kept apart from Close on purpose: Close kills the session for every device, this only drops the tab here.
+                if (onHide != null) {
+                    MenuRow(Icons.Default.VisibilityOff, "Skrýt z tohoto zařízení (běží dál)", c.text, onHide)
+                }
                 MenuRow(Icons.Default.Close, "Close session", c.disconnected, onClose)
 
                 HorizontalDivider(color = c.border, thickness = 1.dp)

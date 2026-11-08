@@ -220,6 +220,9 @@ internal class NotificationService(
     private val promptTokens: PromptTokens = PromptTokens(),
     // The hook reducer saw a pending perm/ask answered (the pane's next work/askdone/stop/end).
     private val onApprovalAnswered: (String) -> Unit = {},
+    // Every applied hook event of a session: `end` (Claude exited, the pane is back at its shell)
+    // with when it fired (device clock), any other event with null (Claude runs again).
+    private val onClaudeEnded: (sessionId: String, endedAtMs: Long?) -> Unit = { _, _ -> },
 ) {
     // Prompt detection for notifications — quiescence-based, reads rendered screen state.
     internal val promptDetector = InputPromptDetector().apply {
@@ -1004,10 +1007,13 @@ internal class NotificationService(
             // A new dialog replaces the prompt a pending reply was written for NOW, not after the
             // settle delay, and also when no alert follows (the foreground tab, an old event).
             if (r.clearedApproval) onApprovalAnswered(sessionId)
+            onClaudeEnded(sessionId, if (e.ev == "end") clock() - r.ageMs else null)
             // Stamped with when the hook FIRED (device clock, skew-corrected): that is what tells a
             // late hook of the dialog the screen already saw from the next dialog (PromptTokens.sameDialog).
             if (e.ev == "perm" || e.ev == "ask") {
-                NotifyKeys.prompt(NotifyKeys.hook(e.ev, e.tmux, e.atMs))?.let { promptTokens.note(sessionId, it, clock() - r.ageMs) }
+                NotifyKeys.prompt(NotifyKeys.hook(e.ev, e.tmux, e.atMs))?.let {
+                    promptTokens.note(sessionId, it, clock() - r.ageMs, text = e.extra.ifBlank { null })
+                }
             }
             val n = r.notify ?: return@onSessionLane
             kotlinx.coroutines.delay(hookSettleMs)

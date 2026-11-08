@@ -29,7 +29,8 @@ import androidx.compose.ui.input.key.type
 enum class AppShortcut(val keys: String, val label: String) {
     PALETTE("Ctrl+Shift+K", "Command palette"),
     NEW_SESSION("Ctrl+Shift+N", "Nová session"),
-    CLOSE_SESSION("Ctrl+Shift+W", "Zavřít session (s potvrzením)"),
+    CLOSE_SESSION("Ctrl+Shift+W", "Zavřít session (10 s jde vrátit)"),
+    REOPEN_CLOSED("Ctrl+Shift+T", "Obnovit naposledy zavřenou session"),
     NEXT_SESSION("Ctrl+Tab", "Další session"),
     PREV_SESSION("Ctrl+Shift+Tab", "Předchozí session"),
     TOGGLE_SIDEBAR("Ctrl+Shift+B", "Skrýt / ukázat seznam sessions"),
@@ -73,6 +74,8 @@ object AppShortcuts {
                 Key.K -> AppShortcut.PALETTE
                 Key.N -> AppShortcut.NEW_SESSION
                 Key.W -> AppShortcut.CLOSE_SESSION
+                // Cmd+Shift+T reopens the last closed tab in every browser; plain Cmd+T stays free
+                Key.T -> if (shift) AppShortcut.REOPEN_CLOSED else null
                 else -> null
             }
         }
@@ -84,6 +87,7 @@ object AppShortcuts {
             Key.K -> AppShortcut.PALETTE
             Key.N -> AppShortcut.NEW_SESSION
             Key.W -> AppShortcut.CLOSE_SESSION
+            Key.T -> AppShortcut.REOPEN_CLOSED
             Key.B -> AppShortcut.TOGGLE_SIDEBAR
             Key.R -> AppShortcut.TOGGLE_VIEW
             Key.L -> AppShortcut.TOGGLE_KEYBOARD_MODE

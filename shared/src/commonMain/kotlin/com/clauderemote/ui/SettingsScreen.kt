@@ -83,6 +83,7 @@ fun SettingsScreen(
     var notifications by remember { mutableStateOf(settings.notificationsEnabled) }
     var connectTimeout by remember { mutableStateOf(settings.sshConnectTimeout) }
     var themeMode by remember { mutableStateOf(settings.themeMode) }
+    var startScreen by remember { mutableStateOf(settings.startScreen) }
 
     Scaffold(
         containerColor = c.bg,
@@ -173,6 +174,21 @@ fun SettingsScreen(
                             selected = appearance.statusViz,
                             onSelect = { onAppearanceChange(appearance.copy(statusViz = it)) },
                             label = { it.name },
+                        )
+                    }
+
+                    // Which screen the app opens on; Launcher unless chosen otherwise.
+                    SettingsRow(label = "Start screen") {
+                        Segmented(
+                            options = listOf(AppSettings.START_LAUNCHER, AppSettings.START_VELIN),
+                            selected = startScreen,
+                            onSelect = {
+                                startScreen = it
+                                settings.startScreen = it
+                                // Chosen here, the Velín has no reason to ask any more.
+                                settings.velinStartOffered = true
+                            },
+                            label = { if (it == AppSettings.START_VELIN) "Velín" else "Launcher" },
                         )
                     }
                 }

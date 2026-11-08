@@ -172,6 +172,14 @@ fun TerminalScreen(
     onLogin: (() -> Unit)? = null,
     latencyMs: Long? = null,
     onNavigate: ((String) -> Unit)? = null,
+    /** Ctrl/Cmd+Shift+T: undo the newest pending close, else restore the newest recently closed session. */
+    onReopenClosed: (() -> Unit)? = null,
+    /** Palette rows "Obnovit: …" (label → restore), newest first. */
+    closedPaletteEntries: List<Pair<String, () -> Unit>> = emptyList(),
+    /** The palette opened: a moment to refresh what [closedPaletteEntries] offers. */
+    onPaletteOpened: (() -> Unit)? = null,
+    /** "Nedávno zavřené" at the bottom of the side panel (desktop, §3.9). */
+    sidePanelFooter: (@Composable () -> Unit)? = null,
     invertColors: Boolean = false,
     onToggleInvertColors: (() -> Unit)? = null,
     onTerminalViewChange: ((CRTerminalView) -> Unit)? = null,
@@ -474,6 +482,7 @@ fun TerminalScreen(
     fun openPalette(filter: String) {
         paletteFilter = filter
         showPalette = true
+        onPaletteOpened?.invoke()
         if (onFetchCommands != null) {
             scope.launch { commands = onFetchCommands.invoke() }
         }
@@ -497,6 +506,7 @@ fun TerminalScreen(
             AppShortcut.PALETTE -> if (!paletteHidden) openPalette("")
             AppShortcut.NEW_SESSION -> onNewTab()
             AppShortcut.CLOSE_SESSION -> activeTabId?.let { onTabClose(it) }
+            AppShortcut.REOPEN_CLOSED -> onReopenClosed?.invoke()
             AppShortcut.NEXT_SESSION -> stepSession(+1)
             AppShortcut.PREV_SESSION -> stepSession(-1)
             AppShortcut.TOGGLE_SIDEBAR -> sidebarHidden = !sidebarHidden
@@ -597,6 +607,7 @@ fun TerminalScreen(
                     fableSessionIds = fableSessionIds,
                     collapsedGroups = collapsedGroups,
                     onToggleGroup = toggleGroup,
+                    footer = sidePanelFooter,
                     modifier = Modifier.width(sidePanelWidth).fillMaxHeight()
                 )
                 if (!isMobile) {
@@ -1166,7 +1177,7 @@ fun TerminalScreen(
 
                 // Command palette
                 if (showPalette) {
-                    val paletteActions = remember(tabs, activeTabId, commands) {
+                    val paletteActions = remember(tabs, activeTabId, commands, closedPaletteEntries) {
                         buildPaletteActions(
                             tabs = tabs,
                             activeTabId = activeTabId,
@@ -1180,6 +1191,7 @@ fun TerminalScreen(
                             onSendEscape = onSendEscape,
                             onNavigate = { target -> onNavigate?.invoke(target) },
                             onSwitchEffort = onSwitchEffort,
+                            restoreClosed = closedPaletteEntries,
                         )
                     }
                     CommandPaletteDialog(

@@ -17,6 +17,9 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
@@ -55,7 +58,7 @@ import kotlinx.coroutines.withContext
 
 enum class Screen {
     LAUNCHER, CONNECT, TERMINAL, SETTINGS, LOG_VIEWER, USAGE_DASHBOARD, HISTORY, ACCOUNTS,
-    ACCOUNT_USAGE,
+    ACCOUNT_USAGE, VELIN,
 }
 
 @Composable
@@ -111,7 +114,12 @@ fun App(
     // Which chat-mentioned paths the server confirmed are real files.
     val pathVerifyCache = remember { RemotePathCache() }
 
-    var currentScreen by remember { mutableStateOf(Screen.LAUNCHER) }
+    // The start screen is a setting (Launcher unless the user chose the Velín), read once here.
+    var currentScreen by remember {
+        mutableStateOf(if (appSettings.startScreen == AppSettings.START_VELIN) Screen.VELIN else Screen.LAUNCHER)
+    }
+    // The Velín asks once whether the app should open there; answered, it never asks again.
+    var velinStartOfferPending by remember { mutableStateOf(!appSettings.velinStartOffered) }
     // Which server's accounts the accounts screen is showing; set when opened
     // from that server's settings, which is the only way in.
     var accountsServerId by remember { mutableStateOf<String?>(null) }
@@ -122,7 +130,6 @@ fun App(
     // session must not take beyond the listed ones (see onConnectServer, ConnectListing)
     val connectListing = remember { ConnectListing() }
     var connectionError by remember { mutableStateOf<String?>(null) }
-    var tabCloseConfirmId by remember { mutableStateOf<String?>(null) }
     // Long-press session context menu (mobile): which session it's open for.
     var sessionMenuId by remember { mutableStateOf<String?>(null) }
     // Usage is reachable from the launcher AND from the chat's "..." menu, so
@@ -190,6 +197,14 @@ fun App(
     var serverList by remember { mutableStateOf(serverStorage.loadServers()) }
     val tabs by tabManager.tabs.collectAsState()
     val activeTabId by tabManager.activeTabId.collectAsState()
+    // A closed tab waits out its undo window still in tabManager (connected, persisted, in the manifest), only
+    // hidden; everything the user sees and picks from uses visibleTabs (PendingCloses).
+    val pendingCloses = sessionOrchestrator.pendingCloses
+    val pendingCloseState by pendingCloses.state.collectAsState()
+    val visibleTabs = remember(tabs, pendingCloseState.pending) { pendingCloseState.visibleOf(tabs) }
+    // A tab gone from tabManager behind the undo window's back (another device closed it, the dead-pane prune
+    // forgot it): nothing left to close or bring back.
+    LaunchedEffect(tabs) { pendingCloses.retain(tabs.mapTo(HashSet()) { it.id }) }
     // Server of the active tab — usage chips (5h/wk) are keyed by server.
     val activeServerId = tabs.firstOrNull { it.id == activeTabId }?.server?.id
 
@@ -248,15 +263,15 @@ fun App(
     var focusedPaneIndex by remember { mutableStateOf(0) }
 
     // FIX 3: Purge dead session ids when tabs change.
-    LaunchedEffect(tabs) {
-        val validIds = tabs.map { it.id }.toSet()
+    LaunchedEffect(visibleTabs) {
+        val validIds = visibleTabs.map { it.id }.toSet()
         paneSessions = paneSessions.map { sid -> if (sid != null && sid !in validIds) null else sid }
         // focusedPaneIndex is left wherever it is; that cell will show the picker.
     }
     // FIX 4: Reset grid entirely when tab count drops to 1 (can't split a
     // single session) — prevents stale TWO/QUAD resurfacing on next open.
-    LaunchedEffect(tabs.size) {
-        if (tabs.size <= 1) {
+    LaunchedEffect(visibleTabs.size) {
+        if (visibleTabs.size <= 1) {
             gridLayout = GridLayout.ONE
             paneSessions = listOf(null, null, null, null)
             focusedPaneIndex = 0
@@ -290,6 +305,38 @@ fun App(
         // re-subscribe and a 2 KB tail replay. onFocusPane already guards this;
         // match that here so switching to what's already active doesn't churn.
         if (id != activeTabId) sessionOrchestrator.switchTab(id)
+    }
+
+    // Closing a tab (Jarvis F0a, R6 = 6d): no question asked; it leaves the bar at once, the real close (durable
+    // tombstone, kill) waits out the undo window in PendingCloses while the server's close facts decide whether it
+    // may happen at all. Selection moves on as TabManager.removeTab moves it: to the last tab left.
+    // Reads the flows' current values, not the composed ones, because shortcuts and menus may hold an older lambda.
+    fun beginTabClose(id: String) {
+        val tab = tabManager.getTab(id) ?: return
+        val wasActive = id == tabManager.activeTabId.value
+        if (!pendingCloses.close(tab, wasActive)) return
+        val hidden = pendingCloses.state.value.hiddenIds
+        val rest = tabManager.tabs.value.filter { it.id !in hidden }
+        if (wasActive) rest.lastOrNull()?.let { switchActiveSession(it.id) }
+        if (rest.isEmpty()) currentScreen = Screen.LAUNCHER
+    }
+
+    // "Vrátit": the tab is back where it was (it never left tabManager); if it was the one on screen, so is it again.
+    fun afterUndo(undone: List<com.clauderemote.session.PendingClose>) {
+        val reselect = undone.lastOrNull { it.wasActive } ?: return
+        if (tabManager.getTab(reselect.sessionId) == null) return
+        switchActiveSession(reselect.sessionId)
+        currentScreen = Screen.TERMINAL
+    }
+
+    // The selection can land on a hidden tab behind beginTabClose's back: TabManager.removeTab (a close that went
+    // through, a forget from elsewhere) picks the last tab in the list, hidden or not. Never leave a terminal on
+    // screen that has no tab in the bar.
+    LaunchedEffect(activeTabId, pendingCloseState.pending, currentScreen) {
+        val id = activeTabId ?: return@LaunchedEffect
+        if (id !in pendingCloseState.hiddenIds || currentScreen != Screen.TERMINAL) return@LaunchedEffect
+        val next = visibleTabs.lastOrNull()
+        if (next != null) switchActiveSession(next.id) else currentScreen = Screen.LAUNCHER
     }
 
     // FIX 2: Per-pane transcript collection keyed on BOTH sid AND claudeSessionId
@@ -509,16 +556,16 @@ fun App(
     // Scan remote sessions on startup and whenever launcher is shown
     LaunchedEffect(Unit) { scanRemoteSessions() }
     LaunchedEffect(currentScreen) {
-        if (currentScreen == Screen.LAUNCHER) scanRemoteSessions()
+        if (currentScreen == Screen.LAUNCHER || currentScreen == Screen.VELIN) scanRemoteSessions()
     }
     // Scan transcript history whenever the history browser is opened.
     LaunchedEffect(currentScreen) {
         if (currentScreen == Screen.HISTORY) scanHistory()
     }
     // Periodically refresh remote sessions while on terminal screen
-    // so the side panel stays up-to-date
+    // so the side panel stays up-to-date (and the Velín's list of sessions not open here)
     LaunchedEffect(currentScreen) {
-        if (currentScreen == Screen.TERMINAL) {
+        if (currentScreen == Screen.TERMINAL || currentScreen == Screen.VELIN) {
             while (true) {
                 kotlinx.coroutines.delay(30_000) // every 30s
                 scanRemoteSessions()
@@ -580,6 +627,255 @@ fun App(
 
     fun refreshServers() {
         serverList = serverStorage.loadServers()
+    }
+
+    // Open a tmux session the server runs but no tab shows (Launcher and Velín alike).
+    fun attachRemote(remote: RemoteSession) {
+        scope.launch {
+            try {
+                connectionError = null
+                val parsed = TmuxNameParser.parse(remote.tmuxSession.name, remote.server.name)
+                sessionOrchestrator.launchSession(
+                    server = remote.server,
+                    folder = parsed.folder,
+                    mode = if (parsed.isYolo) ClaudeMode.YOLO else remote.server.defaultClaudeMode,
+                    model = remote.server.defaultClaudeModel,
+                    connectionType = ConnectionType.SSH,
+                    tmuxSessionName = remote.tmuxSession.name,
+                    isNewTmuxSession = false
+                )
+                currentScreen = Screen.TERMINAL
+            } catch (e: Exception) {
+                connectionError = e.message
+            }
+        }
+    }
+
+    // ── Nedávno zavřené, obnova a zaparkované taby (Jarvis F0b/F0c, §3.9, §15.4) ───────────────────────────
+    // The raw reads per server; the rows are derived at composition, so a later remote scan or tab change filters
+    // out what runs again.
+    var closedReads by remember {
+        mutableStateOf<List<Pair<Pair<String, String>, List<com.clauderemote.session.service.ClosedRecord>>>>(emptyList())
+    }
+    var closedFailed by remember { mutableStateOf<List<String>>(emptyList()) }
+    var closedPartial by remember { mutableStateOf(false) }
+    var closedLoading by remember { mutableStateOf(false) }
+    var closedLoaded by remember { mutableStateOf(false) }
+    var closedNowS by remember { mutableStateOf(System.currentTimeMillis() / 1000) }
+    var closedExpanded by remember { mutableStateOf(false) }
+    var closedListDialog by remember { mutableStateOf(false) }
+    var restoringClosed by remember { mutableStateOf<Set<String>>(emptySet()) }
+    var restoreOutcome by remember { mutableStateOf<RestoreOutcome?>(null) }
+    // the palette rows are built before startRestore exists below; they call it through this
+    val startRestoreRef = remember { java.util.concurrent.atomic.AtomicReference<(com.clauderemote.session.ClosedEntry) -> Unit>({}) }
+    val parkedTabs by sessionOrchestrator.parkedTabs.collectAsState()
+
+    fun currentClosedEntries(): List<com.clauderemote.session.ClosedEntry> {
+        val live = tabManager.tabs.value.mapTo(HashSet()) { it.server.id to it.tmuxSessionName } +
+            remoteSessions.map { it.server.id to it.tmuxSession.name }
+        return com.clauderemote.session.RecentlyClosed.merge(closedReads, live, closedNowS)
+    }
+    val closedEntries = remember(closedReads, tabs, remoteSessions, closedNowS) { currentClosedEntries() }
+    val closedUi = RecentlyClosedUi(closedEntries, closedFailed, closedLoading, closedLoaded, closedPartial)
+    // remembered: the palette rebuilds its actions whenever this list is a new one
+    val closedPaletteEntries = remember(closedEntries, closedNowS) {
+        closedEntries.take(10).map { e ->
+            val label = listOfNotNull(
+                com.clauderemote.session.RecentlyClosed.label(e.record, e.serverName),
+                com.clauderemote.session.RecentlyClosed.folderLeaf(e.record.restoreFolder),
+                com.clauderemote.session.RecentlyClosed.whenLabel(e.record.atEpochSeconds, closedNowS),
+            ).joinToString(" · ")
+            label to { startRestoreRef.get()(e) }
+        }
+    }
+
+    // The hide list lives in this device's settings; adoption adopts nothing until it is wired.
+    LaunchedEffect(Unit) {
+        sessionOrchestrator.hiddenAdoptionsStore = object : com.clauderemote.session.HiddenAdoptionsStore {
+            override fun load(): String = appSettings.hiddenAdoptions
+            override fun save(value: String) { appSettings.hiddenAdoptions = value }
+        }
+    }
+
+    // [full] = pay a handshake for a server without a transport (the user asked: expanded the section, History,
+    // Ctrl+Shift+T); otherwise such a server is skipped and the section says no count.
+    suspend fun readRecentlyClosed(full: Boolean) {
+        val servers = serverList
+        closedLoading = true
+        try {
+            val reads = withContext(Dispatchers.IO) {
+                servers.map { s -> async { s to sessionOrchestrator.readClosedRecords(s, allowFresh = full) } }.awaitAll()
+            }
+            closedReads = reads.mapNotNull { (s, r) ->
+                (r as? com.clauderemote.session.ClosedRead.Ok)?.let { (s.id to s.name) to it.records }
+            }
+            closedFailed = reads.filter { it.second == com.clauderemote.session.ClosedRead.Unknown }.map { it.first.name }
+            closedPartial = reads.any { it.second == com.clauderemote.session.ClosedRead.Skipped }
+            closedNowS = System.currentTimeMillis() / 1000
+            closedLoaded = true
+        } finally {
+            closedLoading = false
+        }
+    }
+
+    fun loadRecentlyClosed(full: Boolean = false) {
+        if (!closedLoading) scope.launch { readRecentlyClosed(full) }
+    }
+
+    fun toggleRecentlyClosed() {
+        closedExpanded = !closedExpanded
+        if (closedExpanded && (closedPartial || closedFailed.isNotEmpty() || !closedLoaded)) loadRecentlyClosed(full = true)
+    }
+
+    LaunchedEffect(currentScreen) {
+        when (currentScreen) {
+            Screen.LAUNCHER -> loadRecentlyClosed(full = closedExpanded)
+            Screen.HISTORY -> loadRecentlyClosed(full = true)
+            else -> {}
+        }
+    }
+    // A close that went through writes its record a moment later (tombstone → record → kill in the background).
+    var lastPendingCount by remember { mutableStateOf(0) }
+    LaunchedEffect(pendingCloseState.pending.size) {
+        val n = pendingCloseState.pending.size
+        val fewer = n < lastPendingCount
+        lastPendingCount = n
+        if (fewer && closedLoaded) {
+            kotlinx.coroutines.delay(4_000)
+            loadRecentlyClosed()
+        }
+    }
+
+    // A restore of [entry] under [tmuxName] (a confirmed new name, a confirmed candidate, a new conversation). The
+    // server never kills anything and lifts the tombstone first; the result decides what the user sees next.
+    fun restoreClosedEntry(
+        entry: com.clauderemote.session.ClosedEntry,
+        tmuxName: String = entry.record.tmuxName,
+        sessionId: String? = null,
+        freshSessionId: String? = null,
+    ) {
+        if (entry.key in restoringClosed) return
+        restoreOutcome = null
+        val server = serverList.firstOrNull { it.id == entry.serverId }
+        if (server == null) {
+            restoreOutcome = RestoreOutcome(entry, com.clauderemote.session.RestoreAction.Message(
+                "Server chybí", "Server ${entry.serverName} už v aplikaci není."))
+            return
+        }
+        restoringClosed = restoringClosed + entry.key
+        scope.launch {
+            try {
+                val (result, tab) = sessionOrchestrator.restoreClosed(server, entry.record, tmuxName, sessionId, freshSessionId)
+                val action = com.clauderemote.session.RecentlyClosed.actionFor(result, entry.record, server.name)
+                if (action is com.clauderemote.session.RestoreAction.OpenTab && tab != null) {
+                    closedListDialog = false
+                    currentScreen = Screen.TERMINAL
+                    if (action.loginRequired) restoreOutcome = RestoreOutcome(entry, action)
+                } else {
+                    restoreOutcome = RestoreOutcome(entry, action)
+                }
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                restoreOutcome = RestoreOutcome(entry, com.clauderemote.session.RestoreAction.Message(
+                    "Obnova selhala", e.message ?: e.javaClass.simpleName))
+            } finally {
+                restoringClosed = restoringClosed - entry.key
+                scanRemoteSessions()
+                loadRecentlyClosed()
+            }
+        }
+    }
+
+    // A row's tap: resume its conversation; a record without one starts a new conversation in the same folder and account.
+    fun startRestore(entry: com.clauderemote.session.ClosedEntry) {
+        when {
+            com.clauderemote.session.RecentlyClosed.canResume(entry.record) -> restoreClosedEntry(entry)
+            com.clauderemote.session.RecentlyClosed.canStartFresh(entry.record) ->
+                restoreClosedEntry(entry, freshSessionId = java.util.UUID.randomUUID().toString())
+        }
+    }
+
+    startRestoreRef.set { startRestore(it) }
+
+    // "Ta konverzace běží v X": its tab here, else attach to it the way a remote row is opened.
+    fun goToRunning(entry: com.clauderemote.session.ClosedEntry, tmuxName: String) {
+        restoreOutcome = null
+        if (!com.clauderemote.session.RecentlyClosed.canGoTo(tmuxName)) return
+        closedListDialog = false
+        tabManager.tabs.value.firstOrNull { it.server.id == entry.serverId && it.tmuxSessionName == tmuxName }?.let {
+            switchActiveSession(it.id)
+            currentScreen = Screen.TERMINAL
+            return
+        }
+        val server = serverList.firstOrNull { it.id == entry.serverId } ?: return
+        scope.launch {
+            try {
+                connectionError = null
+                sessionOrchestrator.launchSession(
+                    server = server,
+                    folder = entry.record.restoreFolder ?: server.defaultFolder,
+                    mode = entry.record.claudeMode,
+                    model = entry.record.claudeModel,
+                    connectionType = ConnectionType.SSH,
+                    tmuxSessionName = tmuxName,
+                    isNewTmuxSession = false,
+                    resumeClaudeSessionId = entry.record.sessionId ?: entry.record.launchSessionId,
+                    accountSlug = entry.record.account,
+                )
+                currentScreen = Screen.TERMINAL
+            } catch (e: Exception) {
+                connectionError = e.message
+            }
+        }
+    }
+
+    // Ctrl/Cmd+Shift+T: a close still in its undo window is undone (free: the pane never died); else the newest
+    // session THIS device closed is restored, read fresh. Nothing of ours to restore → the list (with the others').
+    fun reopenLastClosed() {
+        val ownBy = sessionOrchestrator.ownCloseBy
+        val undo = com.clauderemote.session.RecentlyClosed.reopenTarget(pendingCloses.state.value.pending.map { it.sessionId }, emptyList(), ownBy)
+        if (undo is com.clauderemote.session.ReopenTarget.Undo) {
+            afterUndo(listOfNotNull(pendingCloses.undo(undo.sessionId)))
+            return
+        }
+        scope.launch {
+            if (!closedLoading) readRecentlyClosed(full = true)
+            when (val t = com.clauderemote.session.RecentlyClosed.reopenTarget(emptyList(), currentClosedEntries(), ownBy)) {
+                is com.clauderemote.session.ReopenTarget.Restore -> startRestore(t.entry)
+                else -> closedListDialog = true
+            }
+        }
+    }
+
+    // "Skrýt z tohoto zařízení": the tab goes from this device only; the session runs on (a remote row here).
+    fun hideTab(id: String) {
+        sessionOrchestrator.hideFromThisDevice(id)
+        if (visibleTabs.none { it.id != id } && currentScreen == Screen.TERMINAL) currentScreen = Screen.LAUNCHER
+    }
+
+    // A parked tab (adopted from the server) gets its shell when the user opens it, not before.
+    LaunchedEffect(activeTabId, currentScreen, parkedTabs) {
+        val id = activeTabId ?: return@LaunchedEffect
+        // its own scope: reconnectSession unparks at once, which restarts this effect
+        if (currentScreen == Screen.TERMINAL && id in parkedTabs) scope.launch { sessionOrchestrator.reconnectSession(id) }
+    }
+
+    @Composable
+    fun recentlyClosedSection(compact: Boolean, showEmpty: Boolean, collapsible: Boolean, onHistory: (() -> Unit)?) {
+        RecentlyClosedSection(
+            ui = closedUi,
+            ownBy = sessionOrchestrator.ownCloseBy,
+            nowEpochS = closedNowS,
+            expanded = closedExpanded || !collapsible,
+            onToggle = if (collapsible) ({ toggleRecentlyClosed() }) else null,
+            restoring = restoringClosed,
+            onRestore = { startRestore(it) },
+            onRetry = { loadRecentlyClosed(full = true) },
+            onHistory = onHistory,
+            showEmpty = showEmpty,
+            compact = compact,
+        )
     }
 
     // The server list can also change from outside this composition — the
@@ -773,7 +1069,7 @@ fun App(
                         servers = serverList,
                         serverHealth = serverHealth,
                         onProbeServers = { force -> sessionOrchestrator.probeServers(serverList, force) },
-                        activeSessions = tabs,
+                        activeSessions = visibleTabs,
                         sessionActivities = sessionActivities,
                         remoteSessions = remoteSessions,
                         remoteSessionsLoading = remoteSessionsLoading,
@@ -784,7 +1080,7 @@ fun App(
                             // app restart. Sequential to avoid a connection storm.
                             scope.launch {
                                 // 1) Reconnect restored-but-disconnected tabs.
-                                tabs.filter { it.status != SessionStatus.ACTIVE }
+                                visibleTabs.filter { it.status != SessionStatus.ACTIVE }
                                     .forEach { tab ->
                                         try {
                                             sessionOrchestrator.reconnectSession(tab.id)
@@ -825,26 +1121,7 @@ fun App(
                         onRestartAllSessions = {
                             scope.launch { sessionOrchestrator.restartClaudeForAllSessions() }
                         },
-                        onAttachRemote = { remote ->
-                            scope.launch {
-                                try {
-                                    connectionError = null
-                                    val parsed = TmuxNameParser.parse(remote.tmuxSession.name, remote.server.name)
-                                    sessionOrchestrator.launchSession(
-                                        server = remote.server,
-                                        folder = parsed.folder,
-                                        mode = if (parsed.isYolo) ClaudeMode.YOLO else remote.server.defaultClaudeMode,
-                                        model = remote.server.defaultClaudeModel,
-                                        connectionType = ConnectionType.SSH,
-                                        tmuxSessionName = remote.tmuxSession.name,
-                                        isNewTmuxSession = false
-                                    )
-                                    currentScreen = Screen.TERMINAL
-                                } catch (e: Exception) {
-                                    connectionError = e.message
-                                }
-                            }
-                        },
+                        onAttachRemote = { remote -> attachRemote(remote) },
                         onQuickConnect = { server ->
                             // Long-press: connect directly with defaults
                             scope.launch {
@@ -910,6 +1187,7 @@ fun App(
                         onSettings = { currentScreen = Screen.SETTINGS },
                         onViewLog = { currentScreen = Screen.LOG_VIEWER },
                         onHistory = { currentScreen = Screen.HISTORY },
+                        onVelin = { currentScreen = Screen.VELIN },
                         // Per-account usage IS the usage screen now: with
                         // several seats provisioned, "which account still has
                         // room" is the question being asked, and the
@@ -920,6 +1198,11 @@ fun App(
                             currentScreen = Screen.ACCOUNT_USAGE
                         },
                         onCheckUpdate = { checkForUpdate() },
+                        sessionBadges = parkedTabs.mapValues { com.clauderemote.session.OpenedAdoption.badge(it.value) },
+                        recentlyClosed = {
+                            recentlyClosedSection(compact = false, showEmpty = false, collapsible = true,
+                                onHistory = { currentScreen = Screen.HISTORY })
+                        },
                     )
                 }
 
@@ -1167,7 +1450,7 @@ fun App(
                         }
                     }
                     TerminalScreen(
-                        tabs = tabs,
+                        tabs = visibleTabs,
                         activeTabId = activeTabId,
                         appSettings = appSettings,
                         onUsage = {
@@ -1224,13 +1507,7 @@ fun App(
                         onRestartClaude = { id ->
                             scope.launch { sessionOrchestrator.restartClaude(id) }
                         },
-                        onTabClose = { id ->
-                            // Always confirm — closing forgets the persisted
-                            // session and kills the remote tmux pane, which
-                            // is destructive enough that we don't want a
-                            // single misclick to lose the conversation.
-                            tabCloseConfirmId = id
-                        },
+                        onTabClose = { id -> beginTabClose(id) },
                         onSessionLongPress = { id -> sessionMenuId = id },
                         onNewTab = { currentScreen = Screen.LAUNCHER },
                         onMenuOpen = { currentScreen = Screen.LAUNCHER },
@@ -1449,9 +1726,22 @@ fun App(
                                 "dashboard" -> Screen.USAGE_DASHBOARD
                                 "account-usage" -> Screen.ACCOUNT_USAGE
                                 "logs" -> Screen.LOG_VIEWER
+                                "velin" -> Screen.VELIN
                                 "launcher" -> Screen.LAUNCHER
+                                // the palette's "Obnovit zavřenou…": a list over the terminal, the screen stays
+                                "recently-closed" -> {
+                                    closedListDialog = true
+                                    loadRecentlyClosed(full = true)
+                                    currentScreen
+                                }
                                 else -> Screen.LAUNCHER
                             }
+                        },
+                        onReopenClosed = { reopenLastClosed() },
+                        closedPaletteEntries = closedPaletteEntries,
+                        onPaletteOpened = { loadRecentlyClosed() },
+                        sidePanelFooter = {
+                            recentlyClosedSection(compact = true, showEmpty = false, collapsible = true, onHistory = null)
                         },
                         onTerminalViewChange = { tv -> updateAppearance(appearance.copy(terminalView = tv)) },
                         terminalContent = terminalContent,
@@ -1492,7 +1782,7 @@ fun App(
                                 // Auto-fill: pane 0 = active tab, remaining from
                                 // the first other tabs, extra slots stay empty.
                                 val active = activeTabId
-                                val others = tabs.map { it.id }.filter { it != active }
+                                val others = visibleTabs.map { it.id }.filter { it != active }
                                 val filled = mutableListOf<String?>(active)
                                 for (i in 1 until 4) filled.add(others.getOrNull(i - 1))
                                 paneSessions = filled
@@ -1610,7 +1900,7 @@ fun App(
                 Screen.USAGE_DASHBOARD -> {
                     val usageTokensState by sessionOrchestrator.usageTokens.collectAsState()
                     UsageDashboardScreen(
-                        sessions = tabs,
+                        sessions = visibleTabs,
                         sessionActivities = sessionActivities,
                         contextPercents = contextPercents,
                         sessionUsagePercent = activeServerId?.let { sessionUsagePercents[it] },
@@ -1621,6 +1911,41 @@ fun App(
                         // own caller.
                         onBack = { currentScreen = Screen.ACCOUNT_USAGE },
                         onPerAccountUsage = null,
+                    )
+                }
+
+                Screen.VELIN -> {
+                    VelinScreen(
+                        tabs = tabs,
+                        remoteSessions = remoteSessions,
+                        remoteSessionsLoading = remoteSessionsLoading,
+                        sessionOrchestrator = sessionOrchestrator,
+                        accountTags = buildAccountTags(emptyList(), tabs) { slugs ->
+                            accountColorStorage.assign(slugs).mapValues { it.value.color }
+                        },
+                        onBack = { currentScreen = Screen.LAUNCHER },
+                        onRefresh = {
+                            sessionOrchestrator.probeServers(serverList, true)
+                            scanRemoteSessions()
+                        },
+                        // The same way the Launcher opens a session: it becomes the active tab. Opening one whose close is
+                        // still in its undo window is "Vrátit".
+                        onOpenSession = { session ->
+                            sessionOrchestrator.reclaimPendingClose(session.id)
+                            switchActiveSession(session.id)
+                            currentScreen = Screen.TERMINAL
+                        },
+                        onAttachRemote = { remote -> attachRemote(remote) },
+                        onAccountUsage = {
+                            usageReturnScreen = Screen.VELIN
+                            currentScreen = Screen.ACCOUNT_USAGE
+                        },
+                        // Settings may have answered it meanwhile (choosing a start screen there counts).
+                        onStartOffer = if (velinStartOfferPending && !appSettings.velinStartOffered) { yes ->
+                            if (yes) appSettings.startScreen = AppSettings.START_VELIN
+                            appSettings.velinStartOffered = true
+                            velinStartOfferPending = false
+                        } else null,
                     )
                 }
 
@@ -1705,15 +2030,20 @@ fun App(
                             }
                         },
                         onAttachLive = { hist ->
-                            // Switch to the already-open tab (uuid matched).
+                            // Switch to the already-open tab (uuid matched). Opening one whose close is still in its
+                            // undo window is "Vrátit", as from Velín and a notification.
                             val tab = tabs.firstOrNull { it.claudeSessionId == hist.uuid }
                             if (tab != null) {
+                                sessionOrchestrator.reclaimPendingClose(tab.id)
                                 switchActiveSession(tab.id)
                                 currentScreen = Screen.TERMINAL
                             }
                             // No remote-tmux fallback here: if uuid is in liveUuids
                             // there must be an open tab. If none, fall through silently
                             // (stale snapshot — next scan will correct it).
+                        },
+                        recentlyClosed = {
+                            recentlyClosedSection(compact = false, showEmpty = true, collapsible = false, onHistory = null)
                         },
                     )
                 }
@@ -1749,34 +2079,29 @@ fun App(
             )
         }
 
-        // Close tab confirmation. FloatingDialog (not a plain AlertDialog) so
-        // it renders above the SwingPanel-embedded terminal on desktop when
-        // triggered while Raw view is active.
+        RestoreOutcomeDialog(
+            outcome = restoreOutcome,
+            onDismiss = { restoreOutcome = null },
+            onRestoreAs = { e, name -> restoreClosedEntry(e, tmuxName = name) },
+            onRestoreCandidate = { e, id -> restoreClosedEntry(e, sessionId = id) },
+            onStartFresh = { e -> restoreClosedEntry(e, freshSessionId = java.util.UUID.randomUUID().toString()) },
+            onGoTo = { e, name -> goToRunning(e, name) },
+        )
+
+        // The palette's "Obnovit zavřenou…" and an empty Ctrl+Shift+T: the whole list, above the terminal.
         com.clauderemote.ui.components.FloatingDialog(
-            visible = tabCloseConfirmId != null,
-            onDismiss = { tabCloseConfirmId = null },
+            visible = closedListDialog,
+            onDismiss = { closedListDialog = false },
             theme = com.clauderemote.ui.theme.CRThemeSnapshot.current(),
-            title = { Text("Close Session") },
+            title = { Text("Obnovit zavřenou session") },
             text = {
-                val session = tabCloseConfirmId?.let { tabManager.getTab(it) }
-                Text("Permanently close session on ${session?.server?.name ?: "server"}? The tmux pane will be killed and the conversation removed from your tab list.")
+                Column(Modifier.heightIn(max = 420.dp).verticalScroll(rememberScrollState())) {
+                    recentlyClosedSection(compact = true, showEmpty = true, collapsible = false, onHistory = null)
+                }
             },
             confirmButton = {
-                TextButton(onClick = {
-                    val id = tabCloseConfirmId ?: return@TextButton
-                    tabCloseConfirmId = null
-                    scope.launch {
-                        // userInitiated: the user pressed Close in this dialog, so
-                        // the close is recorded durably and propagates to every
-                        // other device even if one of them is asleep right now.
-                        sessionOrchestrator.forgetSession(id, userInitiated = true)
-                        if (tabManager.tabs.value.isEmpty()) currentScreen = Screen.LAUNCHER
-                    }
-                }) { Text("Close") }
+                TextButton(onClick = { closedListDialog = false }) { Text("Zavřít") }
             },
-            dismissButton = {
-                TextButton(onClick = { tabCloseConfirmId = null }) { Text("Cancel") }
-            }
         )
 
         // Session long-press context menu (mobile). Desktop uses its native
@@ -1797,8 +2122,9 @@ fun App(
                     sessionMenuId = null
                     scope.launch { sessionOrchestrator.reconnectSession(id) }
                 },
-                onClose = { sessionMenuId = null; tabCloseConfirmId = id },
+                onClose = { sessionMenuId = null; beginTabClose(id) },
                 onDismiss = { sessionMenuId = null },
+                onHide = { sessionMenuId = null; hideTab(id) },
             )
         }
 
@@ -1895,6 +2221,29 @@ fun App(
                 confirmButton = {
                     TextButton(onClick = { connectionError = null }) { Text("OK") }
                 }
+            )
+        }
+
+        // Undo snackbar for closed tabs, bottom left, on every screen. FloatingSnackbar for the same reason the
+        // dialogs use FloatingDialog: on desktop an in-window overlay would draw under the Raw-view terminal.
+        val snackbarTheme = com.clauderemote.ui.theme.CRThemeSnapshot.current()
+        com.clauderemote.ui.components.FloatingSnackbar(
+            visible = !pendingCloseState.isEmpty,
+            theme = snackbarTheme,
+        ) {
+            PendingCloseSnackbar(
+                state = pendingCloseState,
+                remainingMs = pendingCloses::remainingMs,
+                windowMs = pendingCloses.windowMillis,
+                onUndo = { id -> afterUndo(listOfNotNull(pendingCloses.undo(id))) },
+                onUndoAll = { afterUndo(pendingCloses.undoAll()) },
+                onForceClose = { id ->
+                    pendingCloses.forceClose(id)
+                    val left = tabManager.tabs.value.filter { it.id != id && it.id !in pendingCloses.state.value.hiddenIds }
+                    if (left.isEmpty() && currentScreen == Screen.TERMINAL) currentScreen = Screen.LAUNCHER
+                },
+                onDismissBlocked = pendingCloses::dismissBlocked,
+                onHover = pendingCloses::setPaused,
             )
         }
         } // end Box

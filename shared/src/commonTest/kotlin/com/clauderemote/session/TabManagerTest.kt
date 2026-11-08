@@ -70,6 +70,18 @@ class TabManagerTest {
     }
 
     @Test
+    fun addTab_inTheBackground_keepsTheActiveTabUnlessThereIsNone() {
+        // a parked tab adopted from the server must not take the screen
+        val manager = TabManager()
+        manager.addTab(session("p"), activate = false)
+        assertEquals("p", manager.activeTabId.value, "with no active tab it becomes the active one")
+        manager.addTab(session("a"))
+        manager.addTab(session("b"), activate = false)
+        assertEquals("a", manager.activeTabId.value)
+        assertEquals(listOf("p", "a", "b"), manager.tabs.value.map { it.id })
+    }
+
+    @Test
     fun addTab_duplicateId_replacesInPlaceRatherThanAppending() {
         // Regression guard: addTab used to have no dedup/replace check —
         // adding a session with an id that already exists produced TWO

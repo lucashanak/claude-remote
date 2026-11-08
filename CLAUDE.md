@@ -51,6 +51,9 @@ Details live in `docs/`; this file only points at the places of truth and at the
   the live Claude processes rewrite (e.g. OAuth refresh of `.credentials.json`) — then rerun once and report it.
 - Never `tmux kill-server`/`-g` options/`window-size manual` on the default socket, never `systemctl --user daemon-reload`, never edit
   `~/.claude-remote/{drift,restore}.sh` by hand, never read or copy `~/.claude/.credentials.json`.
+  - The one exception (Lukáš, R3 = 3c): `~/.claude-remote/bin/cr-session` (`SessionOpsScript`) runs the launch builder's own
+    `set-option -g` (`ClaudeConfig.optionsPreludeBody`/`createBody`: idempotent, the same every app launch sends, never
+    `window-size`) on the live server. Keep it composed from those pieces; it never runs `kill-session` on a name it creates.
 - Account dirs `~/.claude-remote/accounts/*/settings.json` are symlinks to `~/.claude/settings.json`: write through the realpath,
   never `mv` over the account path.
 - Debug builds hide release-only compile errors: always also run `:shared:compileReleaseKotlinAndroid :androidApp:compileReleaseKotlin`.

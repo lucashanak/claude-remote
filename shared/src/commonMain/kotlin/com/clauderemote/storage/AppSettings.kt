@@ -169,6 +169,32 @@ class AppSettings(private val prefs: KeyValueStore) {
         get() = prefs.getBoolean("auto_open_terminal_on_prompt", true)
         set(value) = prefs.putBoolean("auto_open_terminal_on_prompt", value)
 
+    /**
+     * Which screen the app opens on: [START_LAUNCHER] (the default, nothing changes without a
+     * choice) or [START_VELIN]. Read once, when the app's navigation state is created.
+     */
+    var startScreen: String
+        get() = prefs.getString("start_screen", START_LAUNCHER).takeIf { it == START_VELIN } ?: START_LAUNCHER
+        set(value) = prefs.putString("start_screen", if (value == START_VELIN) START_VELIN else START_LAUNCHER)
+
+    /** The Velín has asked once whether to open the app there; it never asks again. */
+    var velinStartOffered: Boolean
+        get() = prefs.getBoolean("velin_start_offered", false)
+        set(value) = prefs.putBoolean("velin_start_offered", value)
+
+    /**
+     * Sessions hidden from (or closed on) this device that must not come back as adopted tabs from the server's
+     * `opened.d` (§15.4): `serverId<TAB>tmuxName<TAB>epochS` per line, see `HiddenAdoptions`. Per device on purpose.
+     */
+    var hiddenAdoptions: String
+        get() = prefs.getString("hidden_adoptions", "")
+        set(value) = prefs.putString("hidden_adoptions", value)
+
+    companion object {
+        const val START_LAUNCHER = "launcher"
+        const val START_VELIN = "velin"
+    }
+
     // Keep alive (Android)
     var keepAliveEnabled: Boolean
         get() = prefs.getBoolean("keep_alive_enabled", true)

@@ -49,7 +49,11 @@ class ExecServerReconcilerTest {
         var onAdopt: suspend () -> Unit = {}
     }
 
-    private fun TestScopeHelper.reconciler(host: Host, periodMs: Long = 15_000) = ExecServerReconciler(
+    private fun TestScopeHelper.reconciler(
+        host: Host,
+        periodMs: Long = 15_000,
+        onRound: (String, ReconcileSnapshot) -> Unit = { _, _ -> },
+    ) = ExecServerReconciler(
         scope = scope,
         run = { _, cmd, _ -> host.commands += cmd; host.onRun(); host.output },
         serverIdOf = { if (it in host.tabs) "srv" else null },
@@ -60,6 +64,7 @@ class ExecServerReconcilerTest {
         isBackground = { host.background },
         periodMs = periodMs,
         clock = clock,
+        onRound = onRound,
     )
 
     private class TestScopeHelper(val scope: kotlinx.coroutines.CoroutineScope, val clock: () -> Long)
@@ -384,5 +389,29 @@ class ExecServerReconcilerTest {
         val rec = TestScopeHelper(backgroundScope) { currentTime }.reconciler(host, periodMs = 3_600_000)
         rec.register("a")
         assertFailsWith<CancellationException> { rec.capability("srv", "claude-server-a") }
+    }
+
+    // ---- onRound: the app's adoption of opened.d markers rides on the round ------------------------------
+
+    @Test fun everyAnsweredRoundIsHandedOnWithItsOpenedSectionAndAFailingHandlerChangesNothing() = runTest {
+        val host = Host(mapOf("a" to "claude-server-a", "b" to "claude-server-b"))
+        val opened = "OPENED 1794040000 ${java.util.Base64.getEncoder().encodeToString("claude-server-j".toByteArray())} {\"by\":\"jarvis\"}\n__END_opened__ rc=0\n"
+        host.output = closedOutput + opened
+        val seen = mutableListOf<Pair<String, List<String>?>>()
+        var fail = true
+        val rec = TestScopeHelper(backgroundScope) { currentTime }.reconciler(host) { srv, snap ->
+            seen += srv to snap.opened?.map { it.tmuxName }
+            if (fail) { fail = false; throw IllegalStateException("adoption broke") }
+        }
+        rec.register("a"); rec.register("b")
+        advanceTimeBy(1_001)
+        assertEquals(listOf<Pair<String, List<String>?>>("srv" to listOf("claude-server-j")), seen)
+        assertEquals(listOf("a"), host.forgotten, "a throwing handler does not stop the round's own work")
+        host.output = null // no transport: no round, nothing handed on
+        advanceTimeBy(15_000)
+        assertEquals(1, seen.size)
+        host.output = closedOutput // an older script: no opened section = unknown
+        advanceTimeBy(15_000)
+        assertEquals<Pair<String, List<String>?>>("srv" to null, seen.last())
     }
 }

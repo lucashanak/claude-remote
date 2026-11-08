@@ -1,0 +1,360 @@
+package com.clauderemote.session
+
+import com.clauderemote.model.ClaudeSession
+import com.clauderemote.util.FileLogger
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.joinAll
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
+import kotlin.time.TimeSource
+
+/**
+ * What the server says about closing a session right now (Jarvis R6 = 6d), from its close facts
+ * (`service.CloseFactsCheck`, wired in by SessionOrchestrator).
+ */
+sealed interface CloseCheck {
+    /** Nothing in the way. */
+    data object Clear : CloseCheck
+
+    /** Close anyway, but say so in the snackbar (uncommitted or unpushed git work). */
+    data class Warn(val text: String) : CloseCheck
+
+    /** Do not close: a turn is running, a prompt is open, someone else is watching, ... */
+    data class Block(val text: String) : CloseCheck
+}
+
+/** A tab whose close is waiting out its undo window. The tab stays in [TabManager] meanwhile, only hidden. */
+data class PendingClose(
+    val sessionId: String,
+    val label: String,
+    /** It was the selected tab when closed: undo selects it again. */
+    val wasActive: Boolean,
+    /** [CloseCheck.Warn] text, once the check said so. */
+    val warning: String? = null,
+)
+
+/** A close the check refused: the tab is back, the notice offers "close anyway". */
+data class BlockedClose(val sessionId: String, val label: String, val reason: String)
+
+data class PendingClosesState(
+    val pending: List<PendingClose> = emptyList(),
+    val blocked: List<BlockedClose> = emptyList(),
+    val paused: Boolean = false,
+) {
+    /** Tabs the UI must not show: their close has not happened yet, but the user already asked for it. */
+    val hiddenIds: Set<String> get() = pending.mapTo(HashSet()) { it.sessionId }
+    val isEmpty: Boolean get() = pending.isEmpty() && blocked.isEmpty()
+
+    /** [tabs] without the hidden ones: what the tab bar, the Launcher and the watch show. */
+    fun visibleOf(tabs: List<ClaudeSession>): List<ClaudeSession> {
+        val hidden = hiddenIds
+        return if (hidden.isEmpty()) tabs else tabs.filter { it.id !in hidden }
+    }
+}
+
+/**
+ * Delayed close with undo (Jarvis F0a, R6 = 6d, R7 = 7b).
+ *
+ * Closing a tab used to forget it at once: durable tombstone, `kill-session`, gone. Now [close] only hides the tab
+ * and starts a [windowMs] countdown; [forget] — the real, irreversible close — runs when it ends. Until then
+ * nothing has happened anywhere: the tab is still in [TabManager], in the local session store and in the manifest
+ * this device pushes, and its PTY stays attached. That is what makes the two failure directions safe:
+ * - undo costs nothing (no reconnect, no new channel, the pane never noticed);
+ * - if the process dies inside the window the close simply never happened, and the tab comes back on the next
+ *   start from the same store it never left.
+ *
+ * Every close has its own deadline. [setPaused] stops all of them while the pointer rests on the snackbar (the
+ * remaining time is kept, not restarted); [flush] runs every pending close now, for when the user leaves the app.
+ *
+ * [closeCheck] runs alongside the countdown: [CloseCheck.Block] cancels the close and turns it into a
+ * [BlockedClose] notice, [CloseCheck.Warn] adds its text to the snackbar, and `null`, an exception or no answer
+ * before the deadline all mean "close" — the check may only stop a close, never hold one up.
+ *
+ * All state lives under [lock]; [forget] and [closeCheck] are called outside it. A close fires at most once: whoever
+ * removes the entry from [entries] (the timer, [flush], [forceClose]) is the only caller of [forget] for it.
+ */
+class PendingCloses(
+    private val scope: CoroutineScope,
+    private val forget: suspend (sessionId: String) -> Unit,
+    closeCheck: suspend (ClaudeSession) -> CloseCheck? = { null },
+    private val windowMs: Long = WINDOW_MS,
+    private val now: () -> Long = monotonicMs(),
+) {
+    /** The server's close facts (SessionOrchestrator wires them in). A `null` answer means "unknown", which closes. */
+    @Volatile
+    var closeCheck: suspend (ClaudeSession) -> CloseCheck? = closeCheck
+
+    private class Entry(
+        val gen: Long,
+        val session: ClaudeSession,
+        val wasActive: Boolean,
+        val blockedReason: String?,
+        var warning: String? = null,
+        // While running: when it fires. While paused: how much was left.
+        var deadline: Long = 0,
+        var remaining: Long = 0,
+        var timer: Job? = null,
+        var check: Job? = null,
+    ) {
+        val isBlocked get() = blockedReason != null
+    }
+
+    private val lock = Any()
+    private val entries = LinkedHashMap<String, Entry>()
+    private var paused = false
+    private var nextGen = 0L
+    private val inFlight = HashSet<Job>()
+
+    private val _state = MutableStateFlow(PendingClosesState())
+    val state: StateFlow<PendingClosesState> = _state.asStateFlow()
+
+    /**
+     * Start the undo window for [session]. False when it is already pending (a second tap on a tab that is
+     * already gone from the bar must not restart or duplicate its countdown). A blocked notice for the same
+     * session is replaced: closing it again is a fresh request.
+     */
+    fun close(session: ClaudeSession, wasActive: Boolean = false): Boolean {
+        val entry = synchronized(lock) {
+            val existing = entries[session.id]
+            if (existing != null && !existing.isBlocked) return false
+            existing?.let { drop(it) }
+            Entry(nextGen++, session, wasActive, blockedReason = null).also {
+                entries[session.id] = it
+                arm(it, windowMs)
+                publish()
+            }
+        }
+        val check = closeCheck
+        // Started outside the lock: a check that answers synchronously calls back into onChecked.
+        val job = scope.launch {
+            val verdict = try {
+                check(session)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                FileLogger.log(TAG, "close check for ${session.id} failed (${e.message}) — closing as if unknown")
+                null
+            }
+            onChecked(session.id, entry.gen, verdict)
+        }
+        synchronized(lock) {
+            if (entries[session.id] === entry) entry.check = job else job.cancel()
+        }
+        return true
+    }
+
+    /** "Vrátit": the tab comes back where it was; [forget] never runs for this close. */
+    fun undo(sessionId: String): PendingClose? = synchronized(lock) {
+        val e = entries[sessionId]?.takeIf { !it.isBlocked } ?: return null
+        drop(e)
+        publish()
+        e.toPending()
+    }
+
+    /** "Vrátit vše": every pending close comes back. Blocked notices stay — those tabs are back already. */
+    fun undoAll(): List<PendingClose> = synchronized(lock) {
+        val undone = entries.values.filter { !it.isBlocked }
+        undone.forEach { drop(it) }
+        publish()
+        undone.map { it.toPending() }
+    }
+
+    /** "Zavřít i tak" on a blocked notice (or on a pending close): close now, no second window. */
+    fun forceClose(sessionId: String) {
+        synchronized(lock) {
+            val e = entries[sessionId] ?: return
+            drop(e)
+            publish()
+        }
+        runForget(listOf(sessionId))
+    }
+
+    /** Hide a blocked notice without closing. */
+    fun dismissBlocked(sessionId: String) = synchronized(lock) {
+        val e = entries[sessionId]?.takeIf { it.isBlocked } ?: return
+        drop(e)
+        publish()
+    }
+
+    /**
+     * Pointer over the snackbar (desktop): hold every countdown, keeping what was left of each. A check that
+     * answers meanwhile still applies; only the deadlines wait.
+     */
+    fun setPaused(value: Boolean) = synchronized(lock) {
+        if (paused == value) return
+        paused = value
+        val t = now()
+        for (e in entries.values) {
+            if (value) {
+                e.remaining = (e.deadline - t).coerceAtLeast(0)
+                e.timer?.cancel()
+                e.timer = null
+            } else {
+                arm(e, e.remaining)
+            }
+        }
+        publish()
+    }
+
+    /**
+     * The user is leaving the app (Android `onStop`, desktop window close): run every pending close now instead of
+     * leaving it to a timer that may never fire. Blocked notices are dropped (their tabs are back, nothing to do).
+     *
+     * A close whose facts check is still running waits for it up to [checkWaitMs]: leaving the app must not get a
+     * close past a BLOCK (a running turn, an open prompt) the check is about to report. A BLOCK that arrives in that
+     * time keeps the tab, as it would inside the window; a check that has not answered by then closes, the same
+     * "unknown closes" rule as at the deadline. Never blocks the caller: the waiting happens in the returned job.
+     *
+     * The returned job completes when every close started here AND every close already running has finished, so
+     * the desktop exit can wait for the server side (tombstone, kill) before the JVM goes.
+     */
+    fun flush(checkWaitMs: Long = FLUSH_CHECK_WAIT_MS): Job {
+        val (due, checks) = synchronized(lock) {
+            entries.values.filter { it.isBlocked }.forEach { drop(it) }
+            val due = entries.values.toList()
+            // flush decides from here on: no timer may fire one of these meanwhile (and fire it a second time)
+            due.forEach { it.timer?.cancel(); it.timer = null }
+            publish()
+            due to due.mapNotNull { e -> e.check?.takeIf { it.isActive } }
+        }
+        return scope.launch {
+            if (checks.isNotEmpty()) withTimeoutOrNull(checkWaitMs) { checks.joinAll() }
+            val (ids, running) = synchronized(lock) {
+                // still the same entry: not undone, and not replaced by a BLOCK notice while we waited
+                val fire = due.filter { entries[it.session.id] === it }
+                fire.forEach { drop(it) }
+                publish()
+                fire.map { it.session.id } to inFlight.toList()
+            }
+            val started = runForget(ids)
+            (running + listOfNotNull(started)).joinAll()
+        }
+    }
+
+    /**
+     * Drop entries whose tab is gone from [TabManager] without this class closing it (another device closed it,
+     * the prune of dead panes forgot it). Nothing to forget any more, and an undo could not bring it back.
+     */
+    fun retain(liveIds: Set<String>) = synchronized(lock) {
+        val gone = entries.values.filter { it.session.id !in liveIds }
+        if (gone.isEmpty()) return
+        gone.forEach { drop(it) }
+        publish()
+    }
+
+    /** Milliseconds left for [sessionId]'s close or notice; null when there is none. Frozen while paused. */
+    fun remainingMs(sessionId: String): Long? = synchronized(lock) {
+        val e = entries[sessionId] ?: return null
+        if (paused) e.remaining else (e.deadline - now()).coerceAtLeast(0)
+    }
+
+    val windowMillis: Long get() = windowMs
+
+    private fun onChecked(sessionId: String, gen: Long, verdict: CloseCheck?) = synchronized(lock) {
+        val e = entries[sessionId]?.takeIf { it.gen == gen && !it.isBlocked } ?: return
+        when (verdict) {
+            is CloseCheck.Block -> {
+                drop(e)
+                val notice = Entry(nextGen++, e.session, e.wasActive, blockedReason = verdict.text)
+                entries[sessionId] = notice
+                arm(notice, windowMs)
+                FileLogger.log(TAG, "close of $sessionId blocked: ${verdict.text}")
+            }
+            is CloseCheck.Warn -> e.warning = verdict.text
+            CloseCheck.Clear, null -> return
+        }
+        publish()
+    }
+
+    /** Must hold [lock]. Starts [e]'s countdown with [ms] left, or only records [ms] while paused. */
+    private fun arm(e: Entry, ms: Long) {
+        e.remaining = ms
+        e.deadline = now() + ms
+        if (paused) return
+        e.timer = scope.launch {
+            delay(ms)
+            expire(e.session.id, e.gen)
+        }
+    }
+
+    private fun expire(sessionId: String, gen: Long) {
+        val fire = synchronized(lock) {
+            val e = entries[sessionId]?.takeIf { it.gen == gen } ?: return
+            // Not drop(): this coroutine IS e.timer, there is nothing to cancel but the check.
+            entries.remove(sessionId)
+            e.check?.cancel()
+            publish()
+            !e.isBlocked
+        }
+        if (fire) runForget(listOf(sessionId))
+    }
+
+    /** Must hold [lock]. */
+    private fun drop(e: Entry) {
+        entries.remove(e.session.id)
+        e.timer?.cancel()
+        e.check?.cancel()
+    }
+
+    /** Runs [forget] for [ids] in one tracked job ([flush] waits for it); null when there is nothing to forget. */
+    private fun runForget(ids: List<String>): Job? {
+        if (ids.isEmpty()) return null
+        val job = scope.launch {
+            // Side by side: a flush of several closes must not wait out one server's cleanup before the next.
+            for (id in ids) launch {
+                try {
+                    FileLogger.log(TAG, "closing $id (undo window over)")
+                    forget(id)
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    FileLogger.error(TAG, "close of $id failed", e)
+                }
+            }
+        }
+        synchronized(lock) { inFlight.add(job) }
+        job.invokeOnCompletion { synchronized(lock) { inFlight.remove(job) } }
+        return job
+    }
+
+    /** Must hold [lock]. */
+    private fun publish() {
+        _state.value = PendingClosesState(
+            pending = entries.values.filter { !it.isBlocked }.map { it.toPending() },
+            blocked = entries.values.filter { it.isBlocked }.map {
+                BlockedClose(it.session.id, it.session.displayLabel, it.blockedReason!!)
+            },
+            paused = paused,
+        )
+    }
+
+    private fun Entry.toPending() = PendingClose(session.id, session.displayLabel, wasActive, warning)
+
+    companion object {
+        private const val TAG = "PendingCloses"
+
+        /** R7 = 7b. */
+        const val WINDOW_MS = 10_000L
+
+        /** How long [flush] waits for a facts check still under way. */
+        const val FLUSH_CHECK_WAIT_MS = 3_000L
+
+        /**
+         * How long the desktop exit waits for [flush]: the checks, then the close's one exec (tombstone, record,
+         * kill), with a second to spare. Cut later than that, the JVM goes; the close is then half done at worst
+         * on the slowest server, and never killed without its tombstone.
+         */
+        const val EXIT_WAIT_MS = FLUSH_CHECK_WAIT_MS + com.clauderemote.session.service.SessionPersistenceService.CLOSE_EXEC_MS + 1_000L
+
+        private fun monotonicMs(): () -> Long {
+            val origin = TimeSource.Monotonic.markNow()
+            return { origin.elapsedNow().inWholeMilliseconds }
+        }
+    }
+}

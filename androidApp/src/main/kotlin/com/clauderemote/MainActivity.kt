@@ -684,6 +684,16 @@ class MainActivity : FragmentActivity() {
         sessionOrchestrator.setBackgroundMode(true)
     }
 
+    override fun onStop() {
+        super.onStop()
+        // Leaving the app runs the pending tab closes now (Jarvis R7 = 7b): the user who left can no longer press
+        // "Vrátit", and a timer in a backgrounded process may never fire. Not on a configuration change — the
+        // user is still here, and the recreated activity's new orchestrator restores the tab from storage anyway.
+        if (!isChangingConfigurations && ::sessionOrchestrator.isInitialized) {
+            sessionOrchestrator.pendingCloses.flush()
+        }
+    }
+
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         handleSessionIntent(intent)
@@ -720,6 +730,10 @@ class MainActivity : FragmentActivity() {
                 tabManager.tabs.first { tabs -> tabs.any { it.id == sessionId } }
             } != null
             if (appeared) {
+                // A tap on the notification of a tab whose close is still in its undo window (app in front, the
+                // shade pulled down) is "Vrátit": the user wants that session, not a terminal the hidden-tab guard
+                // switches straight away from before the close kills it.
+                sessionOrchestrator.reclaimPendingClose(sessionId)
                 sessionOrchestrator.switchTab(sessionId)
             } else {
                 FileLogger.log("MainActivity", "Notification switch to $sessionId gave up — tab never restored")

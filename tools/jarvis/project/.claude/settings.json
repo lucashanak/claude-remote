@@ -1,0 +1,113 @@
+{
+  "permissions": {
+    "defaultMode": "dontAsk",
+    "disableBypassPermissionsMode": "disable",
+    "disableAutoMode": "disable",
+    "allow": [
+      "Bash(cr-sessions:*)",
+      "Bash(cr-digest:*)"
+    ],
+    "deny": [
+      "Agent",
+      "Artifact",
+      "Skill",
+      "Workflow",
+      "WebFetch",
+      "WebSearch",
+      "Edit",
+      "Write",
+      "NotebookEdit",
+      "SendMessage",
+      "ListAgents",
+      "RemoteTrigger",
+      "PushNotification",
+      "PublishPlugin",
+      "CronCreate",
+      "CronDelete",
+      "EnterWorktree",
+      "DesignSync",
+      "ScheduleWakeup",
+      "SendFeedback",
+      "ShareOnboardingGuide",
+      "ReportFindings",
+      "TaskStop",
+      "Monitor",
+      "EnterPlanMode",
+      "ExitPlanMode",
+      "ExitWorktree",
+      "CronList",
+      "EndConversation",
+      "mcp__*",
+      "Bash(ssh:*)",
+      "Bash(tmux:*)",
+      "Bash(rm:*)",
+      "Bash(kill:*)",
+      "Read(~/.claude/**)",
+      "Read(~/.claude.json)",
+      "Read(~/.claude-remote/accounts/**)",
+      "Read(~/claude-local/cc-config/**)",
+      "Read(~/.ssh/**)",
+      "Read(~/.config/**)"
+    ]
+  },
+  "enabledPlugins": {
+    "oh-my-claudecode@omc": false,
+    "frontend-design@claude-plugins-official": false,
+    "stripe@claude-plugins-official": false,
+    "vercel@claude-plugins-official": false,
+    "claude-for-nonprofits@synced": false
+  },
+  "claudeMdExcludes": [
+    "@HOME@/.claude/CLAUDE.md",
+    "@HOME@/.claude-remote/accounts/*/CLAUDE.md"
+  ],
+  "disableClaudeAiConnectors": true,
+  "maxEffortLevel": "medium",
+  "effortLevel": "medium",
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"@JARVIS@/.claude/hooks/session-start.sh\"",
+            "timeout": 20
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"@JARVIS@/.claude/hooks/prompt-delta.sh\"",
+            "timeout": 20
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"@PY@\" -I \"@JARVIS@/.claude/hooks/gate.py\" --tools",
+            "timeout": 10
+          }
+        ]
+      },
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"@PY@\" -I \"@JARVIS@/.claude/hooks/gate.py\"",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
+}

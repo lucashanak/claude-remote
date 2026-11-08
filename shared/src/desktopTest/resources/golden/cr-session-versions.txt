@@ -1,0 +1,3 @@
+# cr-session: <SessionOpsScript.VERSION> <SHA-256 of the installed file>, one line per released content.
+# SessionOpsScriptTest.everyScriptContentHasItsOwnVersion: a changed script needs a new VERSION and its line here.
+2 7e724601901df7127eec01d7802907ff802e3459665b1171e19d54be8e04ace9

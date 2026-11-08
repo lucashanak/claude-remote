@@ -128,6 +128,7 @@ internal object BootstrapScript {
     private const val HOOKS = "===CRB hooks==="
     private const val HOOKS_V2 = "===CRB hooksv2==="
     private const val STREAMD = "===CRB streamd==="
+    private const val SESSIONOPS = "===CRB sessionops==="
     private const val END = "===CRB end==="
 
     /** `cat client-flags.json` (bounded), delimited, then a newline. */
@@ -173,7 +174,9 @@ internal object BootstrapScript {
     /**
      * The whole bootstrap, in order: flags, the legacy Stop-hook ensure UNCHANGED,
      * hooks v2 (install only when [installV2] and the server does not force `hooks`
-     * off, otherwise a read-only status), the streamd script.
+     * off, otherwise a read-only status), the streamd script, and whether `cr-session` ([SessionOpsScript], Jarvis
+     * F0c) is in place. Only that check rides here: the ~25 KB installer goes in a second exec of its own, and only
+     * when the check says the file is missing, damaged or older ([DefaultServerBootstrap.installSessionOps]).
      */
     fun build(installV2: Boolean): String = buildString {
         append(FLAGS_STEP).append('\n')
@@ -188,6 +191,7 @@ internal object BootstrapScript {
             append(HookCommands.STATUS_HOOKS_V2_COMMAND).append('\n')
         }
         append("echo '$STREAMD'\n").append(TranscriptService.ENSURE_STREAMD_COMMAND).append('\n')
+        append("echo '$SESSIONOPS'\n").append(SessionOpsScript.CHECK_COMMAND).append('\n')
         append("echo '$END'\n")
     }
 
@@ -197,6 +201,8 @@ internal object BootstrapScript {
         val legacyHook: String?,
         val v2: HookCommands.V2Report,
         val streamd: String?,
+        /** Last line of the `cr-session` check (`SESSIONOPS_PRESENT|NEEDED`) or null. Not part of [ok]. */
+        val sessionOps: String? = null,
         /** The end marker arrived: the script ran to the end. */
         val complete: Boolean,
     ) {
@@ -219,6 +225,7 @@ internal object BootstrapScript {
                 HOOKS -> cur = sections.getOrPut(HOOKS) { mutableListOf() }
                 HOOKS_V2 -> cur = sections.getOrPut(HOOKS_V2) { mutableListOf() }
                 STREAMD -> cur = sections.getOrPut(STREAMD) { mutableListOf() }
+                SESSIONOPS -> cur = sections.getOrPut(SESSIONOPS) { mutableListOf() }
                 END -> { complete = true; cur = null }
                 else -> cur?.add(line)
             }
@@ -232,6 +239,7 @@ internal object BootstrapScript {
             legacyHook = hooksLast,
             v2 = HookCommands.parseV2(v2Text),
             streamd = streamdLast,
+            sessionOps = sections[SESSIONOPS]?.lastOrNull { it.isNotBlank() }?.trim(),
             complete = complete,
         )
     }
@@ -397,6 +405,7 @@ internal class DefaultServerBootstrap(
         }
         // A truncated output must not read as "client-flags.json is corrupt" and lift a force-off.
         if (report.complete) applyFlags(serverId, report.flags)
+        val sessionOps = if (report.sessionOps == SessionOpsScript.CHECK_NEEDED) installSessionOps(serverId) else report.sessionOps
         val v2 = report.v2
         control.update(serverId) {
             it.copy(
@@ -415,7 +424,8 @@ internal class DefaultServerBootstrap(
         FileLogger.log(
             TAG,
             "Server bootstrap $name: flags=$flagsLog hooks=${report.legacyHook ?: "?"} " +
-                "hooksV2=${report.v2.state}${if (install) "/" + v2.result else ""} streamd=${report.streamd ?: "?"} (${clock() - t0}ms)",
+                "hooksV2=${report.v2.state}${if (install) "/" + v2.result else ""} streamd=${report.streamd ?: "?"} " +
+                "sessionOps=${sessionOps ?: "?"} (${clock() - t0}ms)",
         )
         if (report.ok) {
             synchronized(lock) {
@@ -427,6 +437,22 @@ internal class DefaultServerBootstrap(
         } else {
             fail(serverId, "$name: incomplete (complete=${report.complete} hooks=${report.legacyHook} streamd=${report.streamd})")
         }
+    }
+
+    /**
+     * The `cr-session` installer, sent only after the bootstrap's check said the file needs writing: almost every
+     * bootstrap (6 h, reconnect, restart) then carries a few hundred bytes instead of the whole script, and the
+     * critical bootstrap exec no longer waits on 25 KB going up a slow link. Its own exec, its own failure: nothing
+     * runs `cr-session` on its own, so a failed install only waits for the next bootstrap's check and never fails
+     * this one. The installer checks again before writing (another device may have installed meanwhile).
+     */
+    private suspend fun installSessionOps(serverId: String): String = try {
+        execText(serverId, SessionOpsScript.INSTALL_COMMAND, INSTALL_TIMEOUT_MS).lines().lastOrNull { it.isNotBlank() }?.trim()
+            ?: "SESSIONOPS_FAILED (no output)"
+    } catch (e: CancellationException) {
+        throw e
+    } catch (e: Exception) {
+        "SESSIONOPS_FAILED (${e.message})"
     }
 
     private fun fail(serverId: String, why: String) {
@@ -468,6 +494,7 @@ internal class DefaultServerBootstrap(
         private const val SCRIPT_TIMEOUT_MS = 30_000L
         private const val FLAGS_TIMEOUT_MS = 10_000L
         private const val REMOVE_TIMEOUT_MS = 20_000L
+        private const val INSTALL_TIMEOUT_MS = 20_000L
         private const val TAG = "ServerBootstrap"
     }
 }

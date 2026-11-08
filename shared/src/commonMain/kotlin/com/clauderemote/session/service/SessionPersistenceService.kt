@@ -73,6 +73,8 @@ internal class SessionPersistenceService(
     private val onActivityUpdate: (sessionId: String, activity: SessionActivity) -> Unit,
     private val disconnectSession: suspend (sessionId: String) -> Unit,
     private val onForgotten: (serverId: String, tmuxSessionName: String) -> Unit,
+    /** Who a user close is recorded as in `closed.jsonl` (`app:<installId>`); a prune is recorded as `prune`. */
+    private val closedBy: () -> String = { "app" },
 ) : PersistenceClosures {
     // (serverId, tmux name) -> when THIS device closed it (forgetSession). Feeds
     // recentlyClosedLocally; bounded by pruning on every write.
@@ -121,6 +123,12 @@ internal class SessionPersistenceService(
     // RESTORE_EOF/DRIFT_EOF heredocs it writes — without instantiating
     // SessionPersistenceService, whose constructor takes many live collaborators.
     internal companion object {
+        /**
+         * The limit of the close's one exec ([ManifestCommands.closeCommand]: tombstone, record ≤ ~7 s, kill ≤ 3 s).
+         * The desktop exit waits for it ([com.clauderemote.session.PendingCloses.EXIT_WAIT_MS]).
+         */
+        const val CLOSE_EXEC_MS = 12_000L
+
         /** How long a local close is remembered (the reducer asks within minutes at most). */
         private const val CLOSED_LOCALLY_RETAIN_MS = 30 * 60_000L
 
@@ -1383,7 +1391,9 @@ DTIMER_EOF
      * The exec-routed reconciler, bound to this service and the tab/transcript state.
      * The wiring step installs it into `ConnectionRegistry.reconciler`.
      */
-    fun newExecReconciler(): ServerReconciler = ExecServerReconciler(
+    fun newExecReconciler(
+        onRound: (serverId: String, snapshot: ReconcileSnapshot) -> Unit = { _, _ -> },
+    ): ServerReconciler = ExecServerReconciler(
         scope = scope,
         run = { serverId, cmd, totalMs -> registry.execRead(serverId, cmd, totalMs) },
         serverIdOf = { registry.serverIdOf(it) },
@@ -1395,6 +1405,7 @@ DTIMER_EOF
             if (name != null) forgetClosedElsewhere(sid, name)
         },
         isBackground = isBackground,
+        onRound = onRound,
     )
 
     /**
@@ -1467,21 +1478,8 @@ DTIMER_EOF
         }
     }
 
-    /**
-     * Record a close of [tmuxSessionName] on the server BEFORE its tmux pane
-     * is killed. [durable] marks a genuine user close (as opposed to the
-     * remote-scan prune deciding a tab's pane is gone), which also drops a
-     * `forgotten.d` marker so a device that was asleep during the close still
-     * learns about it after the drift daemon self-cleans the transient
-     * tombstone ~60 s later.
-     */
-    suspend fun writeTombstone(sshManager: SshManager, tmuxSessionName: String, durable: Boolean) {
-        runShellCommand(
-            sshManager,
-            ManifestCommands.tombstone(tmuxSessionName, durable),
-            "tombstone($tmuxSessionName, durable=$durable)",
-        )
-    }
+    /** `by` of a close record: a user close is this install's, a prune (not user-initiated) is `prune`. */
+    private fun closeRecordBy(userInitiated: Boolean): String = if (userInitiated) closedBy() else "prune"
 
     /**
      * Drop every tombstone for [tmuxSessionName]. Called when the user
@@ -1497,24 +1495,38 @@ DTIMER_EOF
         )
     }
 
-    /** Fire-and-wait exec for the small state-file commands above. */
-    private suspend fun runShellCommand(sshManager: SshManager, command: String, label: String) {
-        withContext(Dispatchers.IO) {
+    /**
+     * Fire-and-wait exec for the small state-file commands above: waits up to [waitMs] for the command to end.
+     * Returns its stdout, or null when it could not run (no session, an exception).
+     */
+    private suspend fun runShellCommand(sshManager: SshManager, command: String, label: String, waitMs: Long = 5_000): String? {
+        return withContext(Dispatchers.IO) {
             try {
-                val sshSession = sshManager.getSession() ?: return@withContext
+                val sshSession = sshManager.getSession() ?: return@withContext null
                 val ch = sshSession.openChannel("exec") as com.jcraft.jsch.ChannelExec
                 ch.setCommand(command)
                 ch.inputStream = null
+                val input = ch.inputStream
                 ch.connect(5000)
-                val deadline = System.currentTimeMillis() + 5000
-                while (!ch.isClosed && System.currentTimeMillis() < deadline) {
+                val out = java.io.ByteArrayOutputStream()
+                val buf = ByteArray(4096)
+                val deadline = System.currentTimeMillis() + waitMs
+                while (System.currentTimeMillis() < deadline) {
+                    while (input.available() > 0) {
+                        val n = input.read(buf)
+                        if (n < 0) break
+                        out.write(buf, 0, n)
+                    }
+                    if (ch.isClosed && input.available() <= 0) break
                     kotlinx.coroutines.delay(50)
                 }
                 val exit = ch.exitStatus
                 ch.disconnect()
                 if (exit != 0) FileLogger.error(TAG, "$label exited with $exit", null)
+                out.toString(Charsets.UTF_8)
             } catch (e: Exception) {
                 FileLogger.error(TAG, "$label failed: ${e.message}", e)
+                null
             }
         }
     }
@@ -1722,11 +1734,17 @@ DTIMER_EOF
         val serverId = session.server.id
         val name = session.tmuxSessionName
         try {
-            val tomb = registry.execRun(serverId, ManifestCommands.tombstone(name, durable = userInitiated), totalMs = 8_000)
+            // Tombstone, the close record (it reads the live pane, §15.12) and the kill in ONE exec, in that order: a
+            // second exec for the kill may never start (the desktop exit waits only so long), and a close cut there
+            // left the session running under a tombstone, with no tab and no manifest entry.
+            val res = registry.execRun(
+                serverId,
+                ManifestCommands.closeCommand(name, durable = userInitiated, by = closeRecordBy(userInitiated)),
+                totalMs = CLOSE_EXEC_MS,
+            )
                 ?: return false
-            if (tomb.exitStatus != 0) FileLogger.error(TAG, "tombstone($name) exited with ${tomb.exitStatus}", null)
-            val kill = registry.execRun(serverId, "tmux kill-session -t '=${name.replace("'", "'\\''")}'", totalMs = 8_000)
-            if (kill == null || kill.exitStatus != 0) {
+            if (res.exitStatus != 0) FileLogger.error(TAG, "tombstone($name) exited with ${res.exitStatus}", null)
+            if (ManifestCommands.closeKillStatus(res.stdout) != 0) {
                 FileLogger.error(TAG, "Tmux kill returned failure for ${session.id} ($name) — pane may still be alive", null)
             }
             pushSessionsToServer(serverId)
@@ -1744,8 +1762,11 @@ DTIMER_EOF
      * not just disconnects). Removes the persisted record so it won't be
      * resurrected on next app start, and re-syncs the server-side
      * sessions.json so systemd doesn't try to restore it after reboot.
+     *
+     * Returns the background server-side cleanup (null when there was no tab to clean up), so a caller that is
+     * about to end the process — the desktop exit flushing pending closes — can wait for the tombstone and kill.
      */
-    suspend fun forgetSession(sessionId: String, userInitiated: Boolean = false) {
+    suspend fun forgetSession(sessionId: String, userInitiated: Boolean = false): kotlinx.coroutines.Job? {
         val session = tabManager.getTab(sessionId)
         // Capture identity up front so we can prune the UI's stale remote-tmux
         // snapshot even after the tab is torn down below.
@@ -1772,9 +1793,10 @@ DTIMER_EOF
         //    its own short-lived connection — the tab's live connection was
         //    already torn down above, and reusing it would keep its read loop
         //    (and onConnectionLost → autoReconnect) alive for a dead tab.
+        var cleanup: kotlinx.coroutines.Job? = null
         if (session != null) {
             noteClosedLocally(session.server.id, session.tmuxSessionName)
-            scope.launch {
+            cleanup = scope.launch {
                 if (registry.execActive(session.server.id) && cleanupViaExec(session, userInitiated)) return@launch
                 val cleanupConn: SshManager? = try {
                     val tmp = SshManager(serverStorage)
@@ -1798,17 +1820,15 @@ DTIMER_EOF
                         // session came back moments later. Writing it first
                         // makes the close visible to peers before the death
                         // they react to.
-                        writeTombstone(cleanupConn, session.tmuxSessionName, durable = userInitiated)
-                        try {
-                            val killed = com.clauderemote.connection.TmuxManager.killSession(
-                                cleanupConn.getSession() ?: error("no ssh"),
-                                session.tmuxSessionName
-                            )
-                            if (!killed) {
-                                FileLogger.error(TAG, "Tmux kill returned failure for $sessionId (${session.tmuxSessionName}) — pane may still be alive", null)
-                            }
-                        } catch (e: Exception) {
-                            FileLogger.error(TAG, "Tmux kill failed for $sessionId: ${e.message}", e)
+                        // Tombstone, record and kill in one exec, as on the exec path above.
+                        val out = runShellCommand(
+                            cleanupConn,
+                            ManifestCommands.closeCommand(session.tmuxSessionName, userInitiated, closeRecordBy(userInitiated)),
+                            "close(${session.tmuxSessionName}, durable=$userInitiated)",
+                            waitMs = CLOSE_EXEC_MS,
+                        )
+                        if (out == null || ManifestCommands.closeKillStatus(out) != 0) {
+                            FileLogger.error(TAG, "Tmux kill returned failure for $sessionId (${session.tmuxSessionName}) — pane may still be alive", null)
                         }
                         try {
                             pushSessionsToServer(cleanupConn, session.server.id)
@@ -1821,6 +1841,7 @@ DTIMER_EOF
                 }
             }
         }
+        return cleanup
     }
 
     suspend fun renameTmuxSession(sessionId: String, oldName: String, newName: String) {
