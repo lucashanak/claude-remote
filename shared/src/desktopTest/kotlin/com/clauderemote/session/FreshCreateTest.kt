@@ -320,7 +320,7 @@ class FreshCreateTest {
             val first = async(Dispatchers.IO) { runCatching { launch(o) } }
             assertTrue(waitFor(10_000) { exec.ran.any { "new-session -d" in it } }, "the first launch is creating its session")
             // the listing already shows the session being created; this device's own names include it
-            val quickName = com.clauderemote.ui.pickQuickConnectName(server.copy(defaultFolder = "/work"), o.ownTmuxNames(server.id), emptyList()) {
+            val quickName = com.clauderemote.ui.pickQuickConnectName(server.copy(defaultFolder = "/work"), { o.ownTmuxNames(server.id) }, emptyList()) {
                 com.clauderemote.connection.TmuxManager.FreshNameListing(listOf(com.clauderemote.model.TmuxSession(base, 1, false, "0")), emptySet())
             }
             exec.gate!!.complete(Unit)

@@ -38,7 +38,7 @@ class FreshNamePickTest {
         TmuxManager.FreshNameListing(live.map { TmuxSession(it, 1, false, "0") }, manifest)
 
     private fun pick(ownTabs: Set<String> = emptySet(), lastScan: List<String> = emptyList(), timeoutMs: Long = 3_000, list: suspend () -> TmuxManager.FreshNameListing) =
-        runBlocking { withTimeout(10_000) { pickQuickConnectName(server, ownTabs, lastScan, timeoutMs, list) } }
+        runBlocking { withTimeout(10_000) { pickQuickConnectName(server, { ownTabs }, lastScan, timeoutMs, list) } }
 
     // ---- quick connect ----
 
@@ -84,7 +84,7 @@ class FreshNamePickTest {
         val started = CompletableDeferred<Unit>()
         runBlocking {
             val job = async(Dispatchers.Default) {
-                pickQuickConnectName(server, emptySet(), emptyList(), 10_000) { started.complete(Unit); throw CancellationException("composition left") }
+                pickQuickConnectName(server, { emptySet() }, emptyList(), 10_000) { started.complete(Unit); throw CancellationException("composition left") }
             }
             started.await()
             assertFailsWith<CancellationException> { withTimeout(3_000) { job.await() } }
@@ -275,14 +275,15 @@ class FreshNamePickTest {
     private val screen by lazy { java.io.File("src/commonMain/kotlin/com/clauderemote/ui/ConnectScreen.kt").readText() }
 
     @Test fun theConnectScreenRecomputesTheNameWhenNewSessionIsPickedAgainAndGatesLaunch() {   // M1, R1
-        val effect = Regex("""LaunchedEffect\(([^)]*)\) \{\s*if \(!useExistingTmux\) \{\s*tmuxSessionName = newSessionName\(server, folder, selectedMode == ClaudeMode\.YOLO, sessionAlias, tmuxSessions, takenNames\)""")
+        val effect = Regex("""LaunchedEffect\(([^)]*)\) \{\s*if \(!useExistingTmux\) \{\s*tmuxSessionName = newSessionName\(server, folder, selectedMode == ClaudeMode\.YOLO, sessionAlias, tmuxSessions, takenNames, inFlightNames\(\)\)""")
             .find(screen)
         assertTrue(effect != null, "the new-session name comes from newSessionName(…, tmuxSessions, takenNames)")
         val keys = effect!!.groupValues[1].split(",").map { it.trim() }.toSet()
         assertTrue(setOf("useExistingTmux", "tmuxSessions", "takenNames", "folder", "selectedMode", "sessionAlias").all { it in keys },
             "the effect re-runs on each input, the radio included (M1): $keys")
-        assertEquals(2, Regex("""canLaunch\(launching, newSession = !useExistingTmux, listing = tmuxListing\)""").findAll(screen).count(),
-            "both the button and the keyboard Go go through canLaunch")
+        assertEquals(1, Regex("""val launchAllowed = canLaunch\(launching, newSession = !useExistingTmux, listing = tmuxListing\)\n""").findAll(screen).count(),
+            "one canLaunch verdict")
+        assertTrue("if (launchAllowed) {" in screen && "enabled = launchAllowed," in screen, "both the button and the keyboard Go go through it")
         assertTrue("tmuxListing = connectListing.loading," in app && "takenNames = connectListing.taken," in app, "App hands the screen its listing state and taken names")
     }
 

@@ -345,10 +345,26 @@ fun App(
     // launcher's last scan of the server stands in.
     suspend fun quickConnectName(server: SshServer): String = pickQuickConnectName(
         server,
-        // R6-1: the names launches are creating right now count as own: a second quick connect joins that launch
-        ownTabs = sessionOrchestrator.ownTmuxNames(server.id),
+        // R6-1: the names launches are creating right now count as own: a second quick connect joins that launch.
+        // N7-3: read once the listing answered, not before it — a launch begun meanwhile is joined, not named around.
+        ownTabs = { sessionOrchestrator.ownTmuxNames(server.id) },
         lastScan = remoteSessions.filter { it.server.id == server.id }.map { it.tmuxSession.name },
     ) { com.clauderemote.connection.SshSessionHelper.withSession(server, allowFresh = false) { sess -> TmuxManager.listForFreshName(sess) } }
+
+    // The Connect screen's listing of [server] (C2). V15: a NEW session's name must skip every name in use, not just
+    // the listed ones: the launcher's last scan and this device's tabs always, the manifest when the listing ran. A
+    // failed listing leaves those, never "nothing is taken" (M2). A retry ([allowFresh] false, H18) never pays a
+    // handshake of its own: the exec transport or a transport the server already has, else it fails again at once.
+    fun loadConnectListing(server: SshServer, allowFresh: Boolean) {
+        val fallbackTaken = remoteSessions.filter { it.server.id == server.id }.map { it.tmuxSession.name }.toSet() +
+            tabManager.tabs.value.filter { it.server.id == server.id }.map { it.tmuxSessionName }
+        val opening = connectListing.open(fallbackTaken)
+        scope.launch {
+            connectListing.load(opening, fallbackTaken) {
+                com.clauderemote.connection.SshSessionHelper.withSession(server, allowFresh = allowFresh) { sess -> TmuxManager.listForFreshName(sess) }
+            }
+        }
+    }
 
     // Past Claude conversations discovered from server transcripts (history browser)
     var historySessions by remember { mutableStateOf<List<ClaudeHistorySession>>(emptyList()) }
@@ -857,17 +873,7 @@ fun App(
                         onConnectServer = { server ->
                             selectedServer = server
                             currentScreen = Screen.CONNECT
-                            // V15: a NEW session's name must skip every name in use, not just the listed ones: the
-                            // launcher's last scan and this device's tabs always, the manifest when the listing ran.
-                            // A failed listing leaves those, never "nothing is taken" (M2).
-                            val fallbackTaken = remoteSessions.filter { it.server.id == server.id }.map { it.tmuxSession.name }.toSet() +
-                                tabManager.tabs.value.filter { it.server.id == server.id }.map { it.tmuxSessionName }
-                            val opening = connectListing.open(fallbackTaken)
-                            scope.launch {
-                                connectListing.load(opening, fallbackTaken) {
-                                    com.clauderemote.connection.SshSessionHelper.withSession(server) { sess -> TmuxManager.listForFreshName(sess) }
-                                }
-                            }
+                            loadConnectListing(server, allowFresh = true)
                         },
                         onAddServer = {
                             editingServer = null
@@ -920,11 +926,20 @@ fun App(
 
                 Screen.CONNECT -> {
                     selectedServer?.let { server ->
+                        // C2: Retry needs no connection of its own while the exec transport is up; without it, it may open one
+                        val execState by remember(server.id) { sessionOrchestrator.execManager.state(server.id) }.collectAsState()
+                        val execUp = connectExecUp(execState is com.clauderemote.session.service.LinkState.Up) {
+                            sessionOrchestrator.connectionRegistry.execActive(server.id)
+                        }
                         ConnectScreen(
                             server = server,
                             tmuxSessions = connectListing.sessions,
                             tmuxListing = connectListing.loading,
                             takenNames = connectListing.taken,
+                            listingFailed = (connectListing.state as? ListingState.Failed)?.reason,
+                            onRetryListing = { loadConnectListing(server, allowFresh = connectRetryAllowsFresh(execUp)) },
+                            // H16: the names this device's launches are creating right now (not its tabs) are joined, not named around
+                            inFlightNames = { connectInFlightNames(sessionOrchestrator.ownTmuxNames(server.id), tabManager.tabs.value, server.id) },
                             appSettings = appSettings,
                             onBack = { currentScreen = Screen.LAUNCHER },
                             // ONE exec brings back the whole subtree with the
@@ -1045,11 +1060,15 @@ fun App(
                             onKillTmux = { sessionName ->
                                 scope.launch {
                                     try {
-                                        connectListing.sessions = com.clauderemote.connection.SshSessionHelper.withSession(server) { sess ->
+                                        com.clauderemote.connection.SshSessionHelper.withSession(server) { sess ->
                                             TmuxManager.killSession(sess, sessionName)
-                                            TmuxManager.listSessions(sess)
                                         }
                                     } catch (_: Exception) {}
+                                    // listed again like a retry (a failed listing is "unavailable", never "0 on server"), and only
+                                    // while this server's screen is still shown: never another server's screen (kolo 2)
+                                    if (reloadAfterKill(currentScreen == Screen.CONNECT, selectedServer?.id, server.id)) {
+                                        loadConnectListing(server, allowFresh = connectRetryAllowsFresh(execUp))
+                                    }
                                 }
                             },
                             onLoadAccounts = { sessionOrchestrator.listClaudeAccounts(server.id) },
@@ -1900,20 +1919,21 @@ internal const val CONNECT_LIST_MS = 6_000L
  * the late answer of an earlier one (another server, or the same one opened again) is dropped.
  */
 internal class ConnectListing(private val timeoutMs: Long = CONNECT_LIST_MS) {
-    var sessions by mutableStateOf<List<TmuxSession>>(emptyList())
-    /** The listing of the current opening still runs: a NEW session waits for it (its name is picked from it). */
-    var loading by mutableStateOf(false)
+    /** C2: "N on server" only for [ListingState.Loaded]; a listing that failed or did not answer is [ListingState.Failed], never an empty server. */
+    var state by mutableStateOf<ListingState>(ListingState.Loading)
         private set
+    val sessions: List<TmuxSession> get() = (state as? ListingState.Loaded)?.sessions ?: emptyList()
+    /** The listing of the current opening still runs: a NEW session waits for it (its name is picked from it). */
+    val loading: Boolean get() = state is ListingState.Loading
     var taken by mutableStateOf<Set<String>>(emptySet())
         private set
     private val openings = java.util.concurrent.atomic.AtomicInteger()
 
-    /** A new opening of the Connect screen; returns the token its [load] carries. */
+    /** A new opening of the Connect screen (or a retry of its listing); returns the token its [load] carries. */
     fun open(fallbackTaken: Set<String>): Int {
         val opening = openings.incrementAndGet()
-        sessions = emptyList()
+        state = ListingState.Loading
         taken = fallbackTaken
-        loading = true
         return opening
     }
 
@@ -1923,19 +1943,44 @@ internal class ConnectListing(private val timeoutMs: Long = CONNECT_LIST_MS) {
             if (openings.get() != opening) return
             if (listing == null) {
                 FileLogger.log("App", "Connect screen: no listing within $timeoutMs ms — new session named from the other taken names")
+                state = ListingState.Failed("no answer within ${timeoutMs / 1000} s")
                 return
             }
-            sessions = listing.sessions
             taken = fallbackTaken + listing.manifestNames
+            state = ListingState.Loaded(listing.sessions)
         } catch (e: kotlinx.coroutines.CancellationException) {
             throw e
         } catch (e: Exception) {
             FileLogger.log("App", "Connect screen: listing failed (${e::class.simpleName}: ${e.message}) — no sessions shown, new session named from the other taken names")
-            if (openings.get() == opening) sessions = emptyList()
+            if (openings.get() == opening) state = ListingState.Failed("${e::class.simpleName}: ${e.message}")
         } finally {
-            if (openings.get() == opening) loading = false
+            if (openings.get() == opening && state is ListingState.Loading) state = ListingState.Failed("listing cancelled")
         }
     }
+}
+
+/** C2 kolo 2: Retry opens a fresh connection only when the server has no exec transport up (else there is no way out). */
+internal fun connectRetryAllowsFresh(execUp: Boolean): Boolean = !execUp
+
+/** C2: the server's exec transport is up (its link is Up AND its channels are active); [execActive] is read only for an Up link. */
+internal fun connectExecUp(linkUp: Boolean, execActive: () -> Boolean): Boolean = linkUp && execActive()
+
+/** H16: [serverId]'s in-flight launch names: [own] without the names of this device's [tabs] on that server. */
+internal fun connectInFlightNames(own: Set<String>, tabs: List<com.clauderemote.model.ClaudeSession>, serverId: String): Set<String> =
+    inFlightTmuxNames(own, tabs.filter { it.server.id == serverId }.map { it.tmuxSessionName }.toSet())
+
+/** H16: of this device's own names ([own]: its tabs and the launches creating a name now), the launches' — not the tabs. */
+internal fun inFlightTmuxNames(own: Set<String>, tabNames: Set<String>): Set<String> = own - tabNames
+
+/** C2 kolo 2: a kill re-lists only the screen of the server it killed on, and only while it is shown. */
+internal fun reloadAfterKill(connectShown: Boolean, shownServerId: String?, killedServerId: String): Boolean =
+    connectShown && shownServerId == killedServerId
+
+/** C2: the Connect screen's listing of a server. */
+internal sealed interface ListingState {
+    data object Loading : ListingState
+    data class Loaded(val sessions: List<TmuxSession>) : ListingState
+    data class Failed(val reason: String) : ListingState
 }
 
 /**
@@ -1950,7 +1995,8 @@ internal class ConnectListing(private val timeoutMs: Long = CONNECT_LIST_MS) {
  */
 internal suspend fun pickQuickConnectName(
     server: SshServer,
-    ownTabs: Set<String>,
+    /** Read AFTER the listing (N7-3): a launch that began while the listing ran counts as own, so this one joins it. */
+    ownTabs: () -> Set<String>,
     lastScan: Collection<String>,
     listTimeoutMs: Long = QUICK_CONNECT_LIST_MS,
     list: suspend () -> TmuxManager.FreshNameListing,
@@ -1965,6 +2011,6 @@ internal suspend fun pickQuickConnectName(
     if (listed == null) FileLogger.log("App", "quick connect: no listing of ${server.name} — naming from the last scan")
     return com.clauderemote.session.ClaudeConfig.freshTmuxSessionName(
         server.name, server.defaultFolder, server.defaultClaudeMode == ClaudeMode.YOLO,
-        taken = (listed.orEmpty() + lastScan) - ownTabs,
+        taken = (listed.orEmpty() + lastScan) - ownTabs(),
     )
 }

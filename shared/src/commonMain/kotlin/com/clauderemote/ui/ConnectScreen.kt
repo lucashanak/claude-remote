@@ -61,7 +61,13 @@ fun ConnectScreen(
     // depends on the in-screen `folder` field, not anything App.kt tracks.
     onLoadAccounts: (suspend () -> List<ClaudeAccount>)? = null,
     folderPolicyStorage: FolderPolicyStorage? = null,
-    onLaunch: (folder: String, mode: ClaudeMode, model: ClaudeModel, connectionType: ConnectionType, tmuxSession: String, isNewTmuxSession: Boolean, accountSlug: String?) -> Unit
+    /** C2: why the listing failed (it did not answer, or threw); null = it answered or still runs. Never shown as "0 on server". */
+    listingFailed: String? = null,
+    /** C2: list the server's sessions again (a fresh connection only when the server has no exec transport up). */
+    onRetryListing: (() -> Unit)? = null,
+    /** H16: names this device's launches are creating right now; read when the name is picked, so a second Launch joins one. */
+    inFlightNames: () -> Set<String> = { emptySet() },
+    onLaunch:(folder: String, mode: ClaudeMode, model: ClaudeModel, connectionType: ConnectionType, tmuxSession: String, isNewTmuxSession: Boolean, accountSlug: String?) -> Unit
 ) {
     val c = CRTheme.colors
     val m = CRTheme.metrics
@@ -172,9 +178,14 @@ fun ConnectScreen(
     // taken); a name taken meanwhile is found taken when the launch creates its session (V16), which then takes the
     // next free one — the session there is never killed or adopted. Keyed on useExistingTmux
     // too (M1): back from an existing session to "New session", the name is a free one again, not that session's.
+    // C2 kolo 2: the picked existing session is gone (killed, or the listing failed): back to New session, never a
+    // preview and a Launch for a name nothing shows.
+    LaunchedEffect(tmuxSessions, tmuxListing, listingFailed) {
+        if (!keepsExistingSelection(useExistingTmux, tmuxSessionName, tmuxSessions, tmuxListing)) useExistingTmux = false
+    }
     LaunchedEffect(folder, selectedMode, sessionAlias, tmuxSessions, takenNames, useExistingTmux) {
         if (!useExistingTmux) {
-            tmuxSessionName = newSessionName(server, folder, selectedMode == ClaudeMode.YOLO, sessionAlias, tmuxSessions, takenNames)
+            tmuxSessionName = newSessionName(server, folder, selectedMode == ClaudeMode.YOLO, sessionAlias, tmuxSessions, takenNames, inFlightNames())
         }
     }
 
@@ -192,8 +203,9 @@ fun ConnectScreen(
             launching = false
         }
     }
+    val launchAllowed = canLaunch(launching, newSession = !useExistingTmux, listing = tmuxListing)
     val launch: () -> Unit = {
-        if (canLaunch(launching, newSession = !useExistingTmux, listing = tmuxListing)) {
+        if (launchAllowed) {
             launching = true
             onLaunch(folder, selectedMode, selectedModel, connectionType, tmuxSessionName, !useExistingTmux, selectedAccountSlug)
         }
@@ -201,14 +213,7 @@ fun ConnectScreen(
     val launchKeyboardOptions = KeyboardOptions(imeAction = ImeAction.Go)
     val launchKeyboardActions = KeyboardActions(onGo = { launch() })
 
-    // Build will-run preview command
-    val willRunPreview = buildString {
-        val attachFlag = if (useExistingTmux) "-t" else "new -A -s"
-        append("$ tmux $attachFlag '${tmuxSessionName}'\n")
-        append("$ cd $folder && ${if (selectedModel.isLocal) "claude-local" else "claude"}")
-        if (selectedModel != ClaudeModel.DEFAULT) append(" --model ${selectedModel.cliValue}")
-        selectedMode.cliFlag?.let { append(" $it") }
-    }
+    val willRunPreview = willRunPreview(!useExistingTmux, tmuxSessionName, folder, selectedMode, selectedModel, selectedAccountSlug)
 
     Box(modifier = Modifier.fillMaxSize()) {
     Scaffold(
@@ -507,9 +512,32 @@ fun ConnectScreen(
             }
 
             // ── Tmux session ────────────────────────────────────────────────
-            SectionLabel("Tmux · ${tmuxSessions.size} on server", c.textDim)
+            SectionLabel(tmuxSectionLabel(tmuxListing, listingFailed, tmuxSessions.size), c.textDim)
             CRCard {
                 Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    if (listingFailed != null) {
+                        // C2: a failed listing is not an empty server; Retry is off while a launch runs (H16)
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text(
+                                "Session list on the server unavailable",
+                                style = CRType.bodyDim,
+                                color = c.disconnected,
+                                modifier = Modifier.weight(1f),
+                            )
+                            if (onRetryListing != null) {
+                                TextButton(onClick = onRetryListing, enabled = canRetryListing(launching, tmuxListing)) {
+                                    Text("Retry", style = CRType.pill, color = if (canRetryListing(launching, tmuxListing)) c.accent else c.textDim)
+                                }
+                            }
+                        }
+                        if (!useExistingTmux) {
+                            Text(
+                                "List unavailable — the name is checked on the server when the session is created (a taken one gets the next free name).",
+                                style = CRType.bodyDim,
+                                color = c.textDim,
+                            )
+                        }
+                    }
                     TmuxRadioRow(
                         selected = !useExistingTmux,
                         label = "New session",
@@ -553,22 +581,22 @@ fun ConnectScreen(
             // ── Launch ──────────────────────────────────────────────────────
             Button(
                 onClick = launch,
-                enabled = canLaunch(launching, newSession = !useExistingTmux, listing = tmuxListing),
+                enabled = launchAllowed,
                 modifier = Modifier
                     .fillMaxWidth()
                     .height(m.rowHeight),
+                // a disabled Launch stays visible and says why (N2): Material's default disabled colours all but hid it
                 colors = ButtonDefaults.buttonColors(
                     containerColor = c.accent,
                     contentColor = c.accentInk,
+                    disabledContainerColor = c.surface2,
+                    disabledContentColor = c.textDim,
                 ),
+                border = if (launchAllowed) null else androidx.compose.foundation.BorderStroke(1.dp, c.border),
                 shape = RoundedCornerShape(m.cardRadius),
             ) {
                 Text(
-                    when {
-                        launching -> "Connecting…"
-                        tmuxListing && !useExistingTmux -> "Listing sessions…"
-                        else -> "▶  Launch Claude"
-                    },
+                    launchLabel(launching, newSession = !useExistingTmux, listing = tmuxListing),
                     style = CRType.cardTitle,
                 )
             }
@@ -757,10 +785,56 @@ internal fun newSessionName(
     alias: String,
     listed: List<TmuxSession>,
     takenNames: Set<String>,
+    /** H16: names this device's launches are creating right now — kept, so Launch joins that launch instead of a second session. */
+    inFlight: Set<String> = emptySet(),
 ): String = com.clauderemote.session.ClaudeConfig.freshTmuxSessionName(
-    server.name, folder, isYolo, alias, taken = listed.map { it.name }.toSet() + takenNames,
+    server.name, folder, isYolo, alias, taken = listed.map { it.name }.toSet() + takenNames - inFlight,
 )
 
-/** V15: Launch is open unless one is under way; a NEW session also waits for the listing (its name is picked from it). */
+/**
+ * V15: Launch is open unless one is under way; a NEW session also waits for the listing (its name is picked from it).
+ * C2 kolo 2: after a FAILED listing a new session may always be launched (with a warning): the server checks the name
+ * when it creates the session (V16) on any transport, and a Launch held until a listing answers left no way out.
+ */
 internal fun canLaunch(launching: Boolean, newSession: Boolean, listing: Boolean): Boolean =
     !launching && !(newSession && listing)
+
+/** C2: the Launch button says why it is off (N2): it never just greys out of sight. */
+internal fun launchLabel(launching: Boolean, newSession: Boolean, listing: Boolean): String = when {
+    launching -> "Connecting…"
+    newSession && listing -> "Listing sessions…"
+    else -> "▶  Launch Claude"
+}
+
+/** C2/H16: Retry of the listing is off while a launch runs (its answer could rename the session being created) and while a listing runs (no storm). */
+internal fun canRetryListing(launching: Boolean, listing: Boolean): Boolean = !launching && !listing
+
+/** C2 kolo 2: an existing session stays picked only while a listing that ended still shows it (killed, or the listing failed: back to New session). */
+internal fun keepsExistingSelection(useExisting: Boolean, selected: String, listed: List<TmuxSession>, listing: Boolean): Boolean =
+    !useExisting || listing || listed.any { it.name == selected }
+
+/** C2: "N on server" only for a listing that answered. */
+internal fun tmuxSectionLabel(listing: Boolean, listingFailed: String?, count: Int): String = when {
+    listingFailed != null -> "Tmux · list unavailable"
+    listing -> "Tmux · listing…"
+    else -> "Tmux · $count on server"
+}
+
+/**
+ * C2: "Will run" from the builders of the real launch: a NEW session is `tmux new-session -d -s <name>` with
+ * [com.clauderemote.session.ClaudeConfig.buildLaunchCommand] in it (the conversation id is chosen at launch); an
+ * existing one is attached.
+ */
+internal fun willRunPreview(
+    newSession: Boolean,
+    tmuxSessionName: String,
+    folder: String,
+    mode: ClaudeMode,
+    model: ClaudeModel,
+    accountSlug: String?,
+): String {
+    val q = "'" + tmuxSessionName.replace("'", "'\\''") + "'"
+    if (!newSession) return "$ tmux attach-session -t '=" + tmuxSessionName.replace("'", "'\\''") + "'"
+    return "$ tmux new-session -d -s $q\n$ " +
+        com.clauderemote.session.ClaudeConfig.buildLaunchCommand(folder, mode, model, accountSlug = accountSlug)
+}
