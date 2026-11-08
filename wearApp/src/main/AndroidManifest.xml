@@ -73,6 +73,11 @@
             android:name="com.clauderemote.wear.JarvisDismissReceiver"
             android:exported="false" />
 
+        <!-- Jarvis F4: "Vrátit" on the merged Jarvis notification (sent to the phone, no Activity). -->
+        <receiver
+            android:name="com.clauderemote.wear.JarvisUndoReceiver"
+            android:exported="false" />
+
         <!-- Handles the PackageInstaller session result (self-update). -->
         <receiver
             android:name="com.clauderemote.wear.InstallResultReceiver"
@@ -119,6 +124,14 @@
                     android:scheme="wear"
                     android:host="*"
                     android:path="/reply-refused" />
+            </intent-filter>
+            <!-- Jarvis F4: what "Vrátit" of a Jarvis close did on the phone. -->
+            <intent-filter>
+                <action android:name="com.google.android.gms.wearable.MESSAGE_RECEIVED" />
+                <data
+                    android:scheme="wear"
+                    android:host="*"
+                    android:path="/jarvis-undo-result" />
             </intent-filter>
         </service>
 

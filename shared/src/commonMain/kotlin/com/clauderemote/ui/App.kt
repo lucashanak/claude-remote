@@ -893,6 +893,33 @@ fun App(
 
     startRestoreRef.set { startRestore(it) }
 
+    // "Vrátit" of a close Jarvis announced (the phone notification's action, the Velín's news line): closed.jsonl
+    // decides whether it can still be undone (JarvisUndo.pick), then it is the row's own restore with its dialogs.
+    fun undoJarvisClose(req: com.clauderemote.session.JarvisUndoRequest) {
+        val server = serverList.firstOrNull { it.id == req.serverId }
+        if (server == null) {
+            restoreOutcome = RestoreOutcome(null, com.clauderemote.session.RestoreAction.Message(
+                "Server chybí", "Server, na kterém „${com.clauderemote.session.JarvisUndo.alias(req.tmux)}“ běžela, už v aplikaci není."))
+            return
+        }
+        scope.launch {
+            when (val p = sessionOrchestrator.findJarvisUndo(server, req.tmux)) {
+                is com.clauderemote.session.JarvisUndo.Pick.Found -> startRestore(
+                    com.clauderemote.session.ClosedEntry(server.id, server.name, p.record))
+                is com.clauderemote.session.JarvisUndo.Pick.No -> restoreOutcome =
+                    RestoreOutcome(null, com.clauderemote.session.RestoreAction.Message("Nejde vrátit", p.why))
+            }
+        }
+    }
+
+    // Taken once, then cleared (like the quick-access requests).
+    LaunchedEffect(Unit) {
+        val requests = sessionOrchestrator.jarvisUndoRequests
+        requests.collect { r ->
+            if (r != null && requests.compareAndSet(r, null)) undoJarvisClose(r)
+        }
+    }
+
     // "Ta konverzace běží v X": its tab here, else attach to it the way a remote row is opened.
     fun goToRunning(entry: com.clauderemote.session.ClosedEntry, tmuxName: String) {
         restoreOutcome = null

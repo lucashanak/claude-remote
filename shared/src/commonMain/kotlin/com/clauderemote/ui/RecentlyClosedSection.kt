@@ -193,8 +193,12 @@ private fun ClosedRow(
     }
 }
 
-/** A restore that needs the user: [action] for [entry] (the restore's own outcome, see [RecentlyClosed.actionFor]). */
-internal data class RestoreOutcome(val entry: ClosedEntry, val action: com.clauderemote.session.RestoreAction)
+/**
+ * A restore that needs the user: [action] for [entry] (the restore's own outcome, see [RecentlyClosed.actionFor]).
+ * [entry] is null only with a [com.clauderemote.session.RestoreAction.Message] about a record that was not found
+ * ("Vrátit" of a Jarvis close that can no longer be undone).
+ */
+internal data class RestoreOutcome(val entry: ClosedEntry?, val action: com.clauderemote.session.RestoreAction)
 
 /**
  * The answer to a restore that did not simply open its tab. Every choice that restores under another name or another

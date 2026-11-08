@@ -24,6 +24,14 @@ data class WearApproveRequest(val sessionId: String, val answer: String, val pro
 @Serializable
 data class WearReplyRefused(val sessionId: String, val message: String)
 
+/** Watch -> phone on /jarvis-undo (mirror of androidApp's copy): "Vrátit" of a close Jarvis announced. */
+@Serializable
+data class WearJarvisUndoRequest(val serverId: String, val tmux: String)
+
+/** Phone -> watch on /jarvis-undo-result: what the undo did, one Czech sentence. */
+@Serializable
+data class WearJarvisUndoResult(val tmux: String, val text: String)
+
 private val MESSAGING_JSON = Json { ignoreUnknownKeys = true }
 
 /**
@@ -63,4 +71,10 @@ fun sendApprove(context: Context, sessionId: String, answer: String, prompt: Str
 fun sendHistoryRequest(context: Context, sessionId: String, onResult: (String) -> Unit = {}) {
     val json = MESSAGING_JSON.encodeToString<WearHistoryRequest>(WearHistoryRequest(sessionId))
     sendToPhone(context, "/history-request", json.toByteArray(Charsets.UTF_8), onResult)
+}
+
+/** "Vrátit" of a Jarvis close: the phone checks closed.jsonl, restores, and answers on /jarvis-undo-result. */
+fun sendJarvisUndo(context: Context, serverId: String, tmux: String, onResult: (String) -> Unit = {}) {
+    val json = MESSAGING_JSON.encodeToString<WearJarvisUndoRequest>(WearJarvisUndoRequest(serverId, tmux))
+    sendToPhone(context, "/jarvis-undo", json.toByteArray(Charsets.UTF_8), onResult)
 }

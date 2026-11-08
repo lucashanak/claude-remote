@@ -269,6 +269,7 @@ internal fun VelinScreen(
                 jarvisTab = jarvisTabOf(tabs, feed.serverId), now = now,
                 onOpenTmux = { sid, t -> openTmux(sid, t) },
                 onOpenJarvis = onJarvis,
+                onUndoClose = { al -> al.tmux?.let { t -> sessionOrchestrator.jarvisUndoRequests.value = com.clauderemote.session.JarvisUndoRequest(al.serverId, t) } },
                 modifier = Modifier.padding(start = m.sectionPad, end = m.sectionPad, bottom = 8.dp),
             )
         } else

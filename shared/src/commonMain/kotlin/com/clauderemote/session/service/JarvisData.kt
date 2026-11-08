@@ -44,19 +44,43 @@ data class JarvisWatch(
     val what: String,
 )
 
-/** A mail Jarvis proposed and Lukáš has not confirmed: the card with "Poslat" / "Zahodit". */
+/**
+ * Something Jarvis proposed and Lukáš has not confirmed: the card with "Poslat"/"Provést" and "Zahodit". F3 had only
+ * mail (`cr-mail status`); F4 reads every kind from `cr-jarvis proposals --json` ([via] = [JarvisProposalSource.JARVIS])
+ * and falls back to the mail list on a server whose `cr-jarvis` does not know `proposals` yet.
+ */
 data class JarvisProposal(
     val id: String,
+    /** For mail the tmux name it goes to; for `close`/`restore` the session; for `open` the project (folder or alias). */
     val to: String,
+    /** The body the card shows whole before it may be approved: the message, or the facts and account of an action. */
     val text: String,
     val createdMs: Long?,
     val task: String?,
     /**
-     * [text] is the full wording (`text` of the CLI), not just the subject: only then may "Poslat" approve it — an
-     * approval sends the whole message, so Lukáš must have seen the whole message (rev-f3-app MED6).
+     * [text] is the full wording (`text`/`detail` of the CLI), not just the subject: only then may "Poslat" approve it
+     * — an approval does the whole thing, so Lukáš must have seen all of it (rev-f3-app MED6).
      */
     val fullText: Boolean = false,
+    val kind: JarvisProposalKind = JarvisProposalKind.MAIL,
+    /** The CLI's one Czech sentence (`title`), null from the mail fallback (the card then words it itself). */
+    val title: String? = null,
+    /** Server epoch ms after which the proposal lapsed (10 min for actions), null = unknown. */
+    val expiresMs: Long? = null,
+    val via: JarvisProposalSource = JarvisProposalSource.MAIL,
 )
+
+/** The contract's `kind`. An unknown kind is not shown: approving something the app cannot describe is not consent. */
+enum class JarvisProposalKind(val wire: String) {
+    MAIL("mail"), OPEN("open"), CLOSE("close"), RESTORE("restore");
+
+    companion object {
+        fun of(wire: String?): JarvisProposalKind? = entries.firstOrNull { it.wire == wire }
+    }
+}
+
+/** Which CLI listed the proposal, and so which one decides it. */
+enum class JarvisProposalSource { JARVIS, MAIL }
 
 /** `~/.claude-remote/jarvis/mode`: `normal | blocking | dnd[:<ms until>]`. */
 data class JarvisMode(val mode: Kind, val untilMs: Long? = null) {
@@ -151,10 +175,74 @@ object JarvisData {
     }
 
     /**
-     * "Poslat" is enabled only for a proposal whose full text arrived AND was shown whole ([seenWhole]: it fit, or the
-     * user opened "Zobrazit celé").
+     * `cr-jarvis proposals --json` (F4 contract): `[{id, kind, target, title, detail, created, expires}]`, oldest
+     * first. An entry without an id of the two known shapes, without a target or of an unknown kind is dropped (a
+     * future kind the app cannot describe is decided in Jarvis, not here). Null = not that shape: an older
+     * `cr-jarvis` without `proposals` answers with usage text, and the caller falls back to the mail list.
      */
-    fun canApprove(p: JarvisProposal, seenWhole: Boolean): Boolean = p.fullText && seenWhole
+    fun parseJarvisProposals(text: String?): List<JarvisProposal>? {
+        val arr = parse(text) as? JsonArray ?: return null
+        return arr.mapNotNull { e ->
+            val o = e as? JsonObject ?: return@mapNotNull null
+            val kind = JarvisProposalKind.of(o.str("kind")) ?: return@mapNotNull null
+            val id = o.str("id")?.takeIf { (if (kind == JarvisProposalKind.MAIL) MAIL_ID else ACTION_ID).matches(it) }
+                ?: return@mapNotNull null
+            val target = o.str("target") ?: return@mapNotNull null
+            val detail = o.str("detail")
+            JarvisProposal(
+                id = id, to = target, text = detail ?: o.str("title").orEmpty(), createdMs = o.num("created"),
+                task = o.str("task"), fullText = detail != null, kind = kind, title = o.str("title"),
+                expiresMs = o.num("expires"), via = JarvisProposalSource.JARVIS,
+            )
+        }.sortedBy { it.createdMs ?: 0L }
+    }
+
+    /**
+     * The proposals of [combined] ([PROPOSALS]): `cr-jarvis proposals` when the server knows it, else the mail of
+     * `cr-mail status`. Null = neither answered in shape.
+     */
+    fun parseCombinedProposals(combined: String?): List<JarvisProposal>? {
+        val (jarvis, mail) = splitProposals(combined)
+        return parseJarvisProposals(jarvis) ?: parseProposals(mail)
+    }
+
+    /** The `cr-mail status --json` half of [PROPOSALS] (for [mailOff]). */
+    fun mailHalf(combined: String?): String? = splitProposals(combined).second
+
+    private fun splitProposals(combined: String?): Pair<String?, String?> {
+        val t = combined ?: return null to null
+        val i = t.indexOf(MAIL_MARK)
+        return if (i < 0) t to null else t.substring(0, i) to t.substring(i + MAIL_MARK.length)
+    }
+
+    /**
+     * "Poslat"/"Provést" is enabled only for a proposal whose full text arrived AND was shown whole ([seenWhole]: it
+     * fit, or the user opened "Zobrazit celé"), and that has not lapsed by this device's clock ([nowMs]; the server
+     * refuses a lapsed one anyway, the button only does not offer what cannot work).
+     */
+    fun canApprove(p: JarvisProposal, seenWhole: Boolean, nowMs: Long? = null): Boolean =
+        p.fullText && seenWhole && !expired(p, nowMs)
+
+    fun expired(p: JarvisProposal, nowMs: Long?): Boolean = nowMs != null && p.expiresMs != null && nowMs >= p.expiresMs
+
+    /** The card's heading: what approving does, in a few words. */
+    fun heading(p: JarvisProposal): String = when (p.kind) {
+        JarvisProposalKind.MAIL -> "Návrh zprávy → ${aliasOf(p.to)}"
+        JarvisProposalKind.OPEN -> "Návrh: otevřít ${p.to.trimEnd('/').substringAfterLast('/').ifBlank { p.to }}"
+        JarvisProposalKind.CLOSE -> "Návrh: zavřít ${aliasOf(p.to)}"
+        JarvisProposalKind.RESTORE -> "Návrh: obnovit ${aliasOf(p.to)}"
+    }
+
+    /** The approve button's word: mail is sent, an action is carried out. */
+    fun approveLabel(p: JarvisProposal): String = if (p.kind == JarvisProposalKind.MAIL) "Poslat" else "Provést"
+
+    /** What the screen says after an approval went through: the CLI's own sentence when it has one. */
+    fun approvedNotice(p: JarvisProposal, cliMessage: String): String =
+        cliMessage.takeIf { it.isNotBlank() && it != "Hotovo" }
+            ?: if (p.kind == JarvisProposalKind.MAIL) "Odesláno do fronty: ${aliasOf(p.to)}" else "Provedeno: ${heading(p).removePrefix("Návrh: ")}"
+
+    /** `claude-server-kontexta--soniox` → `soniox`. */
+    private fun aliasOf(tmux: String): String = tmux.substringAfterLast("--").ifBlank { tmux }
 
     /** Whether Jarvis' mail is switched off (`cr-mail off`): nothing pastes, an approval would only queue. */
     fun mailOff(text: String?): Boolean =
@@ -179,6 +267,8 @@ object JarvisData {
     private const val BIN = "~/.local/bin/"
     private val TASK_ID = Regex("t-[A-Za-z0-9-]{1,40}")
     private val MAIL_ID = Regex("m-[A-Za-z0-9-]{1,40}")
+    /** `x-<UTC>-<hex4>` (F4 contract); `.`, `:` and `_` allowed for the UTC part — all inert in a shell word. */
+    private val ACTION_ID = Regex("x-[A-Za-z0-9._:-]{1,60}")
     private val INSTALL_ID = Regex("[A-Za-z0-9-]{1,40}")
 
     /** Exit status as the last line, stderr folded in: a refusal's reason is what the user is shown. */
@@ -189,6 +279,14 @@ object JarvisData {
     const val TASK_LIST = "${BIN}cr-task list --all --json"
     const val WATCHES = "${BIN}cr-task watches --json"
     const val MAIL_STATUS = "${BIN}cr-mail status --json"
+    private const val MAIL_MARK = "\n__cr_mail__\n"
+
+    /**
+     * Every pending proposal and the mail switch in ONE exec (one channel, not two): `cr-jarvis proposals --json`,
+     * a marker, `cr-mail status --json`. An older `cr-jarvis` without `proposals` prints usage instead of JSON and the
+     * mail half still carries the F3 list ([parseCombinedProposals]).
+     */
+    const val PROPOSALS = "${BIN}cr-jarvis proposals --json 2>/dev/null; printf '\\n__cr_mail__\\n'; ${BIN}cr-mail status --json"
     const val MODE_READ = "cat ~/.claude-remote/jarvis/mode 2>/dev/null; echo"
 
     fun taskShow(id: String): String {
@@ -202,6 +300,24 @@ object JarvisData {
         require(INSTALL_ID.matches(installId)) { "not an install id" }
         return checked("${BIN}cr-mail ${if (approve) "approve" else "reject"} $id --by app:$installId")
     }
+
+    /**
+     * The decision of [p] through the CLI that listed it: `cr-jarvis approve|reject <id> --by app:<installId>` (F4: it
+     * hands mail on to `cr-mail` itself), or [decide] for a proposal of the F3 mail fallback.
+     */
+    fun decideProposal(p: JarvisProposal, approve: Boolean, installId: String): String {
+        if (p.via == JarvisProposalSource.MAIL) return decide(p.id, approve, installId)
+        require(MAIL_ID.matches(p.id) || ACTION_ID.matches(p.id)) { "not a proposal id" }
+        require(INSTALL_ID.matches(installId)) { "not an install id" }
+        return checked("${BIN}cr-jarvis ${if (approve) "approve" else "reject"} ${p.id} --by app:$installId")
+    }
+
+    /**
+     * How long an approval may take: opening and restoring wait for claude to start on the server (cr-session gives
+     * it up to ~20 s), mail and closes answer at once.
+     */
+    fun decideTimeoutMs(p: JarvisProposal, approve: Boolean): Long =
+        if (approve && (p.kind == JarvisProposalKind.OPEN || p.kind == JarvisProposalKind.RESTORE)) 35_000L else 10_000L
 
     /**
      * `cr-jarvis mode normal|blocking|dnd [--for <duration>]`; [forMinutes] only with DND. Always a DURATION, never a

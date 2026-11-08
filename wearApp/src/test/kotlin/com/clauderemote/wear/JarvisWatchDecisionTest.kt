@@ -1,6 +1,7 @@
 package com.clauderemote.wear
 
 import com.clauderemote.wear.JarvisWatchDecision.Action
+import kotlinx.serialization.decodeFromString
 import kotlin.test.Test
 import kotlin.test.assertEquals
 
@@ -38,5 +39,17 @@ class JarvisWatchDecisionTest {
         assertEquals(Action.Post(buzz = true), JarvisWatchDecision.decide(i, 100, k, k))
         // re-delivered after it was acted on: no second vibration, no repost
         assertEquals(Action.Skip, JarvisWatchDecision.decide(i, 500, k, null))
+    }
+
+    // F4: "Vrátit" offers ride the same push; a phone without them (older build) still decodes, with none
+    @Test fun undoOffersAreWireCompatible() {
+        val old = """{"sessions": [], "jarvis": {"pending": 1, "text": "✓ Zavřel jsem a.", "notify": true}}"""
+        assertEquals(emptyList(), WearDataListenerService.WEAR_JSON.decodeFromString<WearSessionsPayload>(old).jarvis!!.undo)
+        val new = """{"sessions": [], "jarvis": {"pending": 1, "text": "✓ Zavřel jsem a.", "notify": true,
+            "undo": [{"serverId": "s1", "tmux": "claude-server-x--a", "label": "a", "future": 1}]}}"""
+        assertEquals(
+            listOf(WearJarvisUndo("s1", "claude-server-x--a", "a")),
+            WearDataListenerService.WEAR_JSON.decodeFromString<WearSessionsPayload>(new).jarvis!!.undo,
+        )
     }
 }

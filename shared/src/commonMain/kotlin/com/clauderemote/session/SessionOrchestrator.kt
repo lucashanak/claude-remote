@@ -3445,6 +3445,50 @@ class SessionOrchestrator(
     }
 
     /**
+     * "Vrátit" of a Jarvis close asked from outside the composition (the phone notification's action, the Velín's
+     * news line): App takes each non-null value, sets it back to null and runs the "Nedávno zavřené" restore with its
+     * dialogs. A StateFlow, so a request from a cold start waits for the first composition.
+     */
+    val jarvisUndoRequests = kotlinx.coroutines.flow.MutableStateFlow<JarvisUndoRequest?>(null)
+
+    /** (server id, tmux name) of headless undos under way: a second tap on the wrist waits for nothing, it is said so. */
+    private val jarvisUndoing = java.util.concurrent.ConcurrentHashMap.newKeySet<Pair<String, String>>()
+
+    /**
+     * What "Vrátit" of [tmux] on [server] would restore ([JarvisUndo.pick] over the server's `closed.jsonl`). One
+     * short exec on the same path as the "Nedávno zavřené" read; an unreadable list is [JarvisUndo.Pick.No], never a
+     * guess.
+     */
+    internal suspend fun findJarvisUndo(server: SshServer, tmux: String): JarvisUndo.Pick =
+        when (val read = readClosedRecords(server)) {
+            is ClosedRead.Ok -> JarvisUndo.pick(read.records, tmux, System.currentTimeMillis() / 1000)
+            else -> JarvisUndo.Pick.No("Nedávno zavřené na ${server.name} nejde načíst – zkus to za chvíli.")
+        }
+
+    /**
+     * "Vrátit" from the watch, where no screen can ask anything: [findJarvisUndo], then [restoreClosed] of the record
+     * under its own name (a new conversation in the same folder and account when it has none to resume, the same
+     * choice a tap on the row makes). Never under another name or another conversation: those need the app's
+     * dialog, and the sentence says so. Returns the Czech sentence for the user.
+     */
+    suspend fun undoJarvisClose(serverId: String, tmux: String): String {
+        val name = JarvisUndo.alias(tmux)
+        val server = serverStorage.getServer(serverId) ?: return "Server, na kterém „$name“ běžela, už v aplikaci není."
+        val key = server.id to tmux
+        if (!jarvisUndoing.add(key)) return "„$name“ už vracím."
+        try {
+            return JarvisUndo.undo(
+                tmux, server.name, System.currentTimeMillis() / 1000,
+                read = { readClosedRecords(server) },
+                restore = { record, fresh -> restoreClosed(server, record, freshSessionId = fresh).first },
+                newId = { java.util.UUID.randomUUID().toString() },
+            )
+        } finally {
+            jarvisUndoing.remove(key)
+        }
+    }
+
+    /**
      * "Skrýt z tohoto zařízení": the tab leaves THIS device only — no tombstone, no kill, no manifest push (the
      * session stays live, so pushMerge keeps its manifest entry for the other devices) — and its marker is not
      * adopted again. The session shows up here as a detached remote row, as any session without a tab does.

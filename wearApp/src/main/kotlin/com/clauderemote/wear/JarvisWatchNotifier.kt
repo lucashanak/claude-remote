@@ -56,6 +56,11 @@ object JarvisWatchNotifier {
     private const val KEY_SHOWN = "shown_key"
     internal const val KEY_DISMISSED = "dismissed_key"
     internal const val EXTRA_KEY = "jarvis_key"
+    internal const val EXTRA_UNDO_SERVER = "jarvis_undo_server"
+    internal const val EXTRA_UNDO_TMUX = "jarvis_undo_tmux"
+    private const val UNDO_RESULT_ID = 0x2A11_0003
+    private const val UNDO_REQ_BASE = 0x2A12_0000
+    private const val MAX_UNDO = 2
     private const val TAG = "JarvisWatch"
 
     fun update(context: Context, info: WearJarvisInfo?) {
@@ -99,7 +104,7 @@ object JarvisWatchNotifier {
         val dismissed = PendingIntent.getBroadcast(
             context, NOTIF_ID, Intent(context, JarvisDismissReceiver::class.java).putExtra(EXTRA_KEY, key), flags,
         )
-        val n = NotificationCompat.Builder(context, if (buzz) CHANNEL_NOW else CHANNEL_QUIET)
+        val b = NotificationCompat.Builder(context, if (buzz) CHANNEL_NOW else CHANNEL_QUIET)
             .setSmallIcon(R.mipmap.ic_launcher)
             .setContentTitle("Jarvis · ${info.pending}")
             .setContentText(info.text.lineSequence().firstOrNull().orEmpty())
@@ -108,9 +113,35 @@ object JarvisWatchNotifier {
             .setDeleteIntent(dismissed)
             .setOnlyAlertOnce(!buzz)
             .setAutoCancel(true)
-            .build()
-        nm.notify(NOTIF_ID, n)
+        // F4: "Vrátit" for each close Jarvis announced; the phone decides from closed.jsonl whether it still can.
+        info.undo.take(MAX_UNDO).forEach { u ->
+            val pi = PendingIntent.getBroadcast(
+                context, UNDO_REQ_BASE + ((u.serverId + "\u0000" + u.tmux).hashCode() and 0xFFFF),
+                Intent(context, JarvisUndoReceiver::class.java)
+                    .putExtra(EXTRA_UNDO_SERVER, u.serverId)
+                    .putExtra(EXTRA_UNDO_TMUX, u.tmux),
+                flags,
+            )
+            b.addAction(NotificationCompat.Action.Builder(0, "Vrátit ${u.label}", pi).build())
+        }
+        nm.notify(NOTIF_ID, b.build())
         WearLog.i(context, TAG, "merged: ${info.pending} pending, buzz=$buzz")
+    }
+
+    /** What "Vrátit" did (the phone's sentence, or why it was not sent): one quiet notification, no actions. */
+    fun postUndoResult(context: Context, text: String) {
+        if (Build.VERSION.SDK_INT >= 33 &&
+            ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
+        ) return
+        ensureChannels(context)
+        val n = NotificationCompat.Builder(context, CHANNEL_QUIET)
+            .setSmallIcon(R.mipmap.ic_launcher)
+            .setContentTitle("Jarvis · vrácení")
+            .setContentText(text)
+            .setStyle(NotificationCompat.BigTextStyle().bigText(text))
+            .setAutoCancel(true)
+            .build()
+        NotificationManagerCompat.from(context).notify(UNDO_RESULT_ID, n)
     }
 
     private fun ensureChannels(context: Context) {
@@ -139,5 +170,40 @@ class JarvisDismissReceiver : BroadcastReceiver() {
         val key = intent.getStringExtra(JarvisWatchNotifier.EXTRA_KEY) ?: return
         context.getSharedPreferences(JarvisWatchNotifier.PREFS, Context.MODE_PRIVATE).edit()
             .putString(JarvisWatchNotifier.KEY_DISMISSED, key).apply()
+    }
+}
+
+/**
+ * "Vrátit" on the merged Jarvis notification (F4): hands the close to the phone on /jarvis-undo, with no Activity
+ * (a background activity start is a violation on API 34+, see [WearActionReceiver]). The phone answers on
+ * /jarvis-undo-result; only a send that did not happen is said here. goAsync keeps the process up for the two Play
+ * Services round trips, with a timeout under the receiver's ~10 s budget.
+ */
+class JarvisUndoReceiver : BroadcastReceiver() {
+    override fun onReceive(context: Context, intent: Intent) {
+        val appContext = context.applicationContext
+        val serverId = intent.getStringExtra(JarvisWatchNotifier.EXTRA_UNDO_SERVER)
+        val tmux = intent.getStringExtra(JarvisWatchNotifier.EXTRA_UNDO_TMUX)
+        if (serverId.isNullOrBlank() || tmux.isNullOrBlank()) return
+        val pending = goAsync()
+        val done = java.util.concurrent.atomic.AtomicBoolean(false)
+        val handler = android.os.Handler(android.os.Looper.getMainLooper())
+        lateinit var timeout: Runnable
+        fun settle(result: String) {
+            if (!done.compareAndSet(false, true)) return
+            handler.removeCallbacks(timeout)
+            WearLog.i(appContext, "JarvisUndo", "undo $tmux sent: $result")
+            if (result == "Sent") {
+                WearHaptics.success(appContext)
+            } else if (result != "Timeout") {
+                // a timeout may still arrive: the phone's answer says so, a second tap would only be refused as taken
+                JarvisWatchNotifier.postUndoResult(appContext, "Vrácení se neodeslalo: $result")
+                WearHaptics.error(appContext)
+            }
+            pending.finish()
+        }
+        timeout = Runnable { settle("Timeout") }
+        handler.postDelayed(timeout, 7_500L)
+        sendJarvisUndo(appContext, serverId, tmux) { r -> settle(r) }
     }
 }
