@@ -32,6 +32,12 @@ F2b adds `cr-mail audit` and `cr-task watch|watches|unwatch|log` (all read or no
 F3 adds `cr-rules add|list|rm` (the CLI itself requires a fresh prompt of Lukáš's asking for silence), `cr-jarvis mode`
 (a fresh prompt of his), `cr-task remind|reminders|unremind` and `cr-digest briefing`. Not allowed to Jarvis:
 `cr-mail approve|reject`, the app's yes/no on a proposal (the CLI refuses Jarvis's pane as well).
+
+F4 adds `cr-sessions open|check-close|close|closed|reopen|stale|pick-account` (the CLI decides between acting at once
+and a proposal; `--task` and `--reason` are quoted free text, so cr-sessions joins TEXT_CMDS) and `cr-jarvis proposals`
+(read only). Not allowed to Jarvis: `cr-jarvis approve|reject` (Lukáš's card) and `cr-jarvis run` (an approved
+action, started by the prompt hook), and `--force` anywhere on `cr-sessions close` (the CLI has none; `cr-session`
+itself is not on the list at all).
 """
 import json
 import re
@@ -45,19 +51,20 @@ TOOLS = frozenset({"Bash", "Read", "ToolSearch", "AskUserQuestion"})
 MODE = "dontAsk"
 
 ALLOWED = {
-    "cr-sessions": frozenset({"list", "show", "tail"}),
+    "cr-sessions": frozenset({"list", "show", "tail", "open", "check-close", "close", "closed", "reopen", "stale",
+                              "pick-account"}),
     "cr-digest": frozenset({"delta", "brief", "waiting", "usage", "briefing"}),
     "cr-mail": frozenset({"send", "status", "inbox", "cancel", "off", "audit"}),
     "cr-task": frozenset({"add", "list", "show", "done", "fail", "watch", "watches", "unwatch", "log", "remind",
                           "reminders", "unremind"}),
     "cr-rules": frozenset({"add", "list", "rm"}),
-    "cr-jarvis": frozenset({"mode"}),
+    "cr-jarvis": frozenset({"mode", "proposals"}),
 }
 # Options Jarvis may never pass. `cr-task done --force` closes a delegated task without its evidence; the CLI refuses
 # it to anyone but Lukáš's own shell already, this is the second layer.
-FORBIDDEN = {("cr-task", "done"): frozenset({"--force"})}
+FORBIDDEN = {("cr-task", "done"): frozenset({"--force"}), ("cr-sessions", "close"): frozenset({"--force"})}
 # commands whose arguments may be quoted free text
-TEXT_CMDS = frozenset({"cr-mail", "cr-task", "cr-rules"})
+TEXT_CMDS = frozenset({"cr-mail", "cr-task", "cr-rules", "cr-sessions"})
 HELP = frozenset({"-h", "--help"})
 # Options a subcommand cannot run without. `cr-digest delta` without --peek moves the cursor the UserPromptSubmit hook
 # reads from, so what changed (a perm, an ask) would never reach Lukáš's next delta.

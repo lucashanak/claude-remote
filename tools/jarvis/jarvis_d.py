@@ -59,6 +59,8 @@ INTEGRITY_EVERY_MS = 60000
 # and come back as "zmizela" and "nová": the last good answer stands in for this long, and when there is none,
 # sessions that drop out are carried over unchanged instead of being called gone.
 PANES_STALE_OK_MS = 60000
+# an approved action may wait for cr-session (open: up to ~8 s for the registry, close: facts twice)
+JO_MIN_TIME_LEFT_S = 30
 
 
 class Daemon:
@@ -172,6 +174,14 @@ class Daemon:
                 self._write_dstate()
         except Exception:
             self.log("alerts: " + traceback.format_exc(limit=3))
+        # F4, last: proposals past their 10 minutes expire, and an approved action whose detached runner never
+        # started (the prompt hook could not spawn it) runs here, only with time left for cr-session's wait
+        if self.time_left() >= JO_MIN_TIME_LEFT_S:
+            try:
+                import jarvisops as JO
+                JO.Ops(env, mail=self.mail.mail).sweep(now)
+            except Exception:
+                self.log("ops: " + traceback.format_exc(limit=3))
         return status
 
     def _write_dstate(self):

@@ -463,15 +463,18 @@ class Mail:
                 pass
         if not isinstance(payload, dict) or payload.get("hook_event_name") != "UserPromptSubmit":
             self.decide_proposals(None, None, now)
+            self._decide_ops(None, None, now)
             return "not a UserPromptSubmit payload"
         prompt = payload.get("prompt")
         name, why = self.caller_session()
         me = J.read_self(self.env)
         if not isinstance(prompt, str) or why or not me or name != me:
             self.decide_proposals(None, None, now)
+            self._decide_ops(None, None, now)
             return "not Jarvis's pane" if isinstance(prompt, str) else "no prompt"
         if prompt.lstrip().startswith("[jarvis"):
             self.decide_proposals(None, None, now)
+            self._decide_ops(None, None, now)
             return None
         h = hashlib.sha256(f"{now}\n{prompt}".encode("utf-8", "replace")).hexdigest()[:12]
         # F3: only whether he asked for silence ("nehlas …") or for a quiet mode ("nerušit …"), never the text:
@@ -482,11 +485,29 @@ class Mail:
             silence, quiet = bool(JA.SILENCE_WORDS.search(prompt)), bool(JA.QUIET_WORDS.search(prompt))
         except Exception:  # noqa: BLE001
             silence = quiet = False
+        # F4: projects (folders) and closed sessions he named, for cr-sessions open / reopen; never the text
+        named_projects, named_closed = [], []
+        try:
+            import jarvisops as JO
+            named_projects, named_closed = JO.named_projects(self.env, prompt), JO.named_closed(self.env, prompt)
+        except Exception:  # noqa: BLE001  fails closed: nothing named = a proposal
+            pass
         J.atomic_write(self.env.path("last-prompt"), json.dumps(
             {"id": "p-" + h, "at": now, "by": "lukas", "silence": silence, "quiet": quiet,
-             "named": self._named_sessions(prompt)}))
-        self.decide_proposals(prompt, prev.get("id") if isinstance(prev, dict) else None, now)
+             "named": self._named_sessions(prompt), "namedProjects": named_projects, "namedClosed": named_closed}))
+        prev_id = prev.get("id") if isinstance(prev, dict) else None
+        self.decide_proposals(prompt, prev_id, now)
+        self._decide_ops(prompt, prev_id, now)
         return None
+
+    def _decide_ops(self, prompt, prev_id, now):
+        """F4: the same "ano" decides the action proposals (open / close / restore). A broken jarvisops never costs
+        the prompt record or the mail: then its proposals simply expire (fail closed)."""
+        try:
+            import jarvisops as JO
+            JO.Ops(self.env, mail=self, spawn=getattr(self, "ops_spawn", None)).decide_on_prompt(prompt, prev_id, now)
+        except Exception:  # noqa: BLE001
+            pass
 
     def _named_sessions(self, prompt):
         """Sessions Lukáš named in this prompt by their exact name, alias or short name (whole word, any case).
@@ -613,6 +634,52 @@ class Mail:
             if rec["named"]:
                 # Lukáš named this target himself in the fresh prompt: his instruction is the approval
                 self.transition(rec, "queued", ev="approved", decidedBy="named")
+        return rec, None
+
+    def send_approved(self, to, text, by):
+        """F4: the first task of a session Jarvis has just opened (`cr-sessions open --task`). Lukáš approved the open
+        with this text in front of him (he named the project, or said yes to the proposal or its card), so the mail is
+        queued at once, without a second "Ano?" and without the fresh-prompt check (an app approval has no prompt).
+        Every other check of `send` stays: off, the target resolves, not Jarvis, not I7, the allowlist, the text, the
+        limits. (record, None) or (None, reason)."""
+        now = self.env.now_ms()
+        why = None
+        if self.off():
+            why = "pošta je vypnutá (~/.claude-remote/jarvis/off)"
+        name = to
+        if not why:
+            name, why = self.resolve_name(to)
+        for check in (self.check_not_self, self.check_high_impact):
+            if not why:
+                why = check(name)
+        if not why and not self.allowed(name):
+            why = f"{name} není v ~/.claude-remote/jarvis/mail-allow (seznam píše Lukáš)"
+        clean = None
+        if not why:
+            clean, why = validate_text(text)
+        if why:
+            with self.lock():
+                self.log("refused", to=J.safe_name(to or "", 200), reason=why)
+            return None, why
+        mid = now_id("m", now)
+        rec = {"v": 1, "id": mid, "from": "jarvis", "to": name, "task": None, "prompt": None,
+               "subject": subject_of(clean), "state": "proposed", "created": now, "notBefore": 0, "named": False,
+               "opened": True, "expires": now + EXPIRE_MS, "attempts": 0, "enters": 0, "deliveredAt": None,
+               "pasteAt": None, "lastBlock": None, "reply": None, "base": None, "conflict": None}
+        body = (f"# Zpráva od Jarvise {mid}\n\n"
+                f"Od: Jarvis (správce Lukášových sessions), na Lukášův pokyn\n"
+                f"\n{clean}\n\n---\n"
+                f"Odpověz normálně poslední zprávou svého tahu, Jarvis si ji přečte sám. "
+                f"Nebo výslovně: cr-mail reply {mid} \"…\"\n")
+        with self.lock():
+            why = self.check_send_limits(name, now)
+            if why:
+                self.log("refused", to=name, reason=why)
+                return None, why
+            J.atomic_write(self.msg_path(mid), body)
+            self.put(rec)
+            self.log("proposed", id=mid, to=name)
+            self.transition(rec, "queued", ev="approved", decidedBy=by)
         return rec, None
 
     def target_facts(self, name, now):
@@ -1213,12 +1280,21 @@ def digest_items(env, since_ms, now):
                       "text": J.safe_text(rec.get("reply"), 160) if ev == "reply" else "",
                       "reason": e.get("reason"), "task": rec.get("task"), "at": e["at"]})
     for rec in m.all():
+        # F4: the first task of a session Jarvis opened waits (trust dialog of a new folder, login): said once
+        if rec["state"] == "queued" and rec.get("opened") and rec.get("lastBlock") in OPENED_WAIT_BLOCKS and \
+                now - J._int(rec.get("blockedSince")) > OPENED_WAIT_MS and \
+                J._int(rec.get("blockedSince")) > since_ms - OPENED_WAIT_MS:
+            items.append({"kind": "mail-opened-wait", "id": rec["id"], "to": rec["to"], "short": J.short_name(rec["to"]),
+                          "text": "", "reason": rec.get("lastBlock"), "task": rec.get("task"), "at": now})
         if rec["state"] == "queued" and rec.get("lastBlock") == "draft" and \
                 now - J._int(rec.get("blockedSince")) > 30 * 60 * 1000 and J._int(rec.get("blockedSince")) > since_ms - 60000:
             items.append({"kind": "mail-draft", "id": rec["id"], "to": rec["to"], "short": J.short_name(rec["to"]),
                           "text": "", "reason": "draft", "task": rec.get("task"), "at": now})
     return items, max_at
 
+
+OPENED_WAIT_BLOCKS = ("waiting", "selector", "screen-unknown", "no-claude", "unknown", "dead")
+OPENED_WAIT_MS = 2 * 60 * 1000
 
 MAIL_LINE = {
     "mail-reply": "✉ {short} odpověděla na {id}: «{text}»",
@@ -1229,6 +1305,7 @@ MAIL_LINE = {
     "mail-approved": "✉ {id} pro {short}: Lukáš řekl ano, je ve frontě",
     "mail-dropped": "✉ {id} pro {short}: bez Lukášova ano, zahozena",
     "mail-draft": "✉ {id} nelze doručit: v {short} je přes 30 min rozepsaný vstup",
+    "mail-opened-wait": "✉ {id}: nová session {short} čeká na potvrzení důvěry ke složce (nebo jiný dialog), zadání čeká ve frontě",
 }
 MAIL_SAY = {
     "mail-reply": "{spoken} odpověděla.",
@@ -1239,6 +1316,7 @@ MAIL_SAY = {
     "mail-approved": "Zpráva pro {spoken} je ve frontě.",
     "mail-dropped": "Zprávu pro {spoken} jsem zahodil.",
     "mail-draft": "Do {spoken} nejde doručit, má rozepsaný vstup.",
+    "mail-opened-wait": "{spoken} čeká na potvrzení důvěry ke složce, zadání čeká.",
 }
 
 

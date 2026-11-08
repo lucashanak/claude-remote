@@ -193,12 +193,14 @@ def read_cursor(env):
     return None
 
 
-def write_cursor(env, gen, at, mail_at=None, watch_at=None):
+def write_cursor(env, gen, at, mail_at=None, watch_at=None, ops_at=None):
     d = {"gen": gen, "at": at}
     if mail_at is not None:
         d["mailAt"] = mail_at
     if watch_at is not None:
         d["watchAt"] = watch_at
+    if ops_at is not None:
+        d["opsAt"] = ops_at
     J.atomic_write(env.path("cursor"), json.dumps(d))
 
 
@@ -232,20 +234,25 @@ def cmd_delta(env, a, now):
     # F2b: fired watches and task proofs, on top ("Splněno: …"); their own cursor, like the mail's
     watch_since = _i((cur or {}).get("watchAt")) or _i((cur or {}).get("at")) or now - 3600 * 1000
     done, watch_at = JW.notices(env, watch_since)
+    # F4: results of actions Lukáš approved (the hook or the app ran them, Jarvis did not see it), drops, expiries
+    ops_since = _i((cur or {}).get("opsAt")) or _i((cur or {}).get("at")) or now - 3600 * 1000
+    ops, ops_at = _ops_items(env, ops_since, now)
     _task_status(env, mail, sessions)
     if not a.peek and (st or cur):
         if st:
-            write_cursor(env, gen, _i(st.get("at")), mail_at, watch_at)
+            write_cursor(env, gen, _i(st.get("at")), mail_at, watch_at, ops_at)
         else:
-            write_cursor(env, _i(cur.get("gen")), _i(cur.get("at")), mail_at, watch_at)
+            write_cursor(env, _i(cur.get("gen")), _i(cur.get("at")), mail_at, watch_at, ops_at)
     busy_n = sum(1 for s in vis.values() if s.get("state") == "busy")
     if a.json:
         return _dump({"gen": gen, "from": (cur or {}).get("gen"), "first": first, "warning": warn, "items": items,
-                      "done": done, "mail": mail, "unchanged": len(vis) - len(picked), "busy": busy_n})
+                      "done": done, "mail": mail, "ops": ops, "unchanged": len(vis) - len(picked), "busy": busy_n})
     if a.say:
         notable = [i for i in items if i["kind"] not in ("busy", "cleared", "idle")]
         empty = "Nic nového." + (f" {works_cz(busy_n)}." if busy_n else "")
-        txt = say_list(notable, empty if not (mail or done) else "")
+        txt = say_list(notable, empty if not (mail or done or ops) else "")
+        if ops:
+            txt = " ".join(_ops_say(i) for i in ops[:SAY_MAX]) + (" " + txt if txt else "")
         if mail:
             txt = (txt + " " if txt else "") + " ".join(_mail_say(i) for i in mail[:SAY_MAX])
         if done:
@@ -255,13 +262,32 @@ def cmd_delta(env, a, now):
     lines = [head] + ([f"⚠ {warn}"] if warn else [])
     main = [i for i in items if i["kind"] != "busy"]
     busy = [i for i in items if i["kind"] == "busy"]
-    body = [JW.notice_line(i) for i in done] + [_mail_line(i) for i in mail] + [line_of(i) for i in main]
+    body = [JW.notice_line(i) for i in done] + [_ops_line(i) for i in ops] + [_mail_line(i) for i in mail] \
+        + [line_of(i) for i in main]
     if busy:
         body.append("~ pracuje: " + ", ".join(i["short"] for i in busy))
     if not body:
         body = ["nic nového"]
     tail = f"+{len(vis) - len(picked)} beze změny"
     return fit(lines + body, a.max_chars or 1500, tail)
+
+
+def _ops_items(env, since, now):
+    try:
+        import jarvisops as JO
+        return JO.digest_items(env, since, now)
+    except Exception:  # noqa: BLE001  a broken F4 module must not cost the delta
+        return [], since
+
+
+def _ops_line(i):
+    import jarvisops as JO
+    return JO.ops_line(i)
+
+
+def _ops_say(i):
+    import jarvisops as JO
+    return JO.ops_say(i)
 
 
 def _task_status(env, mail, sessions):
@@ -486,7 +512,16 @@ def briefing_data(env, which, now):
     reminders = sorted((r for r in JA.Reminders(env).fold().values() if r["state"] == "open" and r["due"] <= horizon),
                        key=lambda r: r["due"])
     mode, until = JA.read_mode(env, now)
+    stale = []
+    if which == "morning":
+        try:
+            import jarvisops as JO
+            if JO.stale_due(env, now):
+                stale = [r["short"] for r in JO.stale(env, now, sessions=sessions)]
+        except Exception:  # noqa: BLE001
+            stale = []
     return {"which": which, "at": now, "since": since, "warning": warn, "counts": counts, "total": len(vis),
+            "stale": stale,
             "inbox": wait, "tasks": tasks, "happened": happened, "alerts": len(alerts),
             "alertsBlock": sum(1 for a in alerts if a["kind"] in ("block", "incident")),
             "closed": [{"short": J.short_name(c["name"]), "title": c.get("title")} for c in closed],
@@ -556,7 +591,16 @@ def briefing_say(d):
     u = usage_say(d["usage"])
     if u:
         out.append(u)
+    out += _stale_say(d)
     return " ".join(out)
+
+
+def _stale_say(d):
+    n = len(d.get("stale") or [])
+    if not n:
+        return []
+    num = "jednu" if n == 1 else J.num_f(n)
+    return [f"Můžu zavřít {num} {J.plural(n, 'starou session', 'staré sessions', 'starých sessions')}. Chcete?"]
 
 
 def briefing_text(d):
@@ -586,6 +630,9 @@ def briefing_text(d):
     ul = usage_line(d["usage"])
     if ul:
         lines.append("Limity: " + ul)
+    if d.get("stale"):
+        lines.append(" ".join(_stale_say(d)) + " (týden nečinné, bez změn, úkolu a pošty: "
+                     + ", ".join(d["stale"][:10]) + "; cr-sessions stale, zavřít jen po Lukášově ano)")
     return "\n".join(lines)
 
 
@@ -631,6 +678,13 @@ def cmd_briefing(env, a, now):
         return None
     d = briefing_data(env, a.which, now)
     summary = llm_summary(env, briefing_text(d)) if a.summary and not a.say else None
+    if d.get("stale") and not a.json:
+        # F4: offered once a week; told = said (text or voice), the app's --json reading does not count
+        try:
+            import jarvisops as JO
+            JO.stale_told(env, now, len(d["stale"]))
+        except Exception:  # noqa: BLE001
+            pass
     if a.json:
         return _dump(dict(d, summary=summary))
     if a.say:

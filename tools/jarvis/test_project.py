@@ -256,14 +256,36 @@ class GateTest(unittest.TestCase):
     def test_allowlist_f2a(self):
         # reply is the addressee's, on is Lukáš's switch, prompt-seen is the hook's (it would mint a "fresh prompt"),
         # F3: approve/reject are the app's yes/no on a proposal, never Jarvis's
-        self.assertEqual(load_gate().ALLOWED, {"cr-sessions": {"list", "show", "tail"},
+        self.assertEqual(load_gate().ALLOWED, {"cr-sessions": {"list", "show", "tail", "open", "check-close", "close",
+                                                               "closed", "reopen", "stale", "pick-account"},
                                                "cr-digest": {"delta", "brief", "waiting", "usage", "briefing"},
                                                "cr-mail": {"send", "status", "inbox", "cancel", "off", "audit"},
                                                "cr-task": {"add", "list", "show", "done", "fail", "watch",
                                                            "watches", "unwatch", "log", "remind", "reminders",
                                                            "unremind"},
                                                "cr-rules": {"add", "list", "rm"},
-                                               "cr-jarvis": {"mode"}})
+                                               "cr-jarvis": {"mode", "proposals"}})
+
+    def test_f4_commands_pass(self):
+        for c in ("cr-sessions open kontexta", 'cr-sessions open kontexta --alias pdf-sloupce --task "Oprav sloupce v PDF exportu, hotovo až projdou testy."',
+                  "cr-sessions open /home/lucas/kontexta --account lukashanak@kontexta.cz --model opus",
+                  "cr-sessions check-close pdf-sloupce", "cr-sessions check-close pdf-sloupce --json",
+                  "cr-sessions close pdf-sloupce", 'cr-sessions close a b c --reason "staré, týden nečinné"',
+                  "cr-sessions closed", "cr-sessions closed 20 --json", "cr-sessions reopen pdf-sloupce",
+                  "cr-sessions reopen 2026-11-06T17:20:03Z --name claude-server-kontexta-yolo--pdf-2",
+                  "cr-sessions stale", "cr-sessions stale --days 14 --json", "cr-sessions pick-account kontexta",
+                  "cr-jarvis proposals", "cr-jarvis proposals --json"):
+            self.assertAllowed(c)
+
+    def test_f4_attacks_are_blocked(self):
+        # approve / reject are Lukáš's card, run is the hook's runner, --force is Lukáš's shell, cr-session is not ours
+        for c in ("cr-jarvis approve x-20261108T081500-abcd --by app:x", "cr-jarvis reject x-1 --by app:x",
+                  "cr-jarvis run x-20261108T081500-abcd", "cr-sessions close pdf --force",
+                  "cr-session close claude-server-x --token 1.a --force", "cr-session open --name x",
+                  'cr-sessions open kontexta --task "a $(id)"', "cr-sessions open kontexta; id",
+                  "cr-sessions close *", "cr-sessions open ~/../etc", "cr-sessions kill x",
+                  'cr-sessions open kontexta --task "x" > /tmp/y'):
+            self.assertBlocked(c)
 
     def test_f3_commands_pass(self):
         for c in ('cr-rules add --session music-seeker --kind question "Stopy z music-seeker mi nehlas."',

@@ -65,7 +65,8 @@ PRESENCE_EVERY_MS = 15 * 1000
 BATCH_GAP_MS = 5 * 60 * 1000
 BLOCK_STALE_MS = 6 * 3600 * 1000
 REPEAT_MS = 10 * 60 * 1000
-EXPIRE_MS = {"task": 2 * 3600 * 1000, "watch": 3600 * 1000, "reminder": 2 * 3600 * 1000, "incident": 10 * 60 * 1000}
+EXPIRE_MS = {"task": 2 * 3600 * 1000, "watch": 3600 * 1000, "reminder": 2 * 3600 * 1000, "incident": 10 * 60 * 1000,
+             "closed": 2 * 3600 * 1000}
 INCIDENT_N = 8
 INCIDENT_WINDOW_MS = 60 * 1000
 INCIDENT_COOLDOWN_MS = 10 * 60 * 1000
@@ -269,7 +270,8 @@ class Rules(Store):
     def matches(rule, item, sessions=None):
         """Whole-name match against the session's tmux name, short name, alias or folder: no globs, so a rule says
         exactly which sessions it covers (and the gate needs no `*` in an argument)."""
-        if item.get("sub") in NEVER_SILENCED or item["src"] in ("incident", "reminder"):
+        # F4 "Zavřel jsem X." is the receipt of an act with its undo ("Vrátit"), not news: no rule silences it
+        if item.get("sub") in NEVER_SILENCED or item["src"] in ("incident", "reminder", "closed"):
             return False
         m = rule.get("match") or {}
         kind = m.get("kind") or "*"
@@ -602,7 +604,7 @@ class AlertWorker:
         cur = self.s["cur"]
         if cur is None:
             # first run: nothing from before the alerts existed is news
-            self.s["cur"] = {"mail": now, "watch": now, "task": now}
+            self.s["cur"] = {"mail": now, "watch": now, "task": now, "ops": now}
             cur = self.s["cur"]
         by_id = {m["id"]: m for m in mails}
         # mail: replies and final failures of a task's mail
@@ -653,6 +655,22 @@ class AlertWorker:
                 t = tasks.get(e["id"]) or {}
                 self._add(now, src="task", sub=e["ev"], task=e["id"], name=t.get("to"), at=at, wake=False)
         cur["task"] = tx
+        # F4: sessions Jarvis closed. One line each, with the tmux name in the last field: the app offers "Vrátit"
+        # when closed.jsonl has that name's newest record by "jarvis" younger than 24 h (the contract: no new field)
+        if cur.get("ops") is None:
+            cur["ops"] = now
+        ox = _i(cur.get("ops"))
+        try:
+            import jarvisops as JO
+            evs = JO.Ops(self.env, mail=self.mail).ledger(_i(cur.get("ops")))
+        except Exception:  # noqa: BLE001
+            evs = []
+        for e in evs:
+            ox = max(ox, e["at"])
+            if e.get("ev") == "closed" and e.get("by") == "jarvis" and isinstance(e.get("name"), str):
+                self._add(now, src="closed", sub="closed", name=e["name"], at=e["at"],
+                          text=f"Zavřel jsem {J.short_name(e['name'])}.")
+        cur["ops"] = ox
         # reminders that are due: fired under the store's lock, so one is never told twice
         for r in self.reminders.fold().values():
             if r["state"] != "open" or r["due"] > now:
@@ -668,7 +686,8 @@ class AlertWorker:
         it.setdefault("name", None)
         # §3 point 1: a fired watch and a reminder are things Lukáš asked to hear (HNED), like a task's result; `info`
         # stays for news that is no reason to disturb him (the watch vibrates on block|done|incident)
-        it["kind"] = {"task": "done", "watch": "done", "reminder": "done", "incident": "incident"}[it["src"]]
+        it["kind"] = {"task": "done", "watch": "done", "reminder": "done", "incident": "incident",
+                      "closed": "done"}[it["src"]]
         key = (it["src"], it.get("sub"), it.get("task"), it.get("name"), it.get("at"))
         if any((i["src"], i.get("sub"), i.get("task"), i.get("name"), i.get("at")) == key for i in self.s["items"]):
             return
@@ -717,6 +736,17 @@ class AlertWorker:
             self._persist()
             for it in incidents:
                 self._write(now, "incident", it["text"], None)
+        # F4: each close on its own line at once (outside the 5-minute batch, which would replace the name with `-`
+        # and so lose the app's "Vrátit"); a mode that holds `done` back holds these too (dnd)
+        closed = [it for it in self.s["items"] if it["src"] == "closed" and allowed_by_mode(it, mode)]
+        if closed:
+            ids = {id(it) for it in closed}
+            self.s["items"] = [i for i in self.s["items"] if id(i) not in ids]
+            for _ in closed:
+                self._count(now, "alerts")
+            self._persist()
+            for it in closed:
+                self._write(now, "done", it["text"], it["name"])
         if now - self.s["lastEmit"] < BATCH_GAP_MS:
             return
         sentences, names, kinds, sent, woke = [], [], [], [], []

@@ -15,6 +15,17 @@ fresh prompt of Lukáš's (≤ 10 min): `normal` freely (louder); a quiet mode o
 ("nerušit", "neruš", "dnd", "jen blokující", "jen důležité" — the hook records the flag, never the text), and `dnd`
 only with --until/--for ≤ 12 h (rev-f3 MED1: a quiet mode silences more than any rule). `blocking` has no end time in
 the contract; it still lets every block, task result, reminder and incident through. Exit codes: 0, 2, 1.
+
+F4, the general proposals (mail and actions, the contract with the app):
+    cr-jarvis proposals [--json]                            every pending proposal: [{id, kind: mail|open|close|restore,
+                                                            target, title, detail, created, expires}] (ms)
+    cr-jarvis approve|reject <id> --by app:<installId>      Lukáš's yes / no from the app's card; an `m-…` goes to the
+                                                            mail (`cr-mail approve|reject`), an `x-…` runs at once here;
+                                                            a bulk close is handed to the detached runner and answers
+                                                            `RUNNING …` at once (its result comes as alerts)
+    cr-jarvis run <x-id>                                    an APPROVED action (the prompt hook starts it detached)
+approve / reject are refused inside any Claude session (Jarvis's pane above all), like cr-mail's. `proposals` only
+reads. `target` of a bulk close is the names separated by spaces (`targets` holds the list).
 """
 import argparse
 import json
@@ -25,6 +36,7 @@ sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
 import jarvislib as J  # noqa: E402
 import jarvismail as M  # noqa: E402
 import jarvisalert as JA  # noqa: E402
+import jarvisops as JO  # noqa: E402
 
 FOR_MAX_MS = 24 * 3600 * 1000
 JARVIS_DND_MAX_MS = 12 * 3600 * 1000
@@ -50,7 +62,64 @@ def caller(env, m, now, mode=None):
     raise Refused("režim Jarvise mění jen Lukáš, nebo Jarvis na jeho pokyn; ne pracovní session")
 
 
-def main(argv=None, env=None, out=None, err=None, mail=None):
+def cmd_proposals(env, a, out, m, ops):
+    now = env.now_ms()
+    props = ops.proposals(now)
+    if a.json:
+        out.write(json.dumps(props, ensure_ascii=False, indent=1) + "\n")
+        return 0
+    out.write(f"[cr-jarvis proposals: {M.DATA_NOTE}]\n")
+    for p in props:
+        left = max(0, (p["expires"] - now) // 60000)
+        out.write(f"{p['id']} · {p['kind']} · {p['title']} · propadne za {left} min\n  «{M.data_text(p['detail'], 300)}»\n")
+    if not props:
+        out.write("žádný čekající návrh\n")
+    return 0
+
+
+def cmd_decide(env, a, out, m, ops):
+    import cr_mail
+    why = cr_mail.decide_refusal(m, a)
+    if why:
+        raise Refused(why.replace("cr-mail", "cr-jarvis"))
+    ok = a.cmd == "approve"
+    if M.ID_RE.fullmatch(a.id):
+        why = m.decide_by_app(a.id, ok, a.by)
+        if why:
+            raise Refused(why)
+        out.write(f"{a.id} {'schválena, je ve frontě' if ok else 'zahozena'}\n")
+        return 0
+    if not JO.ID_RE.fullmatch(a.id):
+        raise Refused("id návrhu je m-… nebo x-…")
+    try:
+        rec = ops.get(a.id) or {}
+        if ok and rec.get("kind") == "close" and len(rec.get("targets") or []) > 1:
+            # a bulk close may outlast the app's 35 s: approved here, run by the same detached runner as the hook's
+            rec, _ = ops.decide(a.id, True, a.by, run=False)
+            ops.spawn(a.id)
+            n = len(rec["targets"])
+            out.write(f"RUNNING zavírám {n} {J.plural(n, 'session', 'sessions', 'sessions')}, výsledek přijde jako "
+                      f"upozornění.\n")
+            return 0
+        rec, msg = ops.decide(a.id, ok, a.by)
+    except JO.Refused as e:
+        raise Refused(str(e))
+    out.write(msg + "\n")
+    return 0 if (not ok or rec.get("state") == "done") else 1
+
+
+def cmd_run(env, a, out, m, ops):
+    if not JO.ID_RE.fullmatch(a.id):
+        raise Refused("id akce je x-…")
+    try:
+        rec, msg = ops.run(a.id)
+    except JO.Refused as e:
+        raise Refused(str(e))
+    out.write(msg + "\n")
+    return 0 if rec.get("state") == "done" else 1
+
+
+def main(argv=None, env=None, out=None, err=None, mail=None, ops=None):
     out, err = out or sys.stdout, err or sys.stderr
     ap = argparse.ArgumentParser(prog="cr-jarvis", description="Jarvis switches (F3).")
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -60,11 +129,29 @@ def main(argv=None, env=None, out=None, err=None, mail=None):
     p.add_argument("--for", dest="for_")
     p.add_argument("--json", action="store_true")
     p.add_argument("--say", action="store_true")
+    p = sub.add_parser("proposals")
+    p.add_argument("--json", action="store_true")
+    for c in ("approve", "reject"):
+        p = sub.add_parser(c)
+        p.add_argument("id")
+        p.add_argument("--by", required=True)
+    p = sub.add_parser("run")
+    p.add_argument("id")
     a = ap.parse_args(argv)
     env = env or J.Env()
     m = mail or M.Mail(env)
     now = env.now_ms()
     old = os.umask(0o077)
+    if a.cmd != "mode":
+        try:
+            ops = ops or JO.Ops(env, mail=m)
+            return {"proposals": cmd_proposals, "approve": cmd_decide, "reject": cmd_decide, "run": cmd_run}[a.cmd](
+                env, a, out, m, ops)
+        except Refused as e:
+            err.write(f"cr-jarvis: {e}\n")
+            return 2
+        finally:
+            os.umask(old)
     try:
         if a.mode:
             by = caller(env, m, now, a.mode)

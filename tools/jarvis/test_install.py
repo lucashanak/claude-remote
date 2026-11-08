@@ -35,7 +35,7 @@ class InstallTest(unittest.TestCase):
         self.assertEqual(sorted(os.listdir(cur)), ["SHA256SUMS", "cr_digest.py", "cr_jarvis.py", "cr_mail.py",
                                                    "cr_rules.py", "cr_sessions.py", "cr_task.py", "jarvis_d.py",
                                                    "jarvisalert.py", "jarvislib.py", "jarvismail.py",
-                                                   "jarviswatch.py"])
+                                                   "jarvisops.py", "jarviswatch.py"])
         for b, f in (("cr-sessions", "cr_sessions.py"), ("cr-digest", "cr_digest.py"), ("jarvis-d", "jarvis_d.py"),
                      ("cr-rules", "cr_rules.py"), ("cr-jarvis", "cr_jarvis.py")):
             p = os.path.join(self.prefix, "bin", b)
