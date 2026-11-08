@@ -169,8 +169,15 @@ object WearNotifier {
             .setOnlyAlertOnce(silentUpdate)
             .setSilent(silent)
 
-        buildApproval(context, builder, session)
-        if (WaitingRules.dialogKind(session.prompt) == WaitingRules.DialogKind.QUESTION) buildReply(context, builder, session)
+        val kind = WaitingRules.dialogKind(session.prompt)
+        if (kind == null) {
+            // An approval the phone cannot name (review H1): shown, so Lukáš knows something waits, but with no Ano/Ne —
+            // the phone would refuse an answer it cannot check. The whole text says where to answer.
+            val text = WaitingRules.UNNAMED_TEXT + if (body.isBlank()) "" else "\n$body"
+            builder.setContentText(WaitingRules.UNNAMED_TEXT).setStyle(NotificationCompat.BigTextStyle().bigText(text))
+        }
+        buildApproval(context, builder, session, actions = kind != null)
+        if (kind == WaitingRules.DialogKind.QUESTION) buildReply(context, builder, session)
 
         NotificationManagerCompat.from(context).notify(notifId, builder.build())
         WearLog.i(
@@ -260,6 +267,26 @@ object WearNotifier {
     fun refusalShowing(sessionId: String): Boolean =
         refusalShownAt[sessionId]?.let { android.os.SystemClock.elapsedRealtime() - it < REFUSAL_HOLD_MS } == true
 
+    /**
+     * A per-session "hotovo" an older build left on the wrist (review L7): the waiting-for-input channel and a session
+     * notification id. This build never posts one, so after the update they would hang there until swiped.
+     */
+    internal fun isStaleCompletion(channelId: String?, id: Int): Boolean =
+        channelId == CHANNEL_WAITING && id in 0x2000_0000..0x3FFF_FFFF
+
+    /** Once per install of this build: take the older build's completion notifications down. */
+    fun clearStaleCompletionsOnce(context: Context) {
+        val prefs = context.getSharedPreferences(PREFS_ONCE, Context.MODE_PRIVATE)
+        if (prefs.getBoolean(KEY_STALE_CLEARED, false)) return
+        val nm = context.getSystemService(NotificationManager::class.java) ?: return
+        runCatching {
+            val stale = nm.activeNotifications.filter { isStaleCompletion(it.notification.channelId, it.id) }
+            stale.forEach { nm.cancel(it.id) }
+            WearLog.i(context, TAG, "cleared ${stale.size} completion notification(s) of the older build")
+        }.onFailure { e -> WearLog.w(context, TAG, "stale completions not cleared: ${e.message}") }
+        prefs.edit().putBoolean(KEY_STALE_CLEARED, true).apply()
+    }
+
     fun cancelSession(context: Context, sessionId: String) {
         NotificationManagerCompat.from(context).cancel(notifIdFor(sessionId))
     }
@@ -271,10 +298,14 @@ object WearNotifier {
     fun openAppIntent(context: Context): Intent =
         Intent(context, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP)
 
-    private fun buildApproval(context: Context, builder: NotificationCompat.Builder, session: WearSessionInfo) {
+    private fun buildApproval(context: Context, builder: NotificationCompat.Builder, session: WearSessionInfo, actions: Boolean) {
         builder.setPriority(NotificationCompat.PRIORITY_HIGH)
             .setCategory(NotificationCompat.CATEGORY_CALL)
+        if (actions) addApproveActions(context, builder, session)
+        addFullScreenWake(context, builder, session)
+    }
 
+    private fun addApproveActions(context: Context, builder: NotificationCompat.Builder, session: WearSessionInfo) {
         // Text labels (not just ✓/✗) so TalkBack announces them meaningfully.
         builder.addAction(
             NotificationCompat.Action.Builder(0, "Ano", approvePending(context, session.id, "y", session.prompt)).build()
@@ -282,7 +313,9 @@ object WearNotifier {
         builder.addAction(
             NotificationCompat.Action.Builder(0, "Ne", approvePending(context, session.id, "n", session.prompt)).build()
         )
+    }
 
+    private fun addFullScreenWake(context: Context, builder: NotificationCompat.Builder, session: WearSessionInfo) {
         // Full-screen intent → WakeAndConfirmActivity trampoline wakes an
         // asleep/ambient screen (system fires it immediately when off/locked,
         // degrades to a heads-up when the screen's already on). It hands off
@@ -388,5 +421,7 @@ object WearNotifier {
 
     private const val TAG = "WearNotifier"
     private const val CHANNEL_APPROVAL = "claude_approval"
-    private const val CHANNEL_WAITING = "claude_waiting"
+    internal const val CHANNEL_WAITING = "claude_waiting"
+    private const val PREFS_ONCE = "wear_notifier_once"
+    private const val KEY_STALE_CLEARED = "stale_completions_cleared_v1"
 }

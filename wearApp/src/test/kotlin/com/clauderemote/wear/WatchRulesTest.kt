@@ -5,6 +5,7 @@ import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.json.Json
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
@@ -49,10 +50,32 @@ class WatchRulesTest {
         }
     }
 
-    @Test fun anApprovalNobodyCanVouchForIsNotPosted() {
-        // the phone sends no dialog identity (screen-only, older phone): Ano/Ne could not be checked, Jarvis' block covers it
-        assertEquals(Action.Skip, decide(seen("WORKING", null), row(prompt = null)).action)
-        assertEquals(Action.Skip, decide(seen("WORKING", null), row(prompt = "PERMISSION:")).action)
+    // review H1: an approval the phone cannot name (screen-only, hookev.off, no hooks) still reaches the wrist
+    @Test fun anApprovalNobodyCanNameIsShownWithoutButtons() {
+        for (p in listOf(null, "PERMISSION:", "READY:stop-1")) {
+            val r = decide(seen("WORKING", null), row(prompt = p))
+            assertEquals(Action.Post(alert = true), r.action, "$p")
+            assertEquals(WatchNotifyDecision.UNNAMED, r.baseline!!.activity)
+            assertEquals(Action.Skip, decide(r.baseline, row(prompt = p)).action, "$p: once")
+            assertEquals(Action.Cancel, decide(r.baseline, row(activity = "WORKING", prompt = "INSTRUCTION:instruction")).action)
+            assertEquals(Action.Cancel, decide(r.baseline, null).action, "tab gone")
+        }
+        val r = decide(seen("WORKING", null), row(prompt = null))
+        assertEquals(Action.Repair, decide(r.baseline, row(prompt = null), body = 9).action, "a corrected text")
+    }
+
+    // review M3: a push without the identity in the middle of an open dialog must not lose its notification
+    @Test fun aNamedDialogThatLosesItsNameForAPushStaysOnTheWrist() {
+        val a = decide(seen("WORKING", null), row(prompt = "PERMISSION:A"))
+        assertEquals(Action.Post(alert = true), a.action)
+        val unnamed = decide(a.baseline, row(prompt = null))
+        assertEquals(Action.Post(alert = false), unnamed.action, "turned into the info form quietly, not cancelled")
+        val back = decide(unnamed.baseline, row(prompt = "PERMISSION:A"))
+        assertEquals(Action.Post(alert = false), back.action, "the same dialog back with its buttons, quietly")
+        assertEquals(Action.Skip, decide(back.baseline, row(prompt = "PERMISSION:A")).action)
+        // seen first unnamed, then the phone names it: Lukáš was alerted already
+        val u = decide(seen("WORKING", null), row(prompt = null))
+        assertEquals(Action.Post(alert = false), decide(u.baseline, row(prompt = "PERMISSION:B")).action)
     }
 
     @Test fun aDialogThatEndsIsTakenDown() {
@@ -65,10 +88,20 @@ class WatchRulesTest {
         assertEquals(Action.Skip, decide(seen("WORKING", null), null).action)
     }
 
-    @Test fun aSessionNeverSeenIsRecordedAsAnnounced() {
-        val r = decide(null, row())
+    @Test fun aSessionNeverSeenIsRecordedAsAnnouncedOnlyWhileSeeding() {
+        val r = WatchNotifyDecision.decide(null, row(), 1, seeding = true)
         assertEquals(Action.Skip, r.action)
         assertEquals(Action.Skip, decide(r.baseline, row()).action, "and stays quiet on the next push")
+        val u = WatchNotifyDecision.decide(null, row(prompt = null), 1, seeding = true)
+        assertEquals(Action.Skip, u.action)
+        assertEquals(Action.Skip, decide(u.baseline, row(prompt = null)).action)
+    }
+
+    // review M4: outside a fresh install, a session never seen whose first push is a dialog is announced
+    @Test fun aNewSessionWhoseFirstPushIsADialogIsAnnounced() {
+        assertEquals(Action.Post(alert = true), decide(null, row()).action)
+        assertEquals(Action.Post(alert = true), decide(null, row(prompt = null)).action, "unnamed too")
+        assertEquals(Action.Skip, decide(null, row(activity = "WORKING", prompt = null)).action)
     }
 
     @Test fun aBaselineFromTheOldWatchAnnouncesAWaitingDialogOnce() {
@@ -85,8 +118,8 @@ class WatchRulesTest {
     @Test fun aLostPhoneLinkChangesNothing() {
         val d = decide(seen("APPROVAL_NEEDED"), row(activity = "DISCONNECTED", prompt = null))
         assertEquals(Action.Skip, d.action, "no cancel into DISCONNECTED")
-        // back with the same dialog: shown again quietly, no second vibration
-        assertEquals(Action.Post(alert = false), decide(d.baseline, row()).action)
+        // back with the same dialog: the notification never went, nothing to do
+        assertEquals(Action.Skip, decide(d.baseline, row()).action)
         // back with a new one: it is new
         assertEquals(Action.Post(alert = true), decide(d.baseline, row(prompt = "PERMISSION:perm-9")).action)
     }
@@ -111,10 +144,11 @@ class WatchRulesTest {
             row("f", activity = "IDLE", prompt = null),
         )
         val items = WaitingRules.items(sessions, listOf(proposal("m-1"), proposal("x-2")))
-        assertEquals(listOf("ask:d:QUESTION:q1", "ask:c:PERMISSION:p1", "prop:m-1", "prop:x-2"), items.map { it.key })
-        val ask = items[0] as WaitingRules.Item.Ask
+        assertEquals(listOf("ask:e:null", "ask:d:QUESTION:q1", "ask:c:PERMISSION:p1", "prop:m-1", "prop:x-2"), items.map { it.key })
+        assertNull((items[0] as WaitingRules.Item.Ask).kind, "an unnamed approval: a card without buttons (H1)")
+        val ask = items[1] as WaitingRules.Item.Ask
         assertEquals(WaitingRules.DialogKind.QUESTION, ask.kind)
-        assertEquals(2, WaitingRules.askCount(sessions))
+        assertEquals(3, WaitingRules.askCount(sessions))
         assertTrue(WaitingRules.items(sessions.take(2), emptyList()).isEmpty(), "nothing waits: Klid, pane.")
     }
 
@@ -173,5 +207,62 @@ class WatchRulesTest {
         assertEquals(false, JarvisWatchStore.expired(p, atElapsed = 5_000, nowElapsed = 5_999))
         assertEquals(true, JarvisWatchStore.expired(p, atElapsed = 5_000, nowElapsed = 6_000))
         assertEquals(false, JarvisWatchStore.expired(p.copy(expiresInMs = null), 0, Long.MAX_VALUE))
+    }
+
+    // ── review fixes L6–L8, M5 ──────────────────────────────────────────────────────────────────────────────
+
+    @Test fun aProposalWhoseTextChangedMustBeScrolledAgain() {
+        val p = proposal("m-1")
+        val seen = listOf(WaitingRules.endKey(p))
+        assertTrue(WaitingRules.canApprove(p, seen, expired = false, busy = false))
+        val changed = p.copy(text = "Jiný text")
+        assertFalse(WaitingRules.canApprove(changed, seen, expired = false, busy = false), "same id, new text: not seen")
+        assertFalse(WaitingRules.canApprove(p, seen, expired = true, busy = false))
+        assertFalse(WaitingRules.canApprove(p, seen, expired = false, busy = true))
+        assertFalse(WaitingRules.canApprove(p.copy(fullText = false), listOf(WaitingRules.endKey(p.copy(fullText = false))), false, false))
+    }
+
+    @Test fun aProposalsReadNobodyAnswersStopsLoading() {
+        JarvisWatchStore.proposals.value = null
+        val t = JarvisWatchStore.beginProposals(periodic = false)
+        assertTrue(JarvisWatchStore.proposalsLoading.value)
+        JarvisWatchStore.proposalsTimedOut(t)
+        assertFalse(JarvisWatchStore.proposalsLoading.value)
+        assertEquals(JarvisWatchStore.NO_ANSWER, JarvisWatchStore.proposals.value!!.error)
+        // an older read's timeout does not touch a newer one
+        val t1 = JarvisWatchStore.beginProposals(periodic = false)
+        val t2 = JarvisWatchStore.beginProposals(periodic = false)
+        JarvisWatchStore.proposalsTimedOut(t1)
+        assertTrue(JarvisWatchStore.proposalsLoading.value)
+        JarvisWatchStore.proposalsTimedOut(t2)
+        // a failed minute tick with cards on screen and no warning changes nothing
+        JarvisWatchStore.proposals.value = JarvisWatchStore.Proposals(listOf(proposal("m-1")), 5, null)
+        JarvisWatchStore.proposalsTimedOut(JarvisWatchStore.beginProposals(periodic = true))
+        assertNull(JarvisWatchStore.proposals.value!!.error)
+        assertEquals(1, JarvisWatchStore.proposals.value!!.items.size)
+        assertFalse(JarvisWatchStore.proposalsLoading.value)
+    }
+
+    @Test fun completionsOfTheOlderBuildAreRecognised() {
+        assertTrue(WearNotifier.isStaleCompletion(WearNotifier.CHANNEL_WAITING, 0x2000_0001))
+        assertFalse(WearNotifier.isStaleCompletion("claude_approval", 0x2000_0001), "a dialog stays")
+        assertFalse(WearNotifier.isStaleCompletion("jarvis_quiet", 0x2A11_0001), "Jarvis' own")
+        assertFalse(WearNotifier.isStaleCompletion(WearNotifier.CHANNEL_WAITING, 0x1000_0000), "not a session id")
+        assertFalse(WearNotifier.isStaleCompletion(null, 0x2000_0001))
+    }
+
+    @Test fun aDecisionResultReachesTheWatchWithTheAppClosed() {
+        assertTrue(WatchMessageRouting.notifyDecision(appVisible = false))
+        assertFalse(WatchMessageRouting.notifyDecision(appVisible = true), "the open app shows it on the Čeká page")
+        val manifest = java.io.File("src/main/AndroidManifest.xml").readText()
+        assertTrue("android:path=\"/jarvis-decide-result\"" in manifest, "the background service is woken for it")
+        val r = JarvisWatchStore.decideResult("""{"id":"m-1","ok":true,"text":"Zahozeno – Návrh zprávy → x","future":1}""".toByteArray())
+        assertEquals("m-1", r!!.id)
+    }
+
+    @Test fun theMinuteTickAsksForAPollRead() {
+        val json = Json { encodeDefaults = true }
+        assertEquals("""{"periodic":true}""", json.encodeToString(WearJarvisProposalsRequest.serializer(), WearJarvisProposalsRequest(true)))
+        assertEquals("""{"periodic":false}""", json.encodeToString(WearJarvisProposalsRequest.serializer(), WearJarvisProposalsRequest()))
     }
 }

@@ -69,9 +69,18 @@ fun sendJarvisUndo(context: Context, serverId: String, tmux: String, onResult: (
     sendToPhone(context, "/jarvis-undo", json.toByteArray(Charsets.UTF_8), onResult)
 }
 
+/**
+ * Body of /jarvis-proposals-request (mirror of shared's WatchProposalsRequest). [periodic] = the page's minute tick: the
+ * phone reads with a poll permit, which a busy server may skip (review L8). An older phone ignores the body.
+ */
+@Serializable
+data class WearJarvisProposalsRequest(val periodic: Boolean = false)
+
 /** The Čeká page asks for Jarvis' proposals; the phone answers on /jarvis-proposals (see [JarvisWatchStore]). */
-fun sendJarvisProposalsRequest(context: Context, onResult: (String) -> Unit = {}) =
-    sendToPhone(context, "/jarvis-proposals-request", ByteArray(0), onResult)
+fun sendJarvisProposalsRequest(context: Context, periodic: Boolean, onResult: (String) -> Unit = {}) {
+    val json = MESSAGING_JSON.encodeToString<WearJarvisProposalsRequest>(WearJarvisProposalsRequest(periodic))
+    sendToPhone(context, "/jarvis-proposals-request", json.toByteArray(Charsets.UTF_8), onResult)
+}
 
 /**
  * "Poslat"/"Provést"/"Zahodit" of a proposal card. [textHash] = hash of the text the card showed: the phone reads the

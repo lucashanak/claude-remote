@@ -62,23 +62,63 @@ object JarvisWatchStore {
     fun expired(p: WearJarvisProposal, atElapsed: Long, nowElapsed: Long = SystemClock.elapsedRealtime()): Boolean =
         p.expiresInMs != null && nowElapsed - atElapsed >= p.expiresInMs
 
+    /** How long a proposals read may stay unanswered before the page stops saying "Načítám" (review L7). */
+    const val PROPOSALS_TIMEOUT_MS = 20_000L
+    const val NO_ANSWER = "Telefon neodpověděl – je v něm starší verze aplikace, nebo neběží"
+
+    private var requestSeq = 0
+    private var requestPeriodic = false
+
+    /**
+     * A proposals read was sent; the token names it for [proposalsTimedOut]. [periodic] = the page's minute tick, not
+     * the opening of the page: its failure keeps what is shown without a warning (a skipped poll is no news).
+     */
+    @Synchronized
+    fun beginProposals(periodic: Boolean): Int {
+        proposalsLoading.value = true
+        requestPeriodic = periodic
+        return ++requestSeq
+    }
+
+    /**
+     * [token]'s read got no answer in [PROPOSALS_TIMEOUT_MS] (an older phone does not know the request at all, review
+     * L7): stop loading and say why, unless a later read is running or an answer came meanwhile.
+     */
+    @Synchronized
+    fun proposalsTimedOut(token: Int) {
+        if (token != requestSeq || !proposalsLoading.value) return
+        failed(NO_ANSWER)
+    }
+
+    private fun failed(error: String) {
+        proposalsLoading.value = false
+        val prev = proposals.value
+        // A failed tick with cards on screen changes nothing; anything else says it could not read them.
+        if (requestPeriodic && prev != null && prev.error == null) return
+        proposals.value = Proposals(prev?.items.orEmpty(), prev?.atElapsed ?: 0L, error)
+    }
+
+    fun decideResult(data: ByteArray): WearJarvisDecideResult? =
+        runCatching { JSON.decodeFromString<WearJarvisDecideResult>(String(data, Charsets.UTF_8)) }.getOrNull()
+
     /** One phone answer on [path]; true = it was one of ours. */
     fun onMessage(path: String, data: ByteArray): Boolean {
         val text = String(data, Charsets.UTF_8)
         when (path) {
             PATH_PROPOSALS -> {
                 val r = runCatching { JSON.decodeFromString<WearJarvisProposals>(text) }.getOrNull() ?: return true
-                proposalsLoading.value = false
-                // A failed read keeps the cards already shown (with the reason): "nejde načíst" is not "nic nečeká".
-                val prev = proposals.value
-                proposals.value = if (r.ok) {
-                    Proposals(r.items, SystemClock.elapsedRealtime(), null)
-                } else {
-                    Proposals(prev?.items.orEmpty(), prev?.atElapsed ?: 0L, r.error ?: "Návrhy nejdou načíst")
+                synchronized(this) {
+                    // A failed read keeps the cards already shown (with the reason): "nejde načíst" is not "nic nečeká".
+                    if (r.ok) {
+                        proposalsLoading.value = false
+                        proposals.value = Proposals(r.items, SystemClock.elapsedRealtime(), null)
+                    } else {
+                        failed(r.error ?: "Návrhy nejdou načíst")
+                    }
                 }
             }
             PATH_DECIDE_RESULT -> {
-                val r = runCatching { JSON.decodeFromString<WearJarvisDecideResult>(text) }.getOrNull() ?: return true
+                val r = decideResult(data) ?: return true
                 deciding.value = deciding.value - r.id
                 notice.value = r.text
             }
@@ -95,6 +135,17 @@ object JarvisWatchStore {
     const val PATH_PROPOSALS = "/jarvis-proposals"
     const val PATH_DECIDE_RESULT = "/jarvis-decide-result"
     const val PATH_NEWS = "/jarvis-news"
+}
+
+/** Whether the app is on screen (MainActivity onResume/onPause): a decision's result is then shown there, not posted. */
+object AppVisibility {
+    @Volatile var visible: Boolean = false
+}
+
+/** Where a phone answer that arrives in the background service goes. Pure, tested. */
+internal object WatchMessageRouting {
+    /** The result of a decision: a notification only when the app is not on screen (it shows it itself then, M5). */
+    fun notifyDecision(appVisible: Boolean): Boolean = !appVisible
 }
 
 /**

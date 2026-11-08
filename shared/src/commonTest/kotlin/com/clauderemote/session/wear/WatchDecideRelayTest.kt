@@ -75,4 +75,39 @@ class WatchDecideRelayTest {
         assertTrue("IllegalStateException" in answers[0].text)
         assertTrue(relay.submit(req) { answers += it }, "the id is free after a failure")
     }
+
+    // review H2: the proposals read and the news ran on the listener thread too; same scope now, one run per node
+    @Test fun aReadOfTheSameNodeIsCoalescedAndNeverBlocksTheCaller() = runTest {
+        val scope = TestScope(StandardTestDispatcher(testScheduler))
+        val flight = WatchSingleFlight(scope)
+        val gate = CompletableDeferred<Unit>()
+        var runs = 0
+        val answers = mutableListOf<String>()
+        fun read(node: String) = flight.submit(
+            key = "proposals:$node", limitMs = 20_000,
+            run = { runs++; gate.await(); "ok $node" },
+            onTimeout = { "timeout" }, onError = { "error" },
+        ) { answers += it }
+        assertTrue(read("w1"), "returns before the read ran")
+        assertTrue(answers.isEmpty())
+        assertFalse(read("w1"), "the page's tick while its opening read runs: the running read answers")
+        assertTrue(read("w2"), "another watch has its own")
+        gate.complete(Unit)
+        scope.runCurrent()
+        assertEquals(2, runs)
+        assertEquals(listOf("ok w1", "ok w2"), answers.sorted())
+        assertTrue(read("w1"), "free again")
+        scope.runCurrent()
+        assertEquals(3, runs)
+    }
+
+    @Test fun aReadPastItsLimitAnswersWithTheTimeout() = runTest {
+        val scope = TestScope(StandardTestDispatcher(testScheduler))
+        val flight = WatchSingleFlight(scope)
+        val answers = mutableListOf<String>()
+        flight.submit("news:w1", 25_000, run = { awaitCancellation() }, onTimeout = { "timeout" }, onError = { "error" }) { answers += it }
+        scope.advanceTimeBy(25_001)
+        scope.runCurrent()
+        assertEquals(listOf("timeout"), answers)
+    }
 }

@@ -105,4 +105,23 @@ class WatchJarvisTest {
             json.parseToJsonElement(json.encodeToString(WatchJarvis.Recent("a", "done", "t", 1))).jsonObject.keys,
         )
     }
+
+    // review L6: the result of a decision names the proposal (it may arrive as a notification long after the tap)
+    @Test fun aDecisionSentenceNamesTheProposal() {
+        val p = action()
+        assertEquals("Zahozeno – Návrh: zavřít x", WatchJarvis.decideText(p, approve = false, ok = true, cliMessage = "Hotovo"))
+        assertEquals("Návrh: zavřít x: už vyřízeno", WatchJarvis.decideText(p, approve = true, ok = false, cliMessage = "už vyřízeno"))
+        assertEquals("Provedeno: zavřít x", WatchJarvis.decideText(p, approve = true, ok = true, cliMessage = "Hotovo"))
+        assertEquals("Návrh: zavřít x: Zavřeno.", WatchJarvis.decideText(p, approve = true, ok = true, cliMessage = "Zavřeno."))
+        assertEquals("Návrh: zavřít x: Návrh vypršel", WatchJarvis.refusalText(p, "Návrh vypršel"))
+        assertEquals("Návrh už nečeká", WatchJarvis.refusalText(null, "Návrh už nečeká"))
+    }
+
+    // review L8: the watch's minute tick reads with a poll permit; an older watch sends no body
+    @Test fun theProposalsRequestSaysWhetherItIsTheTick() {
+        assertTrue(WatchJarvis.proposalsRequest("""{"periodic":true}""".encodeToByteArray()).periodic)
+        assertFalse(WatchJarvis.proposalsRequest("{}".encodeToByteArray()).periodic)
+        assertFalse(WatchJarvis.proposalsRequest(ByteArray(0)).periodic, "an older watch: interactive")
+        assertFalse(WatchJarvis.proposalsRequest("garbage".encodeToByteArray()).periodic)
+    }
 }

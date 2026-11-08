@@ -3309,10 +3309,12 @@ class SessionOrchestrator(
      * path as the closed-records read (whatever transport the server has, a fresh one only when none). Null = no
      * answer; the caller says "nejde načíst", never "nic".
      */
-    internal suspend fun jarvisRun(server: SshServer, cmd: String, totalMs: Long = 10_000): String? =
+    internal suspend fun jarvisRun(server: SshServer, cmd: String, totalMs: Long = 10_000, periodic: Boolean = false): String? =
         withContext(Dispatchers.IO) {
             try {
-                SshSessionHelper.withSession(server, 5_000) { sess -> execReadWithWatchdog(sess, cmd, totalMs = totalMs) }
+                // [periodic]: a recurring read (the watch's Čeká tick) takes a POLL permit, never one of the interactive
+                // SHORT ones, and is skipped when none is free; nor does it pay a fresh handshake (review L8).
+                SshSessionHelper.withSession(server, 5_000, allowFresh = !periodic, periodic = periodic) { sess -> execReadWithWatchdog(sess, cmd, totalMs = totalMs) }
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
@@ -3350,10 +3352,10 @@ class SessionOrchestrator(
     }
 
     /** The proposals for the watch's Čeká page: the Velín's read ([JarvisData.PROPOSALS]) on Jarvis' server. */
-    suspend fun jarvisWatchProposals(): com.clauderemote.session.wear.WatchProposals {
+    suspend fun jarvisWatchProposals(periodic: Boolean = false): com.clauderemote.session.wear.WatchProposals {
         val server = jarvisServer(tabManager.tabs.value, emptyList())
             ?: return com.clauderemote.session.wear.WatchProposals(false, "Jarvis není na žádném známém serveru")
-        val all = jarvisRun(server, com.clauderemote.session.service.JarvisData.PROPOSALS)
+        val all = jarvisRun(server, com.clauderemote.session.service.JarvisData.PROPOSALS, periodic = periodic)
         return com.clauderemote.session.wear.WatchJarvis.proposals(
             com.clauderemote.session.service.JarvisData.parseCombinedProposals(all),
             com.clauderemote.session.service.JarvisData.serverNowMs(all),
@@ -3373,7 +3375,7 @@ class SessionOrchestrator(
             ?: return answer(false, "Návrhy nejdou načíst (server/Jarvis)")
         val p = list.firstOrNull { it.id == id }
         com.clauderemote.session.wear.WatchJarvis.refusal(p, approve, textHash, com.clauderemote.session.service.JarvisData.serverNowMs(all))
-            ?.let { return answer(false, it) }
+            ?.let { return answer(false, com.clauderemote.session.wear.WatchJarvis.refusalText(p, it)) }
         p!!
         val r = com.clauderemote.session.service.JarvisData.parseRun(
             jarvisRun(
@@ -3383,10 +3385,7 @@ class SessionOrchestrator(
             ),
         )
         FileLogger.log(TAG, "Watch ${if (approve) "approved" else "rejected"} Jarvis proposal $id: ok=${r.ok}")
-        return answer(
-            r.ok,
-            if (!r.ok) r.message else if (approve) com.clauderemote.session.service.JarvisData.approvedNotice(p, r.message) else "Zahozeno",
-        )
+        return answer(r.ok, com.clauderemote.session.wear.WatchJarvis.decideText(p, approve, r.ok, r.message))
     }
 
     /** "Co je nového?" from the wrist: `cr-digest delta --peek --say` on Jarvis' server (the cursor is not moved). */

@@ -133,6 +133,14 @@
                     android:host="*"
                     android:path="/jarvis-undo-result" />
             </intent-filter>
+            <!-- What became of a Jarvis proposal decided on the wrist: must reach the watch with the app closed too. -->
+            <intent-filter>
+                <action android:name="com.google.android.gms.wearable.MESSAGE_RECEIVED" />
+                <data
+                    android:scheme="wear"
+                    android:host="*"
+                    android:path="/jarvis-decide-result" />
+            </intent-filter>
         </service>
 
         <!-- Glanceable tile — swipe-from-watch-face summary of what needs the

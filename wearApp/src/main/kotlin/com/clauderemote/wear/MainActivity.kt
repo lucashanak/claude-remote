@@ -159,7 +159,13 @@ class MainActivity : ComponentActivity() {
     // umřela — po návratu do popředí se stav přečte znovu, ať banner nelže.
     override fun onResume() {
         super.onResume()
+        AppVisibility.visible = true
         NotificationPermissionState.refresh(this)
+    }
+
+    override fun onPause() {
+        AppVisibility.visible = false
+        super.onPause()
     }
 }
 
@@ -242,12 +248,14 @@ private fun WaitingPage(isCurrent: Boolean) {
     // Proposals are read on demand (one exec on Jarvis' server per read), never polled in the background: while the
     // page is on screen, now and every minute, and once more after a decision came back.
     LaunchedEffect(isCurrent) {
+        var periodic = false
         while (isCurrent) {
-            requestProposals(context)
-            delay(60_000)
+            readProposals(context, periodic)
+            periodic = true
+            delay(60_000 - JarvisWatchStore.PROPOSALS_TIMEOUT_MS)
         }
     }
-    LaunchedEffect(notice) { if (notice != null) requestProposals(context) }
+    LaunchedEffect(notice) { if (notice != null) readProposals(context, periodic = false) }
     // A decision whose answer never came (phone gone, app killed): free the buttons and say so.
     LaunchedEffect(deciding) {
         if (deciding.isNotEmpty()) {
@@ -262,7 +270,7 @@ private fun WaitingPage(isCurrent: Boolean) {
     val seenEnds = remember { mutableStateListOf<String>() }
     LaunchedEffect(listState) {
         snapshotFlow { listState.layoutInfo.visibleItemsInfo.map { it.key } }.collect { keys ->
-            keys.mapNotNull { (it as? String)?.takeIf { k -> k.startsWith("end:") }?.removePrefix("end:") }
+            keys.mapNotNull { (it as? String)?.takeIf { k -> k.startsWith("end:") } }
                 .forEach { if (it !in seenEnds) seenEnds.add(it) }
         }
     }
@@ -301,11 +309,13 @@ private fun WaitingPage(isCurrent: Boolean) {
                     val p = entry.proposal
                     val at = props?.atElapsed ?: 0L
                     item(key = entry.key) { ProposalText(p) }
-                    item(key = "end:${p.id}") {
+                    // keyed by id AND text: a text changed under the same id must be scrolled through again (L6)
+                    item(key = WaitingRules.endKey(p)) {
+                        val expired = JarvisWatchStore.expired(p, at, nowElapsed)
                         ProposalActions(
                             p,
-                            seen = p.id in seenEnds,
-                            expired = JarvisWatchStore.expired(p, at, nowElapsed),
+                            canApprove = WaitingRules.canApprove(p, seenEnds, expired, busy = p.id in deciding),
+                            expired = expired,
                             busy = p.id in deciding,
                         )
                     }
@@ -316,9 +326,12 @@ private fun WaitingPage(isCurrent: Boolean) {
     }
 }
 
-private fun requestProposals(context: Context) {
-    JarvisWatchStore.proposalsLoading.value = true
-    sendJarvisProposalsRequest(context) { r -> if (r != "Sent") JarvisWatchStore.proposalsLoading.value = false }
+/** One proposals read: sent, then given [JarvisWatchStore.PROPOSALS_TIMEOUT_MS] to come back (L7). */
+private suspend fun readProposals(context: Context, periodic: Boolean) {
+    val token = JarvisWatchStore.beginProposals(periodic)
+    sendJarvisProposalsRequest(context, periodic) { r -> if (r != "Sent") JarvisWatchStore.proposalsTimedOut(token) }
+    delay(JarvisWatchStore.PROPOSALS_TIMEOUT_MS)
+    JarvisWatchStore.proposalsTimedOut(token)
 }
 
 /** A session's open dialog: the whole text, Ano/Ne; a question also an answer (typed or dictated). */
@@ -346,6 +359,11 @@ private fun AskCard(item: WaitingRules.Item.Ask) {
             fontSize = 13.sp,
         )
         Text(item.body, fontSize = 13.sp)
+        if (item.kind == null) {
+            // An approval the phone cannot name (review H1): it waits, but an answer from here could not be checked.
+            Text(WaitingRules.UNNAMED_TEXT, fontSize = 12.sp, color = COLOR_WARN)
+            return@Card
+        }
         Row(horizontalArrangement = Arrangement.spacedBy(6.dp), modifier = Modifier.padding(top = 4.dp)) {
             // Side by side but each half the width: a wrong tap is expensive, so they are big and labelled.
             CompactButton(
@@ -386,7 +404,7 @@ private fun ProposalText(p: WearJarvisProposal) {
  * fresh read and approves only the very text shown here.
  */
 @Composable
-private fun ProposalActions(p: WearJarvisProposal, seen: Boolean, expired: Boolean, busy: Boolean) {
+private fun ProposalActions(p: WearJarvisProposal, canApprove: Boolean, expired: Boolean, busy: Boolean) {
     val context = LocalContext.current
     fun decide(approve: Boolean) {
         JarvisWatchStore.deciding.value = JarvisWatchStore.deciding.value + p.id
@@ -394,7 +412,7 @@ private fun ProposalActions(p: WearJarvisProposal, seen: Boolean, expired: Boole
         sendJarvisDecide(context, p.id, approve, p.text.hashCode()) { r ->
             if (r != "Sent") {
                 JarvisWatchStore.deciding.value = JarvisWatchStore.deciding.value - p.id
-                JarvisWatchStore.notice.value = "Neodesláno: $r"
+                JarvisWatchStore.notice.value = "${p.heading}: neodesláno ($r)"
                 WearHaptics.error(context)
             }
         }
@@ -405,7 +423,7 @@ private fun ProposalActions(p: WearJarvisProposal, seen: Boolean, expired: Boole
             expired -> Text("Návrh vypršel", fontSize = 12.sp, color = COLOR_WARN)
             else -> CompactButton(
                 onClick = { decide(true) },
-                enabled = seen && !busy,
+                enabled = canApprove,
                 modifier = Modifier.fillMaxWidth(),
             ) { Text(if (busy) "…" else p.approveLabel) }
         }

@@ -51,6 +51,14 @@ object NotifyStateStore {
 
     private val JSON = Json { ignoreUnknownKeys = true }
 
+    /**
+     * Nothing was ever stored: the first push after a fresh install (or cleared data). Only then is a session never
+     * seen taken as already announced ([WatchNotifyDecision.decide] `seeding`, review M4); an empty map stored later
+     * is not fresh.
+     */
+    fun isFresh(context: Context): Boolean =
+        !context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).contains(KEY_BASELINE)
+
     fun load(context: Context): Map<String, NotifyBaseline> {
         val raw = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
             .getString(KEY_BASELINE, null) ?: return emptyMap()

@@ -116,6 +116,29 @@ object WatchJarvis {
         return null
     }
 
+    /**
+     * The sentence a decision from the wrist ends with, always naming the proposal (review L6: "Zahozeno" alone does
+     * not say which, and the result may arrive as a notification long after the tap).
+     */
+    fun decideText(p: JarvisProposal, approve: Boolean, ok: Boolean, cliMessage: String): String {
+        val what = JarvisData.heading(p)
+        return when {
+            !ok -> "$what: $cliMessage"
+            approve -> JarvisData.approvedNotice(p, cliMessage).let { n -> if (n == cliMessage) "$what: $n" else n }
+            else -> "Zahozeno – $what"
+        }
+    }
+
+    /** A refusal before the CLI ran, named the same way. */
+    fun refusalText(p: JarvisProposal?, reason: String): String = p?.let { "${JarvisData.heading(it)}: $reason" } ?: reason
+
+    private val REQUEST_JSON = kotlinx.serialization.json.Json { ignoreUnknownKeys = true }
+
+    /** The body of /jarvis-proposals-request; empty or unreadable (an older watch) = not periodic. */
+    fun proposalsRequest(body: ByteArray): WatchProposalsRequest =
+        runCatching { REQUEST_JSON.decodeFromString(WatchProposalsRequest.serializer(), body.decodeToString()) }
+            .getOrNull() ?: WatchProposalsRequest()
+
     /** One of Jarvis' alerts for the Jarvis page (newest first from the feed). */
     @Serializable
     data class Recent(val id: String, val kind: String, val text: String, val atMs: Long)
@@ -125,41 +148,70 @@ object WatchJarvis {
     }
 }
 
+/** Watch -> phone body of /jarvis-proposals-request. [periodic] = the page's minute tick (a poll permit, review L8). */
+@Serializable
+data class WatchProposalsRequest(val periodic: Boolean = false)
+
 /**
- * Runs the wrist's "Poslat"/"Provést"/"Zahodit" off the Data Layer listener thread (2026-11-08 review): an approved
- * open or restore waits up to 35 s for claude to start on the server, and a listener blocked that long held back every
- * other message from the watch, its Ano/Ne included. [submit] returns at once; the decision runs on [scope] (IO, process
- * wide) and its sentence goes back through the caller's `answer`, the way /jarvis-undo-result does.
+ * The watch's Jarvis requests off the Data Layer listener thread (review H2): a proposals read (≤ 10 s), the news
+ * (≤ 15 s) and above all an approved open or restore (≤ 35 s) used to hold the listener, and with it every other
+ * message from the watch, its Ano/Ne included. [submit] returns at once; the work runs on [scope] (IO, process wide —
+ * the service may be unbound as soon as onMessageReceived returns) and its answer goes back through `answer`, the way
+ * /jarvis-undo-result does.
  *
- * A second tap on a proposal whose decision is still running is dropped: the first one answers it, and a duplicate
- * `approve` would only be refused by the CLI as taken. [limitMs] bounds the whole call; a decision that hit it may or may
- * not have happened, and the sentence says so instead of "neprovedeno".
+ * One run per [key] at a time: a request whose key is still running is dropped, its answer comes from the run there is
+ * (the Čeká page's tick and its opening, a double tap on a proposal). [limitMs] bounds the whole run.
  */
-class WatchDecideRelay(
-    private val scope: kotlinx.coroutines.CoroutineScope,
-    private val limitMs: Long = LIMIT_MS,
-    private val decide: suspend (WatchDecideRequest) -> WatchDecideResult,
-) {
+class WatchSingleFlight(private val scope: kotlinx.coroutines.CoroutineScope) {
     private val running = HashSet<String>()
 
-    /** False = a decision of this id is already on its way (nothing started). */
-    fun submit(req: WatchDecideRequest, answer: (WatchDecideResult) -> Unit): Boolean {
-        synchronized(running) { if (!running.add(req.id)) return false }
+    /** False = [key] is already running (nothing started). */
+    fun <R> submit(
+        key: String,
+        limitMs: Long,
+        run: suspend () -> R,
+        onTimeout: () -> R,
+        onError: (Exception) -> R,
+        answer: (R) -> Unit,
+    ): Boolean {
+        synchronized(running) { if (!running.add(key)) return false }
         scope.launch {
             val r = try {
-                kotlinx.coroutines.withTimeoutOrNull(limitMs) { decide(req) }
-                    ?: WatchDecideResult(req.id, false, TIMEOUT_TEXT)
+                kotlinx.coroutines.withTimeoutOrNull(limitMs) { run() } ?: onTimeout()
             } catch (e: kotlinx.coroutines.CancellationException) {
-                synchronized(running) { running.remove(req.id) }
+                synchronized(running) { running.remove(key) }
                 throw e
             } catch (e: Exception) {
-                WatchDecideResult(req.id, false, "Rozhodnutí se nepovedlo (${e::class.simpleName}) – ověř ve Velínu.")
+                onError(e)
             }
-            synchronized(running) { running.remove(req.id) }
+            synchronized(running) { running.remove(key) }
             answer(r)
         }
         return true
     }
+}
+
+/**
+ * "Poslat"/"Provést"/"Zahodit" from the wrist on a [WatchSingleFlight] keyed by the proposal: a second tap while the
+ * first runs is dropped (a duplicate `approve` would only be refused by the CLI as taken). A decision that hit
+ * [limitMs] may or may not have happened, and the sentence says so instead of "neprovedeno".
+ */
+class WatchDecideRelay(
+    scope: kotlinx.coroutines.CoroutineScope,
+    private val limitMs: Long = LIMIT_MS,
+    private val decide: suspend (WatchDecideRequest) -> WatchDecideResult,
+) {
+    private val flight = WatchSingleFlight(scope)
+
+    /** False = a decision of this id is already on its way (nothing started). */
+    fun submit(req: WatchDecideRequest, answer: (WatchDecideResult) -> Unit): Boolean = flight.submit(
+        key = req.id,
+        limitMs = limitMs,
+        run = { decide(req) },
+        onTimeout = { WatchDecideResult(req.id, false, TIMEOUT_TEXT) },
+        onError = { e -> WatchDecideResult(req.id, false, "Rozhodnutí se nepovedlo (${e::class.simpleName}) – ověř ve Velínu.") },
+        answer = answer,
+    )
 
     companion object {
         /** decideTimeoutMs gives an open or restore 35 s, the read before it 10 s; this is the outer bound of both. */

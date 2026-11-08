@@ -28,6 +28,18 @@ class WearDataListenerService : WearableListenerService() {
      * znovu — bez akcí, nový dotaz je třeba nejdřív vidět.
      */
     override fun onMessageReceived(messageEvent: MessageEvent) {
+        if (messageEvent.path == JarvisWatchStore.PATH_DECIDE_RESULT) {
+            // Review M5: a decision that comes back after the app was closed must not be lost. The open app's own
+            // listener gets it too and shows it on the Čeká page; with the app not on screen it is a notification.
+            val r = JarvisWatchStore.decideResult(messageEvent.data) ?: return
+            JarvisWatchStore.onMessage(messageEvent.path, messageEvent.data)
+            WearLog.i(this, TAG, "Jarvis decision ${r.id}: ok=${r.ok} ${r.text}")
+            if (WatchMessageRouting.notifyDecision(AppVisibility.visible)) {
+                JarvisWatchNotifier.postResult(this, "Jarvis · návrh", r.text)
+                if (r.ok) WearHaptics.success(this) else WearHaptics.error(this)
+            }
+            return
+        }
         if (messageEvent.path == PATH_JARVIS_UNDO_RESULT) {
             val r = runCatching {
                 WEAR_JSON.decodeFromString<WearJarvisUndoResult>(String(messageEvent.data, Charsets.UTF_8))
@@ -81,11 +93,13 @@ class WearDataListenerService : WearableListenerService() {
      */
     private fun handleTransitions(sessions: List<WearSessionInfo>) {
         WearNotifier.ensureChannels(this)
+        WearNotifier.clearStaleCompletionsOnce(this)
         // TTS stays gated behind the read-aloud toggle + Do Not Disturb.
         // Notifications do NOT — the OS filters those itself by channel
         // importance under DND.
         val autoSpeakOn = AutoSpeakPrefs.isEnabled(this)
         val dnd = isDoNotDisturb()
+        val seeding = NotifyStateStore.isFresh(this)
         val stored = NotifyStateStore.load(this)
         val byId = sessions.associateBy { it.id }
         val next = HashMap<String, NotifyBaseline>(sessions.size)
@@ -93,7 +107,7 @@ class WearDataListenerService : WearableListenerService() {
             val session = byId[id]
             val prev = stored[id]
             val body = session?.let { WearNotifier.bodyFor(it) }.orEmpty()
-            val r = WatchNotifyDecision.decide(prev, session, body.hashCode())
+            val r = WatchNotifyDecision.decide(prev, session, body.hashCode(), seeding)
             var baseline = r.baseline
             when (val a = r.action) {
                 WatchNotifyDecision.Action.Skip -> Unit
@@ -122,7 +136,8 @@ class WearDataListenerService : WearableListenerService() {
         }
         // Jen při skutečné změně: drtivá většina pushů baseline nemění a
         // re-encode + apply() na každý data event je na hodinkách zbytečný.
-        if (next != stored) NotifyStateStore.save(this, next)
+        // Seeding writes even an empty map: from then on the store is no longer fresh (M4).
+        if (next != stored || seeding) NotifyStateStore.save(this, next)
     }
 
     // Nudge the tile to re-render off the just-updated SessionRepository so

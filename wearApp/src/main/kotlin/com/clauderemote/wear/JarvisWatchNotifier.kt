@@ -59,6 +59,7 @@ object JarvisWatchNotifier {
     internal const val EXTRA_UNDO_SERVER = "jarvis_undo_server"
     internal const val EXTRA_UNDO_TMUX = "jarvis_undo_tmux"
     private const val UNDO_RESULT_ID = 0x2A11_0003
+    private const val DECIDE_RESULT_ID = 0x2A11_0004
     private const val UNDO_REQ_BASE = 0x2A12_0000
     private const val MAX_UNDO = 2
     private const val TAG = "JarvisWatch"
@@ -133,19 +134,25 @@ object JarvisWatchNotifier {
     }
 
     /** What "Vrátit" did (the phone's sentence, or why it was not sent): one quiet notification, no actions. */
-    fun postUndoResult(context: Context, text: String) {
+    fun postUndoResult(context: Context, text: String) = postResult(context, "Jarvis · vrácení", text, UNDO_RESULT_ID)
+
+    /**
+     * One quiet result notification, no actions: what "Vrátit" did, or what became of a proposal decided on the wrist
+     * while the app was closed (review M5, its own id so the two do not replace each other).
+     */
+    fun postResult(context: Context, title: String, text: String, id: Int = DECIDE_RESULT_ID) {
         if (Build.VERSION.SDK_INT >= 33 &&
             ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
         ) return
         ensureChannels(context)
         val n = NotificationCompat.Builder(context, CHANNEL_QUIET)
             .setSmallIcon(R.mipmap.ic_launcher)
-            .setContentTitle("Jarvis · vrácení")
+            .setContentTitle(title)
             .setContentText(text)
             .setStyle(NotificationCompat.BigTextStyle().bigText(text))
             .setAutoCancel(true)
             .build()
-        NotificationManagerCompat.from(context).notify(UNDO_RESULT_ID, n)
+        NotificationManagerCompat.from(context).notify(id, n)
     }
 
     private fun ensureChannels(context: Context) {
