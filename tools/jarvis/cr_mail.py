@@ -9,6 +9,8 @@
     cr-mail reply <m-id> "<text>"                            the ADDRESSEE's explicit reply (overrides the implicit one)
     cr-mail off                                              "Jarvisi, stop": no paste until `cr-mail on`
     cr-mail on                                               Lukáš only (refused inside any Claude session)
+    cr-mail audit [--since 1h] [--json] [--say]              what Jarvis proposed, Lukáš approved, what was delivered
+                                                             or refused, with times (+ tasks and watches)
     cr-mail prompt-seen                                      Jarvis's UserPromptSubmit hook (payload on stdin)
 
 Exit codes: 0 done, 2 refused (the reason, in Czech, on stderr), 1 internal error.
@@ -24,6 +26,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
 import jarvislib as J  # noqa: E402
 import jarvismail as M  # noqa: E402
+import jarviswatch as JW  # noqa: E402
 
 STATE_CZ = {"proposed": "navrženo, čeká na Lukášovo ano", "dropped": "zahozeno (bez ano)", "queued": "ve frontě", "delivering": "doručuje se", "delivered": "doručeno, čeká na odpověď",
             "uncertain": "NEJISTÉ", "replied": "odpovězeno", "expired": "vypršelo", "cancelled": "zrušeno"}
@@ -58,6 +61,11 @@ def cmd_send(m, a, out):
         raise Refused(why)
     out.write(f"{rec['id']} navržena pro {J.short_name(rec['to'])}. Zeptej se Lukáše: „Pošlu to do "
               f"{J.short_name(rec['to'])}. Ano?“ Odejde jen po jeho ano v příští zprávě (do 10 minut), jinak se zahodí.\n")
+    c = rec.get("conflict")
+    if c:
+        # E1: only information; Lukáš decides with it in front of him
+        out.write(f"Pozor, konflikt checkoutu: {JW.conflict_text(c)}.\n"
+                  f"V otázce to zmiň, třeba: „{JW.conflict_say(c)}“\n")
 
 
 def cmd_status(m, a, out):
@@ -73,6 +81,8 @@ def cmd_status(m, a, out):
         out.write(f"[cr-mail: {M.DATA_NOTE}]\n{_row(r, now)}\n")
         if r.get("reason"):
             out.write(f"důvod: {r['reason']}\n")
+        if r.get("conflict"):
+            out.write(f"pozor při odeslání: {JW.conflict_text(r['conflict'])}\n")
         if r.get("reply"):
             how = "výslovná" if r.get("replyBy") == "explicit" else "poslední zpráva tahu"
             out.write(f"odpověď ({how}, {_age(now, r.get('replyAt'))}): «{M.data_text(r['reply'], 3000)}»\n")
@@ -139,6 +149,14 @@ def cmd_on(m, a, out):
     out.write("Pošta je zapnutá.\n")
 
 
+def cmd_audit(m, a, out):
+    try:
+        span = JW.parse_since(a.since, 3600 * 1000)
+    except ValueError as e:
+        raise Refused(str(e))
+    JW.write_audit(out, JW.audit(m.env, m.env.now_ms() - span), a, span)
+
+
 def cmd_prompt_seen(m, a, out):
     try:
         payload = json.loads(sys.stdin.read(1024 * 1024) or "null")
@@ -168,6 +186,10 @@ def main(argv=None, env=None, out=None, err=None, mail=None):
     p = sub.add_parser("reply")
     p.add_argument("id")
     p.add_argument("text")
+    p = sub.add_parser("audit")
+    p.add_argument("--since")
+    p.add_argument("--json", action="store_true")
+    p.add_argument("--say", action="store_true")
     sub.add_parser("off")
     sub.add_parser("on")
     sub.add_parser("prompt-seen")
@@ -175,7 +197,7 @@ def main(argv=None, env=None, out=None, err=None, mail=None):
     env = env or J.Env()
     m = mail or M.Mail(env)
     fn = {"send": cmd_send, "status": cmd_status, "inbox": cmd_inbox, "cancel": cmd_cancel, "reply": cmd_reply,
-          "off": cmd_off, "on": cmd_on, "prompt-seen": cmd_prompt_seen}[a.cmd]
+          "off": cmd_off, "on": cmd_on, "prompt-seen": cmd_prompt_seen, "audit": cmd_audit}[a.cmd]
     old = os.umask(0o077)
     try:
         fn(m, a, out)

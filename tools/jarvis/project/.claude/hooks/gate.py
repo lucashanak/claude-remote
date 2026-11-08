@@ -25,6 +25,9 @@ gate lets no heredoc, pipe or `$` through: a token wrapped whole in '…' or "�
 line shape already removed `$`, backtick and backslash, the only things double quotes still expand), so the gate
 judges the same words bash will pass. Not allowed to Jarvis: `cr-mail reply` (the addressee's), `cr-mail on`
 (Lukáš's switch) and `cr-mail prompt-seen` (the hook's: it would mint Jarvis a fresh "Lukáš's prompt").
+
+F2b adds `cr-mail audit` and `cr-task watch|watches|unwatch|log` (all read or notify-only), and forbids
+`cr-task done --force` (Lukáš's override of the evidence).
 """
 import json
 import re
@@ -40,9 +43,12 @@ MODE = "dontAsk"
 ALLOWED = {
     "cr-sessions": frozenset({"list", "show", "tail"}),
     "cr-digest": frozenset({"delta", "brief", "waiting", "usage"}),
-    "cr-mail": frozenset({"send", "status", "inbox", "cancel", "off"}),
-    "cr-task": frozenset({"add", "list", "show", "done", "fail"}),
+    "cr-mail": frozenset({"send", "status", "inbox", "cancel", "off", "audit"}),
+    "cr-task": frozenset({"add", "list", "show", "done", "fail", "watch", "watches", "unwatch", "log"}),
 }
+# Options Jarvis may never pass. `cr-task done --force` closes a delegated task without its evidence; the CLI refuses
+# it to anyone but Lukáš's own shell already, this is the second layer.
+FORBIDDEN = {("cr-task", "done"): frozenset({"--force"})}
 # commands whose arguments may be quoted free text
 TEXT_CMDS = frozenset({"cr-mail", "cr-task"})
 HELP = frozenset({"-h", "--help"})
@@ -121,6 +127,9 @@ def check_text_cmd(line):
     name, args = toks[0][0], toks[1:]
     if not args or args[0][1] or (args[0][0] not in ALLOWED[name] and args[0][0] not in HELP):
         return f"{name} takes one of: {', '.join(sorted(ALLOWED[name]))}"
+    bad = FORBIDDEN.get((name, args[0][0]), frozenset()) & {w for w, q in args[1:] if not q}
+    if bad:
+        return f"{name} {args[0][0]} {' '.join(sorted(bad))} is Lukáš's, not Jarvis's"
     for w, quoted in args:
         if quoted:
             if not TEXT.fullmatch(w) or any(unicodedata.category(c) in ("Cc", "Cf", "Cs", "Co", "Zl", "Zp") for c in w):

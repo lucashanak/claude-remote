@@ -23,6 +23,7 @@ import time
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
 import jarvislib as J  # noqa: E402
 import jarvismail as M  # noqa: E402
+import jarviswatch as JW  # noqa: E402
 
 STALE_MS = 120 * 1000
 SAY_MAX = 5
@@ -185,10 +186,12 @@ def read_cursor(env):
     return None
 
 
-def write_cursor(env, gen, at, mail_at=None):
+def write_cursor(env, gen, at, mail_at=None, watch_at=None):
     d = {"gen": gen, "at": at}
     if mail_at is not None:
         d["mailAt"] = mail_at
+    if watch_at is not None:
+        d["watchAt"] = watch_at
     J.atomic_write(env.path("cursor"), json.dumps(d))
 
 
@@ -219,33 +222,73 @@ def cmd_delta(env, a, now):
     # the daemon, so a reply is told once. A first delta tells only what came in the last hour.
     mail_since = _i((cur or {}).get("mailAt")) or _i((cur or {}).get("at")) or now - 3600 * 1000
     mail, mail_at = M.digest_items(env, mail_since, now)
+    # F2b: fired watches and task proofs, on top ("Splněno: …"); their own cursor, like the mail's
+    watch_since = _i((cur or {}).get("watchAt")) or _i((cur or {}).get("at")) or now - 3600 * 1000
+    done, watch_at = JW.notices(env, watch_since)
+    _task_status(env, mail, sessions)
     if not a.peek and (st or cur):
         if st:
-            write_cursor(env, gen, _i(st.get("at")), mail_at)
+            write_cursor(env, gen, _i(st.get("at")), mail_at, watch_at)
         else:
-            write_cursor(env, _i(cur.get("gen")), _i(cur.get("at")), mail_at)
+            write_cursor(env, _i(cur.get("gen")), _i(cur.get("at")), mail_at, watch_at)
     busy_n = sum(1 for s in vis.values() if s.get("state") == "busy")
     if a.json:
         return _dump({"gen": gen, "from": (cur or {}).get("gen"), "first": first, "warning": warn, "items": items,
-                      "mail": mail, "unchanged": len(vis) - len(picked), "busy": busy_n})
+                      "done": done, "mail": mail, "unchanged": len(vis) - len(picked), "busy": busy_n})
     if a.say:
         notable = [i for i in items if i["kind"] not in ("busy", "cleared", "idle")]
         empty = "Nic nového." + (f" {works_cz(busy_n)}." if busy_n else "")
-        txt = say_list(notable, empty if not mail else "")
+        txt = say_list(notable, empty if not (mail or done) else "")
         if mail:
-            txt = (txt + " " if txt else "") + " ".join(M.mail_say(i) for i in mail[:SAY_MAX])
+            txt = (txt + " " if txt else "") + " ".join(_mail_say(i) for i in mail[:SAY_MAX])
+        if done:
+            txt = " ".join(JW.notice_say(i) for i in done[:SAY_MAX]) + (" " + txt if txt else "")
         return ("Pozor, Jarvisův démon neběží. " + txt) if warn else txt
     head = f"[jarvis delta {'start' if first else str(cur['gen']) + '→' + str(gen)} · {_hm(now)}] {DATA_NOTE}"
     lines = [head] + ([f"⚠ {warn}"] if warn else [])
     main = [i for i in items if i["kind"] != "busy"]
     busy = [i for i in items if i["kind"] == "busy"]
-    body = [M.mail_line(i) for i in mail] + [line_of(i) for i in main]
+    body = [JW.notice_line(i) for i in done] + [_mail_line(i) for i in mail] + [line_of(i) for i in main]
     if busy:
         body.append("~ pracuje: " + ", ".join(i["short"] for i in busy))
     if not body:
         body = ["nic nového"]
     tail = f"+{len(vis) - len(picked)} beze změny"
     return fit(lines + body, a.max_chars or 1500, tail)
+
+
+def _task_status(env, mail, sessions):
+    """A reply to a delegated task says where the task stands (zadáno … ke kontrole, čeká na důkaz: …), so a reply is
+    never read as "hotovo" (F1 ověřené hotovo). git is read here; CI only from jarvis-d's cache."""
+    if not any(i.get("task") and i["kind"] == "mail-reply" for i in mail):
+        return
+    try:
+        import cr_task
+        tasks = cr_task.fold(cr_task.read_events(env))
+        recs = M.Mail(env).all()
+        repo = cr_task.repo_for(env)
+        for i in mail:
+            t = tasks.get(i.get("task") or "")
+            if t and i["kind"] == "mail-reply":
+                i["taskStatus"] = list(JW.task_status(t, recs, sessions, repo))
+    except Exception:  # noqa: BLE001  the delta must never fail on this
+        pass
+
+
+def _mail_line(i):
+    ln = M.mail_line(i)
+    ts = i.get("taskStatus")
+    return ln + (f" · úkol {i['task']}: {ts[0]}" + (f", {ts[1]}" if ts[1] else "") if ts else "")
+
+
+def _mail_say(i):
+    s = M.mail_say(i)
+    ts = i.get("taskStatus")
+    if ts and ts[0] == "ke kontrole":
+        s += " Úkol je ke kontrole" + (", čeká na důkaz." if (ts[1] or "").startswith("čeká na důkaz") else ".")
+    elif ts and ts[0] == "běží":
+        s += " Ještě ale pracuje."
+    return s
 
 
 STATE_CZ = {"busy": "pracuje", "idle": "nečinná", "waiting": "čeká", "shell": "shell", "dead": "bez claude",
@@ -272,6 +315,8 @@ def cmd_brief(env, a, now):
         u = usage_say(usage)
         if u:
             parts.append(u)
+        fired, _ = JW.notices(env, now - JW.FIRED_SHOW_MS)
+        parts = [JW.notice_say(i) for i in fired if i["kind"] != "watch-expired"][:SAY_MAX] + parts
         return ("Pozor, Jarvisův démon neběží. " if warn else "") + " ".join(parts)
     cz = ", ".join(f"{v} {STATE_CZ.get(k, k)}" for k, v in sorted(counts.items(), key=lambda kv: STATE_ORDER.get(kv[0], 9)))
     lines = [f"[jarvis brief · {_hm(now)} · {len(vis)} sessions: {cz}] {DATA_NOTE}"]
@@ -283,6 +328,11 @@ def cmd_brief(env, a, now):
     ul = usage_line(usage)
     if ul:
         lines.append("Limity: " + ul)
+    fired, _ = JW.notices(env, now - JW.FIRED_SHOW_MS)
+    lines += [JW.notice_line(i) for i in fired if i["kind"] != "watch-expired"]
+    open_n = sum(1 for w in JW.Watches(env).all().values() if w["state"] == "open")
+    if open_n:
+        lines.append(f"Hlídky: {open_n} aktivní (cr-task watches)")
     if wait:
         lines.append("Čeká na Lukáše:")
         lines += ["  " + line_of(i) for i in wait]

@@ -554,10 +554,11 @@ class Mail:
         name, clean = why
         lp = self.last_prompt() or {}
         mid = now_id("m", now)
+        base, conflict = self.target_facts(name, now)
         rec = {"v": 1, "id": mid, "from": "jarvis", "to": name, "task": task, "prompt": lp.get("id"),
                "subject": subject_of(clean), "state": "proposed", "created": now, "notBefore": 0,
                "expires": now + EXPIRE_MS, "attempts": 0, "enters": 0, "deliveredAt": None, "pasteAt": None,
-               "lastBlock": None, "reply": None}
+               "lastBlock": None, "reply": None, "base": base, "conflict": conflict}
         body = (f"# Zpráva od Jarvise {mid}\n\n"
                 f"Od: Jarvis (správce Lukášových sessions), na Lukášův pokyn\n"
                 + (f"Úkol: {task}\n" if task else "")
@@ -574,6 +575,18 @@ class Mail:
             self.put(rec)
             self.log("proposed", id=mid, to=name, task=task, prompt=rec["prompt"])
         return rec, None
+
+    def target_facts(self, name, now):
+        """F2b, read only: the target's repo at the proposal (`base`, the point the evidence of "done" is measured
+        from) and the checkout-conflict warning (E1). Information, never a block: any failure is just no facts."""
+        try:
+            import jarviswatch as JW
+            repo = JW.Repo(self.env)
+            cwd = JW.target_cwd(self.env, name)
+            base = dict(repo.state(cwd), at=now) if cwd else None
+            return base, JW.conflicts(self.env, name, repo, me=J.read_self(self.env))
+        except Exception:  # noqa: BLE001
+            return None, None
 
     def _send_checks(self, to, text, task, sessions, now):
         if self.off():

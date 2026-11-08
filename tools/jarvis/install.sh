@@ -36,7 +36,7 @@ while [ $# -gt 0 ]; do
   esac
 done
 
-FILES=(jarvislib.py jarvismail.py cr_sessions.py cr_digest.py jarvis_d.py cr_mail.py cr_task.py)
+FILES=(jarvislib.py jarvismail.py jarviswatch.py cr_sessions.py cr_digest.py jarvis_d.py cr_mail.py cr_task.py)
 declare -A BIN=([cr-sessions]=cr_sessions.py [cr-digest]=cr_digest.py [jarvis-d]=jarvis_d.py [cr-mail]=cr_mail.py
                 [cr-task]=cr_task.py)
 state="${JARVIS_STATE_DIR:-$HOME/.claude-remote/jarvis}"

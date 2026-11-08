@@ -33,7 +33,8 @@ class InstallTest(unittest.TestCase):
         cur = os.path.realpath(os.path.join(lib, "current"))
         self.assertTrue(cur.startswith(os.path.realpath(lib) + os.sep))
         self.assertEqual(sorted(os.listdir(cur)), ["SHA256SUMS", "cr_digest.py", "cr_mail.py", "cr_sessions.py",
-                                                   "cr_task.py", "jarvis_d.py", "jarvislib.py", "jarvismail.py"])
+                                                   "cr_task.py", "jarvis_d.py", "jarvislib.py", "jarvismail.py",
+                                                   "jarviswatch.py"])
         for b, f in (("cr-sessions", "cr_sessions.py"), ("cr-digest", "cr_digest.py"), ("jarvis-d", "jarvis_d.py")):
             p = os.path.join(self.prefix, "bin", b)
             self.assertTrue(os.path.islink(p))

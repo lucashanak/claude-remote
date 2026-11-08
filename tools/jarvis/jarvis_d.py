@@ -23,6 +23,11 @@ Events of Jarvis's own session (name in `<state>/self`) are ignored (I8), so its
 F2a: it is also the mail deliverer (jarvismail.MailWorker): a `stop` of a target with queued mail is tried 1.5 s later
 (2 min for `stop bg`), the whole queue every 60 s, implicit replies and crash recovery every tick. It never wakes
 Jarvis (F3). Every 60 s it compares the installed files with the installer's SHA-256 record (`integrity`).
+
+F2b: it checks the watches ("dej vědět, až…", jarviswatch.WatchWorker) and the evidence of delegated tasks after the
+mail, every tick. It is the only caller of `gh` (at most once per 2 min per watch or commit, 15 s timeout, never when
+the run has under 25 s left). Fired watches and proofs go to watches.jsonl, which the delta shows on top; status.json
+carries `watches` {open, fired in the last hour, evidence} for F3, which will wake Jarvis and push to the app.
 """
 import argparse
 import fcntl
@@ -36,6 +41,7 @@ import traceback
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
 import jarvislib as J  # noqa: E402
 import jarvismail as M  # noqa: E402
+import jarviswatch as JW  # noqa: E402
 
 TICK_S = 5
 DURATION_S = 55
@@ -74,6 +80,7 @@ class Daemon:
         self.usage, self.usage_at = {}, 0
         self.errors = []
         self.mail = M.MailWorker(env, log=self.log)
+        self.watch = JW.WatchWorker(env, log=self.log)
         self.time_left = lambda: 60.0
         self.integrity, self.integrity_at = [], 0
 
@@ -126,7 +133,7 @@ class Daemon:
             "counts": _counts(sessions),
             "inbox": [{"name": s["name"], "short": s["short"], **s["attention"]} for s in J.inbox(sessions)],
             "usage": self.usage, "closed": closed, "errors": self.errors[-5:], "integrity": self.integrity,
-            "sessions": sessions,
+            "watches": self.watch.summary, "sessions": sessions,
         }
         J.atomic_write(env.path("status.json"), json.dumps(status, ensure_ascii=False, separators=(",", ":")))
         J.atomic_write(env.path("d-state.json"), json.dumps(
@@ -136,6 +143,11 @@ class Daemon:
             self.mail.tick(sessions, self.fold, now, self.time_left)
         except Exception:
             self.log("mail: " + traceback.format_exc(limit=3))
+        # after the mail: a watch tick may wait for GitHub; its summary reaches status.json on the next tick
+        try:
+            self.watch.tick(new, sessions, self.fold, self.usage, now, self.time_left)
+        except Exception:
+            self.log("watch: " + traceback.format_exc(limit=3))
         return status
 
     def _integrity(self):

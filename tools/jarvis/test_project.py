@@ -257,8 +257,9 @@ class GateTest(unittest.TestCase):
         # reply is the addressee's, on is Lukáš's switch, prompt-seen is the hook's (it would mint a "fresh prompt")
         self.assertEqual(load_gate().ALLOWED, {"cr-sessions": {"list", "show", "tail"},
                                                "cr-digest": {"delta", "brief", "waiting", "usage"},
-                                               "cr-mail": {"send", "status", "inbox", "cancel", "off"},
-                                               "cr-task": {"add", "list", "show", "done", "fail"}})
+                                               "cr-mail": {"send", "status", "inbox", "cancel", "off", "audit"},
+                                               "cr-task": {"add", "list", "show", "done", "fail", "watch",
+                                                           "watches", "unwatch", "log"}})
 
     def test_f2a_mail_and_task_commands_pass(self):
         for c in ('cr-mail send --to jarvis-test "Oprav prosím timeout v extrakci, hotové až projdou testy. Díky!"',
@@ -283,6 +284,21 @@ class GateTest(unittest.TestCase):
                   "cr-mail prompt-seen", 'cr-mail "send" --to x "y"', "cr-mail", "cr-task", "cr-task rm t-1",
                   'cr-task add "x" > /tmp/y', "cr-mailx send", "cr-mail send --to x hi; id",
                   'cr-mail send --to x "a" && id', "cr-mail send --to x <<EOF", 'cr-mail send --to x "a\x1bb"'):
+            self.assertBlocked(c)
+
+    def test_f2b_watch_audit_and_log_pass(self):
+        for c in ("cr-task watch stop jarvis-test", "cr-task watch waiting soniox --task t-20261108T081500-abcd",
+                  "cr-task watch ci jarvis-test --ref main", "cr-task watch ci jarvis-test --ref feature/x-1",
+                  "cr-task watch ci jarvis-test --ref 0123abcd", "cr-task watch usage nekrachni 50 --week",
+                  "cr-task watches", "cr-task watches --all --say", "cr-task unwatch w-20261108T081500-abcd",
+                  "cr-task log", "cr-task log t-20261108T081500-abcd --since 2d --json", "cr-task log --say",
+                  "cr-mail audit", "cr-mail audit --since 1h --say", "cr-mail audit --json"):
+            self.assertAllowed(c)
+
+    def test_f2b_force_and_tricks_are_blocked(self):
+        for c in ("cr-task done t-20261108T081500-abcd --force", 'cr-task done t-1 "ok" --force',
+                  "cr-task watch ci x --ref main@{u}", "cr-task watch ci x --ref $(id)", "cr-task watch ci x --ref ~",
+                  "cr-task watch stop x; id", "cr-mail audit --since 1h | sh", "cr-task log > /tmp/x"):
             self.assertBlocked(c)
 
     def test_line_shape_alone_rejects_every_metacharacter(self):

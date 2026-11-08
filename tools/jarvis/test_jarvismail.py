@@ -902,10 +902,15 @@ class TaskTest(Base):
         rec, why = self.send("udělej to", task=tid)
         self.assertIsNone(why)
         rc, out, _ = self.run_task("show", tid)
-        self.assertIn("otevřený", out)
+        self.assertIn("zadáno (ve frontě)", out)  # F2b: the derived state, not just "otevřený"
         self.assertIn(rec["id"], out)
         self.assertIn("testy zelené", out)
-        self.assertEqual(self.run_task("done", tid, "ověřeno")[0], 0)
+        # F2b: delegated with criteria, so Jarvis's `done` needs the evidence; Lukáš may override from his shell
+        rc, _, err = self.run_task("done", tid, "ověřeno")
+        self.assertEqual(rc, 2)
+        self.assertIn("ještě nemá odpověď", err)
+        self.assertEqual(self.run_task("done", tid, "ověřeno", "--force",
+                                       env=self.fx.env(environ_extra={}, my_pid=12))[0], 0)
         rc, _, err = self.run_task("done", tid)
         self.assertEqual(rc, 2)
         self.assertIn("už je hotovo", err)
