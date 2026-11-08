@@ -738,10 +738,35 @@ class MainActivity : FragmentActivity() {
         val cm = applicationContext.getSystemService(CONNECTIVITY_SERVICE) as android.net.ConnectivityManager
         NetworkCallbackHub.register(current = { OrchestratorHolder.orchestrator }) { listener ->
             cm.registerDefaultNetworkCallback(object : android.net.ConnectivityManager.NetworkCallback() {
-                override fun onAvailable(network: android.net.Network) = listener.onAvailable()
-                override fun onLost(network: android.net.Network) = listener.onLost()
+                // C1 (V1 = b): the reaction stays as it is; the log only says which network it was (netId, type) and when
+                // Android announced the old one's end (onLosing: the linger after a switch, kritika K-7 / H15)
+                override fun onAvailable(network: android.net.Network) {
+                    FileLogger.log("Network", "default network available: ${describeNetwork(cm, network)}")
+                    listener.onAvailable()
+                }
+                override fun onLost(network: android.net.Network) {
+                    FileLogger.log("Network", "default network lost: netId=$network")
+                    listener.onLost()
+                }
+                override fun onLosing(network: android.net.Network, maxMsToLive: Int) {
+                    FileLogger.log("Network", "default network losing: ${describeNetwork(cm, network)} in ${maxMsToLive}ms")
+                }
             })
         }
+    }
+
+    /** `netId=<id> type=<wifi|cellular|vpn|ethernet|…>` of [network] for the network log lines (diagnostics only). */
+    private fun describeNetwork(cm: android.net.ConnectivityManager, network: android.net.Network): String {
+        val caps = try { cm.getNetworkCapabilities(network) } catch (_: Exception) { null }
+        val type = when {
+            caps == null -> "unknown"
+            caps.hasTransport(android.net.NetworkCapabilities.TRANSPORT_VPN) -> "vpn"
+            caps.hasTransport(android.net.NetworkCapabilities.TRANSPORT_WIFI) -> "wifi"
+            caps.hasTransport(android.net.NetworkCapabilities.TRANSPORT_CELLULAR) -> "cellular"
+            caps.hasTransport(android.net.NetworkCapabilities.TRANSPORT_ETHERNET) -> "ethernet"
+            else -> "other"
+        }
+        return "netId=$network type=$type"
     }
 
     /**

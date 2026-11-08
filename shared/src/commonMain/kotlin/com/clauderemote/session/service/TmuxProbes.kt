@@ -8,6 +8,12 @@ import kotlinx.coroutines.launch
 
 private const val TAG = "SessionOrchestrator"
 
+/** C1 round 2: `$CR_T` = `timeout 3` where coreutils `timeout` exists, else nothing (N7-2: a probe must still answer). */
+private const val TMUX_LIMIT = "if command -v timeout >/dev/null 2>&1; then CR_T='timeout 3'; else CR_T=; fi; "
+
+/** The refresh-client kick's bound: after the permit more than Cloudflare's floor (1.5 s) must be left for the open. */
+private const val REFRESH_MS = 2_500L
+
 /**
  * Trailing-edge window for coalescing a burst of kickRedraw calls into one
  * server-side resize/refresh. A tab switch alone fires several kicks inside the
@@ -48,7 +54,8 @@ internal class TmuxProbes(
         // Sync pty geometry to the current view first (no-op if unchanged) —
         // each session's pty keeps the size from the last time *it* was
         // active, which may be stale after switching between sessions.
-        conn.resize(cols, rows)
+        // C4: through terminalIO, so the tab remembers the size (its next reconnect starts at it, not at 80x24)
+        terminalIO.resize(sessionId, cols, rows)
         val tmuxName = tabManager.getTab(sessionId)?.tmuxSessionName
         // COALESCE the burst. Every kick used to run `resize-window` server
         // side, and continuous resize churn is the leading suspect for the
@@ -149,14 +156,26 @@ internal class TmuxProbes(
         kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
             try {
                 val escaped = tmuxName.replace("'", "'\\''")
-                val refreshCmd = "tmux list-clients -t '=$escaped' -F '#{client_name}' 2>/dev/null" +
-                    " | while IFS= read -r c; do tmux refresh-client -t \"\$c\" 2>/dev/null && echo OK; done"
+                // C1 round 2 (adv 3, N7-1 pattern): every tmux client bounded and never on the channel's pipe — a stopped
+                // tmux server keeps a client's stdout, and with it the channel and sshd's session, until it wakes up
+                val refreshCmd = com.clauderemote.session.ClaudeConfig.TMUX_OUT_FILE + " " + TMUX_LIMIT +
+                    "\$CR_T tmux list-clients -t '=$escaped' -F '#{client_name}' </dev/null >\"\$CR_F\" 2>/dev/null; " +
+                    "while IFS= read -r c; do \$CR_T tmux refresh-client -t \"\$c\" </dev/null >/dev/null 2>&1 && echo OK; done <\"\$CR_F\""
                 if (serverId != null && registry.execActive(serverId)) {
                     // Exec transport: a refresh must not cost the attached shell's own channel budget. With the
                     // exec transport down execRead falls back to a tab transport WITH room (counted); no room is
                     // no kick, never a channel of the attached shell's own session (the geometry fallback of the
                     // caller needs none).
-                    val out = registry.execRead(serverId, refreshCmd, totalMs = 1_500)
+                    // C1 priority class: a poll permit or none (no kick; the caller's SIGWINCH toggle needs no channel).
+                    // 2.5 s: what is left after the permit must stay above Cloudflare's floor (1.5 s) for the open; a
+                    // tick skipped for want of a permit or of that floor is counted, not an error (review C1-1)
+                    val out = try {
+                        registry.execRead(serverId, refreshCmd, totalMs = REFRESH_MS, kind = ExecKind.POLL)
+                    } catch (e: ExecUnavailable) {
+                        if (e.reason != ExecUnavailableReason.GATE_TIMEOUT && !e.belowFloor) throw e
+                        PollSkipLog.skipped(serverId, PollSkipLog.PROBE)
+                        null
+                    }
                     return@withContext out?.contains("OK") ?: false
                 }
                 val sshSession = conn.getSession() ?: return@withContext false
@@ -167,10 +186,13 @@ internal class TmuxProbes(
                     ch.setCommand(refreshCmd)
                     ch.inputStream = null
                     val input = ch.inputStream
-                    ch.connect(1500) // keep snappy on cell links; fallback toggle covers failure
-                    val out = input.bufferedReader().readText()
-                    ch.disconnect()
-                    out.contains("OK")
+                    // keep snappy on cell links; fallback toggle covers failure. C1: ChannelOpen (floor, detached open)
+                    try {
+                        com.clauderemote.connection.ChannelOpen.connect(ch, 1500)
+                        input.bufferedReader().readText().contains("OK")
+                    } finally {
+                        com.clauderemote.connection.ChannelOpen.disconnect(ch)
+                    }
                 }
                 if (serverId == null) run(sshSession)
                 else registry.withTabChannel(serverId, sshSession, "refresh-client", run)?.value ?: false
@@ -208,9 +230,13 @@ internal class TmuxProbes(
             ch.setCommand(hasSessionCmd(sessionName))
             ch.inputStream = null
             val input = ch.inputStream
-            ch.connect(1500) // fail-open probe — keep snappy on cell links
-            val out = input.bufferedReader().readText().trim()
-            ch.disconnect()
+            // fail-open probe — keep snappy on cell links. C1: ChannelOpen (floor, detached open)
+            val out = try {
+                com.clauderemote.connection.ChannelOpen.connect(ch, 1500)
+                input.bufferedReader().readText().trim()
+            } finally {
+                com.clauderemote.connection.ChannelOpen.disconnect(ch)
+            }
             // Only an explicit NO means gone. A channel that closed before
             // answering reads as "" — and "gone" makes the caller kill-session and
             // rebuild a LIVE session mid-task, so it is fail-open like an exception.
@@ -227,6 +253,7 @@ internal class TmuxProbes(
      * anything but an explicit NO reads as alive.
      */
     suspend fun probeTmuxSession(serverId: String, sessionName: String): Boolean = try {
+        // interactive (SHORT): it decides launch/attach and what an ended attach means (review C1-1 adv 4), never skipped
         val out = registry.execRead(serverId, hasSessionCmd(sessionName), totalMs = 2_000)?.trim()
         out == null || !out.endsWith("NO")
     } catch (e: kotlinx.coroutines.CancellationException) {
@@ -236,8 +263,15 @@ internal class TmuxProbes(
         true // fail-open
     }
 
-    private fun hasSessionCmd(sessionName: String): String =
-        "tmux has-session -t '=${sessionName.replace("'", "'\\''")}' 2>/dev/null && echo YES || echo NO"
+    internal companion object {
+        /**
+         * C1 round 2 (adv 3): bounded and off the channel's pipe (N7-1 pattern). A check cut short (124) prints nothing,
+         * which reads as alive (fail-open): only tmux's own "no such session" is NO.
+         */
+        fun hasSessionCmd(sessionName: String): String =
+            TMUX_LIMIT + "\$CR_T tmux has-session -t '=${sessionName.replace("'", "'\\''")}' </dev/null >/dev/null 2>&1; CR_R=\$?; " +
+                "if [ \$CR_R -eq 0 ]; then echo YES; elif [ \$CR_R -ne 124 ]; then echo NO; fi"
+    }
 
     /** The shell probe behind [probeTranscriptExists]: prints YES or NO. */
     private fun transcriptProbeCmd(folder: String, rawUuid: String): String {
@@ -299,9 +333,13 @@ internal class TmuxProbes(
             ch.setCommand(cmd)
             ch.inputStream = null
             val input = ch.inputStream
-            ch.connect(1500)
-            val out = input.bufferedReader().readText().trim()
-            ch.disconnect()
+            // C1: ChannelOpen (floor, detached open)
+            val out = try {
+                com.clauderemote.connection.ChannelOpen.connect(ch, 1500)
+                input.bufferedReader().readText().trim()
+            } finally {
+                com.clauderemote.connection.ChannelOpen.disconnect(ch)
+            }
             when {
                 out.endsWith("YES") -> true
                 out.endsWith("NO") -> false

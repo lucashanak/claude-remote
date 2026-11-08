@@ -4,6 +4,7 @@ import com.clauderemote.connection.SshSessionHelper
 import com.clauderemote.session.service.CommFlags
 import com.clauderemote.session.service.ExecUnavailable
 import com.clauderemote.session.service.ExecUnavailableReason
+import com.clauderemote.session.service.PollSkipLog
 import com.clauderemote.model.SshServer
 import com.clauderemote.util.FileLogger
 import kotlinx.coroutines.CoroutineScope
@@ -118,12 +119,14 @@ class SessionStatusPoller(
                 val shared = liveSession()?.takeIf { it.isConnected }
                 val raw = if (viaExec()) {
                     try {
-                        SshSessionHelper.withSession(server, timeout = 10_000, allowFresh = false) { sess ->
+                        SshSessionHelper.withSession(server, timeout = 10_000, allowFresh = false, periodic = true) { sess ->
                             execStat(sess, statCmd)
                         }
                     } catch (e: ExecUnavailable) {
-                        if (e.reason != ExecUnavailableReason.NOT_UP) throw e
-                        if (shared == null) null else onOwnSession(shared, statCmd)
+                        // C1 priority class: no poll permit = skip this tick quietly (no error line, no backoff)
+                        if (e.reason == ExecUnavailableReason.GATE_TIMEOUT) { PollSkipLog.skipped(server.id, PollSkipLog.STATUS); null }
+                        else if (e.reason != ExecUnavailableReason.NOT_UP) throw e
+                        else if (shared == null) null else onOwnSession(shared, statCmd)
                     }
                 } else if (shared != null) {
                     // Exec routing off (kill switch, legacy server): counted where the shells are packed.
@@ -131,13 +134,16 @@ class SessionStatusPoller(
                 } else {
                     // No live session: with the pool on, no fresh handshake per tick outside the pool's limits (skip it).
                     try {
-                        SshSessionHelper.withSession(server, timeout = 10_000, allowFresh = !CommFlags.effectiveFor(server.id).pool) { sess ->
+                        SshSessionHelper.withSession(server, timeout = 10_000, allowFresh = !CommFlags.effectiveFor(server.id).pool, periodic = true) { sess ->
                             execStat(sess, statCmd)
                         }
                     } catch (e: ExecUnavailable) {
-                        if (e.reason != ExecUnavailableReason.NOT_UP) throw e
-                        tabChannels.skipped(SKIP_SOURCE)
-                        null
+                        if (e.reason == ExecUnavailableReason.GATE_TIMEOUT) { PollSkipLog.skipped(server.id, PollSkipLog.STATUS); null }
+                        else if (e.reason != ExecUnavailableReason.NOT_UP) throw e
+                        else {
+                            tabChannels.skipped(SKIP_SOURCE)
+                            null
+                        }
                     }
                 }
                 if (raw == null) {
@@ -191,7 +197,8 @@ class SessionStatusPoller(
         return try {
             withContext(Dispatchers.IO) {
                 try {
-                    ch.connect(8_000)
+                    // C1: floor, detached open and the transport's health (ChannelOpen)
+                    com.clauderemote.connection.ChannelOpen.connect(ch, 8_000)
                 } catch (e: com.jcraft.jsch.JSchException) {
                     tabChannels.channelOpenFailed(SKIP_SOURCE, sess, ch.exitStatus, e)
                     throw e
@@ -199,7 +206,7 @@ class SessionStatusPoller(
                 input.bufferedReader().readText()
             }
         } finally {
-            try { ch.disconnect() } catch (_: Throwable) {}
+            com.clauderemote.connection.ChannelOpen.disconnect(ch)
         }
     }
 

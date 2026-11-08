@@ -78,12 +78,18 @@ class RemoteExecRunTest {
     // ---- the connect never waits longer than what is left of the bound ----
 
     @Test fun connectWaitsAtMostWhatIsLeftOfTheBound() {
-        val tight = Scripted(stdout = "x", exit = 0)
-        runBlocking { exec(Fake { tight }).run("s", "c", totalMs = 1_200) }
-        assertTrue(tight.connectArgs.single() in 900..1_200, "connect timeout ${tight.connectArgs} must be ~1200, not the fixed 5000")
+        // C1 (K-4): the caller waits at most what is left of the bound; the open itself goes on detached up to its dead
+        // limit (com.clauderemote.connection.ChannelOpen), so jsch gets that limit, not the caller's budget
+        val tight = Scripted(stdout = "x", exit = 0, onConnect = { Thread.sleep(3_000) })
+        val t0 = System.nanoTime()
+        assertFailsWith<ExecUnavailable> { runBlocking { exec(Fake { tight }).run("s", "c", totalMs = 1_200) } }
+        val ms = (System.nanoTime() - t0) / 1_000_000
+        assertTrue(ms in 900..1_700, "the caller waited ~1200 ms, not the 3 s the open took ($ms ms)")
+        val dead = com.clauderemote.connection.ChannelOpen.tuning.openDeadLanMs.toInt()
+        assertEquals(listOf(dead), tight.connectArgs, "the detached open's own limit")
         val roomy = Scripted(stdout = "x", exit = 0)
         runBlocking { exec(Fake { roomy }).run("s", "c", totalMs = 60_000) }
-        assertEquals(listOf(5_000), roomy.connectArgs, "a roomy bound still caps the connect at 5 s")
+        assertEquals(listOf(dead), roomy.connectArgs, "a roomy bound: the caller waits 5 s at most, the open its limit")
     }
 
     // ---- the wall-clock bound covers the wait for a permit too ----
@@ -103,8 +109,9 @@ class RemoteExecRunTest {
         val e = assertFailsWith<ExecUnavailable> { runBlocking { exec(Fake(permitWaitMs = 600) { ch }).run("s", "c", totalMs = 900) } }
         val ms = (System.nanoTime() - t0) / 1_000_000
         assertEquals(ExecUnavailableReason.TIMEOUT, e.reason)
-        assertTrue(ms in 800..1_300, "the whole call fits the 900 ms bound, not 600 + 900 (took $ms ms)")
-        assertTrue(ch.connectArgs.single() <= 320, "connect gets what was left, ${ch.connectArgs}")
+        assertTrue(ms in 550..1_300, "the whole call fits the 900 ms bound, not 600 + 900 (took $ms ms)")
+        // C1: what was left (~300 ms) is no longer handed to jsch: below the LAN floor no open is started at all
+        assertTrue(ch.connectArgs.isEmpty() || ch.connectArgs.single() >= 300, "${ch.connectArgs}")
     }
 
     @Test fun aPermitThatArrivesAfterTheBoundIsATimeoutWithoutConnecting() {
@@ -181,9 +188,9 @@ class RemoteExecRunTest {
 
     @Test fun theWatchdogDoesNotFireAfterTheCommandFinished() {
         val ch = Scripted(stdout = "ok", exit = 0, sessionOf = liveSession)
-        runBlocking { exec(Fake { ch }).run("s", "c", totalMs = 300) }
+        runBlocking { exec(Fake { ch }).run("s", "c", totalMs = 400) }   // C1: at least the LAN floor of 300 ms for the open
         val after = ch.disconnects.get()
-        Thread.sleep(700)    // well past the 300 ms bound
+        Thread.sleep(800)    // well past the 400 ms bound
         assertEquals(after, ch.disconnects.get(), "a leaked watchdog would disconnect the channel again at 300 ms")
     }
 

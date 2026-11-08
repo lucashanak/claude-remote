@@ -55,6 +55,9 @@ object SshSessionHelper {
      */
     @Volatile internal var execChannelsProvider: ((serverId: String) -> ExecChannels?)? = null
 
+    /** The Cloudflare proxy of a session [createSession] made, until [withSession] arms it after the connect. */
+    private val freshProxies = java.util.Collections.synchronizedMap(java.util.WeakHashMap<Session, CloudflareProxy>())
+
     fun createSession(server: SshServer, timeout: Int = 10000): Session {
         val jsch = JSch()
         if (server.authMethod == AuthMethod.KEY && server.privateKey != null) {
@@ -68,13 +71,16 @@ object SshSessionHelper {
         sess.timeout = timeout
         // Keepalive (interval is MILLISECONDS in JSch): a quiet-but-alive
         // operation longer than the socket timeout survives (the keepalive
-        // resets it), while a silently-dead link is torn down in ~20s instead
-        // of hanging the helper's exec read on a flaky network.
+        // resets it), while a silently-dead link is torn down in ~30 s (the
+        // interval x 3: two unanswered keepalives, then the third timeout) instead
+        // of hanging the helper's exec read on a flaky network. Over Cloudflare
+        // the proxy's own keepalive does it once [CloudflareProxy.armKeepAlive] ran
+        // after the connect (there is no socket for JSch to time out; see [withSession]).
         sess.setServerAliveInterval(10_000)
         sess.setServerAliveCountMax(2)
 
         if (server.useCloudflareProxy) {
-            sess.setProxy(CloudflareProxy(server.host, server.cloudflareToken))
+            sess.setProxy(CloudflareProxy(server.host, server.cloudflareToken).also { freshProxies[sess] = it })
         }
 
         return sess
@@ -90,18 +96,21 @@ object SshSessionHelper {
      * [ExecUnavailable] ([ExecUnavailableReason.NOT_UP]) is thrown instead of paying a
      * handshake. Only NOT_UP falls through to those transports; a permit wait that timed out
      * ([ExecUnavailableReason.GATE_TIMEOUT]) is thrown to the caller. A caller that can skip a tick (a poller) passes `allowFresh = false`.
+     * A [periodic] tick (C1, priority class) takes an [ExecKind.POLL] permit: no waiting, never one of the interactive
+     * reserve; [ExecUnavailableReason.GATE_TIMEOUT] then means "skip this tick", not an error.
      */
     suspend fun <T> withSession(
         server: SshServer,
         timeout: Int = 10000,
         allowFresh: Boolean = true,
+        periodic: Boolean = false,
         block: suspend (Session) -> T
     ): T {
         val gated = execChannelsProvider?.invoke(server.id)
         if (gated != null) {
             var entered = false
             try {
-                return gated.withPermit(server.id, ExecKind.SHORT) { sess -> entered = true; block(sess) }
+                return gated.withPermit(server.id, if (periodic) ExecKind.POLL else ExecKind.SHORT) { sess -> entered = true; block(sess) }
             } catch (e: ExecUnavailable) {
                 // An ExecUnavailable raised by the block itself is the block's business.
                 if (entered) throw e
@@ -122,6 +131,7 @@ object SshSessionHelper {
             kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
                 sess.connect(timeout)
             }
+            freshProxies.remove(sess)?.armKeepAlive(sess)
             block(sess)
         } finally {
             try { sess.disconnect() } catch (_: Exception) {}

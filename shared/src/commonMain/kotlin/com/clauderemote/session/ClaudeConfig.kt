@@ -264,12 +264,23 @@ object ClaudeConfig {
         // K6-1: the server ends a hung creation itself (`timeout`, exit 124 = cut short = Lost) and each check after it,
         // so a stuck tmux never keeps sshd's session once the client gave up (vzor K5-2). A check cut short prints no
         // owner and no ABSENT line: Lost too, never "absent" or "taken".
-        return "{ timeout $FRESH_CREATE_SERVER_LIMIT_S sh -c $runQ; } 2>&1; echo \"$FRESH_CREATE_RC\$?\"; " +
-            "timeout $FRESH_CHECK_LIMIT_S tmux has-session -t $target 2>/dev/null; CR_HS=\$?; " +
-            "if [ \$CR_HS -eq 0 ]; then CR_OW=\$(timeout $FRESH_CHECK_LIMIT_S tmux show-environment -t $target $LAUNCH_ENV 2>/dev/null); " +
-            "[ \$? -ne 124 ] && echo \"$FRESH_CREATE_OWNER\$CR_OW\"; " +
+        // N7-1: every tmux client writes into a temp file ([TMUX_OUT_FILE]), never into the channel's pipe or a `$(…)`: a
+        // tmux client hands its stdout to the server, so a hung (stopped) server kept that pipe open after `timeout` killed
+        // the client, and the channel — sshd's session — waited for an EOF until tmux recovered.
+        return "$TMUX_OUT_FILE " +
+            "{ timeout $FRESH_CREATE_SERVER_LIMIT_S sh -c $runQ; } >\"\$CR_F\" 2>&1 </dev/null; CR_RC=\$?; " +
+            "cat \"\$CR_F\"; echo \"$FRESH_CREATE_RC\$CR_RC\"; " +
+            "timeout $FRESH_CHECK_LIMIT_S tmux has-session -t $target </dev/null >/dev/null 2>&1; CR_HS=\$?; " +
+            "if [ \$CR_HS -eq 0 ]; then timeout $FRESH_CHECK_LIMIT_S tmux show-environment -t $target $LAUNCH_ENV </dev/null >\"\$CR_F\" 2>/dev/null; " +
+            "CR_X=\$?; CR_OW=\$(cat \"\$CR_F\"); [ \$CR_X -ne 124 ] && echo \"$FRESH_CREATE_OWNER\$CR_OW\"; " +
             "elif [ \$CR_HS -ne 124 ]; then echo $FRESH_CREATE_ABSENT; fi"
     }
+
+    /**
+     * N7-1: the temp file (`$CR_F`) the tmux clients of a creation / a cleanup / a probe write into. Removed on every way
+     * out (review C1-1, R15b): the end of the command, and a client that gave up (the shell's SIGPIPE/HUP/TERM).
+     */
+    internal const val TMUX_OUT_FILE = "CR_F=\$(mktemp) || exit 1; trap 'rm -f \"\${CR_F:?}\"' EXIT; trap 'exit 1' HUP PIPE TERM;"
 
     /**
      * K6-1: the server's limit on the creation itself (socket guard, anchor, `new-session`), in seconds. With the two
@@ -282,17 +293,36 @@ object ClaudeConfig {
     const val FRESH_CHECK_LIMIT_S = 3
     /** R6-2/R6-3: what [buildOwnSessionCleanupCommand] prints once it killed this launch's session. */
     const val FRESH_CLEANED = "__CR_CLEANED__"
+    /** LOW4: the cleanup could not tell (a tmux check cut short by its limit): the session may still be there. */
+    const val FRESH_CLEANUP_UNKNOWN = "__CR_CLEANUP_UNKNOWN__"
+    /** LOW3: the session is this launch's, but a client is attached to it (another device took it over): it stays. */
+    const val FRESH_CLEANUP_ATTACHED = "__CR_CLEANUP_ATTACHED__"
 
     /**
      * R6-2/R6-3: kill the session [tmuxSessionName] only when it is this launch's — its `CR_LAUNCH` is [nonce] — for a
      * launch that ends without a tab after its creation may have run (cancelled, every answer lost). A session of the
-     * name without that nonce (another device's, a user's) is never touched.
+     * name without that nonce (another device's, a user's) is never touched; nor one of ours a client is attached to
+     * (LOW3: the launch that gives up has no client, so any client is another device that took the session over:
+     * [FRESH_CLEANUP_ATTACHED]). A check cut short by its limit prints [FRESH_CLEANUP_UNKNOWN] (LOW4). Like the creation,
+     * the tmux clients write into a temp file, not a pipe (N7-1).
      */
     fun buildOwnSessionCleanupCommand(tmuxSessionName: String, nonce: String): String {
         require(nonce.isNotEmpty() && nonce.all { it.isLetterOrDigit() && it.code < 128 }) { "nonce must be ASCII alphanumeric" }
         val target = "'" + ("=" + tmuxSessionName).replace("'", "'\\''") + "'"
-        return "[ \"\$(timeout $FRESH_CHECK_LIMIT_S tmux show-environment -t $target $LAUNCH_ENV 2>/dev/null)\" = '$LAUNCH_ENV=$nonce' ] && " +
-            "timeout $FRESH_CHECK_LIMIT_S tmux kill-session -t $target && echo $FRESH_CLEANED"
+        val t = "timeout $FRESH_CHECK_LIMIT_S tmux"
+        // review C1-1 (HIGH): display-message takes a PANE target — `=name` alone resolves to nothing (empty output,
+        // rc 0) and the cleanup never killed anything; `=name:` is the session's current pane
+        val paneTarget = "'" + ("=" + tmuxSessionName + ":").replace("'", "'\\''") + "'"
+        return "$TMUX_OUT_FILE " +
+            "$t show-environment -t $target $LAUNCH_ENV </dev/null >\"\$CR_F\" 2>/dev/null; CR_X=\$?; CR_V=\$(cat \"\$CR_F\"); " +
+            "if [ \$CR_X -eq 124 ]; then echo $FRESH_CLEANUP_UNKNOWN; " +
+            "elif [ \"\$CR_V\" = '$LAUNCH_ENV=$nonce' ]; then " +
+            "$t display-message -p -t $paneTarget '#{session_attached}' </dev/null >\"\$CR_F\" 2>/dev/null; CR_X=\$?; CR_A=\$(cat \"\$CR_F\"); " +
+            "if [ \$CR_X -eq 124 ]; then echo $FRESH_CLEANUP_UNKNOWN; " +
+            "elif [ \"\$CR_A\" = 0 ]; then $t kill-session -t $target </dev/null >/dev/null 2>&1; CR_X=\$?; " +
+            "if [ \$CR_X -eq 0 ]; then echo $FRESH_CLEANED; elif [ \$CR_X -eq 124 ]; then echo $FRESH_CLEANUP_UNKNOWN; fi; " +
+            "elif [ -n \"\$CR_A\" ]; then echo $FRESH_CLEANUP_ATTACHED; fi; " +
+            "fi"
     }
 
     /**

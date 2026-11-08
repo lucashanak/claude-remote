@@ -120,10 +120,15 @@ internal class ConnectionRegistry(
     /**
      * The pool of [serverId]. Its shell cap is 8 only while the server's exec transport is UP ([execUp]):
      * with the transient exec channels still on the tab transports, 8 shells plus their execs would overflow
-     * sshd's `MaxSessions` 10.
+     * sshd's `MaxSessions` 10 — and while that transport is being replaced for channel health (C1, H7: hysteresis,
+     * [ExecTransportManager.keepsShellCap]), so a wave in that window does not open a transport per 3 tabs.
      */
     fun transportPool(serverId: String): ServerTransportPool =
-        transportPools.getOrPut(serverId) { ServerTransportPool(serverStorage, execWired = { execUp(it.id) }) }
+        transportPools.getOrPut(serverId) { ServerTransportPool(serverStorage, execWired = { execUp(it.id) || execKeepsShellCap(it.id) }) }
+
+    /** C1 (H7): the exec transport of [serverId] is being replaced for channel health; the shells keep the cap of 8. */
+    internal fun execKeepsShellCap(serverId: String): Boolean =
+        (execSessions as? ExecTransportManager)?.keepsShellCap(serverId) == true
 
     /** The exec transport manager of [serverId] is wired and its transport is UP (the condition for shell cap 8). */
     internal fun execUp(serverId: String): Boolean =

@@ -121,7 +121,7 @@ internal object RouteKind {
  *  - [release] drops a claim; the last one out disconnects the transport.
  *  - [reportDead] marks a transport unusable on a WRITE timeout — the one
  *    zombie signal where the TCP is dead but `isConnected` still reads true
- *    (keepalive needs ~20 s to notice). A channel-only EOF (user exits the
+ *    (the keepalive needs its interval x 3, ~30 s in the foreground, to notice). A channel-only EOF (user exits the
  *    remote shell) must NOT report the transport dead: the siblings riding it
  *    are healthy, and killing it would cascade a reconnect across all of them.
  *  - [reportFull] marks a transport that REFUSED a channel (`MaxSessions`) as
@@ -489,7 +489,7 @@ class ServerTransportPool(
     /**
      * Kill every transport NOW. For the Android network-lost event: the
      * interface our TCP rode is gone, but keepalive wouldn't notice for up to
-     * 20 s (fg) / 2 min (bg) — frozen tabs the whole time. Disconnecting
+     * ~30 s (fg, 10 s x 3) / 3 min (bg, 60 s x 3) — frozen tabs the whole time. Disconnecting
      * unblocks the parked channel reads immediately, so every manager's read
      * loop EOFs and per-session autoReconnect (gated + pooled) re-establishes
      * on the new network the moment it's up. Structural removal from the list
@@ -567,17 +567,23 @@ class ServerTransportPool(
             // Keepalive via the EXPLICIT API (milliseconds!) — see SshManager. The pool-wide
             // value (setKeepAlive), so a transport connected in the background does not start
             // with the foreground interval.
+            // C1: the read timeout first — `setServerAliveInterval` sets it to the interval, and JSch sends its keepalive
+            // only when a read times out; set after it, the connect timeout (15 s) was the keepalive pace (~45 s to notice
+            // a dead link instead of ~30 s). The handshake: on a socket connect(connectTimeout) below bounds it; over Cloudflare
+            // (no socket) the proxy's own limit does (TunnelKeepAlive)
+            sess.timeout = connectTimeout
             sess.setServerAliveInterval(keepAliveMs)
             sess.setServerAliveCountMax(2)
             sess.userInfo = TofuUserInfo(server.host, serverStorage)
-            sess.timeout = connectTimeout
             // F4: jsch reports the end of its main loop (and why) only to a logger; this one keeps that reason
             sess.setLogger(end)
-            if (server.useCloudflareProxy) {
+            val cf = if (server.useCloudflareProxy) {
                 FileLogger.log(TAG, "Using Cloudflare tunnel proxy for ${server.host}")
-                sess.setProxy(CloudflareProxy(server.host, server.cloudflareToken))
-            }
+                CloudflareProxy(server.host, server.cloudflareToken).also { sess.setProxy(it) }
+            } else null
             sess.connect(connectTimeout)
+            // C1 (K-2): only now does the keepalive run over the tunnel (no socket to time out)
+            cf?.armKeepAlive(sess)
             sess
         }
 

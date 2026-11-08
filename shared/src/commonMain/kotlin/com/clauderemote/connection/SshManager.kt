@@ -213,17 +213,19 @@ class SshManager(
         // timeout, radio handoff on a flaky roaming network) is detected in
         // ~20s instead of never/90s, which is what re-arms auto-reconnect.
         // [keepAliveMs] is 10 s until [setKeepAliveInterval] changes it.
+        // C1: the read timeout before the interval (which sets it to itself): see ServerTransportPool.connectTransport
+        own.timeout = connectTimeout
         own.setServerAliveInterval(keepAliveMs)
         own.setServerAliveCountMax(2)
         own.userInfo = TofuUserInfo(server.host, serverStorage)
-        own.timeout = connectTimeout
 
         // Cloudflare Tunnel: route SSH over WebSocket instead of direct TCP
-        if (server.useCloudflareProxy) {
+        val cf = if (server.useCloudflareProxy) {
             FileLogger.log(TAG, "Using Cloudflare tunnel proxy for ${server.host}")
-            own.setProxy(CloudflareProxy(server.host, server.cloudflareToken))
-        }
+            CloudflareProxy(server.host, server.cloudflareToken).also { own.setProxy(it) }
+        } else null
         own.connect(connectTimeout)
+        cf?.armKeepAlive(own)
         return own
     }
 
@@ -399,10 +401,9 @@ class SshManager(
         // forever on a silently-dead link.
         sess.setServerAliveInterval(keepAliveMs)
         sess.setServerAliveCountMax(2)
-        if (server.useCloudflareProxy) {
-            sess.setProxy(CloudflareProxy(server.host, server.cloudflareToken))
-        }
+        val cf = if (server.useCloudflareProxy) CloudflareProxy(server.host, server.cloudflareToken).also { sess.setProxy(it) } else null
         sess.connect(10_000)
+        cf?.armKeepAlive(sess)
         session = sess
     }
 

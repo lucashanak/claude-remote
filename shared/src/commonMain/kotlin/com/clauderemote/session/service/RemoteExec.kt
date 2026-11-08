@@ -32,16 +32,16 @@ internal suspend fun execReadWithWatchdog(
     val input = ch.inputStream
     val watchdog = launch {
         kotlinx.coroutines.delay(totalMs)
-        try { ch.disconnect() } catch (_: Exception) {}
+        com.clauderemote.connection.ChannelOpen.disconnect(ch)
     }
     try {
         kotlinx.coroutines.withContext(Dispatchers.IO) {
-            ch.connect(connectMs)
+            com.clauderemote.connection.ChannelOpen.connect(ch, connectMs.toLong())
             input.bufferedReader().readText()
         }
     } finally {
         watchdog.cancel()
-        try { ch.disconnect() } catch (_: Exception) {}
+        com.clauderemote.connection.ChannelOpen.disconnect(ch)
     }
 }
 
@@ -53,8 +53,49 @@ internal suspend fun execReadWithWatchdog(
 // the contract.
 // ---------------------------------------------------------------------------
 
-/** What an exec channel is for; permits are per kind (SFTP shares SHORT). */
-internal enum class ExecKind { SHORT, LONG, SFTP }
+/**
+ * What an exec channel is for; permits are per kind (SFTP shares SHORT). [POLL] is a SHORT channel of a periodic poller
+ * (transcript tick, status, tmux probe/refresh): it never waits for a permit and never takes the last
+ * [GatedExecChannels.Limits.interactiveReserve] SHORT permits, which stay for what a user waits on (C1, priority class).
+ */
+internal enum class ExecKind { SHORT, LONG, SFTP, POLL }
+
+/**
+ * C1: the ticks the poll class skipped for want of a permit ([ExecKind.POLL]), counted per server and source and written
+ * as ONE line per server at most every [WINDOW_MS] (`poll skipped (no poll permit) server=… transcript=N status=M
+ * probe=K in Xs`), so the skips stay measurable without a line per tick. The line goes out with the first skip after
+ * the window; a window without skips writes nothing.
+ */
+internal object PollSkipLog {
+    const val WINDOW_MS = 60_000L
+    const val TRANSCRIPT = "transcript"
+    const val STATUS = "status"
+    const val PROBE = "probe"
+
+    private class Window(var since: Long) {
+        val counts = linkedMapOf(TRANSCRIPT to 0, STATUS to 0, PROBE to 0)
+    }
+
+    private val windows = java.util.concurrent.ConcurrentHashMap<String, Window>()
+
+    /** A periodic tick of [source] on [serverId] was skipped (no poll permit). */
+    fun skipped(serverId: String, source: String, now: Long = System.currentTimeMillis()) {
+        val w = windows.getOrPut(serverId) { Window(now) }
+        val line = synchronized(w) {
+            w.counts[source] = (w.counts[source] ?: 0) + 1
+            if (now - w.since < WINDOW_MS) null
+            else ("poll skipped (no poll permit) server=$serverId " + w.counts.entries.joinToString(" ") { "${it.key}=${it.value}" } +
+                " in ${(now - w.since) / 1000}s").also { w.counts.keys.forEach { k -> w.counts[k] = 0 }; w.since = now }
+        }
+        line?.let { FileLogger.log("ExecChannel", it) }
+    }
+
+    /** The counts of the current window of [serverId] (tests, diagnostics). */
+    fun counts(serverId: String): Map<String, Int> = windows[serverId]?.let { w -> synchronized(w) { w.counts.toMap() } }.orEmpty()
+
+    /** Forget every window (tests). */
+    fun resetForTest() = windows.clear()
+}
 
 /** Stdin pacing for CF-tunnelled uploads (SshManager: 4 KB / 20 ms). */
 internal data class Pace(val chunkBytes: Int = 4096, val delayMs: Long = 20)
@@ -82,6 +123,11 @@ internal class ExecUnavailable(
      * (a sibling channel may have closed). Any other refusal is not retried.
      */
     val spillable: Boolean = false,
+    /**
+     * Only with [ExecUnavailableReason.TIMEOUT]: no channel was opened because less than the route's floor was left
+     * ([com.clauderemote.connection.ChannelOpen]). For a periodic poll that is a skipped tick, not an error.
+     */
+    val belowFloor: Boolean = false,
 ) : Exception(message)
 
 /**
@@ -98,7 +144,7 @@ internal interface RemoteExec {
      * Run [cmd] on [serverId], optionally feeding [stdin] paced by [paceStdin].
      * Wall-clock bounded by [totalMs] (connect included), enforced independently of
      * the caller: cancelling the caller does not lift the bound. [kind] must be
-     * [ExecKind.SHORT] or [ExecKind.LONG] (SFTP is not an exec; `IllegalArgumentException`).
+     * [ExecKind.SHORT], [ExecKind.POLL] or [ExecKind.LONG] (SFTP is not an exec; `IllegalArgumentException`).
      * Throws [ExecUnavailable] as described on this interface.
      */
     suspend fun run(
@@ -171,7 +217,7 @@ internal class UngatedExecChannels(
         try {
             return block(ch)
         } finally {
-            try { ch.disconnect() } catch (_: Exception) {}
+            com.clauderemote.connection.ChannelOpen.disconnect(ch)
         }
     }
 
@@ -249,7 +295,8 @@ internal class PooledRemoteExec(
         val watchdog = CoroutineScope(Dispatchers.Default).launch {
             delay(leftMs)
             timedOut.set(true)
-            try { ch.disconnect() } catch (_: Exception) {}
+            // a channel whose open still runs detached is the open's to close (ChannelOpen)
+            com.clauderemote.connection.ChannelOpen.disconnect(ch)
         }
         try {
             val result = withContext(Dispatchers.IO) {
@@ -257,8 +304,9 @@ internal class PooledRemoteExec(
                 val out = if (stdin != null) ch.outputStream else null
                 ch.inputStream = null
                 val input = ch.inputStream
-                // never wait for the connect longer than what is left of the bound
-                ch.connect(minOf(CONNECT_MS, leftMs).toInt())
+                // never wait for the connect longer than what is left of the bound; below the route's floor no open at
+                // all, and an open the bound gave up on goes on detached and is closed when it lands (ChannelOpen)
+                com.clauderemote.connection.ChannelOpen.connect(ch, minOf(CONNECT_MS, leftMs))
                 if (stdin != null && out != null) {
                     var off = 0
                     while (off < stdin.size) {
@@ -302,7 +350,7 @@ internal class PooledRemoteExec(
             }
         } finally {
             watchdog.cancel()
-            try { ch.disconnect() } catch (_: Exception) {}
+            com.clauderemote.connection.ChannelOpen.disconnect(ch)
         }
     }
 
@@ -310,7 +358,8 @@ internal class PooledRemoteExec(
     private fun sessionConnected(ch: com.jcraft.jsch.Channel): Boolean =
         try { ch.session.isConnected } catch (_: Exception) { true }
 
-    private companion object {
+    internal companion object {
+        /** The open's budget; at least [com.clauderemote.connection.ChannelOpen.Tuning.fullBudgetMs], or no open of it counts. */
         const val CONNECT_MS = 5_000L
         const val ACQUIRE_MS = 5_000L
     }
@@ -322,7 +371,9 @@ internal class PooledRemoteExec(
  * `MaxSessions` (default 10) whatever the callers do.
  *
  * Permits per server: SHORT 6 (SFTP shares them), LONG 2 (notify watcher, streamd),
- * 8 channels in total. Permits belong to a transport GENERATION
+ * 8 channels in total. A periodic poller ([ExecKind.POLL]) takes a SHORT permit only while more than
+ * [Limits.interactiveReserve] are free and never waits for one (no permit = the tick is skipped by its caller);
+ * an open the caller gave up on keeps its slot until it resolves ([com.clauderemote.connection.ChannelOpen]). Permits belong to a transport GENERATION
  * ([ExecTransportManager.generation]): when the transport dies every permit of the
  * old generation is void and waiters re-evaluate against the new one — a leaked
  * permit cannot outlive its transport.
@@ -358,7 +409,13 @@ internal class GatedExecChannels(
     /** The fallback stream ended: give the capacity back (`ServerTransportPool.releaseChannel`). */
     private val releaseFallback: suspend (String, com.jcraft.jsch.Session) -> Unit = { _, _ -> },
 ) : ExecChannels {
-    data class Limits(val short: Int = 6, val long: Int = 2, val fallbackLong: Int = 2) {
+    data class Limits(
+        val short: Int = 6,
+        val long: Int = 2,
+        val fallbackLong: Int = 2,
+        /** SHORT permits a [ExecKind.POLL] never takes: attach, listing, launch, a reply, `pollNow` of the Stop path. */
+        val interactiveReserve: Int = 2,
+    ) {
         val total: Int get() = short + long
     }
 
@@ -369,6 +426,8 @@ internal class GatedExecChannels(
         var short = 0
         var long = 0
         var fallback = 0
+        /** Slots of opens their callers gave up on, until those opens resolve (ChannelOpen.Slots.hold). */
+        var pending = 0
         /** Bumped on every release / reset so waiters wake. */
         val version = kotlinx.coroutines.flow.MutableStateFlow(0L)
     }
@@ -387,6 +446,29 @@ internal class GatedExecChannels(
     /** Permits currently held on [serverId]'s exec transport: (short, long, fallback). For tests and diagnostics. */
     fun held(serverId: String): Triple<Int, Int, Int> =
         gates[serverId]?.let { g -> synchronized(g) { Triple(g.short, g.long, g.fallback) } } ?: Triple(0, 0, 0)
+
+    /** Slots still held for opens their callers gave up on (tests and diagnostics). */
+    fun pendingOpens(serverId: String): Int = gates[serverId]?.let { g -> synchronized(g) { g.pending } } ?: 0
+
+    /** The budget of the exec transport [gen] of [gate], as [com.clauderemote.connection.ChannelOpen] sees it. */
+    private fun slotsOf(gate: Gate, gen: Long, session: com.jcraft.jsch.Session) = object : com.clauderemote.connection.ChannelOpen.Slots {
+        override fun hold(): () -> Unit {
+            val took = synchronized(gate) { if (gate.gen == gen) { gate.pending++; true } else false }
+            if (!took) return {}
+            val once = AtomicBoolean(false)
+            return {
+                if (once.compareAndSet(false, true)) {
+                    synchronized(gate) { if (gate.gen == gen && gate.pending > 0) gate.pending-- }
+                    gate.version.update { it + 1 }
+                }
+            }
+        }
+        // review C1-1: the gate's own count (<= 8) is always below 10; what counts is what JSch really has open on the
+        // transport, pending opens included, against sshd's MaxSessions. Unreadable = no claim of room (the rule stays off).
+        override fun headroom(): Boolean = synchronized(gate) { gate.gen == gen } &&
+            (com.clauderemote.connection.ChannelOpen.sessionChannels(session)
+                ?.let { it < com.clauderemote.connection.ChannelOpen.tuning.maxSessions } ?: false)
+    }
 
     override suspend fun <T> use(
         serverId: String,
@@ -408,7 +490,7 @@ internal class GatedExecChannels(
                 if (e.reason == ExecUnavailableReason.IO) onTransportTrouble(serverId)
                 throw e
             } finally {
-                try { ch.disconnect() } catch (_: Exception) {}
+                com.clauderemote.connection.ChannelOpen.disconnect(ch)
             }
         } finally {
             release(permit)
@@ -444,7 +526,9 @@ internal class GatedExecChannels(
     }
 
     private suspend fun acquire(serverId: String, kind: ExecKind, acquireTimeoutMs: Long): Permit {
-        val deadline = System.nanoTime() + acquireTimeoutMs * 1_000_000
+        val poll = kind == ExecKind.POLL
+        // a poller never waits: no permit now = its tick is skipped (C1, priority class)
+        val deadline = System.nanoTime() + (if (poll) 0 else acquireTimeoutMs) * 1_000_000
         val gate = gates.getOrPut(serverId) { Gate() }
         val isLong = kind == ExecKind.LONG
         var stale = 0
@@ -456,6 +540,11 @@ internal class GatedExecChannels(
             else minOf(if (isLong) longFallbackAfterMs else upWaitMs, remainingMs(deadline).coerceAtLeast(0))
             var session = manager.session(serverId) ?: if (waitUp > 0) manager.await(serverId, waitUp) else null
             var where = Where.EXEC
+            if (session == null && poll && state is LinkState.Connecting) {
+                // review C1-1: a poll does not wait for the transport coming up, nor does it go onto the shell transports
+                // meanwhile — the tick is skipped (its caller counts it)
+                throw ExecUnavailable(ExecUnavailableReason.GATE_TIMEOUT, "exec unavailable: the exec transport is connecting, tick skipped")
+            }
             if (session == null) {
                 val fb = if (isLong) {
                     try { fallbackSession(serverId)?.takeIf { it.isConnected } } catch (e: CancellationException) { throw e } catch (_: Exception) { null }
@@ -463,7 +552,7 @@ internal class GatedExecChannels(
                 session = fb ?: throw ExecUnavailable(ExecUnavailableReason.NOT_UP)
                 where = Where.FALLBACK
             }
-            val permit = waitForPermit(serverId, gate, where, isLong, gen, session, deadline)
+            val permit = waitForPermit(serverId, gate, where, isLong, poll, gen, session, deadline)
             // the transport may have died or been replaced while we waited
             if (permit != null && where == Where.FALLBACK) {
                 val counted = kotlinx.coroutines.withContext(kotlinx.coroutines.NonCancellable) { reserveFallback(serverId, session) }
@@ -473,7 +562,10 @@ internal class GatedExecChannels(
                 permit.gate.version.update { it + 1 }
                 throw ExecUnavailable(ExecUnavailableReason.NOT_UP)
             }
-            if (permit != null && manager.generation(serverId) == gen && session.isConnected) return permit
+            if (permit != null && manager.generation(serverId) == gen && session.isConnected) {
+                com.clauderemote.connection.ChannelOpen.slots(session, slotsOf(gate, gen, session))
+                return permit
+            }
             if (permit != null) release(permit)
             if (++stale >= 3) throw ExecUnavailable(ExecUnavailableReason.NOT_UP, "exec unavailable: the exec transport kept changing")
         }
@@ -485,6 +577,7 @@ internal class GatedExecChannels(
         gate: Gate,
         where: Where,
         isLong: Boolean,
+        poll: Boolean,
         gen: Long,
         session: com.jcraft.jsch.Session,
         deadline: Long,
@@ -496,12 +589,14 @@ internal class GatedExecChannels(
                     if (gate.gen != gen) {
                         if (gate.gen > gen) return null // a newer generation already runs
                         gate.gen = gen
-                        gate.short = 0; gate.long = 0   // the old transport's permits are void
+                        gate.short = 0; gate.long = 0; gate.pending = 0   // the old transport's permits are void
                     }
+                    val inUse = gate.short + gate.long + gate.pending
                     if (isLong) {
-                        if (gate.long < limits.long && gate.short + gate.long < limits.total) { gate.long++; true } else false
+                        if (gate.long < limits.long && inUse < limits.total) { gate.long++; true } else false
                     } else {
-                        if (gate.short < limits.short && gate.short + gate.long < limits.total) { gate.short++; true } else false
+                        val cap = if (poll) limits.short - limits.interactiveReserve else limits.short
+                        if (gate.short + gate.pending < cap && inUse < limits.total) { gate.short++; true } else false
                     }
                 } else {
                     if (gate.fallback < limits.fallbackLong) { gate.fallback++; true } else false
@@ -510,7 +605,9 @@ internal class GatedExecChannels(
             if (got) return Permit(serverId, gate, where, isLong, gen, session)
             if (where == Where.EXEC && manager.generation(serverId) != gen) return null
             val left = remainingMs(deadline)
-            if (left <= 0) throw ExecUnavailable(ExecUnavailableReason.GATE_TIMEOUT, "exec unavailable: no channel permit within the acquire timeout")
+            if (left <= 0) throw ExecUnavailable(ExecUnavailableReason.GATE_TIMEOUT,
+                if (poll) "exec unavailable: no poll permit (the interactive reserve stays free), tick skipped"
+                else "exec unavailable: no channel permit within the acquire timeout")
             // wake on a release, and re-check the generation at least every 250 ms
             kotlinx.coroutines.withTimeoutOrNull(minOf(left, 250)) { gate.version.first { it != seen } }
         }

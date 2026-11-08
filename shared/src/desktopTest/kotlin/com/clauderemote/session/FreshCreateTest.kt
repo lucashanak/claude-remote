@@ -86,17 +86,22 @@ class FreshCreateTest {
         @Volatile var up = true
         /** The cleanups seen (R6-2/R6-3): (name, nonce). */
         val cleanups = CopyOnWriteArrayList<Pair<String, String>>()
+        /** LOW4: the cleanup's tmux checks are cut short by their limit (tmux hung): the server cannot tell. */
+        @Volatile var cleanupCutShort = false
         // the run of the creation is quoted once more inside `timeout … sh -c '…'` (K6-1): `'\''name'\''`
         private val createRe = Regex("""tmux new-session -d -x 200 -y 50 -s '(?:\\'')?([^'\\]+)'(?:\\'')? -e CR_LAUNCH=([A-Za-z0-9]+) """)
-        private val cleanupRe = Regex("""show-environment -t '=([^']+)' CR_LAUNCH 2>/dev/null\)" = 'CR_LAUNCH=([A-Za-z0-9]+)' ] && timeout \d+ tmux kill-session""")
+        private val cleanupRe = Regex("""show-environment -t '=([^']+)' CR_LAUNCH .*?\[ "\${'$'}CR_V" = 'CR_LAUNCH=([A-Za-z0-9]+)' ].*kill-session""")
 
         override suspend fun run(serverId: String, cmd: String, stdin: ByteArray?, totalMs: Long, kind: ExecKind, paceStdin: Pace): ExecResult {
+            // T7-2: a real channel suspends; a fake that never does let a cleanup without NonCancellable pass while cancelled
+            kotlinx.coroutines.yield()
             if (!up) throw ExecUnavailable(ExecUnavailableReason.NOT_UP)
             ran += cmd
             cleanupRe.find(cmd)?.let { c ->
                 // compare-and-kill, as the server runs it: only a session carrying the nonce goes
                 val (name, nonce) = c.groupValues[1] to c.groupValues[2]
                 cleanups += name to nonce
+                if (cleanupCutShort) return ExecResult("${ClaudeConfig.FRESH_CLEANUP_UNKNOWN}\n", 0)
                 val killed = sessions[name]?.owner == nonce && sessions.remove(name) != null
                 return ExecResult(if (killed) "__CR_CLEANED__\n" else "", 0)
             }
@@ -336,12 +341,17 @@ class FreshCreateTest {
         }
         val (o, _) = orchestrator(exec)
         runBlocking {
-            val first = async(Dispatchers.IO) { runCatching { launch(o) } }
+            val first = async(Dispatchers.IO) { runCatching { launch(o) }.also { firstEndedAt = System.nanoTime() } }
             assertTrue(waitFor(10_000) { exec.ran.any { "new-session -d" in it } })
-            val second = async(Dispatchers.IO) { runCatching { launch(o) } }
+            val second = async(Dispatchers.IO) { runCatching { launch(o) }.also { secondEndedAt = System.nanoTime() } }
             Thread.sleep(500)
             exec.gate!!.complete(Unit)
-            assertTrue(first.await().isFailure && second.await().isFailure, "both end with the first one's error")
+            val a = first.await()
+            val b = second.await()
+            assertTrue(a.isFailure && b.isFailure, "both end with the first one's error")
+            // T7-1 (P04): the joiner gets the first one's error at once — not its own launch timeout
+            assertTrue("socket guard exit 4" in b.exceptionOrNull()?.message.orEmpty(), "the first one's error: ${b.exceptionOrNull()}")
+            assertTrue((secondEndedAt - firstEndedAt) / 1_000_000 < 5_000, "and right after it, not when its own wait ran out")
         }
         assertEquals(1, exec.creates.size, "the second launch created nothing of its own: ${exec.creates}")
         assertTrue(tabs.tabs.value.isEmpty())
@@ -388,6 +398,85 @@ class FreshCreateTest {
         }
         assertTrue(exec.sessions.isEmpty(), "the cancelled launch's session is gone again: ${exec.sessions.keys}")
         assertTrue(tabs.tabs.value.isEmpty() && sessions.load().isEmpty())
+    }
+
+    @Volatile private var firstEndedAt = 0L
+    @Volatile private var secondEndedAt = 0L
+
+    /** LOW1 (review B-7): an attach of the name a launch is creating joins that launch — one tab, not two. */
+    @Test fun anAttachOfTheNameBeingCreatedJoinsThatLaunch() {
+        val exec = FakeTmux().apply { gate = CompletableDeferred() }
+        val (o, connects) = orchestrator(exec)
+        runBlocking {
+            val first = async(Dispatchers.IO) { launch(o) }
+            assertTrue(waitFor(10_000) { exec.ran.any { "new-session -d" in it } }, "the launch is creating its session")
+            val attach = async(Dispatchers.IO) {
+                withTimeout(40_000) { o.launchSession(server, "/work", ClaudeMode.NORMAL, ClaudeModel.DEFAULT, ConnectionType.SSH, base, isNewTmuxSession = false) }
+            }
+            Thread.sleep(500)
+            // kolo 2 (LOW1a): the attach waits for the creation — it does not attach a session that is not there yet
+            assertTrue(connects.isEmpty() && tabs.tabs.value.isEmpty(), "nothing attached before the session exists: $connects")
+            exec.gate!!.complete(Unit)
+            assertEquals(first.await().id, attach.await().id, "the attach is the launch's tab")
+        }
+        assertEquals(listOf(base), tabs.tabs.value.map { it.tmuxSessionName }, "one tab of the name")
+        assertEquals(1, connects.size, "one attach: $connects")
+    }
+
+    /** Kolo 2 (review C1-1, LOW1): when the launch an attach joined fails, the attach goes its own way — a tab of the name. */
+    @Test fun anAttachWhoseJoinedLaunchFailsAttachesOnItsOwn() {
+        val exec = FakeTmux().apply {
+            gate = CompletableDeferred()
+            guardRefusal = "claude-remote: not starting a tmux server (socket guard exit 4)"
+        }
+        val (o, connects) = orchestrator(exec)
+        runBlocking {
+            val first = async(Dispatchers.IO) { runCatching { launch(o) } }
+            assertTrue(waitFor(10_000) { exec.ran.any { "new-session -d" in it } })
+            val attach = async(Dispatchers.IO) {
+                runCatching { withTimeout(40_000) { o.launchSession(server, "/work", ClaudeMode.NORMAL, ClaudeModel.DEFAULT, ConnectionType.SSH, base, isNewTmuxSession = false) } }
+            }
+            Thread.sleep(500)
+            exec.gate!!.complete(Unit)
+            assertTrue(first.await().isFailure, "the launch failed")
+            val a = attach.await()
+            assertTrue(a.isSuccess, "the attach did not take the launch's error: ${a.exceptionOrNull()}")
+            assertEquals(base, a.getOrThrow().tmuxSessionName)
+        }
+        assertEquals(listOf(base), tabs.tabs.value.map { it.tmuxSessionName })
+        assertEquals(1, connects.size, "the attach's own connect: $connects")
+    }
+
+    /** LOW2 (review B-7): the claim of a name ends with its tab; a launch after that tab was closed during its attach creates anew. */
+    @Test fun aLaunchAfterTheTabWasClosedDuringItsAttachDoesNotJoinTheGoneTab() {
+        val exec = FakeTmux()
+        val (o, _) = orchestrator(exec)
+        val attaching = java.util.concurrent.CountDownLatch(1)
+        val letGo = java.util.concurrent.CountDownLatch(1)
+        o.connectSeam = { _, s, _, _ -> if (s.tmuxSessionName == base) { attaching.countDown(); letGo.await(20, java.util.concurrent.TimeUnit.SECONDS) }; true }
+        runBlocking {
+            val first = async(Dispatchers.IO) { runCatching { launch(o) } }
+            assertTrue(attaching.await(10, java.util.concurrent.TimeUnit.SECONDS), "the first tab is attaching")
+            val closed = tabs.tabs.value.single { it.tmuxSessionName == base }
+            tabs.removeTab(closed.id)   // the user closes it while its attach still runs
+            val second = withTimeout(20_000) { async(Dispatchers.IO) { launch(o) }.await() }
+            assertTrue(second.id != closed.id, "not the tab that is gone")
+            assertTrue(tabs.getTab(second.id) != null, "a live tab")
+            letGo.countDown()
+            first.await()
+        }
+        assertEquals(2, exec.creates.map { it.second }.distinct().size, "the second launch created its own session: ${exec.creates}")
+        assertEquals(setOf(base, "$base-2"), exec.sessions.keys)
+    }
+
+    /** LOW4 (review B-7): a cleanup whose tmux check was cut short says it does not know — not "nothing to remove". */
+    @Test fun aCleanupCutShortSaysItDoesNotKnow() {
+        val exec = FakeTmux().apply { loseAnswers = FRESH_LOST; cleanupCutShort = true }
+        val (o, _) = orchestrator(exec)
+        assertFailsWith<java.io.IOException> { launch(o) }
+        assertTrue(logLines.any { "unknown whether the session it may have created is there" in it },
+            "${logLines.filter { "ended without its tab" in it }}")
+        assertTrue(logLines.none { "no session of this launch to remove" in it }, "never the misleading line")
     }
 
     private companion object {

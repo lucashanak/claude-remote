@@ -5,6 +5,7 @@ import com.clauderemote.model.SshServer
 import com.clauderemote.session.service.CommFlags
 import com.clauderemote.session.service.ExecUnavailable
 import com.clauderemote.session.service.ExecUnavailableReason
+import com.clauderemote.session.service.PollSkipLog
 import com.clauderemote.util.FileLogger
 import com.clauderemote.util.isoToEpochMillis
 import kotlinx.coroutines.CoroutineScope
@@ -221,11 +222,14 @@ class TranscriptStream(
             attempt++
             try {
                 if (_entries.value.isEmpty()) _status.value = "connecting…"
-                doPoll(safeFolder, safeUuid)
+                tickSkipped = false
+                doPoll(safeFolder, safeUuid, periodic = true)
                 attempt = 0
+                // C1 (review C1-1 adv 6): a tick skipped for want of a poll permit polled nothing — the status stays
+                // (it must not say "connected" for a link it never used)
                 // A poll that succeeded clears any transient failure note; with
                 // no entries yet, keep explaining why the view is still empty.
-                _status.value = if (_entries.value.isEmpty()) {
+                if (!tickSkipped) _status.value = if (_entries.value.isEmpty()) {
                     // Connected & polled fine, but nothing parseable yet (no
                     // transcript written, or wrong folder/uuid).
                     "connected, no transcript data yet"
@@ -260,7 +264,10 @@ class TranscriptStream(
      * [byteOffset]), parse the new lines and append them. Shared by the steady
      * [runTail] loop and [pollNow] so the two never issue overlapping reads.
      */
-    private suspend fun doPoll(safeFolder: String, safeUuid: String) = pollMutex.withLock {
+    /** The last periodic tick was skipped (no poll permit): it polled nothing, so it says nothing about the link. */
+    @Volatile private var tickSkipped = false
+
+    private suspend fun doPoll(safeFolder: String, safeUuid: String, periodic: Boolean = false) = pollMutex.withLock {
         // Prefer the main connection (no extra SSH connection, no handshake per
         // poll); fall back to a short-lived dedicated session only when the tab
         // has no live main connection.
@@ -273,10 +280,13 @@ class TranscriptStream(
             // Exec routing: exec transport (permit) → pooled transport → the tab's own
             // session → skip the tick. Never a fresh handshake of our own.
             try {
-                SshSessionHelper.withSession(server, timeout = 15_000, allowFresh = false) { sess ->
+                SshSessionHelper.withSession(server, timeout = 15_000, allowFresh = false, periodic = periodic) { sess ->
                     pollOnce(sess, safeFolder, safeUuid, byteOffset)
                 }
             } catch (e: ExecUnavailable) {
+                // C1 priority class: a tick without a poll permit is skipped quietly (no error, no backoff); pollNow
+                // (the Stop path) is not periodic and waits for its permit like any interactive caller
+                if (periodic && e.reason == ExecUnavailableReason.GATE_TIMEOUT) { tickSkipped = true; PollSkipLog.skipped(server.id, PollSkipLog.TRANSCRIPT); return@withLock }
                 if (e.reason != ExecUnavailableReason.NOT_UP) throw e
                 if (shared == null) return@withLock
                 val ch = tabChannels.reserve(shared) ?: run { tabChannels.skipped(SKIP_SOURCE); return@withLock }
@@ -298,10 +308,11 @@ class TranscriptStream(
             // No live session of the tab. With the pool on, a fresh connection per poll would be a handshake outside the
             // pool's limits (50 tabs x one poll after a network loss): skip the tick instead. Pool off: as before.
             try {
-                SshSessionHelper.withSession(server, timeout = 15_000, allowFresh = !CommFlags.effectiveFor(server.id).pool) { sess ->
+                SshSessionHelper.withSession(server, timeout = 15_000, allowFresh = !CommFlags.effectiveFor(server.id).pool, periodic = periodic) { sess ->
                     pollOnce(sess, safeFolder, safeUuid, byteOffset)
                 }
             } catch (e: ExecUnavailable) {
+                if (periodic && e.reason == ExecUnavailableReason.GATE_TIMEOUT) { tickSkipped = true; PollSkipLog.skipped(server.id, PollSkipLog.TRANSCRIPT); return@withLock }
                 if (e.reason != ExecUnavailableReason.NOT_UP) throw e
                 tabChannels.skipped(SKIP_SOURCE)
                 return@withLock
@@ -498,15 +509,16 @@ class TranscriptStream(
         val inStream = ch.inputStream
         val out = withContext(Dispatchers.IO) {
             try {
-                ch.connect(10_000)
+                // C1: floor, detached open and the transport's health (ChannelOpen)
+                com.clauderemote.connection.ChannelOpen.connect(ch, 10_000)
             } catch (e: com.jcraft.jsch.JSchException) {
                 tabChannels.channelOpenFailed(SKIP_SOURCE, sess, ch.exitStatus, e)
-                try { ch.disconnect() } catch (_: Throwable) {}
+                com.clauderemote.connection.ChannelOpen.disconnect(ch)
                 throw e
             }
             inStream.bufferedReader(Charsets.UTF_8).readText()
         }
-        try { ch.disconnect() } catch (_: Throwable) {}
+        com.clauderemote.connection.ChannelOpen.disconnect(ch)
         var newOffset = -1L
         val lines = ArrayList<String>()
         for (line in out.lineSequence()) {

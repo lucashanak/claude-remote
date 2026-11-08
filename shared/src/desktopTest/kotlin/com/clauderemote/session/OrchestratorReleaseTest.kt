@@ -185,7 +185,7 @@ class OrchestratorReleaseTest {
         val o = orchestrator()
         tabs.addTab(tab("t1", SessionStatus.DISCONNECTED))
         tabs.addTab(tab("t2", SessionStatus.ERROR))
-        tabs.addTab(tab("t3", SessionStatus.ACTIVE))
+        connectedTab(o, "t3")   // C4: ACTIVE over a live shell (an ACTIVE tab without one is swept too, ReconnectLivenessTest)
         o.reconnectDeadTabs("onResume")
         eventually("the sweep reconnects both") {
             logLines.any { it.contains("Reconnecting session t1") } && logLines.any { it.contains("Reconnecting session t2") }

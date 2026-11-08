@@ -105,6 +105,69 @@ class FreshCreateParseTest {
         }
     }
 
+    // ---- dávka C (C1): the review B-7 holes T7-3 (P10, P11), LOW3, LOW4 ----
+
+    @Test fun theServerEndsAHungOwnerReadItselfAndItReadsAsLost() {   // T7-3 / P10
+        FakeServer().use { srv ->
+            srv.owner("CR_LAUNCH=$nonce")
+            srv.flag("hang-show")
+            val (out, took) = srv.run(createCmd())
+            assertTrue(out != null, "the server ended the hung owner read itself (gave up waiting after $took ms)")
+            assertTrue(took < (ClaudeConfig.FRESH_CHECK_LIMIT_S + 2) * 1000L, "the read's own limit ($took ms)")
+            assertEquals(FreshCreate.Result.Lost, FreshCreate.parse(out, nonce), "an owner read cut short is neither ours nor taken: $out")
+            assertTrue(srv.hungGone())
+        }
+    }
+
+    @Test fun theCleanupEndsAHungCheckItselfAndSaysItDoesNotKnow() {   // T7-3 / P11, LOW4
+        FakeServer().use { srv ->
+            srv.owner("CR_LAUNCH=$nonce")
+            srv.flag("hang-show")
+            val (out, took) = srv.run(ClaudeConfig.buildOwnSessionCleanupCommand("claude-box-work", nonce))
+            assertTrue(out != null && took < (ClaudeConfig.FRESH_CHECK_LIMIT_S + 2) * 1000L, "ended by its own limit ($took ms)")
+            assertTrue(ClaudeConfig.FRESH_CLEANUP_UNKNOWN in out!! && ClaudeConfig.FRESH_CLEANED !in out, "unknown, not cleaned: $out")
+            assertTrue(srv.killed().isEmpty())
+            assertTrue(srv.hungGone())
+        }
+        FakeServer().use { srv ->
+            srv.owner("CR_LAUNCH=$nonce")
+            srv.flag("hang-kill")
+            val (out, took) = srv.run(ClaudeConfig.buildOwnSessionCleanupCommand("claude-box-work", nonce))
+            assertTrue(out != null && took < (ClaudeConfig.FRESH_CHECK_LIMIT_S + 2) * 1000L, "a hung kill ended by its limit ($took ms)")
+            assertTrue(ClaudeConfig.FRESH_CLEANUP_UNKNOWN in out!! && ClaudeConfig.FRESH_CLEANED !in out, "$out")
+            assertTrue(srv.hungGone())
+        }
+    }
+
+    @Test fun theCleanupLeavesOurSessionWhenAClientIsAttachedToIt() {   // LOW3
+        FakeServer().use { srv ->
+            srv.owner("CR_LAUNCH=$nonce")
+            srv.attached(1)
+            val (out, _) = srv.run(ClaudeConfig.buildOwnSessionCleanupCommand("claude-box-work", nonce))
+            assertTrue(srv.killed().isEmpty(), "another device took it over: it stays ($out)")
+            assertTrue(ClaudeConfig.FRESH_CLEANUP_ATTACHED in out.orEmpty() && ClaudeConfig.FRESH_CLEANED !in out.orEmpty(), "$out")
+        }
+        FakeServer().use { srv ->
+            srv.owner("CR_LAUNCH=$nonce")
+            srv.attached(0)
+            val (out, _) = srv.run(ClaudeConfig.buildOwnSessionCleanupCommand("claude-box-work", nonce))
+            assertEquals(listOf("kill-session -t =claude-box-work"), srv.killed(), "nobody attached: removed ($out)")
+        }
+    }
+
+    /** Kolo 2 (R15b): the temp file goes on every way out — a normal end, and a client that gave up (SIGPIPE). */
+    @Test fun theTempFileOfACreationOrCleanupNeverStaysBehind() {
+        FakeServer().use { srv ->
+            srv.owner("CR_LAUNCH=$nonce")
+            srv.run(ClaudeConfig.buildOwnSessionCleanupCommand("claude-box-work", nonce))
+            srv.run(createCmd())
+            assertTrue(srv.tmp.listFiles().orEmpty().isEmpty(), "after a normal end: ${srv.tmp.listFiles()?.map { it.name }}")
+            srv.flag("hang-show")
+            assertTrue(srv.runGivingUp(ClaudeConfig.buildOwnSessionCleanupCommand("claude-box-work", nonce)))
+            assertTrue(srv.tmp.listFiles().orEmpty().isEmpty(), "after the client gave up: ${srv.tmp.listFiles()?.map { it.name }}")
+        }
+    }
+
     private fun createCmd() = ClaudeConfig.buildFreshCreateCommand("claude-box-work", "/work", ClaudeMode.NORMAL, ClaudeModel.DEFAULT, "u-u-i-d", null, nonce)
 
     /** A server of one fake `tmux` (first on PATH, HOME of its own: no socket guard, never the real tmux) that a real `sh` runs commands on. */
@@ -120,8 +183,12 @@ class FreshCreateParseTest {
                       list-sessions) exit 0 ;;
                       new-session) [ -f "${'$'}D/hang-new" ] && { echo ${'$'}${'$'} > "${'$'}D/pid"; exec sleep 60; }; exit 0 ;;
                       has-session) [ -f "${'$'}D/hang-has" ] && { echo ${'$'}${'$'} > "${'$'}D/pid"; exec sleep 60; }; [ -f "${'$'}D/owner" ] ;;
-                      show-environment) [ -f "${'$'}D/owner" ] && { cat "${'$'}D/owner"; exit 0; }; echo 'unknown variable' >&2; exit 1 ;;
-                      kill-session) echo "${'$'}*" >> "${'$'}D/killed"; exit 0 ;;
+                      show-environment) [ -f "${'$'}D/hang-show" ] && { echo ${'$'}${'$'} > "${'$'}D/pid"; exec sleep 60; }; [ -f "${'$'}D/owner" ] && { cat "${'$'}D/owner"; exit 0; }; echo 'unknown variable' >&2; exit 1 ;;
+                      display-message) case " ${'$'}* " in
+                          *" -t ="*": "*) [ -f "${'$'}D/attached" ] && { cat "${'$'}D/attached"; exit 0; }; echo 0 ;;
+                          *) echo ;;   # like tmux 3.5a: a pane target without its ':' resolves to nothing, rc 0
+                        esac ;;
+                      kill-session) [ -f "${'$'}D/hang-kill" ] && { echo ${'$'}${'$'} > "${'$'}D/pid"; exec sleep 60; }; echo "${'$'}*" >> "${'$'}D/killed"; exit 0 ;;
                       *) exit 0 ;;
                     esac
                     """.trimIndent() + "\n",
@@ -131,6 +198,22 @@ class FreshCreateParseTest {
         }
         fun flag(name: String) { java.io.File(dir, name).writeText("") }
         fun owner(line: String) { java.io.File(dir, "owner").writeText(line + "\n") }
+        fun attached(n: Int) { java.io.File(dir, "attached").writeText("$n\n") }
+        /** TMPDIR of the commands: where `mktemp` puts the temp file of a creation / cleanup (R15b). */
+        val tmp: java.io.File = java.io.File(dir, "tmp").apply { mkdirs() }
+
+        /** Runs [cmd] but closes its output at once (the client gave up); returns when the shell is gone. */
+        fun runGivingUp(cmd: String): Boolean {
+            val pb = ProcessBuilder("sh", "-c", cmd).redirectErrorStream(true)
+            pb.environment()["PATH"] = "${dir.absolutePath}:${System.getenv("PATH")}"
+            pb.environment()["HOME"] = dir.absolutePath
+            pb.environment()["TMPDIR"] = tmp.absolutePath
+            val p = pb.start()
+            p.inputStream.close()
+            val done = p.waitFor(15, java.util.concurrent.TimeUnit.SECONDS)
+            if (!done) { p.descendants().forEach { it.destroyForcibly() }; p.destroyForcibly() }
+            return done
+        }
         fun killed(): List<String> = java.io.File(dir, "killed").takeIf { it.exists() }?.readLines().orEmpty()
 
         /** Output of [cmd], or null when it was still running at the client's limit; and how long it ran. */
@@ -138,6 +221,7 @@ class FreshCreateParseTest {
             val pb = ProcessBuilder("sh", "-c", cmd).redirectErrorStream(true)
             pb.environment()["PATH"] = "${dir.absolutePath}:${System.getenv("PATH")}"
             pb.environment()["HOME"] = dir.absolutePath
+            pb.environment()["TMPDIR"] = tmp.absolutePath
             val t0 = System.currentTimeMillis()
             val p = pb.start()
             val out = StringBuilder()

@@ -21,6 +21,9 @@ internal class TerminalIOService(private val registry: ConnectionRegistry) {
     // size isn't known yet (e.g. reconnected while backgrounded) — avoids the
     // jsch 80x24 default that leaves tmux panes not filling the window.
     @Volatile private var lastActiveViewSize: Pair<Int, Int>? = null
+    // C4: completed by the first real view size; the cold-start wait ends at the deadline set by its first caller
+    private val firstViewSize = kotlinx.coroutines.CompletableDeferred<Unit>()
+    private var firstViewSizeDeadline = 0L
 
     fun append(sessionId: String, data: String) {
         // Single choke point for all terminal output (SSH shell / ET / mosh) —
@@ -53,10 +56,28 @@ internal class TerminalIOService(private val registry: ConnectionRegistry) {
         terminalSizes[sessionId] = cols to rows
         // Remember the active-view size as a global fallback for sessions that
         // (re)connect while backgrounded. Guard against transient 0-size layout passes.
-        if (cols > 1 && rows > 0) lastActiveViewSize = cols to rows
+        if (cols > 1 && rows > 0) {
+            lastActiveViewSize = cols to rows
+            firstViewSize.complete(Unit)
+        }
         val et = registry.et(sessionId)
         if (et != null && et.isConnected) et.resize(cols, rows)
         else registry.ssh(sessionId)?.resize(cols, rows)
+    }
+
+    /**
+     * C4: wait until the terminal view has reported its size for the first time, at most [ms] counted from the first
+     * call (every caller shares that one deadline, later calls past it return at once). True if it waited.
+     */
+    suspend fun awaitFirstViewSize(ms: Long): Boolean {
+        if (firstViewSize.isCompleted) return false
+        val left = synchronized(firstViewSize) {
+            if (firstViewSizeDeadline == 0L) firstViewSizeDeadline = System.currentTimeMillis() + ms
+            firstViewSizeDeadline - System.currentTimeMillis()
+        }
+        if (left <= 0) return false
+        kotlinx.coroutines.withTimeoutOrNull(left) { firstViewSize.await() }
+        return true
     }
 
     /** Best-known pty size for [sessionId]: its own remembered size, else the last

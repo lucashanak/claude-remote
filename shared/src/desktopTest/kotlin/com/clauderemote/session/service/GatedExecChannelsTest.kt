@@ -299,4 +299,118 @@ class GatedExecChannelsTest {
         assertEquals(ExecUnavailableReason.NOT_UP, e.reason)
         assertEquals(Triple(0, 0, 0), g.held("s"), "the stale permits did not leak")
     }
+
+    // ---- C1: the priority class of periodic pollers, and the slot of an open its caller gave up on ----
+
+    @Test fun aPollerNeverWaitsForAPermitAndLeavesTheInteractiveReserveFree() = bounded {
+        val g = channels(Manager(sessionWith()), limits = GatedExecChannels.Limits(short = 6, long = 2, fallbackLong = 1, interactiveReserve = 2))
+        val release = CompletableDeferred<Unit>()
+        val holders = (1..3).map { async { g.use("s", ExecKind.SHORT) { release.await() } } }
+        while (g.held("s").first < 3) delay(5)
+        assertEquals("poll", g.use("s", ExecKind.POLL) { "poll" }, "4 of 6 taken by it: a poller still fits")
+        val fourth = async { g.use("s", ExecKind.SHORT) { release.await() } }
+        while (g.held("s").first < 4) delay(5)
+        val t0 = System.nanoTime()
+        val e = assertFailsWith<ExecUnavailable> { g.use("s", ExecKind.POLL, acquireTimeoutMs = 5_000) { "poll" } }
+        val tookMs = (System.nanoTime() - t0) / 1_000_000
+        assertEquals(ExecUnavailableReason.GATE_TIMEOUT, e.reason, "4 taken: the last 2 are the interactive reserve")
+        assertTrue(tookMs < 500, "a poller does not wait for a permit (it skips the tick): $tookMs ms")
+        assertEquals("user", g.use("s", ExecKind.SHORT) { "user" }, "an interactive caller still gets one of the reserve")
+        release.complete(Unit)
+        holders.awaitAll(); fourth.await()
+        assertEquals(Triple(0, 0, 0), g.held("s"))
+    }
+
+    /** K-4: an open the caller gave up on keeps its slot until it resolves; then it is free again (no leak). */
+    @Test fun anOpenItsCallerGaveUpOnKeepsItsSlotUntilItResolves() = bounded {
+        com.clauderemote.connection.ChannelOpen.resetForTest()
+        try {
+            lateinit var sess: Session
+            val opened = CompletableDeferred<Unit>()
+            sess = sessionWith { object : ChannelExec() {
+                @Volatile var confirmed = false
+                override fun getSession(): Session = sess
+                override fun connect(connectTimeout: Int) { Thread.sleep(1_200); confirmed = true; opened.complete(Unit) }
+                override fun isConnected(): Boolean = confirmed
+                override fun disconnect() {}
+            } }
+            val g = channels(Manager(sess), limits = GatedExecChannels.Limits(short = 2, long = 1, fallbackLong = 1, interactiveReserve = 0))
+            val exec = PooledRemoteExec(g)
+            val e = assertFailsWith<ExecUnavailable> { exec.run("s", "true", totalMs = 400) }
+            assertTrue(e.reason == ExecUnavailableReason.REFUSED || e.reason == ExecUnavailableReason.TIMEOUT, "${e.reason}: ${e.message}")
+            assertEquals(0, g.held("s").first, "the caller's own permit is back")
+            assertEquals(1, g.pendingOpens("s"), "but the open still runs and keeps its slot")
+            withTimeout(5_000) { opened.await() }
+            while (g.pendingOpens("s") > 0) delay(10)
+            assertEquals(0, g.pendingOpens("s"), "resolved: the slot is free again")
+        } finally {
+            com.clauderemote.connection.ChannelOpen.resetForTest()
+        }
+    }
+
+    // ---- kolo 2 (review C1-1) ----
+
+    /** R12: production uses the default limits — 6 SHORT, 2 of them the interactive reserve. */
+    @Test fun theDefaultLimitsKeepTwoOfSixShortPermitsForInteractiveWork() {
+        assertEquals(GatedExecChannels.Limits(short = 6, long = 2, fallbackLong = 2, interactiveReserve = 2), GatedExecChannels.Limits())
+    }
+
+    /** R12b: an open given up and still pending takes its slot from the poll class too. */
+    @Test fun aPendingOpenCountsAgainstThePollCap() = bounded {
+        com.clauderemote.connection.ChannelOpen.resetForTest()
+        try {
+            lateinit var sess: Session
+            sess = sessionWith { object : ChannelExec() {
+                override fun getSession(): Session = sess
+                override fun connect(connectTimeout: Int) { Thread.sleep(2_000) }
+                override fun disconnect() {}
+            } }
+            val g = channels(Manager(sess), limits = GatedExecChannels.Limits())
+            val release = CompletableDeferred<Unit>()
+            val holders = (1..3).map { async { g.use("s", ExecKind.SHORT) { release.await() } } }
+            while (g.held("s").first < 3) delay(5)
+            assertEquals("poll", g.use("s", ExecKind.POLL) { "poll" }, "3 of 6 in use: a poller fits")
+            assertFailsWith<ExecUnavailable> { PooledRemoteExec(g).run("s", "true", totalMs = 400) }   // given up: pending
+            assertEquals(1, g.pendingOpens("s"))
+            val e = assertFailsWith<ExecUnavailable> { g.use("s", ExecKind.POLL) { "poll" } }
+            assertEquals(ExecUnavailableReason.GATE_TIMEOUT, e.reason, "3 held + 1 pending = 4: the reserve stays free")
+            release.complete(Unit); holders.awaitAll()
+        } finally {
+            com.clauderemote.connection.ChannelOpen.resetForTest()
+        }
+    }
+
+    /** Review C1-1 (LOW): while the exec transport is connecting a poll skips its tick — no wait, no shell transport. */
+    @Test fun aPollWhileTheExecTransportConnectsIsSkippedNotSentToAShellTransport() = bounded {
+        val m = Manager(null).also { it.link.value = LinkState.Connecting }
+        val shell = sessionWith()
+        val reserved = mutableListOf<String>()
+        val g = channels(m, fallback = shell, reserved = reserved)
+        val t0 = System.nanoTime()
+        val e = assertFailsWith<ExecUnavailable> { g.use("s", ExecKind.POLL) { "poll" } }
+        assertEquals(ExecUnavailableReason.GATE_TIMEOUT, e.reason)
+        assertTrue((System.nanoTime() - t0) / 1_000_000 < 50, "at once")
+        assertTrue(reserved.isEmpty(), "nothing taken on a shell transport")
+    }
+
+    /** R8b: the production budget's headroom answers the refusal rule — two refusals with room left replace the transport. */
+    @Test fun twoRefusalsWithRoomLeftOnTheExecTransportReportItDead() = bounded {
+        com.clauderemote.connection.ChannelOpen.resetForTest()
+        try {
+            lateinit var sess: Session
+            sess = sessionWith { object : ChannelExec() {
+                override fun getSession(): Session = sess
+                override fun getExitStatus(): Int = 2
+                override fun connect(connectTimeout: Int) { throw JSchException("channel is not opened.") }
+                override fun disconnect() {}
+            } }
+            val dead = java.util.concurrent.CopyOnWriteArrayList<String>()
+            com.clauderemote.connection.ChannelOpen.watch(sess) { _, why -> dead += why; true }
+            val g = channels(Manager(sess), limits = GatedExecChannels.Limits())
+            assertFailsWith<ExecUnavailable> { PooledRemoteExec(g, refusedRetryDelayMs = 5).run("s", "true", totalMs = 3_000) }
+            assertEquals(1, dead.size, "a refusal and its one retry, our channels far below MaxSessions: orphans ($dead)")
+        } finally {
+            com.clauderemote.connection.ChannelOpen.resetForTest()
+        }
+    }
 }

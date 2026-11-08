@@ -185,4 +185,51 @@ class TmuxTargetSyntaxTest {
                 offenders.joinToString("\n")
         )
     }
+
+    /**
+     * Kolo 2 (review C1-1, HIGH): the forms the scans above do not see — a tmux run through a shell variable
+     * (`$t display-message …`, `$CR_T tmux …`) and a target that is a pre-built Kotlin variable (`-t $target`). For a
+     * PANE verb the variable must be built with the trailing `:`: the cleanup's `display-message -t $target` (`'=name'`)
+     * answered nothing on tmux 3.5a, so the cleanup never killed its session.
+     */
+    @Test
+    fun paneVerbsWithAPrebuiltTargetVariableBuildItWithTheColon() {
+        val paneVerbs = listOf("send-keys", "respawn-pane", "copy-mode", "display-message")
+        val offenders = mutableListOf<String>()
+        var checked = 0
+        for (file in kotlinSources()) {
+            val text = file.readText()
+            file.readLines().forEachIndexed { idx, line ->
+                if (allowed.any { it in line }) return@forEachIndexed
+                for (verb in paneVerbs) {
+                    val m = Regex("""(?:tmux|\$\w+|\$\{\w+\})\s+$verb\b[^\n]*?-t\s+\$\{?(\w+)""").find(line) ?: continue
+                    val name = m.groupValues[1]
+                    if (name == "c" || name.startsWith("CR_")) continue   // shell variables, not Kotlin targets
+                    checked++
+                    val def = Regex("""val\s+$name\s*=\s*([^\n]*)""").find(text)?.groupValues?.get(1)
+                    if (def == null || "\":" !in def) {   // a string literal starting with ':' (`":"`, `":'"`) ends the target
+                        offenders += "${file.path}:${idx + 1}  [$verb -t \$$name]  defined as: ${def ?: "(not found)"}"
+                    }
+                }
+            }
+        }
+        assertTrue(checked > 0, "the scan must see the pre-built pane targets (the cleanup's, the restart's)")
+        assertTrue(offenders.isEmpty(), "pane verb with a pre-built target lacking the trailing `:`:\n" + offenders.joinToString("\n"))
+    }
+
+    /** Kolo 2: a session verb run through a shell variable (`$t kill-session -t '…'`) is held to the same `=` rule. */
+    @Test
+    fun tmuxRunThroughAShellVariableStillUsesExactTargets() {
+        val offenders = mutableListOf<String>()
+        for (file in kotlinSources()) {
+            file.readLines().forEachIndexed { idx, line ->
+                if (allowed.any { it in line }) return@forEachIndexed
+                for (verb in nameTargetedVerbs) {
+                    val re = Regex("""\$\{?\w+\}?\s+$verb\b[^\n]*?-t\s+(['"])(?!=)""")
+                    if (re.containsMatchIn(line)) offenders += "${file.path}:${idx + 1}  [$verb]  ${line.trim().take(140)}"
+                }
+            }
+        }
+        assertTrue(offenders.isEmpty(), offenders.joinToString("\n"))
+    }
 }

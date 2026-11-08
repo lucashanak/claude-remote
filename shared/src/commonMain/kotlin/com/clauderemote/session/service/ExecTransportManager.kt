@@ -42,6 +42,12 @@ internal interface ExecTransportManager : ExecSessionProvider {
     fun generation(serverId: String): Long
     /** Keepalive interval in MILLISECONDS for every transport, current and future (0 = off). */
     fun setKeepAlive(ms: Int)
+    /**
+     * C1 (H7): the server's shells keep the cap of 8 although the exec transport is not Up, because it is being replaced
+     * after its channels stopped opening ([ExecTransportPolicy.SHELL_CAP_HOLD_MS]): a reconnect wave in that window must
+     * not fall back to 3 shells per transport (49 tabs: 17 handshakes instead of 7).
+     */
+    fun keepsShellCap(serverId: String): Boolean = false
 }
 
 /**
@@ -89,6 +95,27 @@ internal object ExecTransportPolicy {
 
     /** A transport that lived this long was healthy: the backoff starts over. */
     const val STABLE_MS = 60_000L
+
+    /**
+     * C1 (H9): at least this long between two replacements of a server's exec transport for channel health
+     * ([com.clauderemote.connection.ChannelOpen]), whatever the backoff says (a transport that lived 60 s resets it to 0).
+     */
+    const val HEALTH_SWAP_SPACING_MS = 30_000L
+
+    /** C1 round 2 (adv 3): the spacing grows up to this while the replacements do not help. */
+    const val HEALTH_SWAP_SPACING_MAX_MS = 300_000L
+
+    /**
+     * The spacing before the NEXT replacement for channel health: back to [base] when an open was confirmed on the
+     * transport since the previous replacement (it worked for a while: a new problem), else doubled up to
+     * [HEALTH_SWAP_SPACING_MAX_MS] (30 -> 60 -> 120 -> 240 -> 300 s) — a stuck tmux that refuses every channel must not
+     * cost a handshake every 30 s.
+     */
+    fun nextHealthSwapSpacingMs(current: Long, confirmedSinceLastSwap: Boolean, base: Long = HEALTH_SWAP_SPACING_MS): Long =
+        if (confirmedSinceLastSwap) base else (current * 2).coerceAtMost(HEALTH_SWAP_SPACING_MAX_MS).coerceAtLeast(base)
+
+    /** C1 (H7): after such a replacement the shell cap stays 8 this long, or until the exec transport is Up again. */
+    const val SHELL_CAP_HOLD_MS = 60_000L
 
     private val FOREGROUND_BACKOFF_S = longArrayOf(0, 1, 2, 4, 8, 16, 30)
     private const val BACKGROUND_FLOOR_MS = 5_000L
@@ -208,6 +235,8 @@ internal class PoolExecTransportManager(
     private val rerouteDrainMs: Long = 5_000,
     /** Binds one port forward on a transport (a seam for tests: they hold a port taken while a move binds it). */
     private val bindForward: (Session, com.clauderemote.model.PortForward) -> Unit = ::bindForwardOnJsch,
+    /** C1: the least time between two replacements for channel health (a seam for tests). */
+    private val healthSwapSpacingMs: Long = ExecTransportPolicy.HEALTH_SWAP_SPACING_MS,
 ) : ExecTransportManager {
 
     private inner class Entry(val serverId: String) {
@@ -227,6 +256,12 @@ internal class PoolExecTransportManager(
         @Volatile var wanted = false
         @Volatile var networkLost = false
         @Volatile var lastAttemptAt = 0L
+        /** C1: when the transport was last replaced for channel health ([healthSwap]), and when a refusal was last logged. */
+        @Volatile var lastHealthSwapAt = Long.MIN_VALUE / 2
+        @Volatile var lastSwapRefusedLogAt = Long.MIN_VALUE / 2
+        /** C1 round 2: the spacing the next replacement must keep, and when (monotonic) the last one happened. */
+        @Volatile var healthSwapSpacing = healthSwapSpacingMs
+        @Volatile var lastHealthSwapNanos = Long.MIN_VALUE
         /** Wakes the supervisor: network back, channel trouble, someone is waiting. */
         val wake = kotlinx.coroutines.channels.Channel<Unit>(kotlinx.coroutines.channels.Channel.CONFLATED)
     }
@@ -329,6 +364,47 @@ internal class PoolExecTransportManager(
         entries[serverId]?.wake?.trySend(Unit)
     }
 
+    override fun keepsShellCap(serverId: String): Boolean {
+        val e = entries[serverId] ?: return false
+        return !e.closed && e.wanted && !e.networkLost && clock() - e.lastHealthSwapAt < ExecTransportPolicy.SHELL_CAP_HOLD_MS
+    }
+
+    /**
+     * C1 (K-4, K-6, H8, H9): the channels of [session] stopped opening ([com.clauderemote.connection.ChannelOpen]). One way
+     * out: mark the transport unusable in the pool; the watch then sees it, logs `down`, releases it (the last lessee
+     * disconnects it) and leases a new one — never the same, an unusable transport is pruned, not leased. At most one
+     * replacement per spacing ([ExecTransportPolicy.HEALTH_SWAP_SPACING_MS], growing while replacements do not help:
+     * [ExecTransportPolicy.nextHealthSwapSpacingMs]); false = not now (or not this run's transport).
+     */
+    private fun healthSwap(e: Entry, token: Any, session: Session, why: String): Boolean {
+        val now = clock()
+        val refusedFor: Long = synchronized(e) {
+            if (e.run !== token || e.closed || e.networkLost || e.session !== session) return false
+            val since = now - e.lastHealthSwapAt
+            if (since < e.healthSwapSpacing) since else {
+                val confirmed = com.clauderemote.connection.ChannelOpen.lastConfirmedNanos(session)?.let { it > e.lastHealthSwapNanos } ?: false
+                e.healthSwapSpacing = ExecTransportPolicy.nextHealthSwapSpacingMs(e.healthSwapSpacing, confirmed, healthSwapSpacingMs)
+                e.lastHealthSwapAt = now
+                e.lastHealthSwapNanos = System.nanoTime()
+                -1L
+            }
+        }
+        if (refusedFor >= 0) {
+            if (now - e.lastSwapRefusedLogAt >= healthSwapSpacingMs) {
+                e.lastSwapRefusedLogAt = now
+                FileLogger.log(TAG, "Exec transport ${e.serverId}: $why — not replaced, the last replacement was ${refusedFor}ms ago")
+            }
+            return false
+        }
+        FileLogger.log(TAG, "Exec transport ${e.serverId}: $why — replacing it (the next replacement not within ${e.healthSwapSpacing}ms)")
+        poolOf(e.serverId).reportDead(session)
+        e.wake.trySend(Unit)
+        return true
+    }
+
+    private fun watchHealth(e: Entry, token: Any, session: Session) =
+        com.clauderemote.connection.ChannelOpen.watch(session) { s, why -> healthSwap(e, token, s, why) }
+
     /**
      * Someone wants the transport while it is down for the network: try now, at most every 2 s in
      * the foreground and at most every half retry period in the background (a poller must not turn
@@ -427,6 +503,7 @@ internal class PoolExecTransportManager(
                     }
                 }
                 if (!published) break
+                watchHealth(e, token, session!!)
                 FileLogger.log(TAG, "Exec transport ${server.name} up via $via in ${(mUp - m0) / 1_000_000}ms route=${pool.routeOf(session!!)}" +
                     " (resolve=${(mResolved - m0) / 1_000_000}ms lease=${(mLeased - mResolved) / 1_000_000}ms" +
                     " forwards=${(mUp - mLeased) / 1_000_000}ms total=${(mUp - m0) / 1_000_000}ms wall=${upAt - w0}ms)")
@@ -448,6 +525,8 @@ internal class PoolExecTransportManager(
                     if (e.closed || e.networkLost || !ExecTransportPolicy.onFallback(server, via)) continue
                     val target = reroute.tick(e, server, upAt) ?: continue
                     val moved = moveTo(e, token, server, session, lessee, eff!!, via, target, unbound) ?: continue
+                    com.clauderemote.connection.ChannelOpen.watch(session!!, null)
+                    watchHealth(e, token, moved.session)
                     session = moved.session
                     lessee = moved.lessee
                     eff = target
@@ -456,7 +535,10 @@ internal class PoolExecTransportManager(
                     upAt = clock()
                     confirmed = false
                     reroute.restart(upAt)
-                } } finally { reroute.cancel() }
+                } } finally {
+                    reroute.cancel()
+                    session?.let { com.clauderemote.connection.ChannelOpen.watch(it, null) }
+                }
                 // closed, or superseded by close() and a new ensure() (review B-5 adv-spojeni K5-3): the old run left the watch because
                 // it was cancelled, not because its transport died; no "down after" line, no generation bump, no strike
                 if (!stillOurs(e, token)) break
