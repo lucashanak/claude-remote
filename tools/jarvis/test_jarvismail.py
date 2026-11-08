@@ -27,6 +27,7 @@ import cr_task  # noqa: E402
 import jarvis_d  # noqa: E402
 import jarvislib as J  # noqa: E402
 import jarvismail as M  # noqa: E402
+M.Mail._orig_prompt_seen = M.Mail.prompt_seen  # for the L7 mutant
 from jarvis_fixtures import T0, Fx, ev_line  # noqa: E402
 
 JARVIS = "claude-server-jarvis--jarvis"
@@ -1363,7 +1364,7 @@ class Med4ApprovalTest(Base):
         self.assertEqual(self.tm.writes(), [])
 
     def test_short_yes_approves(self):
-        for yes in ("ano", "Ano.", "jo", "pošli", "Pošli to", "ok", "OK, díky", "jasně"):
+        for yes in ("ano", "Ano.", "jo", "pošli", "Pošli to", "ok", "OK!", " jasně "):
             self.prompt(pid="p-" + yes.replace(" ", "")[:6])
             rec, _ = self.send(approve=False)
             self.lukas_says(yes)
@@ -1371,12 +1372,44 @@ class Med4ApprovalTest(Base):
             self.m.cancel(rec["id"])
 
     def test_anything_else_drops(self):
+        # rev-f4 M1: a yes followed by anything is not a bare yes ("OK, díky, a co dělá kontexta?")
         for other in ("ne", "počkej", "anonym", "ano, ale pošli to spíš do soniox a přidej k tomu ještě test parseru",
-                      "[jarvis wake] ano", "okamžitě ne"):
+                      "okamžitě ne", "OK, díky", "ok díky, a co dělá kontexta?", "ano a co RAG?"):
             self.prompt(pid="p-" + str(abs(hash(other)))[:6])
             rec, _ = self.send(approve=False)
             self.lukas_says(other)
             self.assertEqual(self.m.get(rec["id"])["state"], "dropped", other)
+
+    def test_a_wake_decides_nothing_and_the_next_real_prompt_still_can(self):
+        # rev-f4 L7: "Ano?" asked, then a wake: the proposal waits for Lukáš, his "ano" after the wake approves it
+        rec, _ = self.send(approve=False)
+        self.lukas_says("[jarvis wake] Výsledek úkolu t-1")
+        self.assertEqual(self.m.get(rec["id"])["state"], "proposed")
+        self.assertIsNone(self.m.last_prompt())  # the wake never counts as a fresh prompt (I8)
+        self.lukas_says("ano")
+        self.assertEqual(self.m.get(rec["id"])["state"], "queued")
+
+    def test_a_bare_yes_with_two_pending_approves_nothing(self):
+        # rev-f4 M1: with more than one proposal waiting, only the ids approve
+        self.allow(TARGET, OTHER)
+        a, _ = self.send("první", approve=False)
+        b, _ = self.send("druhá", to=OTHER, approve=False)
+        self.lukas_says("ano")
+        self.assertEqual((self.m.get(a["id"])["state"], self.m.get(b["id"])["state"]), ("dropped", "dropped"))
+
+    def test_a_named_target_without_a_send_word_is_still_asked(self):
+        # rev-f4 H1 (lead, mail too): naming a session in a question is not an instruction to send it something
+        self.named()
+        self.lukas_says("kolik tokenů žere jarvis-test?")
+        lp = json.load(open(os.path.join(self.fx.state, "last-prompt")))
+        self.assertEqual((lp["named"], lp["sendIntent"]), ([TARGET], False))
+        rec, _ = self.send(approve=False)
+        self.assertEqual(rec["state"], "proposed")
+        for words in ("napiš do jarvis-test, ať to pushne", "jarvis-test: oprav ten test", "Řekni jarvis-test výsledek"):
+            self.lukas_says(words)
+            rec, _ = self.send(approve=False)
+            self.assertEqual(rec["state"], "queued", words)
+            self.m.cancel(rec["id"])
 
     def test_naming_the_id_approves_only_that_one(self):
         self.allow(TARGET, OTHER)
@@ -1523,6 +1556,10 @@ class ReviewMutationTest(unittest.TestCase):
             [I4ShapeTest, DeliveryTest]),
         "MED4": (lambda: mock.patch.object(M.Mail, "decide_proposals", _approve_all), [Med4ApprovalTest]),
         "MED4-regex": (lambda: mock.patch.object(M, "APPROVE", __import__("re").compile("")), [Med4ApprovalTest]),
+        # rev-f4 H1 and M1
+        "sendIntent": (lambda: mock.patch.object(M, "SEND_INTENT", __import__("re").compile("")), [Med4ApprovalTest]),
+        "single": (lambda: mock.patch.object(M.Mail, "_pending", lambda self: 1), [Med4ApprovalTest]),
+        "L7": (lambda: mock.patch.object(M.Mail, "prompt_seen", _prompt_seen_wake_drops), [Med4ApprovalTest]),
         "MED5": (lambda: mock.patch.object(M.Mail, "prompt_seen", _prompt_seen_without_unlink), [Med5PromptTest]),
         "LOW1": (lambda: mock.patch.object(M.Mail, "check_send_limits", _limits_without_prompt), [LowFixesTest]),
         "LOW2": (lambda: mock.patch.object(M.Mail, "ledger", _ledger_main_only), [LowFixesTest]),
@@ -1563,7 +1600,14 @@ def _old_box_check(self, t, line):
     return None if (f and f["box"] and not f["selector"] and f["norm"] == M.norm_box(line)) else "marker-missing"
 
 
-def _approve_all(self, prompt, prev_id, now):
+def _prompt_seen_wake_drops(self, payload, now):
+    # the F3 behaviour: a [jarvis prompt dropped every pending proposal
+    if isinstance(payload, dict) and str(payload.get("prompt", "")).lstrip().startswith("[jarvis"):
+        self.decide_proposals(None, None, now)
+    return M.Mail.__dict__["_orig_prompt_seen"](self, payload, now)
+
+
+def _approve_all(self, prompt, prev_id, now, **kw):
     with self.lock():
         for rec in self.all():
             if rec["state"] == "proposed":

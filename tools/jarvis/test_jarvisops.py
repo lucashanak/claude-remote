@@ -34,6 +34,7 @@ DAY = 86400 * 1000
 
 ATRAPA = """#!/bin/sh
 printf '%s\\n' "$*" >> "$HOME/cr-calls.log"
+printf 'TMUX=%s PANE=%s CC=%s CFG=%s\\n' "${TMUX:-}" "${TMUX_PANE:-}" "${CLAUDECODE:-}" "${CLAUDE_CONFIG_DIR:-}" >> "$HOME/cr-env.log"
 R="$HOME/cr-resp"
 case "$1" in
   version) if [ -f "$R/version" ]; then cat "$R/version"; else echo "cr-session v2"; fi ;;
@@ -117,10 +118,12 @@ class Base(TM.Base):
     def actions(self):
         return [c for c in self.calls() if c and c[0] in ("open", "close", "restore")]
 
-    def named(self, sessions=(), projects=(), closed=(), age_s=5, pid="p-abc"):
+    def named(self, sessions=(), projects=(), closed=(), age_s=5, pid="p-abc", intent=True):
+        """last-prompt as the hook writes it: what Lukáš named, and (rev-f4 H1) whether he asked to act on it."""
         with open(os.path.join(self.fx.state, "last-prompt"), "w") as f:
             json.dump({"id": pid, "at": self.fx.clock.ms - int(age_s * 1000), "named": list(sessions),
-                       "namedProjects": list(projects), "namedClosed": list(closed)}, f)
+                       "namedProjects": list(projects), "namedClosed": list(closed), "closeIntent": intent,
+                       "openIntent": intent, "reopenIntent": intent, "sendIntent": intent}, f)
 
     def cli(self, mod, *argv, env=None, ops=None):
         out, err = io.StringIO(), io.StringIO()
@@ -289,12 +292,24 @@ class FactsTest(unittest.TestCase):
 # ------------------------------------------------------------------------------------------------- open
 
 class OpenTest(Base):
-    def test_named_project_on_the_default_account_opens_at_once_with_its_task_queued(self):
+    def test_named_project_on_the_default_account_opens_at_once(self):
+        self.named(projects=[self.proj["kontexta"]])
+        rc, out, err = self.sessions_cli("open", "kontexta", "--alias", "pdf")
+        self.assertEqual(rc, 0, err)
+        self.assertIn("Otevřel jsem pdf v kontexta na účtu lukas-kontexta.", out)
+        self.assertEqual(self.ledger(), ["approved", "started", "opened", "done"])
+
+    def test_a_task_makes_it_a_proposal_and_yes_queues_the_task(self):
+        # rev-f4 H1: a new yolo session with work in it: Lukáš sees the task in the question first
         self.named(projects=[self.proj["kontexta"]])
         name = "claude-server-kontexta-yolo--pdf"
         self.resp("open", 'OPENED {"name":"%s","pane":"%%9","pid":900,"sessionId":"s"}\n' % name)
         rc, out, err = self.sessions_cli("open", "kontexta", "--alias", "pdf", "--task", "Oprav sloupce v PDF exportu.")
-        self.assertEqual(rc, 0, err)
+        self.assertIn("se zadáním", out)
+        self.assertEqual(self.actions(), [])
+        p = self.ops.proposals(self.fx.clock.ms)[0]
+        self.assertIn("zadání: Oprav sloupce v PDF exportu.", p["detail"])
+        rec, out = self.ops.decide(p["id"], True, "app:x")
         self.assertIn("Otevřel jsem pdf v kontexta na účtu lukas-kontexta.", out)
         self.assertIn("čeká ve frontě", out)
         o = self.actions()[0]
@@ -304,7 +319,6 @@ class OpenTest(Base):
         mails = [r for r in self.m.all() if r["to"] == name]
         self.assertEqual([(r["state"], r["opened"]) for r in mails], [("queued", True)])
         self.assertIn("Oprav sloupce v PDF exportu.", self.m.text_of(mails[0]["id"]))
-        self.assertEqual(self.ledger(), ["approved", "started", "opened", "done"])
 
     def test_a_project_jarvis_chose_is_a_proposal_and_yes_runs_it(self):
         rc, out, _ = self.sessions_cli("open", "kontexta", "--alias", "pdf")
@@ -414,6 +428,7 @@ class CloseTest(Base):
         self.resp("facts." + TARGET, facts(git=(2, "-", 0)))
 
     def test_named_and_clean_closes_at_once_with_the_token(self):
+        self.resp("facts." + TARGET, facts())
         self.named(sessions=[TARGET])
         rc, out, err = self.sessions_cli("close", "jarvis-test")
         self.assertEqual(rc, 0, err)
@@ -454,13 +469,16 @@ class CloseTest(Base):
         self.assertEqual(rc, 1)
         self.assertIn("nezavřu, pracuje (běží tah)", out)
         self.assertEqual(self.actions(), [])
-        # it finished meanwhile: Lukáš's yes to close it despite the block still holds
+        # it finished meanwhile: still no close on that yes (rev-f4 L2, lead: BLOK after "ano" = a refusal; the
+        # facts changed, so Lukáš is asked again with the new ones)
+        self.named(sessions=[TARGET])
         self.sessions_cli("close", "jarvis-test")
         xid = self.ops.proposals(self.fx.clock.ms)[0]["id"]
         self.resp("facts." + TARGET, facts(token="1794000000.h9"))
         rc, out, _ = self.cli(cr_jarvis, "approve", xid, "--by", "app:x", env=self.app_env())
-        self.assertEqual(rc, 0, out)
-        self.assertEqual(self.actions()[0][:4], ["close", TARGET, "--token", "1794000000.h9"])
+        self.assertEqual(rc, 1, out)
+        self.assertIn("se od otázky změnila", out)
+        self.assertEqual(self.actions(), [])
 
     def test_our_own_blocks_task_and_mail(self):
         self.named(sessions=[TARGET])
@@ -550,6 +568,7 @@ class CloseTest(Base):
         self.assertIn("Věta: „Zavřít jarvis-test? Má 2 necommitnuté soubory, konverzaci si pamatuju.“", out)
 
     def test_refused_blocked_from_cr_session_is_told(self):
+        self.resp("facts." + TARGET, facts())
         self.named(sessions=[TARGET])
         self.resp("close." + TARGET, "REFUSED_BLOCKED BUSY,VIEWER\n")
         rc, out, _ = self.sessions_cli("close", "jarvis-test")
@@ -581,6 +600,7 @@ class ReopenTest(Base):
         self.assertIn("Vrátit ji jako pdf-sloupce-2? Ano?", out)
         p = [x for x in self.ops.proposals(self.fx.clock.ms) if x["kind"] == "restore"][0]
         self.assertEqual(p["target"], self.name + "-2")
+        self.assertIsNone(self.ops.get(p["id"])["prompt"])  # rev-f4 L1: no "ano" approves what Lukáš has not seen
         self.resp("restore", "CR_RESTORE RESTORED 1 a a\n")
         self.ops.decide(p["id"], True, "app:x")
         self.assertEqual(self.actions()[-1][:4], ["restore", "2026-11-06T17:20:03Z", "--name", self.name + "-2"])
@@ -663,7 +683,7 @@ class ProposalsTest(Base):
         self.assertEqual(len(self.actions()), 1)
         self.sessions_cli("open", "rag", "--alias", "z")
         self.lukas_says("[jarvis wake] Výsledek úkolu")
-        self.assertEqual(self.ops.all()[-1]["state"], "dropped")
+        self.assertEqual(self.ops.all()[-1]["state"], "proposed")  # rev-f4 L7: a wake decides nothing
 
     def test_the_real_detached_runner_executes_the_approved_action(self):
         # the hook's spawn, for real: a detached `cr_jarvis.py run` under the temp HOME / state dir, the atrapa
@@ -684,14 +704,24 @@ class ProposalsTest(Base):
         self.assertEqual(self.ops.get(xid)["state"], "done", self.ops.get(xid).get("message"))
         self.assertEqual(self.actions()[0][:3], ["open", "--name", "claude-server-rag-2-yolo"])
 
-    def test_sweep_expires_and_runs_what_the_spawn_missed(self):
+    def test_sweep_expires_and_spawns_what_the_spawn_missed(self):
+        # rev-f4 M2: the daemon never runs an action in its tick, it hands it to the detached runner (once per 30 s)
         self.sessions_cli("open", "rag")
         self.lukas_says("ano")
         self.sessions_cli("open", "rag", "--alias", "q")
+        self.spawned.clear()
         self.fx.clock.advance(601)
         self.ops.sweep(self.fx.clock.ms)
         st = {r["args"].get("alias"): r["state"] for r in self.ops.all()}
-        self.assertEqual(st, {None: "done", "q": "expired"})
+        self.assertEqual(st, {None: "approved", "q": "expired"})
+        self.assertEqual(len(self.spawned), 1)
+        self.assertEqual(self.actions(), [])
+        self.fx.clock.advance(10)
+        self.ops.sweep(self.fx.clock.ms)
+        self.assertEqual(len(self.spawned), 1)
+        self.fx.clock.advance(31)
+        self.ops.sweep(self.fx.clock.ms)
+        self.assertEqual(len(self.spawned), 2)
 
     def test_a_run_whose_process_died_is_failed_by_the_sweep(self):
         self.sessions_cli("open", "rag")
@@ -820,6 +850,223 @@ class StaleTest(Base):
             self.assertIn("Můžu zavřít", cr_digest.cmd_briefing(self.env, a, self.fx.clock.ms))
 
 
+# ------------------------------------------------------------------------------------------------- review fixes
+
+class ReviewFixTest(Base):
+    """rev-f4-srv: H1 (named is not intent), M1 (bare yes), M2, L1-L7. The reviewer's probes are the first tests."""
+
+    def status(self):
+        with open(os.path.join(self.fx.state, "status.json"), "w") as f:
+            json.dump({"sessions": {TARGET: {"alias": "jarvis-test", "short": "jarvis-test"},
+                                    OTHER: {"alias": "RAG", "short": "RAG"}}}, f)
+
+    # ---- H1
+    def test_h1_probe_a_question_about_rag_never_closes_it(self):
+        self.status()
+        self.resp("facts." + OTHER, facts(pid=300, transcript=0, git=(3, "-", 0)))
+        self.lukas_says("kolik tokenů žere rag pipeline?")
+        lp = self.m.last_prompt()
+        self.assertEqual((lp["named"], lp["closeIntent"]), ([OTHER], False))
+        rc, out, _ = self.sessions_cli("close", "RAG")
+        self.assertEqual(rc, 0)
+        self.assertIn("Návrh x-", out)
+        self.assertEqual(self.actions(), [])
+
+    def test_h1_close_needs_intent_restorable_and_no_warning(self):
+        self.status()
+        for f, closes in ((facts(pid=300, git=(3, "-", 0)), False), (facts(pid=300, transcript=0), False),
+                          (facts(pid=300, event=("stop", 60, 0)), False), (facts(pid=300), True)):
+            self.lukas_says("zavři RAG")
+            self.assertTrue(self.m.last_prompt()["closeIntent"])
+            self.resp("facts." + OTHER, f)
+            self.sessions_cli("close", "RAG")
+            self.assertEqual(bool(self.actions()), closes, f)
+
+    def test_h1_project_named_in_a_question_is_not_an_open(self):
+        self.lukas_says("co dělá kontexta?")
+        self.assertEqual((self.m.last_prompt()["namedProjects"], self.m.last_prompt()["openIntent"]),
+                         ([self.proj["kontexta"]], False))
+        rc, out, _ = self.sessions_cli("open", "kontexta")
+        self.assertIn("Lukáš o otevření neřekl", out)
+        self.assertEqual(self.actions(), [])
+        self.lukas_says("otevři novou session v kontexta")
+        self.sessions_cli("open", "kontexta")
+        self.assertEqual(self.actions()[0][0], "open")
+
+    def test_h1_an_open_without_a_named_project_asks(self):
+        self.lukas_says("otevři novou session, ať se podívá na ten bug")
+        rc, out, _ = self.sessions_cli("open", "kontexta")
+        self.assertIn("projekt Lukáš ve zprávě nejmenoval", out)
+        self.assertEqual(self.actions(), [])
+
+    def test_h1_reopen_needs_intent(self):
+        name = "claude-server-kontexta-yolo--pdf-sloupce"
+        self.fx.closed({"tmuxName": name, "at": "2026-11-06T17:20:03Z", "cwd": self.proj["kontexta"],
+                        "account": "lukas-kontexta-cz"})
+        self.lukas_says("co dělala pdf-sloupce?")
+        self.assertIn("Lukáš o vrácení neřekl", self.sessions_cli("reopen", "pdf-sloupce")[1])
+        self.lukas_says("vrať pdf-sloupce")
+        self.sessions_cli("reopen", "pdf-sloupce")
+        self.assertEqual(self.actions()[0][0], "restore")
+
+    def test_h1_intent_words(self):
+        for text, key, want in (("Zavři RAG", "closeIntent", True), ("zavřít to můžeš", "closeIntent", True),
+                                ("zavřená session", "closeIntent", False), ("kill it", "closeIntent", True),
+                                ("otevři kontexta", "openIntent", True), ("založ novou session", "openIntent", True),
+                                ("otevřený úkol", "openIntent", False), ("vrať ji", "reopenIntent", True),
+                                ("obnovení limitu", "reopenIntent", False)):
+            self.assertEqual(JO.intents(text)[key], want, text)
+        for text, want in (("pošli to", True), ("ať to pushne", True), ("opravdu?", False), ("Oprav to", True),
+                           ("napsal jsi?", False), ("udělej to", True)):
+            self.assertEqual(bool(M.SEND_INTENT.search(text)), want, text)
+
+    # ---- M1
+    def test_m1_probe_ok_thanks_and_a_question_approves_nothing(self):
+        for a in ("a", "b", "c"):
+            self.sessions_cli("open", "rag", "--alias", a)
+        self.lukas_says("ok díky, a co dělá kontexta?")
+        self.assertEqual({r["state"] for r in self.ops.all()}, {"dropped"})
+        # and with a lone proposal too: a yes followed by anything is not a bare yes
+        self.sessions_cli("open", "rag", "--alias", "d")
+        self.lukas_says("ok díky, a co dělá kontexta?")
+        self.assertEqual({r["state"] for r in self.ops.all()}, {"dropped"})
+        self.assertEqual(self.spawned, [])
+
+    def test_m1_bare_yes_only_for_a_lone_proposal_ids_otherwise(self):
+        self.sessions_cli("open", "rag", "--alias", "a")
+        self.m.send(TARGET, "Pusť testy.")
+        self.lukas_says("ano")
+        self.assertEqual(self.spawned, [])
+        self.assertEqual([r["state"] for r in self.m.all()], ["dropped"])
+        self.sessions_cli("open", "rag", "--alias", "b")
+        self.lukas_says("Ano.")
+        self.assertEqual(len(self.spawned), 1)
+
+    def test_m1_close_targets_per_prompt_add_up_to_five(self):
+        for i, n in enumerate(("x1", "x2", "x3", "x4")):
+            name = f"claude-server-z-yolo--{n}"
+            self.fx.session(name, 500 + 10 * i, f"%{9 + i}", pane_pid=499 + 10 * i)
+            self.resp("facts." + name, facts(pid=500 + 10 * i))
+        self.resp("facts." + TARGET, facts())
+        self.resp("facts." + OTHER, facts(pid=300))
+        self.assertEqual(self.sessions_cli("close", "jarvis-test", "RAG", "x1")[0], 0)
+        rc, _, err = self.sessions_cli("close", "x2", "x3", "x4")
+        self.assertEqual(rc, 2)
+        self.assertIn("nejvýš 5 zavíraných sessions dohromady", err)
+
+    # ---- L1 (M2: ProposalsTest.test_sweep_expires_and_spawns_what_the_spawn_missed)
+    def test_l1_a_restore_proposal_from_a_runner_waits_for_its_id_or_the_card(self):
+        name = "claude-server-kontexta-yolo--pdf-sloupce"
+        self.fx.closed({"tmuxName": name, "at": "2026-11-06T17:20:03Z", "cwd": self.proj["kontexta"]})
+        self.sessions_cli("reopen", "pdf-sloupce")
+        self.resp("restore", f"CR_RESTORE EXISTS {name}-2\n")
+        self.lukas_says("ano")
+        self.ops.run(self.spawned[0])
+        new = [r for r in self.ops.all() if r["state"] == "proposed"][0]
+        self.lukas_says("ano")
+        self.assertEqual(self.ops.get(new["id"])["state"], "dropped")
+        self.assertEqual(len(self.spawned), 1)
+
+    # ---- L3
+    def test_l3_the_day_slot_is_reserved_under_the_lock_before_cr_session_closes(self):
+        self.resp("facts." + TARGET, facts())
+        self.named(sessions=[TARGET])
+        seen = []
+        real = self.ops.cr.call
+
+        def call(*args, **kw):
+            if args[0] == "close":
+                seen.append([e["ev"] for e in self.ops.ledger() if e.get("name") == TARGET])
+            return real(*args, **kw)
+        self.ops.cr.call = call
+        self.sessions_cli("close", "jarvis-test", ops=self.ops)
+        self.assertEqual(seen, [["closing"]])
+        self.assertEqual(self.ops.closes_today(self.fx.clock.ms), 1)  # closing + closed = one close
+
+    # ---- L4
+    def test_l4_runner_and_cr_session_never_run_as_jarvis(self):
+        env = self.fx.env(environ_extra={"TMUX": "/tmp/tmux-1/default,1,0", "TMUX_PANE": "%1", "CLAUDECODE": "1",
+                                         "CLAUDE_CONFIG_DIR": "/x"}, my_pid=12)
+        JO.CrSession(env).call("version")
+        with open(os.path.join(self.fx.home, "cr-env.log")) as f:
+            self.assertEqual(f.read().splitlines()[-1], "TMUX= PANE= CC= CFG=")
+        got = []
+        with mock.patch.object(JO.Ops, "_popen", staticmethod(lambda *a, **kw: got.append(kw["env"]))):
+            JO.Ops(env, mail=self.m)._spawn("x-20261108T000000-abcd")
+        self.assertFalse(set(JO.SCRUB_ENV) & set(got[0]))
+        self.assertEqual(got[0]["HOME"], self.fx.home)
+
+    # ---- L5
+    def test_l5_force_is_an_argparse_refusal_the_gate_is_only_the_second_layer(self):
+        # the gate lets a quoted "--force" through as text; the CLI has no such option and stops it before any action
+        with self.assertRaises(SystemExit) as cm:
+            self.sessions_cli("close", "jarvis-test", "--force")
+        self.assertEqual(cm.exception.code, 2)
+        with self.assertRaises(SystemExit):
+            self.sessions_cli("close", "jarvis-test", "--forc")
+        self.assertEqual(self.actions(), [])
+
+    # ---- L6
+    def test_l6_nothing_under_jarvis_and_outside_the_policy_is_said(self):
+        sub = os.path.join(self.proj["jarvis"], "sub")
+        os.makedirs(sub)
+        self.fx.closed({"tmuxName": "claude-server-sub-yolo", "at": "2026-11-06T17:20:03Z", "cwd": sub})
+        self.assertNotIn(os.path.realpath(sub), JO.known_projects(self.env))
+        self.named(projects=[self.proj["kontexta"]])
+        rc, out, _ = self.sessions_cli("open", "kontexta", "--account", "default")
+        self.assertIn("MIMO POLITIKU SLOŽKY", out)
+        self.assertIn("MIMO POLITIKU", self.ops.proposals(self.fx.clock.ms)[0]["detail"])
+
+    # ---- L7
+    def test_l7_a_wake_keeps_an_action_proposal_for_lukas_next_yes(self):
+        self.sessions_cli("open", "rag")
+        self.lukas_says("[jarvis wake] Výsledek úkolu t-1 · cr-task show t-1")
+        self.assertEqual(self.ops.all()[0]["state"], "proposed")
+        self.lukas_says("ano")
+        self.assertEqual(self.ops.all()[0]["state"], "approved")
+
+
+_real_prompt_seen = M.Mail.prompt_seen
+
+
+def _prompt_seen_wake_drops_all(self, payload, now):
+    # the F3/F4 behaviour before L7: a [jarvis prompt dropped every pending proposal, mail and actions
+    if isinstance(payload, dict) and str(payload.get("prompt", "")).lstrip().startswith("[jarvis"):
+        self.decide_proposals(None, None, now)
+        self._decide_ops(None, None, now)
+    return _real_prompt_seen(self, payload, now)
+
+
+def _sweep_runs(self, now):
+    late = [r["id"] for r in self.all() if r["state"] == "approved"]
+    for xid in late:
+        self.run(xid)
+    return late
+
+
+_real_propose = JO.Ops.propose
+
+
+def _propose_with_prompt(self, kind, target, title, detail, args, prompt_id, now, targets=None):
+    return _real_propose(self, kind, target, title, detail, args, prompt_id or (self.mail.last_prompt() or {}).get("id"),
+                         now, targets)
+
+
+_real_log = JO.Ops.log
+
+
+def _log_without_reservation(self, ev, **kw):
+    if ev != "closing":
+        _real_log(self, ev, **kw)
+
+
+_real_pick = JO.pick_account
+
+
+def _pick_no_allowed(env, folder, now, usage=None):
+    return dict(_real_pick(env, folder, now, usage), allowed=[])
+
+
 # ------------------------------------------------------------------------------------------------- mutations
 
 class MutationTest(unittest.TestCase):
@@ -838,15 +1085,47 @@ class MutationTest(unittest.TestCase):
         "per day": (lambda: mock.patch.object(JO, "CLOSE_PER_DAY", 999),
                     [("CloseTest", "test_limits_five_per_confirmation_twenty_a_day")]),
         "version": (lambda: mock.patch.object(JO, "CR_SESSION_VERSION", "cr-session v3"),
-                    [("OpenTest", "test_named_project_on_the_default_account_opens_at_once_with_its_task_queued")]),
+                    [("OpenTest", "test_named_project_on_the_default_account_opens_at_once")]),
         "usage limits": (lambda: mock.patch.object(JO, "SEVEN_DAY_MAX", 101),
                          [("OpenTest", "test_a_spent_default_account_proposes_the_other_allowed_one")]),
         "named project": (lambda: mock.patch.object(JO, "named_projects", lambda env, p: list(JO.known_projects(env))),
-                          [("ProposalsTest", "test_the_next_prompt_decides")]),
+                          [("ReviewFixTest", "test_h1_an_open_without_a_named_project_asks")]),
         "proposal age": (lambda: mock.patch.object(JO, "PROPOSAL_MS", 10 ** 12),
                          [("ProposalsTest", "test_reject_runs_nothing_and_late_approval_expires")]),
         "restorable bulk": (lambda: mock.patch.object(JO, "facts_report", _always_restorable),
                             [("CloseTest", "test_bulk_only_restorable_one_proposal_one_yes")]),
+        # rev-f4-srv fixes
+        "H1 intent": (lambda: mock.patch.dict(JO.INTENT, {k: __import__("re").compile("") for k in JO.INTENT}),
+                      [("ReviewFixTest", "test_h1_probe_a_question_about_rag_never_closes_it"),
+                       ("ReviewFixTest", "test_h1_project_named_in_a_question_is_not_an_open"),
+                       ("ReviewFixTest", "test_h1_reopen_needs_intent")]),
+        "H1 no warning, restorable": (lambda: mock.patch.object(JO, "facts_report", _no_warn_restorable),
+                                      [("ReviewFixTest", "test_h1_close_needs_intent_restorable_and_no_warning")]),
+        "H1 task = proposal": (lambda: mock.patch.object(S, "TASK_NEEDS_YES", False),
+                               [("OpenTest", "test_a_task_makes_it_a_proposal_and_yes_queues_the_task")]),
+        "M1 bare yes": (lambda: mock.patch.object(M, "APPROVE", __import__("re").compile(r"^\s*(ano|ok)\b", 2)),
+                        [("ReviewFixTest", "test_m1_probe_ok_thanks_and_a_question_approves_nothing")]),
+        "M1 single": (lambda: mock.patch.object(M.Mail, "_pending", lambda self: 1),
+                      [("ReviewFixTest", "test_m1_bare_yes_only_for_a_lone_proposal_ids_otherwise")]),
+        "M1 targets": (lambda: mock.patch.object(JO, "CLOSE_TARGETS_PER_PROMPT", 99),
+                       [("ReviewFixTest", "test_m1_close_targets_per_prompt_add_up_to_five")]),
+        "M2": (lambda: mock.patch.object(JO.Ops, "sweep", _sweep_runs),
+               [("ProposalsTest", "test_sweep_expires_and_spawns_what_the_spawn_missed")]),
+        "L1": (lambda: mock.patch.object(JO.Ops, "propose", _propose_with_prompt),
+               [("ReviewFixTest", "test_l1_a_restore_proposal_from_a_runner_waits_for_its_id_or_the_card")]),
+        "L2": (lambda: mock.patch.object(JO.Ops, "same_facts", staticmethod(
+                   lambda at, rep: bool(at.get("blocks")) or at.get("hash") == rep["hash"])),
+               [("CloseTest", "test_blok_is_a_proposal_and_never_forced")]),
+        "L3": (lambda: mock.patch.object(JO.Ops, "log", _log_without_reservation),
+               [("ReviewFixTest", "test_l3_the_day_slot_is_reserved_under_the_lock_before_cr_session_closes")]),
+        "L4": (lambda: mock.patch.object(JO, "SCRUB_ENV", ()),
+               [("ReviewFixTest", "test_l4_runner_and_cr_session_never_run_as_jarvis")]),
+        "L6 subtree": (lambda: mock.patch.object(JO, "banned_folder", lambda rp, banned: rp in banned),
+                       [("ReviewFixTest", "test_l6_nothing_under_jarvis_and_outside_the_policy_is_said")]),
+        "L6 policy": (lambda: mock.patch.object(JO, "pick_account", _pick_no_allowed),
+                      [("ReviewFixTest", "test_l6_nothing_under_jarvis_and_outside_the_policy_is_said")]),
+        "L7": (lambda: mock.patch.object(M.Mail, "prompt_seen", _prompt_seen_wake_drops_all),
+               [("ReviewFixTest", "test_l7_a_wake_keeps_an_action_proposal_for_lukas_next_yes")]),
     }
 
     def test_every_rule_test_fails_without_its_check(self):
@@ -863,6 +1142,12 @@ class MutationTest(unittest.TestCase):
 
 
 _real_report = JO.facts_report
+
+
+def _no_warn_restorable(f, extra=()):
+    r = _real_report(f, extra)
+    r.update(warn=[], restorable=True)
+    return r
 
 
 def _always_restorable(f, extra=()):

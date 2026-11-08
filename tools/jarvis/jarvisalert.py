@@ -32,7 +32,8 @@ items, never perm/ask/waiting, incidents or reminders.
 Waking Jarvis (§3 point 3): a task result that went out is also pasted into Jarvis's pane as ONE line
 `[jarvis wake] <sentences>` through the mail's own checks (I1 live claude, I2 idle + settled + empty box + no
 selector, I3 Enter only over exactly our line, I5 no client input in 20 s / copy-mode / hold), never while a mail
-proposal waits for Lukáš's "ano" (a `[jarvis` prompt drops proposals), never with mail off or in dnd; at most once
+proposal waits for Lukáš's "ano" (since rev-f4 L7 a `[jarvis` prompt no longer drops it, but a wake between his question
+and his answer would still bury the question), never with mail off or in dnd; at most once
 per 3 min and 30 times a day. The line is fixed: `[jarvis wake] Výsledek úkolu t-… · cr-task show t-…` (no title). Lukáš writing to Jarvis in the meantime makes it moot (the delta told it).
 """
 import base64
@@ -833,7 +834,7 @@ class AlertWorker:
         if self.s["day"].get("d") == day and _i(self.s["day"].get("wakes")) >= WAKE_DAY_MAX:
             return "day-cap"
         if any(r["state"] == "proposed" for r in self.mail.all()):
-            return "proposal"  # a `[jarvis` prompt would drop the proposal Lukáš is about to answer
+            return "proposal"  # a wake would bury the question Lukáš is about to answer (it no longer drops it: L7)
         return None
 
     def _wake(self, now, mode, fold, self_name, time_left):

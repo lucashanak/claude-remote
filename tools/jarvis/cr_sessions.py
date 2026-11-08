@@ -188,6 +188,10 @@ def cmd_tail(env, a, out, err):
 
 # ---------------------------------------------------------------------------------------------------------- F4
 
+# rev-f4 H1 (lead): an open with a first task is always a proposal for Jarvis (a new yolo session, work nobody saw)
+TASK_NEEDS_YES = True
+
+
 def _ops(env, ops):
     return ops or JO.Ops(env)
 
@@ -275,9 +279,17 @@ def cmd_open(env, a, out, err, ops=None):
     reasons = []
     if by == "jarvis" and folder not in (lp.get("namedProjects") or []):
         reasons.append("projekt Lukáš ve zprávě nejmenoval")
+    elif by == "jarvis" and not lp.get("openIntent"):
+        reasons.append("Lukáš o otevření neřekl")  # rev-f4 H1: a project named in a question is no instruction
+    if by == "jarvis" and task and TASK_NEEDS_YES:
+        # rev-f4 H1: a new yolo session gets work nobody has seen yet: Lukáš reads the task in the question first
+        reasons.append("se zadáním")
     if acct != pick["account"]:
-        reasons.append(f"jiný než výchozí účet ({_acct(pick['account'])}"
+        outside = bool(pick["allowed"]) and acct not in pick["allowed"]
+        reasons.append(("MIMO POLITIKU SLOŽKY, " if outside else "") + f"jiný než výchozí účet ({_acct(pick['account'])}"
                        + (f" {pick['why']})" if pick["why"] else ")"))
+        if outside:
+            detail += " · účet je MIMO POLITIKU složky (povolené: " + ", ".join(_acct(x) for x in pick["allowed"]) + ")"
     elif not pick["ok"]:
         reasons.append(f"účet {_acct(acct)} {pick['why']}")
     if by == "lukas" or not reasons:
@@ -333,6 +345,8 @@ def cmd_close(env, a, out, err, ops=None):
             raise JO.Refused(why)
         if n not in names:
             names.append(n)
+    if ops.close_targets(pid) + len(names) > JO.CLOSE_TARGETS_PER_PROMPT:
+        raise JO.Refused(f"na jeden Lukášův pokyn nejvýš {JO.CLOSE_TARGETS_PER_PROMPT} zavíraných sessions dohromady")
     if ops.closes_today(now) + len(names) > JO.CLOSE_PER_DAY:
         raise JO.Refused(f"dnes už {ops.closes_today(now)} zavření, za den nejvýš {JO.CLOSE_PER_DAY}")
     reps = [ops.check_close(n)[0] for n in names]
@@ -344,7 +358,10 @@ def cmd_close(env, a, out, err, ops=None):
     if len(reps) == 1:
         r = reps[0]
         title = f"Zavřít {r['short']}."
-        if not blocked and (by == "lukas" or r["name"] in (lp.get("named") or [])):
+        # rev-f4 H1: at once only when he named it AND asked to close it, and nothing would be lost (it can come back,
+        # no uncommitted work, no warning at all); anything else he decides with the facts in front of him
+        asked = r["name"] in (lp.get("named") or []) and lp.get("closeIntent")
+        if not blocked and (by == "lukas" or (asked and r["restorable"] and not r["warn"])):
             rec, msg = ops.start_now("close", r["name"], title, detail, args, pid,
                                      "named" if by == "jarvis" else "lukas", JO.OPEN_WAIT_S)
             return _result(out, rec, msg)
@@ -352,7 +369,9 @@ def cmd_close(env, a, out, err, ops=None):
             raise JO.Refused(f"{r['short']}: " + ", ".join(r["block"]) + f"; zavřít přes to jde jen ze shellu: "
                              f"cr-session facts {r['name']}, pak cr-session close {r['name']} --token … --force")
         p = ops.propose("close", r["name"], title, detail, args, pid, now)
-        why = "BLOK: " + ", ".join(r["block"]) if blocked else "Lukáš ji ve zprávě nejmenoval"
+        why = ("BLOK: " + ", ".join(r["block"]) if blocked else "Lukáš ji ve zprávě nejmenoval"
+               if r["name"] not in (lp.get("named") or []) else "Lukáš o zavření neřekl" if not lp.get("closeIntent")
+               else "VAROVÁNÍ: " + ", ".join(r["warn"]) if r["warn"] else "nepůjde vrátit")
         _proposal_out(out, p, r["question"] + " Ano?", why)
         if blocked:
             out.write("Řekni Lukášovi i důvod BLOKu. Po jeho ano zavřu jen tehdy, když to, co ji drží (tah, dialog, "
@@ -443,6 +462,8 @@ def cmd_reopen(env, a, out, err, ops=None):
     reasons = []
     if by == "jarvis" and name not in (lp.get("namedClosed") or []):
         reasons.append("Lukáš ji ve zprávě nejmenoval")
+    elif by == "jarvis" and not lp.get("reopenIntent"):
+        reasons.append("Lukáš o vrácení neřekl")
     if not u["ok"]:
         reasons.append(f"účet {_acct(acct)} {u['why']}")
     if new:
