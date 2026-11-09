@@ -110,6 +110,15 @@ class TransportWriteGuardIntegrationTest {
         assertTrue(!armed.get(), "the window-change hit the failing write")
         assertTrue(sess.isConnected, "nothing noticed it yet")
         keys.write("echo hi\n".toByteArray()); keys.flush()  // the next packet, encrypted a packet ahead of sshd
+        // sshd decrypts a garbage packet length from it. When that length happens to be plausible (up to 256 KB) it
+        // waits for that many bytes before the MAC check fails, so one short packet left the link up in some CI runs.
+        // Keep sending packets, each just as out of step, until sshd has enough to check and drops the link.
+        val end = System.currentTimeMillis() + 20_000
+        val filler = ("#" + "x".repeat(4000) + "\n").toByteArray()
+        while (sess.isConnected && System.currentTimeMillis() < end) {
+            try { keys.write(filler); keys.flush() } catch (_: IOException) { break }
+            Thread.sleep(20)
+        }
         assertTrue(downWithin(sess, 10_000), "sshd ends the connection on the garbage")
     }
 
