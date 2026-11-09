@@ -418,6 +418,44 @@ def _int(v):
         return None
 
 
+def _boot_ms():
+    try:
+        with open("/proc/stat", encoding="ascii", errors="replace") as f:
+            for line in f:
+                if line.startswith("btime "):
+                    return int(line.split()[1]) * 1000
+    except (OSError, ValueError):
+        pass
+    return None
+
+
+def _proc_start_ms(env, pid):
+    """When the process started (epoch ms), from its starttime ticks and the boot time; None when unknown."""
+    try:
+        ticks = int(env.proc_start(pid)) if pid else None
+        boot = _boot_ms()
+        if ticks is None or boot is None:
+            return None
+        return boot + ticks * 1000 // os.sysconf("SC_CLK_TCK")
+    except (TypeError, ValueError, OSError, AttributeError):
+        return None
+
+
+def _pane_of(env, pid, pane_info, limit=64):
+    """The live pane (its id, e.g. %61) whose process is an ancestor of pid (claude runs under the pane's shell), or
+    None. pane_info is pane id -> (pane process pid, session, dead)."""
+    by_pid = {info[0]: pane for pane, info in pane_info.items()}
+    q = env.ppid(pid)
+    for _ in range(limit):
+        if q is None or q <= 1:
+            return None
+        pane = by_pid.get(q)
+        if pane is not None:
+            return None if pane_info[pane][2] else pane
+        q = env.ppid(q)
+    return None
+
+
 def is_descendant(env, pid, ancestor, limit=64):
     q = pid
     for _ in range(limit):
@@ -806,6 +844,14 @@ def build_sessions(env, regs, panes, manifest, fold, self_name=None, tr_cache=No
                 on_pane.add(id(r))
             elif r.tmux:
                 live[r.tmux].append(r)
+            else:
+                # Claude 2.1.319 after a --resume restart can write the record without `tmux` (2026-11-09: 21 of 59
+                # sessions, Jarvis included, showed as "?"): find its pane by ancestry instead.
+                pane = _pane_of(env, r.pid, pane_info)
+                if pane is not None:
+                    r.pane = pane
+                    live[pane_info[pane][1]].append(r)
+                    on_pane.add(id(r))
         elif r.tmux:
             stale[r.tmux] += 1
 
@@ -872,10 +918,17 @@ def build_sessions(env, regs, panes, manifest, fold, self_name=None, tr_cache=No
             s["lastEvent"] = {"ev": last["ev"], "ms": last["ms"]} if last else None
             if s["stateSince"] is None and last:
                 s["stateSince"] = last["ms"]
-            if s.get("noRegistry") and last and last["ev"] in EVENT_STATE:
+            if s.get("noRegistry"):
                 # no registry record (claude after a --resume restart can lack one): the last hook event is the only
-                # signal, so take it, marked as inferred, instead of "?"
-                s["state"], s["stateInferred"] = EVENT_STATE[last["ev"]], True
+                # signal, so take it, marked as inferred, instead of "?". An event older than the claude process is
+                # from its previous life; no event since it started = it sits idle at its prompt (2026-11-09: 8
+                # sessions restarted the day before had neither a record nor an event since).
+                born = _proc_start_ms(env, s.get("pid"))
+                ev = last if last and (born is None or last["ms"] >= born) else None
+                if ev and ev["ev"] in EVENT_STATE:
+                    s["state"], s["stateInferred"] = EVENT_STATE[ev["ev"]], True
+                elif ev is None and s.get("pid"):
+                    s["state"], s["stateInferred"] = "idle", True
             stop = fs.get("stop")
             if s["state"] == "idle" and last and last["ev"] == "stop" and stop and stop.get("bg"):
                 # the turn ended with background tasks (agents, a watched build) still running: not idle, and it

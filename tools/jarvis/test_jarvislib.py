@@ -1,5 +1,6 @@
 """Unit tests of the shared read layer: escaping, names, events (rotation, cut lines), registry liveness, transcript
 tail, attention rules. Run: python3 -m unittest discover -s tools/jarvis"""
+import json
 import os
 import re
 import unittest
@@ -263,7 +264,8 @@ class RegistryTest(unittest.TestCase):
         fx.pane("%9", 70, "claude-server-noreg")
         fx.ptable = {70: (1, "bash"), 71: (70, "bash"), 72: (71, "claude")}
         s = J.snapshot(fx.env())["sessions"]["claude-server-noreg"]
-        self.assertEqual((s["state"], s["pid"], s["noRegistry"]), ("unknown", 72, True))
+        # no registry record and no hook event since it started: it sits idle at its prompt (inferred, 2026-11-09)
+        self.assertEqual((s["state"], s["pid"], s["noRegistry"], s.get("stateInferred")), ("idle", 72, True, True))
 
     def test_claude_without_registry_takes_its_state_from_the_last_hook_event(self):
         fx = self.fx
@@ -274,6 +276,28 @@ class RegistryTest(unittest.TestCase):
             fx.clock.advance(1)
             s = J.snapshot(fx.env())["sessions"]["claude-server-noreg"]
             self.assertEqual((s["state"], s.get("stateInferred")), (want, True), ev)
+
+    def test_a_registry_record_without_a_tmux_field_is_found_by_its_pane(self):
+        # Claude 2.1.319 after a --resume restart wrote records without `tmux` (21 of 59 sessions on 2026-11-09)
+        fx = self.fx
+        fx.pane("%12", 120, "claude-server-notmux")
+        fx.ptable = {120: (1, "bash"), 121: (120, "claude")}
+        fx.session("claude-server-notmux", 121, "%12", pane_pid=120, status="busy")
+        rec = os.path.join(fx.home, ".claude", "sessions", "121.json")
+        d = json.load(open(rec)); d.pop("tmux", None); json.dump(d, open(rec, "w"))
+        s = J.snapshot(fx.env())["sessions"]["claude-server-notmux"]
+        self.assertEqual((s["state"], s.get("noRegistry", False)), ("busy", False))
+
+    def test_an_event_from_before_the_restart_does_not_count(self):
+        fx = self.fx
+        fx.pane("%13", 130, "claude-server-old")
+        fx.ptable = {130: (1, "bash"), 131: (130, "claude")}
+        fx.append_events(ev_line("work", "claude-server-old", 1000, 131))  # long before the process started
+        env = fx.env()
+        import unittest.mock as um
+        with um.patch.object(J, "_proc_start_ms", return_value=5000):
+            s = J.snapshot(env)["sessions"]["claude-server-old"]
+        self.assertEqual((s["state"], s.get("stateInferred")), ("idle", True))
 
     def test_a_stop_with_background_tasks_is_not_idle(self):
         fx = self.fx
