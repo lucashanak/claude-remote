@@ -5,7 +5,7 @@ import com.clauderemote.model.RemoteSession
 import com.clauderemote.model.SessionStatus
 
 /** Where a one-tap "quick access" goes: Jarvis' tab, the Velín, or the Velín's Jarvis tab (his merged notification). */
-enum class QuickTarget { JARVIS, VELIN, JARVIS_NEWS }
+enum class QuickTarget { JARVIS, VELIN, JARVIS_NEWS, JARVIS_TALK }
 
 /** What a tap on Jarvis does, given what this device knows ([QuickAccess.route]). */
 sealed interface JarvisRoute {
@@ -36,20 +36,55 @@ object QuickAccess {
     /** Intent actions of the launcher shortcuts and the tile (Android). */
     const val ACTION_JARVIS = "com.clauderemote.action.JARVIS"
     const val ACTION_VELIN = "com.clauderemote.action.VELIN"
+    /** Jarvis' conversation mode (F5a): opens his tab and starts talking. */
+    const val ACTION_JARVIS_TALK = "com.clauderemote.action.JARVIS_TALK"
 
     /** The extra form of the same request ("jarvis" / "velin"), for intents that keep the MAIN action. */
     const val EXTRA_TARGET = "quick_access"
 
-    fun extraValue(target: QuickTarget): String = if (target == QuickTarget.JARVIS_NEWS) "jarvis-news" else target.name.lowercase()
+    fun extraValue(target: QuickTarget): String = when (target) {
+        QuickTarget.JARVIS_NEWS -> "jarvis-news"
+        QuickTarget.JARVIS_TALK -> "jarvis-talk"
+        else -> target.name.lowercase()
+    }
+
+    /** The in-process token that lets an intent start the conversation mode ([authorize]). */
+    const val EXTRA_TALK_TOKEN = "quick_access_talk"
+
+    private val talkLock = Any()
+    private var talkToken: String? = null
+
+    /**
+     * A one-time token for an intent this process builds itself (QuickAccessActivity, which is not exported). Only one
+     * is live: a newer one replaces it.
+     */
+    fun issueTalkToken(): String = java.util.UUID.randomUUID().toString().also { synchronized(talkLock) { talkToken = it } }
+
+    /**
+     * MainActivity is exported, so anyone can send it `jarvis-talk`; opening the microphone (and then sending what it
+     * hears to Jarvis, who acts on a spoken "ano") must take a token only this process could have issued. Without it
+     * the request is downgraded to opening Jarvis. The token is used up either way.
+     */
+    fun authorize(target: QuickTarget, token: String?): QuickTarget {
+        if (target != QuickTarget.JARVIS_TALK) return target
+        val ok = synchronized(talkLock) {
+            val live = talkToken
+            talkToken = null
+            live != null && token != null && live == token
+        }
+        return if (ok) QuickTarget.JARVIS_TALK else QuickTarget.JARVIS
+    }
 
     /** The target an intent asks for, or null when it is not a quick-access intent. The action wins over the extra. */
     fun targetOf(action: String?, extra: String?): QuickTarget? = when (action) {
         ACTION_JARVIS -> QuickTarget.JARVIS
         ACTION_VELIN -> QuickTarget.VELIN
+        ACTION_JARVIS_TALK -> QuickTarget.JARVIS_TALK
         else -> when (extra?.trim()?.lowercase()) {
             "jarvis" -> QuickTarget.JARVIS
             "velin", "velín" -> QuickTarget.VELIN
             "jarvis-news" -> QuickTarget.JARVIS_NEWS
+            "jarvis-talk" -> QuickTarget.JARVIS_TALK
             else -> null
         }
     }

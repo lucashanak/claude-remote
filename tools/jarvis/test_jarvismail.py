@@ -1556,6 +1556,80 @@ class LowFixesTest(Base):
         self.assertEqual(self.tm.writes(), [])
 
 
+class VoicePrefixTest(Base):
+    """F5a: the app's conversation mode sends `[hlas] <what he said>`; the hook decides on what he said."""
+
+    def setUp(self):
+        super().setUp()
+        with open(os.path.join(self.fx.state, "status.json"), "w") as f:
+            json.dump({"sessions": {TARGET: {"alias": "jarvis-test", "short": "jarvis-test"}}}, f)
+
+    def test_a_spoken_yes_approves_the_lone_proposal(self):
+        rec, _ = self.send(approve=False)
+        self.lukas_says("[hlas] Ano.")
+        self.assertEqual(self.m.get(rec["id"])["state"], "queued")
+
+    def test_a_spoken_name_is_a_name(self):
+        self.lukas_says("[hlas] Pošli do jarvis-test, ať pushne rozdělanou práci.")
+        rec, why = self.send(approve=False)
+        self.assertIsNone(why)
+        self.assertEqual(rec["state"], "queued")
+        with open(os.path.join(self.fx.state, "last-prompt")) as f:
+            self.assertEqual(json.load(f)["by"], "lukas")
+
+    def test_a_spoken_yes_with_two_waiting_approves_nothing(self):
+        a, _ = self.send(approve=False)
+        b, _ = self.send("Druhý návrh.", approve=False)
+        self.lukas_says("[hlas] ano")
+        self.assertEqual([self.m.get(r["id"])["state"] for r in (a, b)], ["dropped", "dropped"])
+
+    def test_the_marker_only_counts_at_the_start(self):
+        rec, _ = self.send(approve=False)
+        self.lukas_says("ano [hlas]")  # not a bare yes: the marker is only cut off at the start
+        self.assertEqual(self.m.get(rec["id"])["state"], "dropped")
+
+    def test_a_machine_prompt_behind_the_marker_stays_a_machines(self):
+        rec, _ = self.send(approve=False)
+        self.lukas_says("[hlas] [jarvis wake] ano")
+        self.assertFalse(os.path.exists(os.path.join(self.fx.state, "last-prompt")))
+        self.assertEqual(self.m.get(rec["id"])["state"], "proposed")  # a wake decides nothing (L7)
+
+    def test_strip_voice(self):
+        self.assertEqual(M.strip_voice("[hlas] ano"), "ano")
+        self.assertEqual(M.strip_voice("  [hlas]ano"), "ano")
+        self.assertEqual(M.strip_voice("[hlas] [hlas] ano"), "[hlas] ano")  # once
+        self.assertEqual(M.strip_voice("ano [hlas]"), "ano [hlas]")
+        self.assertEqual(M.strip_voice("[HLAS] ano"), "[HLAS] ano")  # the app's exact marker only
+        self.assertIsNone(M.strip_voice(None))
+
+
+class VoiceMutationTest(unittest.TestCase):
+    """Each part of the `[hlas]` rule: its test fails when the rule is taken out or widened."""
+
+    MUTANTS = {
+        "no strip": (lambda: mock.patch.object(M, "strip_voice", lambda p: p),
+                     # (a spoken name needs no strip: names are found anywhere in the prompt; its test is a guard)
+                     ["test_a_spoken_yes_approves_the_lone_proposal"]),
+        "strip anywhere": (lambda: mock.patch.object(M, "strip_voice", lambda p: p.replace("[hlas]", "").strip()
+                                                     if isinstance(p, str) else p),
+                           ["test_the_marker_only_counts_at_the_start"]),
+        "strip any tag": (lambda: mock.patch.object(M, "strip_voice", lambda p: __import__("re").sub(
+                              r"^(\s*\[[^\]]*\]\s*)+", "", p) if isinstance(p, str) else p),
+                          ["test_a_machine_prompt_behind_the_marker_stays_a_machines"]),
+    }
+
+    def test_every_voice_test_fails_without_its_rule(self):
+        for what, (patcher, names) in self.MUTANTS.items():
+            for n in names:
+                res = unittest.TestResult()
+                VoicePrefixTest(n).run(res)
+                self.assertTrue(res.wasSuccessful(), f"{n} fails unmutated: {res.failures + res.errors}")
+                with patcher():
+                    res = unittest.TestResult()
+                    VoicePrefixTest(n).run(res)
+                self.assertGreater(len(res.failures) + len(res.errors), 0, f"{what}: {n} passed a mutant")
+
+
 class ReviewMutationTest(unittest.TestCase):
     """Each rev-f2a fix: its tests fail when the fix is taken out."""
 

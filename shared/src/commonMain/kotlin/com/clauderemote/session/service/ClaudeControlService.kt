@@ -169,9 +169,26 @@ internal class ClaudeControlService(
      * with its Enter in one tmux call. Returns null when sent, else why not: an exec that never
      * ran fails closed, one that broke off after it started may have sent the keys.
      */
-    suspend fun sendCheckedReply(sessionId: String, expect: ServerExpectation, text: String, approve: Boolean = false): RefuseReason? {
-        val tab = tabManager.getTab(sessionId) ?: return RefuseReason.NOT_CONNECTED
-        val cmd = ReplyGuard.serverCommand(tab.tmuxSessionName, expect, text, approve)
+    suspend fun sendCheckedReply(
+        sessionId: String,
+        expect: ServerExpectation,
+        text: String,
+        approve: Boolean = false,
+        emptyInput: Boolean = false,
+    ): RefuseReason? = sendCheckedReplyTimed(sessionId, expect, text, approve, emptyInput).why
+
+    /** [why] as [sendCheckedReply]; [serverAtMs] = when the server pressed Enter (only with `emptyInput`), else null. */
+    data class CheckedReply(val why: RefuseReason?, val serverAtMs: Long? = null)
+
+    suspend fun sendCheckedReplyTimed(
+        sessionId: String,
+        expect: ServerExpectation,
+        text: String,
+        approve: Boolean = false,
+        emptyInput: Boolean = false,
+    ): CheckedReply {
+        val tab = tabManager.getTab(sessionId) ?: return CheckedReply(RefuseReason.NOT_CONNECTED)
+        val cmd = ReplyGuard.serverCommand(tab.tmuxSessionName, expect, text, approve, emptyInput)
         val exec = replyExecOverride
         val out = try {
             if (exec != null) exec(tab.server.id, cmd) else registry.execRead(tab.server.id, cmd, totalMs = REPLY_EXEC_MS)
@@ -179,15 +196,15 @@ internal class ClaudeControlService(
             throw e
         } catch (e: ExecUnavailable) {
             FileLogger.log(TAG, "checked reply exec failed for $sessionId: ${e.reason}")
-            return when (e.reason) {
+            return CheckedReply(when (e.reason) {
                 // the command never started
                 ExecUnavailableReason.NOT_UP, ExecUnavailableReason.GATE_TIMEOUT, ExecUnavailableReason.REFUSED ->
                     RefuseReason.NOT_VERIFIABLE
                 ExecUnavailableReason.TIMEOUT, ExecUnavailableReason.IO -> RefuseReason.MAYBE_SENT
-            }
+            })
         } catch (e: Exception) {
             FileLogger.log(TAG, "checked reply exec failed for $sessionId: ${e.message}")
-            return RefuseReason.MAYBE_SENT
+            return CheckedReply(RefuseReason.MAYBE_SENT)
         }
         val why = ReplyGuard.serverResult(out)
         if (why == null) {
@@ -196,7 +213,7 @@ internal class ClaudeControlService(
             notifications.promptDetector.onUserInput(sessionId)
             noteSent(sessionId, text + "\r")
         }
-        return why
+        return CheckedReply(why, if (why == null) ReplyGuard.sentAtServerMs(out) else null)
     }
 
 

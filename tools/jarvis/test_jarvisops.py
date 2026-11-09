@@ -942,6 +942,12 @@ class ReviewFixTest(Base):
         self.lukas_says("Ano.")
         self.assertEqual(len(self.spawned), 1)
 
+    def test_f5a_a_spoken_yes_runs_the_lone_action_proposal(self):
+        # the app's conversation mode: `[hlas] Ano.` decides an action exactly like a typed "Ano."
+        self.sessions_cli("open", "rag", "--alias", "b")
+        self.lukas_says("[hlas] Ano.")
+        self.assertEqual(len(self.spawned), 1)
+
     def test_m1_close_targets_per_prompt_add_up_to_five(self):
         for i, n in enumerate(("x1", "x2", "x3", "x4")):
             name = f"claude-server-z-yolo--{n}"
@@ -1124,6 +1130,8 @@ class MutationTest(unittest.TestCase):
                        [("ReviewFixTest", "test_l6_nothing_under_jarvis_and_outside_the_policy_is_said")]),
         "L6 policy": (lambda: mock.patch.object(JO, "pick_account", _pick_no_allowed),
                       [("ReviewFixTest", "test_l6_nothing_under_jarvis_and_outside_the_policy_is_said")]),
+        "F5a [hlas]": (lambda: mock.patch.object(M, "strip_voice", lambda p: p),
+                       [("ReviewFixTest", "test_f5a_a_spoken_yes_runs_the_lone_action_proposal")]),
         "L7": (lambda: mock.patch.object(M.Mail, "prompt_seen", _prompt_seen_wake_drops_all),
                [("ReviewFixTest", "test_l7_a_wake_keeps_an_action_proposal_for_lukas_next_yes")]),
     }

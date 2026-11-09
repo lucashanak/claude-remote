@@ -325,6 +325,8 @@ internal fun JarvisPane(
                         }
                         state.briefing?.let { SpeakerButton(it, tint = c.accent) }
                     }
+                    // the conversation mode (F5a): talk to him with the headset, the answer read aloud
+                    JarvisTalkRow()
                     state.briefing?.let { Text(it, style = CRType.bodyDim, color = c.text) }
                     state.notice?.let { Text(it, style = CRType.bodyDim, color = c.textDim) }
                     state.jarvisError?.let { Text(it, style = CRType.bodyDim, color = c.disconnected) }

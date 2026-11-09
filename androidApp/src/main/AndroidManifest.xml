@@ -8,6 +8,8 @@
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+    <!-- Jarvis' conversation mode (F5a): a microphone FGS, started only from the foreground (install-time permission). -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
@@ -65,6 +67,17 @@
         <receiver
             android:name="com.clauderemote.PlayReceiver"
             android:exported="false" />
+
+        <!-- Jarvis' conversation mode (F5a): mic + headset button while it runs. specialUse only for the failure path:
+             a refused microphone start must still call startForeground once before it stops (no crash). -->
+        <service
+            android:name="com.clauderemote.voice.JarvisTalkService"
+            android:exported="false"
+            android:foregroundServiceType="microphone|specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="Ending a voice conversation that could not get the microphone" />
+        </service>
 
         <service
             android:name="com.clauderemote.KeepAliveService"

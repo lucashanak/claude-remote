@@ -312,6 +312,8 @@ class MainActivity : FragmentActivity() {
         // future Wear data layer).
         OrchestratorHolder.orchestrator = sessionOrchestrator
         replacedOrchestrator?.shutdown()
+        // Jarvis' conversation mode (F5a): its service reaches Jarvis through whichever orchestrator is current.
+        com.clauderemote.voice.AndroidJarvisTalk.install(applicationContext, OrchestratorHolder.current)
         // Keep the Wear companion app's session list in sync (Data Layer).
         WearSync.start(applicationContext, tabManager, sessionOrchestrator)
         // WearSync already observes the tab list to prune its own per-session
@@ -809,10 +811,15 @@ class MainActivity : FragmentActivity() {
     private fun handleQuickAccessIntent(intent: Intent?) {
         if (intent == null) return
         if (intent.flags and Intent.FLAG_ACTIVITY_LAUNCHED_FROM_HISTORY != 0) return
-        val target = com.clauderemote.session.QuickAccess.targetOf(
+        val asked = com.clauderemote.session.QuickAccess.targetOf(
             intent.action, intent.getStringExtra(com.clauderemote.session.QuickAccess.EXTRA_TARGET),
         ) ?: return
+        // F5a review: "Mluvit s Jarvisem" opens the microphone, so only with the token this process put in
+        val target = com.clauderemote.session.QuickAccess.authorize(
+            asked, intent.getStringExtra(com.clauderemote.session.QuickAccess.EXTRA_TALK_TOKEN),
+        )
         intent.removeExtra(com.clauderemote.session.QuickAccess.EXTRA_TARGET)
+        intent.removeExtra(com.clauderemote.session.QuickAccess.EXTRA_TALK_TOKEN)
         intent.action = Intent.ACTION_MAIN
         setIntent(intent)
         FileLogger.log("MainActivity", "Quick access -> $target")
@@ -837,6 +844,10 @@ class MainActivity : FragmentActivity() {
             Intent(context, MainActivity::class.java).apply {
                 action = Intent.ACTION_MAIN
                 putExtra(com.clauderemote.session.QuickAccess.EXTRA_TARGET, com.clauderemote.session.QuickAccess.extraValue(target))
+                // built only in this process (QuickAccessActivity, notifications): the talk mode's token (authorize)
+                if (target == com.clauderemote.session.QuickTarget.JARVIS_TALK) {
+                    putExtra(com.clauderemote.session.QuickAccess.EXTRA_TALK_TOKEN, com.clauderemote.session.QuickAccess.issueTalkToken())
+                }
                 flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP
             }
     }

@@ -288,6 +288,17 @@ internal class NotificationService(
         }
     }
 
+    /**
+     * Every finished turn with the body its notification got (F5a: Jarvis' conversation mode reads his answer from
+     * here, so it is the very text the Stop notification would show — [StopBodySelector], one place). Emitted after
+     * the dispatch, whether or not an alert was raised (a foreground tab raises none). Replays and primed baselines
+     * never get here. Not replayed to a late collector: a turn that ended before someone listened is not his answer.
+     */
+    private val _stopAnswers = kotlinx.coroutines.flow.MutableSharedFlow<StopAnswer>(
+        extraBufferCapacity = 16, onBufferOverflow = kotlinx.coroutines.channels.BufferOverflow.DROP_OLDEST,
+    )
+    val stopAnswers: kotlinx.coroutines.flow.SharedFlow<StopAnswer> = _stopAnswers
+
     // Sessions whose idle/working state is driven by the Claude Code Stop hook
     // (authoritative: flips to WAITING the instant Claude finishes, regardless
     // of which screen the user is on). The UI uses this to know it can trust
@@ -982,7 +993,11 @@ internal class NotificationService(
         // same amount.
         val claimForSession = claim
         onSessionLane(sessionId) {
-            handleStopMarker(sessionId, markerTmux, markerEpochSec, claimForSession)
+            handleStopMarker(
+                sessionId, markerTmux, markerEpochSec, claimForSession,
+                // unknown skew = unknown time: a guessed one could hide (or pass off) an answer by minutes
+                markerAtMs = if (markerEpochSec != null && clockSkewMs != null) markerEpochSec * 1000L + clockSkewMs else null,
+            )
         }
     }
 
@@ -1111,6 +1126,7 @@ internal class NotificationService(
         markerTmux: String,
         markerEpochSec: Long?,
         claim: NotifyEpochTracker.Claim?,
+        markerAtMs: Long? = null,
     ) {
         var dispatched = false
         try {
@@ -1174,6 +1190,7 @@ internal class NotificationService(
                 body = body,
             )
             dispatched = true
+            _stopAnswers.tryEmit(StopAnswer(sessionId, markerAtMs, body, markerEpochSec))
             // Outside the dispatch guard on purpose: a completion the debounce
             // swallowed is still a completion, and the dot must say so.
             updateActivity(sessionId, SessionActivity.WAITING_FOR_INPUT)
@@ -1256,3 +1273,10 @@ internal class NotificationService(
         }
     }
 }
+
+/**
+ * One finished turn of [sessionId]: [body] = the assistant text the Stop notification carried (null = none could be
+ * chosen in time), [markerAtMs] = when the Stop hook fired, on the DEVICE clock (server epoch + measured skew; null =
+ * unknown), [markerEpochSec] = the marker's own second on the server's clock.
+ */
+data class StopAnswer(val sessionId: String, val markerAtMs: Long?, val body: String?, val markerEpochSec: Long? = null)

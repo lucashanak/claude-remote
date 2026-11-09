@@ -21,6 +21,9 @@ class ReplyServerCommandTest {
     private val sent = File(root, "sent")
     private val tmux = "claude-server-x"
 
+    // What capture-pane prints (missing = nothing on the screen).
+    private val screen = File(root, "screen")
+
     // Runs on the first `send-keys` when present: a dialog opening while the text is typed.
     private val onType = File(root, "on-type")
 
@@ -31,6 +34,8 @@ class ReplyServerCommandTest {
                 "#!/bin/bash\n" +
                     "[ \"\$1\" = -u ] && shift\n" +
                     "if [ \"\$1\" = list-panes ]; then printf '%%3\\n%%5\\n'; exit 0; fi\n" +
+                    // the screen of the pane (Jarvis' conversation mode reads his input box); not recorded as a key
+                    "if [ \"\$1\" = capture-pane ]; then cat '${screen.absolutePath}' 2>/dev/null; exit 0; fi\n" +
                     "printf '%s\\n' \"\$*\" >> '${sent.absolutePath}'\n" +
                     "if [ -f '${onType.absolutePath}' ]; then bash '${onType.absolutePath}'; rm -f '${onType.absolutePath}'; fi\n",
             )
@@ -56,8 +61,8 @@ class ReplyServerCommandTest {
         f.writeText(lines.joinToString("") { "$it\n" })
     }
 
-    private fun run(expect: ServerExpectation, text: String = "ahoj", approve: Boolean = false): String {
-        val pb = ProcessBuilder("bash", "-c", ReplyGuard.serverCommand(tmux, expect, text, approve))
+    private fun run(expect: ServerExpectation, text: String = "ahoj", approve: Boolean = false, emptyInput: Boolean = false): String {
+        val pb = ProcessBuilder("bash", "-c", ReplyGuard.serverCommand(tmux, expect, text, approve, emptyInput))
         pb.environment()["HOME"] = home.absolutePath
         pb.environment()["PATH"] = bin.absolutePath + ":" + System.getenv("PATH")
         pb.redirectErrorStream(true)
@@ -252,5 +257,63 @@ class ReplyServerCommandTest {
             // the private named socket only (wrapper adds -L cr-reply-test, TMUX_TMPDIR is ours)
             tmuxEnv(ProcessBuilder("tmux", "kill-server")).start().waitFor(20, java.util.concurrent.TimeUnit.SECONDS)
         }
+    }
+
+    // ---- Jarvis' conversation mode (F5a): the input box must be empty right before the keys ----
+
+    private val esc = "\u001b"
+    private val rule = "$esc[38;5;244m" + "─".repeat(40) + "$esc[39m"
+
+    /** A Claude Code 2.1 screen: the box row is `❯`+NBSP right below a rule ([box] typed, else the dim placeholder). */
+    private fun drawScreen(box: String?, cursor: Boolean = true) {
+        val row = when {
+            box != null -> "$esc[39m❯\u00a0$box"
+            cursor -> "$esc[39m❯\u00a0$esc[7mT$esc[0m$esc[2mry \"write a test for <filepath>\"$esc[0m"
+            else -> "$esc[39m❯\u00a0$esc[2mTry \"fix lint errors\"$esc[0m"
+        }
+        screen.writeText(listOf("● PONG", "$esc[38;5;246m✻$esc[39m Baked for 2s", rule, row, rule, "  ⏵⏵ bypass permissions on").joinToString("\n") + "\n")
+    }
+
+    @Test fun aSpokenPromptGoesInOnlyOverAnEmptyInputBox() {
+        events(ev("stop", 1_000))
+        drawScreen(box = null)
+        val before = System.currentTimeMillis()
+        val out = run(ServerExpectation.Idle, "[hlas] co je nového", emptyInput = true)
+        // SENT carries the server's ms right before Enter: the app reads only a later Stop as the answer
+        assertTrue(Regex("CR_REPLY SENT \\d{13}").matches(out), out)
+        assertEquals(null, ReplyGuard.serverResult(out))
+        val at = ReplyGuard.sentAtServerMs(out)!!
+        assertTrue(at in (before - 1_000)..(System.currentTimeMillis() + 1_000), "$at")
+        assertTrue(keys().contains("send-keys -t %3 -l -- [hlas] co je nového"), keys())
+        sent.delete()
+        drawScreen(box = null, cursor = false)
+        assertTrue(run(ServerExpectation.Idle, emptyInput = true).startsWith("CR_REPLY SENT "), "the placeholder without the cursor is empty too")
+    }
+
+    @Test fun aDraftInTheBoxStopsASpokenPrompt() {
+        events(ev("stop", 1_000))
+        drawScreen(box = "rozepsan")
+        assertEquals("CR_REPLY DRAFT", run(ServerExpectation.Idle, "[hlas] ano", emptyInput = true))
+        assertEquals("", keys(), "nothing typed after the draft")
+    }
+
+    @Test fun noBoxOnTheScreenStopsASpokenPrompt() {
+        events(ev("stop", 1_000))
+        assertEquals("CR_REPLY DRAFT", run(ServerExpectation.Idle, emptyInput = true), "no capture at all")
+        screen.writeText("Resume a conversation\n❯ 1. yesterday\n")
+        assertEquals("CR_REPLY DRAFT", run(ServerExpectation.Idle, emptyInput = true), "another screen")
+        assertEquals("", keys())
+    }
+
+    @Test fun theDraftCheckRunsOnlyAfterTheEventCheck() {
+        events(ev("work", 1_000))
+        drawScreen(box = null)
+        assertEquals("CR_REPLY STALE", run(ServerExpectation.Idle, emptyInput = true))
+    }
+
+    @Test fun withoutTheFlagTheBoxIsNotRead() {
+        events(ev("stop", 1_000))
+        drawScreen(box = "rozepsan")
+        assertEquals("CR_REPLY SENT", run(ServerExpectation.Idle), "the watch's reply path is unchanged (no time either)")
     }
 }

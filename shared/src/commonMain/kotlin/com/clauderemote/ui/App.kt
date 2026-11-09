@@ -736,6 +736,11 @@ fun App(
         com.clauderemote.session.QuickTarget.JARVIS -> openJarvis()
         com.clauderemote.session.QuickTarget.VELIN -> openVelin()
         com.clauderemote.session.QuickTarget.JARVIS_NEWS -> openVelin(VelinTab.JARVIS)
+        // the launcher shortcut "Mluvit s Jarvisem": his tab, and the mode from this foreground start (F5a)
+        com.clauderemote.session.QuickTarget.JARVIS_TALK -> {
+            openJarvis()
+            com.clauderemote.voice.conversation.JarvisTalk.start()
+        }
     }
 
     // Requests from outside (launcher shortcuts, the tile): taken once, then cleared.
@@ -1198,6 +1203,7 @@ fun App(
             when (AppShortcuts.match(e)) {
                 AppShortcut.JARVIS -> { openJarvis(); true }
                 AppShortcut.VELIN -> { openVelin(); true }
+                AppShortcut.JARVIS_TALK -> { openQuick(com.clauderemote.session.QuickTarget.JARVIS_TALK); true }
                 else -> false
             }
         }) {
@@ -1215,6 +1221,12 @@ fun App(
 
             // Read-aloud transport (only visible while something is read).
             TtsPlayerBar()
+            // Jarvis' conversation mode: on his tab, and on every screen while it runs (F5a).
+            JarvisTalkBar(
+                // the tab the mode talks to (jarvis/self of his server), not a fixed name (review LOW)
+                jarvisShown = currentScreen == Screen.TERMINAL && activeTabId != null &&
+                    activeTabId == sessionOrchestrator.jarvisTabIdForWatch(),
+            )
 
             // Main content
             when (currentScreen) {
@@ -1899,6 +1911,7 @@ fun App(
                         },
                         onReopenClosed = { reopenLastClosed() },
                         onOpenJarvis = { openJarvis() },
+                        onOpenJarvisTalk = { openQuick(com.clauderemote.session.QuickTarget.JARVIS_TALK) },
                         onOpenVelin = { openVelin() },
                         closedPaletteEntries = closedPaletteEntries,
                         onPaletteOpened = { loadRecentlyClosed() },

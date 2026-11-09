@@ -265,6 +265,7 @@ fun TerminalScreen(
     onFocusTerminal: (() -> Boolean)? = null,
     /** Quick access (top-bar Jarvis button, Ctrl+Shift+J / Ctrl+Shift+D caught by the platform first); null hides the button. */
     onOpenJarvis: (() -> Unit)? = null,
+    onOpenJarvisTalk: (() -> Unit)? = null,
     onOpenVelin: (() -> Unit)? = null,
 ) {
     val c = CRTheme.colors
@@ -523,6 +524,7 @@ fun TerminalScreen(
             // App catches these first on every screen; here only the ones the platform caught (Android's terminal view)
             AppShortcut.JARVIS -> onOpenJarvis?.invoke()
             AppShortcut.VELIN -> onOpenVelin?.invoke()
+            AppShortcut.JARVIS_TALK -> onOpenJarvisTalk?.invoke()
             AppShortcut.HELP -> showShortcutHelp = !showShortcutHelp
         }
     }

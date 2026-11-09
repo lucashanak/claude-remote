@@ -59,6 +59,8 @@ enum class RefuseReason(val message: String) {
     MAYBE_SENT("Možná odesláno – zkontroluj v aplikaci"),
     /** The text went in, but the prompt moved before Enter: it waits in the input, unsent. */
     TYPED_NOT_SENT("Text je napsaný, ale neodeslaný – dokonči v aplikaci"),
+    /** Jarvis' conversation mode (F5a): his input box holds a draft (or could not be read), so nothing is typed. */
+    DRAFT_IN_INPUT("Ve vstupu je rozepsaný text – dokonči ho v aplikaci"),
 }
 
 /**
@@ -158,6 +160,21 @@ object ReplyGuard {
     }
 
     /**
+     * Jarvis' conversation mode (F5a, decision 14d/14e): a spoken instruction goes in only while Jarvis is idle at his
+     * prompt — never queued behind a running turn (the answer read aloud would belong to another question), never
+     * into a dialog (a spoken "ano" must never approve a permission or answer a question). Stricter than an
+     * [PromptKind.INSTRUCTION] from the watch, which a working session takes too; the server then checks the same
+     * [ServerExpectation.Idle] and, with `emptyInput`, that his input box holds no draft.
+     */
+    internal fun voiceCheck(current: PromptTokens.Current?, activity: SessionActivity?, deliverable: Boolean): Verdict = when {
+        !deliverable -> refuse(RefuseReason.NOT_CONNECTED, "the session is not connected")
+        current != null && current.prompt.kind.isDialog() ->
+            refuse(RefuseReason.PROMPT_CHANGED, "a dialog was announced last (${current.prompt.key})")
+        activity != SessionActivity.WAITING_FOR_INPUT -> refuse(RefuseReason.PROMPT_CHANGED, "not idle at the prompt ($activity)")
+        else -> Verdict.Send(ServerExpectation.Idle)
+    }
+
+    /**
      * The prompt a view of the session offers a reply to (the watch row, captured again when the
      * user starts answering): [notified] when it agrees with [activity], an instruction for a
      * working or an unannounced idle session, nothing for an approval nobody announced.
@@ -194,17 +211,22 @@ object ReplyGuard {
      * again right before Enter, and if it moved (a dialog opened meanwhile) Enter is not sent —
      * the typed text stays in the input, but no selector default gets picked.
      *
+     * [emptyInput] (Jarvis' conversation mode): right before the first key the pane is captured and its input box must
+     * be empty — the row under a rule that starts with `❯`+NBSP, once the dim placeholder and the reversed cursor are
+     * cut (the same reading as `cr-session facts`' draft, [CloseFacts]). A draft, or no box at all (another screen),
+     * prints `CR_REPLY DRAFT` and nothing is typed: the spoken text would be glued to whatever was typed there.
+     *
      * `claude-remote-ev <EV> <name_b64> <epoch_ms> <pid> <extra_b64>` lines come from
      * [HookCommands.EVENTS_PATH]; legacy Stop markers (`claude-remote-notify <name> <epoch_s>`)
      * from both marker files the notify watcher tails (the newest epoch wins). A switched-off or
      * full events file counts as "no hooks". Prints `CR_REPLY SENDING` before the first key and
-     * then `CR_REPLY SENT`, or one of `STALE|STALE_TYPED|NOHOOKS|NOPANE|FAILED`.
+     * then `CR_REPLY SENT`, or one of `STALE|STALE_TYPED|NOHOOKS|NOPANE|DRAFT|FAILED`.
      */
     // Spelled out at every call, not kept in a shell variable: an unquoted `$TM` is not
     // word-split by zsh, and the login shell of the exec is the server's choice.
     private const val TMUX_CAPPED = "timeout -k 1 2 tmux -u"
 
-    fun serverCommand(tmux: String, expect: ServerExpectation, text: String, approve: Boolean = false): String {
+    fun serverCommand(tmux: String, expect: ServerExpectation, text: String, approve: Boolean = false, emptyInput: Boolean = false): String {
         val decide = when (expect) {
             is ServerExpectation.Dialog -> {
                 val want = sq("${expect.ev} ${expect.atMs}")
@@ -226,10 +248,14 @@ object ReplyGuard {
             "if $TMUX_CAPPED send-keys -t \"\$P\" -l -- $keys \\; send-keys -t \"\$P\" Enter 2>/dev/null; " +
                 "then echo '$SERVER_TOKEN SENT'; else echo '$SERVER_TOKEN FAILED'; fi"
         } else {
+            // emptyInput (the conversation mode): SENT carries the server's ms right before Enter, so the app reads
+            // only a Stop after it as the answer (a wake's Stop still in flight is older)
+            val sent = if (emptyInput) "T=\$(date +%s%3N 2>/dev/null); " else ""
+            val sentEcho = if (emptyInput) "echo \"$SERVER_TOKEN SENT \$T\"" else "echo '$SERVER_TOKEN SENT'"
             "if $TMUX_CAPPED send-keys -t \"\$P\" -l -- $keys 2>/dev/null; then sleep 0.1; rd; " +
                 "if [ \"\$L\" != \"\$L0\" ]; then echo '$SERVER_TOKEN STALE_TYPED'; " +
-                "elif $TMUX_CAPPED send-keys -t \"\$P\" Enter 2>/dev/null; then echo '$SERVER_TOKEN SENT'; " +
-                "else echo '$SERVER_TOKEN FAILED'; fi; else echo '$SERVER_TOKEN FAILED'; fi"
+                "else ${sent}if $TMUX_CAPPED send-keys -t \"\$P\" Enter 2>/dev/null; then $sentEcho; " +
+                "else echo '$SERVER_TOKEN FAILED'; fi; fi; else echo '$SERVER_TOKEN FAILED'; fi"
         }
         // tac reads the file from its end: the pane's newest line is found without scanning
         // 20 MB of other panes' history.
@@ -249,9 +275,29 @@ object ReplyGuard {
             "$decide; " +
             "if [ \"\$OK\" = 1 ]; then " +
             "P=\$($TMUX_CAPPED list-panes -s -t ${sq("=$tmux")} -F '#{pane_id}' 2>/dev/null | head -n 1); " +
-            "if [ -z \"\$P\" ]; then echo '$SERVER_TOKEN NOPANE'; else echo '$SERVER_TOKEN SENDING'; $send; fi; " +
+            "if [ -z \"\$P\" ]; then echo '$SERVER_TOKEN NOPANE'; " +
+            (if (emptyInput) "elif [ \"\$($TMUX_CAPPED capture-pane -p -e -t \"\$P\" 2>/dev/null | $DRAFT_AWK)\" != 0 ]; then echo '$SERVER_TOKEN DRAFT'; " else "") +
+            "else echo '$SERVER_TOKEN SENDING'; $send; fi; " +
             "else echo \"$SERVER_TOKEN \$W\"; fi"
     }
+
+    /**
+     * Prints `0` for an empty input box, `1` for a draft, `-` when no box is on the screen. A copy of the reading in
+     * [CloseFacts] (`FACT draft`), spelled with `$` here (that one is a `§` template): the box row is the one right
+     * below a `─` rule that starts with `❯`+NBSP; dim (`ESC[2m`, the "Try …" placeholder) and reversed (`ESC[7m`, the
+     * cursor) runs are dropped, then the colours, NBSPs and blanks; whatever is left was typed.
+     */
+    private val DRAFT_AWK = "LC_ALL=C awk -v esc=\"\$(printf '\\033')\" '" +
+        "function plain(s) { gsub(esc \"\\\\[[0-9;]*m\", \"\", s); return s } " +
+        "{ p = plain(\$0); if (rule && index(p, \"\\342\\235\\257\\302\\240\") == 1) cand = \$0; rule = (index(p, \"\\342\\224\\200\") == 1) } " +
+        "END { if (cand == \"\") { print \"-\"; exit } s = cand; sub(/^[^\\342]*\\342\\235\\257\\302\\240/, \"\", s); " +
+        "gsub(esc \"\\\\[(0;)?2m[^\" esc \"]*\", \"\", s); gsub(esc \"\\\\[7m[^\" esc \"]*\", \"\", s); " +
+        "s = plain(s); gsub(/\\302\\240/, \"\", s); gsub(/[ \\t]/, \"\", s); print (s == \"\" ? 0 : 1) }'"
+
+    /** The server's ms of `CR_REPLY SENT <ms>` (emptyInput), null when it did not say (or not in ms). */
+    fun sentAtServerMs(output: String?): Long? =
+        output?.lineSequence()?.map { it.trim() }?.lastOrNull { it.startsWith("$SERVER_TOKEN SENT") }
+            ?.removePrefix("$SERVER_TOKEN SENT")?.trim()?.takeIf { it.length >= 12 }?.toLongOrNull()
 
     /**
      * The refusal a watch reply earns before any state is looked at: an old watch build sends
@@ -270,13 +316,14 @@ object ReplyGuard {
      */
     fun serverResult(output: String?): RefuseReason? {
         val token = output?.lineSequence()?.map { it.trim() }?.lastOrNull { it.startsWith("$SERVER_TOKEN ") }
-            ?.removePrefix("$SERVER_TOKEN ")
+            ?.removePrefix("$SERVER_TOKEN ")?.substringBefore(' ')
         return when (token) {
             "SENT" -> null
             "SENDING" -> RefuseReason.MAYBE_SENT
             "STALE" -> RefuseReason.PROMPT_CHANGED
             "STALE_TYPED" -> RefuseReason.TYPED_NOT_SENT
             "NOHOOKS" -> RefuseReason.NO_HOOKS
+            "DRAFT" -> RefuseReason.DRAFT_IN_INPUT
             else -> RefuseReason.NOT_VERIFIABLE
         }
     }

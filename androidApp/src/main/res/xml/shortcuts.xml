@@ -14,6 +14,19 @@
             android:targetPackage="com.clauderemote.android"
             android:targetClass="com.clauderemote.QuickAccessActivity" />
     </shortcut>
+    <!-- Jarvis' conversation mode (F5a): opens his tab and starts talking; the app is in front, so the microphone
+         service may start. -->
+    <shortcut
+        android:shortcutId="jarvis-talk"
+        android:enabled="true"
+        android:icon="@drawable/ic_qa_jarvis"
+        android:shortcutShortLabel="@string/qa_jarvis_talk"
+        android:shortcutLongLabel="@string/qa_jarvis_talk_long">
+        <intent
+            android:action="com.clauderemote.action.JARVIS_TALK"
+            android:targetPackage="com.clauderemote.android"
+            android:targetClass="com.clauderemote.QuickAccessActivity" />
+    </shortcut>
     <shortcut
         android:shortcutId="velin"
         android:enabled="true"

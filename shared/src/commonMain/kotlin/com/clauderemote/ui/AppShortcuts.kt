@@ -42,6 +42,9 @@ enum class AppShortcut(val keys: String, val label: String) {
     // is paste in Linux terminals, so the Velín is D (dashboard). Both work on every screen (App handles them).
     JARVIS("Ctrl+Shift+J", "Jarvis (když neběží: Velín)"),
     VELIN("Ctrl+Shift+D", "Velín"),
+    // "Promluvit" (M is the model; Ctrl+Shift+U is the IBus/GTK Unicode entry on Linux and never reaches the app);
+    // opens Jarvis' tab and starts the conversation mode where the platform has it
+    JARVIS_TALK("Ctrl+Shift+P", "Mluvit s Jarvisem (konverzační mód)"),
     HELP("Ctrl+Shift+H", "Tahle nápověda"),
 }
 
@@ -99,6 +102,7 @@ object AppShortcuts {
             Key.E -> AppShortcut.EFFORT
             Key.J -> AppShortcut.JARVIS
             Key.D -> AppShortcut.VELIN
+            Key.P -> AppShortcut.JARVIS_TALK
             Key.H -> AppShortcut.HELP
             else -> null
         }

@@ -174,4 +174,25 @@ class QuickAccessTest {
         assertEquals("Jarvis neběží", QuickAccess.notRunningNotice(anyServerAnswered = true))
         assertTrue(QuickAccess.notRunningNotice(anyServerAnswered = false).contains("neodpověděl"))
     }
+
+    // review MED (F5a): MainActivity is exported; the microphone mode needs this process' own token
+    @Test fun talkFromOutsideIsOnlyOpeningJarvis() {
+        assertEquals(QuickTarget.JARVIS_TALK, QuickAccess.targetOf("android.intent.action.MAIN", "jarvis-talk"))
+        assertEquals(QuickTarget.JARVIS, QuickAccess.authorize(QuickTarget.JARVIS_TALK, null), "no token")
+        assertEquals(QuickTarget.JARVIS, QuickAccess.authorize(QuickTarget.JARVIS_TALK, "guess"), "a guessed token")
+        val t = QuickAccess.issueTalkToken()
+        assertEquals(QuickTarget.JARVIS, QuickAccess.authorize(QuickTarget.JARVIS_TALK, "x$t"))
+        assertEquals(QuickTarget.JARVIS, QuickAccess.authorize(QuickTarget.JARVIS_TALK, t), "a wrong try used the token up")
+    }
+
+    @Test fun talkWithTheTokenStartsOnceAndOtherTargetsNeedNone() {
+        val t = QuickAccess.issueTalkToken()
+        assertEquals(QuickTarget.JARVIS_TALK, QuickAccess.authorize(QuickTarget.JARVIS_TALK, t))
+        assertEquals(QuickTarget.JARVIS, QuickAccess.authorize(QuickTarget.JARVIS_TALK, t), "a replayed intent")
+        assertEquals(QuickTarget.VELIN, QuickAccess.authorize(QuickTarget.VELIN, null))
+        val old = QuickAccess.issueTalkToken()
+        val new = QuickAccess.issueTalkToken()
+        assertEquals(QuickTarget.JARVIS, QuickAccess.authorize(QuickTarget.JARVIS_TALK, old), "only the newest is live")
+        assertEquals(QuickTarget.JARVIS, QuickAccess.authorize(QuickTarget.JARVIS_TALK, new), "and the failed try used it")
+    }
 }

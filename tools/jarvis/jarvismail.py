@@ -94,6 +94,21 @@ APPROVE = re.compile(r"^\s*(ano|jo|ok|jasně|pošli|pošli to|proveď|proveď to
 SEND_INTENT = re.compile(r"(?<!\w)(?:pošli|napiš|řekni|zadej|předej|vzkaž|pushni|commitni|oprav|udělej|dokonči|"
                          r"odpověz)(?:te)?(?!\w)|(?<!\w)ať(?!\w)", re.IGNORECASE)
 
+# F5a: the app's conversation mode sends what Lukáš SAID as `[hlas] <transcript>` (so Jarvis answers in one or two
+# spoken sentences). The prefix is the app's, not his: it is cut off before anything is decided, so a spoken "ano"
+# approves the lone proposal exactly like a typed one, and a spoken name is a name. Once, at the very start only; a
+# `[jarvis` behind it is still a machine's (the check below sees the remainder).
+VOICE_PREFIX = re.compile(r"^\s*\[hlas\][ \t]?")
+
+
+def strip_voice(prompt):
+    """The prompt without the app's leading `[hlas] ` marker; anything else unchanged (a non-str too)."""
+    if not isinstance(prompt, str):
+        return prompt
+    m = VOICE_PREFIX.match(prompt)
+    return prompt[m.end():] if m else prompt
+
+
 # I7: until the voice readback (F5) exists these names get nothing. Case-insensitive on purpose: `*PROD*` typed by a
 # person as `prod-api` or `Prod` is the same risk; a false refusal costs a sentence, a false pass costs production.
 HIGH_IMPACT = re.compile(r"prod|db-|deploy|proxmox", re.IGNORECASE)
@@ -471,7 +486,8 @@ class Mail:
             self.decide_proposals(None, None, now)
             self._decide_ops(None, None, now)
             return "not a UserPromptSubmit payload"
-        prompt = payload.get("prompt")
+        # F5a: decided on what he said, not on the app's `[hlas]` marker (VOICE_PREFIX)
+        prompt = strip_voice(payload.get("prompt"))
         name, why = self.caller_session()
         me = J.read_self(self.env)
         if not isinstance(prompt, str) or why or not me or name != me:

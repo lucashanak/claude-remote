@@ -305,4 +305,46 @@ class ReplyGuardTest {
         t.forget("b")
         assertEquals(emptyMap(), t.shown.value)
     }
+
+    // ---------------------------------------------------------------- Jarvis' conversation mode (F5a, 14d/14e)
+
+    @Test fun aSpokenPromptGoesInOnlyWhileJarvisIsIdleAtHisPrompt() {
+        assertEquals(
+            Verdict.Send(ServerExpectation.Idle),
+            ReplyGuard.voiceCheck(cur(stop1), SessionActivity.WAITING_FOR_INPUT, deliverable = true),
+        )
+        assertEquals(Verdict.Send(ServerExpectation.Idle), ReplyGuard.voiceCheck(null, SessionActivity.WAITING_FOR_INPUT, true))
+    }
+
+    @Test fun aSpokenPromptIsNeverQueuedBehindAWorkingTurn() {
+        // the watch's instruction would be (Claude queues it); the read-aloud answer would then belong to another turn
+        assertEquals(RefuseReason.PROMPT_CHANGED, ReplyGuard.voiceCheck(null, SessionActivity.WORKING, true).reason())
+        assertIs<Verdict.Send>(check(instruction, null, SessionActivity.WORKING))
+    }
+
+    @Test fun aSpokenPromptNeverAnswersADialog() {
+        assertEquals(RefuseReason.PROMPT_CHANGED, ReplyGuard.voiceCheck(cur(permA), SessionActivity.APPROVAL_NEEDED, true).reason())
+        assertEquals(RefuseReason.PROMPT_CHANGED, ReplyGuard.voiceCheck(cur(askQ), SessionActivity.WAITING_FOR_INPUT, true).reason())
+        assertEquals(RefuseReason.PROMPT_CHANGED, ReplyGuard.voiceCheck(null, SessionActivity.APPROVAL_NEEDED, true).reason())
+    }
+
+    @Test fun aSpokenPromptNeedsARouteAndAKnownState() {
+        assertEquals(RefuseReason.NOT_CONNECTED, ReplyGuard.voiceCheck(null, SessionActivity.WAITING_FOR_INPUT, false).reason())
+        assertEquals(RefuseReason.PROMPT_CHANGED, ReplyGuard.voiceCheck(null, null, true).reason())
+        assertEquals(RefuseReason.PROMPT_CHANGED, ReplyGuard.voiceCheck(null, SessionActivity.IDLE, true).reason())
+    }
+
+    @Test fun aDraftTokenIsTheDraftRefusal() {
+        assertEquals(RefuseReason.DRAFT_IN_INPUT, ReplyGuard.serverResult("CR_REPLY DRAFT"))
+    }
+
+    @Test fun aTimedSentIsSentAndCarriesTheServersMs() {
+        val out = "CR_REPLY SENDING\nCR_REPLY SENT 1762700000123\n"
+        assertNull(ReplyGuard.serverResult(out))
+        assertEquals(1_762_700_000_123L, ReplyGuard.sentAtServerMs(out))
+        assertNull(ReplyGuard.sentAtServerMs("CR_REPLY SENT"), "the watch's untimed SENT")
+        assertNull(ReplyGuard.sentAtServerMs("CR_REPLY SENT %3N"), "a date without ms")
+        assertNull(ReplyGuard.serverResult("CR_REPLY SENT "), "a date that printed nothing is still SENT")
+        assertEquals(RefuseReason.PROMPT_CHANGED, ReplyGuard.serverResult("CR_REPLY STALE"))
+    }
 }

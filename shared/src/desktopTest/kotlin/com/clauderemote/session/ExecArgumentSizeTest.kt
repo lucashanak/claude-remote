@@ -116,6 +116,14 @@ class ExecArgumentSizeTest {
         out["close facts (closeFactsCommand)"] = CloseFactsCommands.closeFactsCommand(
             names[0], CloseFactsCommands.selfMarkerFor(names[0], "android-706cbd7b"),
         )
+        // Jarvis' conversation mode (F5a): the longest spoken prompt in its worst forms — 3-byte typography, and
+        // apostrophes, which the shell quoting turns into 4 bytes each
+        for ((what, unit) in listOf("3-byte" to "„“…", "apostrophes" to "a'", "2-byte, ending in ;" to "ěščř;")) {
+            out["Jarvis voice prompt, $what (ReplyGuard.serverCommand, emptyInput)"] = com.clauderemote.session.service.ReplyGuard.serverCommand(
+                com.clauderemote.session.QuickAccess.JARVIS_TMUX_NAME, com.clauderemote.session.service.ServerExpectation.Idle,
+                com.clauderemote.voice.conversation.TalkWords.prompt(unit.repeat(3_000)), emptyInput = true,
+            )
+        }
         return out
     }
 

@@ -375,6 +375,8 @@ fun main() = application {
     // Mirror FileLogger to the server (per-install file) — same remote
     // diagnostics as the Android app.
     sessionOrchestrator.startLogShipping(appSettings.installId)
+    // Jarvis' conversation mode (F5a): desktop Soniox dictation + read-aloud over this orchestrator
+    com.clauderemote.voice.DesktopJarvisTalk.install(kotlinx.coroutines.flow.MutableStateFlow(sessionOrchestrator))
     val sshKeyManager = com.clauderemote.connection.SshKeyManager(prefs)
 
     // Create connector and wire SSH output → JediTerm
@@ -2041,12 +2043,14 @@ internal class QuickAccessChord {
     }
 }
 
-/** Ctrl+Shift+J / Ctrl+Shift+D (no Alt/Meta) as a quick-access target; null for every other key. */
+/** Ctrl+Shift+J / Ctrl+Shift+D / Ctrl+Shift+P (no Alt/Meta) as a quick-access target; null for every other key. */
 internal fun quickAccessTarget(keyCode: Int, ctrl: Boolean, shift: Boolean, alt: Boolean, meta: Boolean): com.clauderemote.session.QuickTarget? {
     if (!ctrl || !shift || alt || meta) return null
     return when (keyCode) {
         java.awt.event.KeyEvent.VK_J -> com.clauderemote.session.QuickTarget.JARVIS
         java.awt.event.KeyEvent.VK_D -> com.clauderemote.session.QuickTarget.VELIN
+        // "Promluvit": Jarvis' tab and the conversation mode (F5a); not U, the IBus/GTK Unicode entry on Linux
+        java.awt.event.KeyEvent.VK_P -> com.clauderemote.session.QuickTarget.JARVIS_TALK
         else -> null
     }
 }

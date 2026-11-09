@@ -102,6 +102,8 @@ class AppShortcutsTest {
     fun jarvisAndVelinTakeOnlyTheShiftVariants() {
         assertEquals(AppShortcut.JARVIS, hit(Key.J, ctrl = true, shift = true))
         assertEquals(AppShortcut.VELIN, hit(Key.D, ctrl = true, shift = true))
+        assertEquals(AppShortcut.JARVIS_TALK, hit(Key.P, ctrl = true, shift = true))
+        assertEquals(null, hit(Key.U, ctrl = true, shift = true), "Ctrl+Shift+U is the Linux IME's Unicode entry")
         // Ctrl+J is a newline in Claude's prompt, Ctrl+D is EOF: both stay the terminal's
         assertNull(hit(Key.J, ctrl = true))
         assertNull(hit(Key.D, ctrl = true))

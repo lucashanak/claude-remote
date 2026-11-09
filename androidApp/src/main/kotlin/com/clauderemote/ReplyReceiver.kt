@@ -15,7 +15,12 @@ import com.clauderemote.util.FileLogger
  * sessions. Set by [MainActivity] on create, cleared on destroy.
  */
 object OrchestratorHolder {
-    @Volatile var orchestrator: SessionOrchestrator? = null
+    /** The same, as a flow: Jarvis' conversation mode follows the current orchestrator across a recreation (F5a). */
+    val current = kotlinx.coroutines.flow.MutableStateFlow<SessionOrchestrator?>(null)
+
+    var orchestrator: SessionOrchestrator?
+        get() = current.value
+        set(value) { current.value = value }
 }
 
 /**

@@ -3351,6 +3351,59 @@ class SessionOrchestrator(
         return tabs.firstOrNull { it.tmuxSessionName == name && (server == null || it.server.id == server.id) }?.id
     }
 
+    // ── Jarvis' conversation mode (F5a, 2026-11-09) ─────────────────────────────────────────────────────────────
+
+    /**
+     * Type a spoken [prompt] (`[hlas] …`) into Jarvis' pane — his tab only ([jarvisTabIdForWatch], the tab the watch's
+     * dictation answers), over the same checked reply exec as an answer from the wrist, never the PTY and never a new
+     * channel. Stricter than the watch's instruction (decision 14d): only while Jarvis is idle at his prompt
+     * ([com.clauderemote.session.service.ReplyGuard.voiceCheck]) and his input box is empty (`emptyInput`, checked on
+     * the server right before the keys). No tab, no route or any doubt = not sent, said as one sentence; nothing waits
+     * to be sent later (CLAUDE.md "Input delivery").
+     */
+    suspend fun sendJarvisVoice(
+        prompt: String,
+        stillWanted: () -> Boolean = { true },
+    ): com.clauderemote.voice.conversation.TalkSendResult {
+        val id = jarvisTabIdForWatch()
+            ?: return com.clauderemote.voice.conversation.TalkSendResult.Refused(com.clauderemote.voice.conversation.TalkWords.NO_TAB)
+        val verdict = com.clauderemote.session.service.ReplyGuard.voiceCheck(
+            statusService.promptTokens.current(id), statusService.currentActivity(id), claudeControl.canDeliverNow(id),
+        )
+        var serverAtMs: Long? = null
+        val why = when (verdict) {
+            is com.clauderemote.session.service.ReplyGuard.Verdict.Refuse -> {
+                FileLogger.log(TAG, "Jarvis voice prompt refused: ${verdict.detail}")
+                verdict.reason
+            }
+            is com.clauderemote.session.service.ReplyGuard.Verdict.Send -> {
+                // the mode ended before the keys: nothing goes in
+                if (!stillWanted()) return com.clauderemote.voice.conversation.TalkSendResult.Refused("Konverzace skončila, neposláno.")
+                // started = finished: a cut between the typing and the Enter would leave the text as his draft
+                val r = kotlinx.coroutines.withContext(kotlinx.coroutines.NonCancellable) {
+                    claudeControl.sendCheckedReplyTimed(id, verdict.expect, prompt, approve = false, emptyInput = true)
+                }
+                serverAtMs = r.serverAtMs
+                r.why
+            }
+        }
+        FileLogger.log(TAG, "Jarvis voice prompt (${prompt.length} chars) to $id: ${why ?: "sent at server ms $serverAtMs"}")
+        return if (why == null) com.clauderemote.voice.conversation.TalkSendResult.Sent(serverAtMs)
+        else com.clauderemote.voice.conversation.TalkWords.refusal(why)
+    }
+
+    /** Jarvis' tab can be reached now (the conversation mode's route check, every tick). */
+    fun jarvisVoiceReachable(): Boolean = jarvisTabIdForWatch()?.let { claudeControl.canDeliverNow(it) } == true
+
+    /** Jarvis' finished turns: his tab at the moment the turn ended (a tab reopened under another id still counts). */
+    fun jarvisTurns(): kotlinx.coroutines.flow.Flow<com.clauderemote.voice.conversation.JarvisTurn> = kotlinx.coroutines.flow.flow {
+        notificationService.stopAnswers.collect { a ->
+            if (a.sessionId == jarvisTabIdForWatch()) {
+                emit(com.clauderemote.voice.conversation.JarvisTurn(a.markerAtMs, a.body, a.markerEpochSec))
+            }
+        }
+    }
+
     /** The proposals for the watch's Čeká page: the Velín's read ([JarvisData.PROPOSALS]) on Jarvis' server. */
     suspend fun jarvisWatchProposals(periodic: Boolean = false): com.clauderemote.session.wear.WatchProposals {
         val server = jarvisServer(tabManager.tabs.value, emptyList())
