@@ -359,6 +359,16 @@ class TranscriptTest(unittest.TestCase):
         self.assertTrue(i["endsWithQuestion"])
         self.assertEqual(len(i["texts"]), 1)
 
+    def test_a_usage_limit_hit_is_seen_until_a_real_answer(self):
+        # 2026-11-09: "You've hit your weekly limit" held Lukáš's input for hours and nobody knew
+        hit = assistant("You've hit your weekly limit · resets 4pm (UTC)", isApiErrorMessage=True, error="rate_limit",
+                        ts="2026-11-09T07:12:46Z")
+        p = self.fx.transcript("/w", "abcdef09-0000", [user("x"), assistant("ok"), user("máme review zpracuj"), hit])
+        lh = J.transcript_info(p)["limitHit"]
+        self.assertIn("weekly limit", lh["text"])
+        p2 = self.fx.transcript("/w", "abcdef0a-0000", [user("x"), hit, user("znovu"), assistant("Hotovo.")])
+        self.assertIsNone(J.transcript_info(p2)["limitHit"])
+
     def test_prompt_after_question_clears_it(self):
         p = self.fx.transcript("/w", "abcdef03-0000", [user("x"), assistant("Mám pokračovat?"), user("ano")])
         self.assertFalse(J.transcript_info(p)["endsWithQuestion"])

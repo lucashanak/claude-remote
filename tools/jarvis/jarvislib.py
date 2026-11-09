@@ -660,7 +660,7 @@ def transcript_info(path, max_bytes=TRANSCRIPT_TAIL_BYTES, keep_texts=0):
     """{title, lastPrompt, lastAssistantMs, endsWithQuestion, texts?} from the transcript's tail. Raw values: the
     caller escapes them before they go anywhere."""
     info = {"title": None, "lastPrompt": None, "lastPromptMs": None, "lastAssistantMs": None,
-            "endsWithQuestion": False}
+            "endsWithQuestion": False, "limitHit": None}
     texts = collections.deque(maxlen=keep_texts or 1)
     custom = None
     last_text = None
@@ -683,9 +683,14 @@ def transcript_info(path, max_bytes=TRANSCRIPT_TAIL_BYTES, keep_texts=0):
         elif t == "user" and _is_prompt(d):
             info["lastPromptMs"] = _ts_ms(d.get("timestamp"))
             last_text = None
+        elif t == "assistant" and d.get("isApiErrorMessage") and d.get("error") == "rate_limit":
+            # "You've hit your weekly limit · resets 4pm (UTC)": the session holds Lukáš's input until the reset
+            # (2026-11-09: nobody knew, neither Lukáš nor Jarvis)
+            info["limitHit"] = {"ms": _ts_ms(d.get("timestamp")), "text": _assistant_text(d) or ""}
         elif t == "assistant":
             txt = _assistant_text(d)
             if txt:
+                info["limitHit"] = None  # a real answer after it: the session works again
                 last_text = txt
                 info["lastAssistantMs"] = _ts_ms(d.get("timestamp"))
                 if keep_texts:
@@ -955,6 +960,8 @@ def build_sessions(env, regs, panes, manifest, fold, self_name=None, tr_cache=No
             s["lastPromptMs"] = ti.get("lastPromptMs")
             s["lastAssistantMs"] = ti.get("lastAssistantMs")
             s["endsWithQuestion"] = bool(ti.get("endsWithQuestion"))
+            lh = ti.get("limitHit")
+            s["limit"] = {"ms": lh.get("ms"), "text": safe_text(lh.get("text"), 80)} if isinstance(lh, dict) else None
             # Stored and shown only escaped: whatever reads status.json (a model included) gets data, not instructions.
             s["title"] = safe_text(ti.get("title"), 100) or None
             s["lastPrompt"] = safe_text(ti.get("lastPrompt"), 160) or None
@@ -992,6 +999,9 @@ def _claude_under(kids, root, limit=4096):
 
 def _attention(s, fs, ti, now_ms):
     """What the session waits for from Lukáš, or None. Order: open perm/ask, registry waiting, Stop with a question."""
+    lim = s.get("limit")
+    if lim and s["state"] not in ("dead", "missing"):
+        return {"kind": "limit", "text": lim.get("text") or "", "since": lim.get("ms")}
     op = fs.get("open")
     state = s["state"]
     if op:

@@ -204,6 +204,29 @@ class GraceTest(Base):
         self.tick()
         self.assertEqual(self.alerts(), [])
 
+    def test_a_session_that_hit_the_usage_limit_is_told(self):
+        s = sess(TARGET, state="idle")
+        s["attention"] = {"kind": "limit", "text": "resets 4pm (UTC)", "since": T0}
+        self.sessions = {TARGET: s}
+        self.tick()
+        self.advance(20)
+        self.tick()
+        self.assertEqual(self.texts(), ["jarvis-test narazila na limit účtu a stojí."])
+
+    def test_a_message_stuck_in_the_queue_is_told_after_10_min(self):
+        # 2026-11-09: an approved message waited 16 h on "no-claude" and nobody knew
+        self.m.put({"v": 1, "id": "m-20261109T070000-ab12", "from": "jarvis", "to": TARGET, "state": "queued",
+                    "created": T0, "expires": T0 + 86400000, "lastBlock": "no-claude", "blockedSince": T0,
+                    "firstBlockedAt": T0, "attempts": 0, "enters": 0})
+        self.sessions = {TARGET: sess(TARGET, state="idle")}
+        self.tick()
+        self.advance(5)
+        self.tick()
+        self.assertEqual(self.alerts(), [])
+        self.advance(20)
+        self.tick()
+        self.assertEqual(self.texts(), ["jarvis-test zatím nedostala zprávu od Jarvise."])
+
     def test_jarvis_himself_never(self):
         self.sessions = {JARVIS: sess(JARVIS, "perm", T0, self=True)}
         self.tick()

@@ -952,6 +952,9 @@ class Mail:
         """Target, or the first reason not to paste. Order: cheap file checks first, tmux last."""
         if self.off():
             return "off"
+        st = J.read_json(self.env.path("status.json"), {}) or {}
+        if ((st.get("sessions") or {}).get(name) or {}).get("limit"):
+            return "limit"  # the account hit its limit: a pasted line would wait in Claude's queue until the reset
         t = self.resolve_target(name)
         if isinstance(t, str):
             return t
@@ -969,6 +972,7 @@ class Mail:
             if r and r["state"] == "queued" and r.get("lastBlock") != why:
                 r["lastBlock"] = why
                 r["blockedSince"] = self.env.now_ms()
+                r.setdefault("firstBlockedAt", r["blockedSince"])  # for "stuck for 10 min", across changing reasons
                 self.put(r)
                 self.log("blocked", id=r["id"], to=r["to"], why=why)
 

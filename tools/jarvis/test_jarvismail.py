@@ -1314,6 +1314,18 @@ class Med2EnterTest(Base):
         self.assertEqual(len(self.tm.keys()), 1)
 
 
+class LimitTest(Base):
+    def test_no_paste_into_a_session_that_hit_its_usage_limit(self):
+        # the pasted line would wait in Claude's queue until the reset, unseen (2026-11-09)
+        with open(os.path.join(self.fx.state, "status.json"), "w") as f:
+            json.dump({"sessions": {TARGET: {"limit": {"ms": T0, "text": "resets 4pm (UTC)"}}}}, f)
+        rec, _ = self.send()
+        self.assertEqual(self.deliver(rec), "limit")
+        self.assertEqual(self.m.get(rec["id"])["lastBlock"], "limit")
+        self.assertTrue(self.m.get(rec["id"])["firstBlockedAt"])
+        self.assertEqual(self.tm.writes(), [])
+
+
 class Med4ApprovalTest(Base):
     """MED4: send only proposes; Lukáš's next prompt approves (short yes or the id) or drops."""
 

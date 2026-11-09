@@ -408,7 +408,10 @@ def clean(s, n):
     return t
 
 
-BLOCK_CZ = {"perm": "chce povolení", "ask": "se ptá", "waiting": "čeká na tebe", "question": "se v odpovědi ptá"}
+BLOCK_CZ = {"perm": "chce povolení", "ask": "se ptá", "waiting": "čeká na tebe", "question": "se v odpovědi ptá",
+            "limit": "narazila na limit účtu a stojí", "mail": "zatím nedostala zprávu od Jarvise"}
+# A message approved but stuck in the queue this long is told (2026-11-09: one waited 16 h, nobody knew).
+MAIL_STUCK_MS = 10 * 60 * 1000
 
 
 def block_sentence(name, kind):
@@ -590,6 +593,17 @@ class AlertWorker:
                 task_names = self.task_sessions(tasks, mails)
             self.s["blocks"][name] = {"kind": kind, "since": since, "sig": sig, "told": told,
                                       "task": name in task_names}
+        for m in mails or ():
+            name = m.get("to") or ""
+            first = _i(m.get("firstBlockedAt"))
+            if m.get("state") != "queued" or not first or name in seen or now - first < MAIL_STUCK_MS:
+                continue
+            seen.add(name)
+            b = self.s["blocks"].get(name)
+            if b and b.get("kind") == "mail" and b.get("since") == first:
+                continue
+            self.s["blocks"][name] = {"kind": "mail", "since": first, "sig": f"mail|{m.get('id')}", "told": False,
+                                      "task": True}
         for name in [n for n in self.s["blocks"] if n not in seen]:
             del self.s["blocks"][name]  # unblocked before or after its alert: nothing more to say (expiry)
         self.s["recent"] = {k: v for k, v in self.s["recent"].items() if now - _i(v.get("at")) < REPEAT_MS}
