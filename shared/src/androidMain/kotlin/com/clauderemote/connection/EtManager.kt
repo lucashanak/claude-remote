@@ -60,7 +60,7 @@ actual class EtManager {
             val proc = pb.start()
             process = proc
 
-            val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+            val scope = CoroutineScope(LongReads + SupervisorJob())  // the read blocks for the process's life (see LongReads)
             readJob = scope.launch {
                 val buffer = ByteArray(8192)
                 try {

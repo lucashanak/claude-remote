@@ -159,8 +159,9 @@ class SshManager(
         lastCols = initialCols; lastRows = initialRows
         FileLogger.log(TAG, "Shell channel opened")
 
-        // Read loop — delivers SSH data immediately to onOutput
-        readJob = ioScope.launch {
+        // Read loop — delivers SSH data immediately to onOutput. On [LongReads], never Dispatchers.IO: one blocked
+        // thread per tab for the channel's life would exhaust IO's 64 and starve the attach step (see LongReads).
+        readJob = ioScope.launch(LongReads) {
             // Why the loop ended (dávka B, F4 — log only): the channel's own end, refined below by the transport's.
             var ended = "channel closed"
             try {

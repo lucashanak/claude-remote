@@ -600,7 +600,8 @@ internal class TranscriptService(
                     }
                 }
                 while (isActive && ch.isConnected) {
-                    val line = kotlinx.coroutines.withContext(Dispatchers.IO) {
+                    // LongReads, not IO: this read blocks for the daemon's life (see LongReads).
+                    val line = kotlinx.coroutines.withContext(com.clauderemote.connection.LongReads) {
                         reader.readLine()
                     }
                     if (line == null) {

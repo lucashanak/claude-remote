@@ -845,7 +845,8 @@ internal class NotificationService(
                         FileLogger.log(TAG, "Notify watcher started for server ${w.serverId} (${w.tmuxToSession.size} sessions)")
 
                         while (isActive && ch.isConnected) {
-                            val line = kotlinx.coroutines.withContext(Dispatchers.IO) {
+                            // LongReads, not IO: this read blocks for the watcher's life (see LongReads).
+                            val line = kotlinx.coroutines.withContext(com.clauderemote.connection.LongReads) {
                                 reader.readLine()
                             } ?: break
                             // Server clock probe (emitted once, first): learn skew.
