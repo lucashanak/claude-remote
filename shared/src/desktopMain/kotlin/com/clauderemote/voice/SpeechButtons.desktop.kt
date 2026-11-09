@@ -21,7 +21,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.input.TextFieldValue
 import com.clauderemote.util.FileLogger
-import kotlinx.coroutines.Dispatchers
+import com.clauderemote.connection.LongReads
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.util.concurrent.atomic.AtomicInteger
@@ -208,11 +208,11 @@ actual fun SpeakerButton(
     IconButton(
         onClick = {
             if (speaking) {
-                // Killing the process makes speakBlocking return, which clears
+                // Stopping makes speakBlocking return, which clears
                 // `speaking` below — one place resets the state, always.
                 // Off the Compose thread: stopping spd-say also forks
                 // `spd-say -C`, and a fork on the render thread drops a frame.
-                DesktopSpeech.stopAsync()
+                DesktopReadAloud.stopAsync()
                 return@IconButton
             }
             // Read the words, not the markdown syntax (*, `, #, …).
@@ -221,16 +221,22 @@ actual fun SpeakerButton(
             val ratePct = desktopTtsSpeechRatePct()
             speaking = true
             scope.launch {
-                // The failure reason is logged inside DesktopSpeech (once for a
-                // machine with no synthesiser at all); there is no toast surface
-                // on desktop, so nothing is reported to the user beyond the
-                // button going quiet.
-                withContext(Dispatchers.IO) { DesktopSpeech.speakBlocking(payload, ratePct) }
-                // MUST clear on every path — a failed read that left the button
-                // stuck "speaking" would send the next tap into the stop branch,
-                // and read-aloud would silently die until it was tapped an even
+                // Soniox when Settings → Voice has a key, else (or when Soniox
+                // fails) the OS synthesiser. The failure reason is logged inside
+                // DesktopReadAloud / DesktopSpeech; there is no toast surface on
+                // desktop, so nothing is reported beyond the button going quiet.
+                // LongReads, not Dispatchers.IO: this blocks for the whole
+                // reading, and IO's 64 threads are what the tabs attach on.
+                // MUST clear on every path, a throw or a cancelled scope
+                // included — a failed read that left the button stuck
+                // "speaking" would send the next tap into the stop branch, and
+                // read-aloud would silently die until it was tapped an even
                 // number of times. That is a real bug the Android button hit.
-                speaking = false
+                try {
+                    withContext(LongReads) { DesktopReadAloud.speakBlocking(payload, ratePct) }
+                } finally {
+                    speaking = false
+                }
             }
         },
         modifier = modifier,

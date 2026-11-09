@@ -42,8 +42,9 @@ interface TtsPlayerController {
 
 /**
  * Process-wide bridge between the platform TTS player and the shared UI.
- * `state` is null whenever nothing is being read; only the Android Soniox
- * player publishes here (desktop and the other engines have no transport).
+ * `state` is null whenever nothing is being read; only the Soniox player
+ * ([SonioxTtsSession], Android and desktop) publishes here — the other engines
+ * have no transport.
  */
 object TtsPlayback {
     private val _state = MutableStateFlow<TtsPlayerState?>(null)

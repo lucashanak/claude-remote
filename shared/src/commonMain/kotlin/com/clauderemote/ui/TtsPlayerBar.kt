@@ -33,11 +33,11 @@ import com.clauderemote.voice.TtsPhase
 import com.clauderemote.voice.TtsPlayback
 
 /**
- * Slim transport bar for read-aloud (Soniox on Android): previous / -10 s /
+ * Slim transport bar for read-aloud (Soniox, Android and desktop): previous / -10 s /
  * play-pause / next paragraph / close, plus where in the message we are.
  * Invisible whenever nothing is being read, so it costs nothing elsewhere.
- * The same controls are on the media notification, the lock screen and the
- * car's / headset's media buttons (MediaSession on Android).
+ * On Android the same controls are on the media notification, the lock screen
+ * and the car's / headset's media buttons (MediaSession); desktop has the bar only.
  */
 @Composable
 fun TtsPlayerBar(modifier: Modifier = Modifier) {

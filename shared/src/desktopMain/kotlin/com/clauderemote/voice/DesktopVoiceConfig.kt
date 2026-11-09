@@ -11,8 +11,8 @@ import com.clauderemote.storage.PlatformPreferences
  * sees what the settings screen last wrote instead of a snapshot from
  * whenever the composable first ran.
  *
- * These three keys are what SettingsScreen's desktop Voice card writes; the
- * rest of the voice settings are engine/server choices that only Android's
+ * These keys are what SettingsScreen's desktop Voice card writes; the rest
+ * of the voice settings are engine/server choices that only Android's
  * backends have.
  */
 private fun settings() = AppSettings(PlatformPreferences())
@@ -20,8 +20,11 @@ private fun settings() = AppSettings(PlatformPreferences())
 /** Reading speed as a percentage (100 = normal), shared with Android. */
 internal fun desktopTtsSpeechRatePct(): Int = settings().ttsSpeechRatePct.coerceIn(25, 400)
 
-/** Soniox cloud key — the only STT backend reachable from desktop. */
+/** Soniox cloud key — dictation, and read-aloud when set (else the OS synthesiser). */
 internal fun desktopSonioxApiKey(): String = settings().sonioxApiKey
 
 /** How long a pause ends a single-shot dictation. */
 internal fun desktopDictationSilenceMs(): Int = settings().dictationSilenceMs
+
+/** Soniox speaker name for read-aloud (shared key with Android, default "Adrian"). */
+internal fun desktopSonioxTtsVoice(): String = settings().sonioxTtsVoice.ifBlank { "Adrian" }

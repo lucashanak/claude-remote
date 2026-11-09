@@ -618,9 +618,10 @@ fun SettingsScreen(
  * hand-editing ~/.claude-remote/settings.properties — and the mic button,
  * which hides itself while the key is blank, could never appear at all.
  *
- * Only three settings are here because only three are read on desktop:
- * read-aloud drives the OS synthesiser (`say`, `spd-say`, `espeak-ng`), which
- * needs no key, no server and no voice list — just a speed.
+ * Only these settings are here because only these are read on desktop:
+ * read-aloud is Soniox when the key is set (the phone's segmented player) and
+ * the OS synthesiser (`say`, `spd-say`, `espeak-ng`) otherwise or when Soniox
+ * fails — no engine choice, no server, no voice list.
  */
 @Composable
 private fun DesktopVoiceCard(settings: AppSettings) {
@@ -628,13 +629,14 @@ private fun DesktopVoiceCard(settings: AppSettings) {
     var sonioxKey by remember { mutableStateOf(settings.sonioxApiKey) }
     var silenceSec by remember { mutableStateOf(settings.dictationSilenceMs / 1000) }
     var speechRatePct by remember { mutableStateOf(settings.ttsSpeechRatePct) }
+    var sonioxVoice by remember { mutableStateOf(settings.sonioxTtsVoice) }
 
     CRCard {
         Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
             Text(
-                "Read aloud uses the system speech synthesiser (say on macOS, " +
-                    "spd-say or espeak-ng on Linux). Dictation streams to Soniox " +
-                    "and needs an API key.",
+                "With a Soniox API key, dictation and read aloud both use Soniox. " +
+                    "Without one — or when Soniox fails — read aloud uses the system " +
+                    "speech synthesiser (say on macOS, spd-say or espeak-ng on Linux).",
                 style = CRType.bodyDim,
                 color = c.textDim,
             )
@@ -651,6 +653,14 @@ private fun DesktopVoiceCard(settings: AppSettings) {
                     "go back to a session to pick it up.",
                 style = CRType.monoTiny,
                 color = c.textDim.copy(alpha = 0.7f),
+            )
+            OutlinedTextField(
+                value = sonioxVoice,
+                onValueChange = { sonioxVoice = it; settings.sonioxTtsVoice = it },
+                label = { Text("Soniox voice (read aloud)") },
+                placeholder = { Text("Adrian") },
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth(),
             )
             SettingsSlider(
                 label = "Dictation silence (s)",

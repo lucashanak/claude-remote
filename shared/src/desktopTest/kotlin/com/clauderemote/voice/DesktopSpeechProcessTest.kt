@@ -136,10 +136,10 @@ class DesktopSpeechProcessTest {
         // The resolver runs inside the spawn window, so stopping from it is the
         // race: the process does not exist yet, so there is nothing to kill.
         val startedAt = System.currentTimeMillis()
-        val error = DesktopSpeech.speakBlocking("hello", 100) { _, _ ->
+        val error = DesktopSpeech.speakBlocking("hello", 100, resolve = { _, _ ->
             DesktopSpeech.stop()
             SpeechCommand("sleep", listOf("30"), textOnStdin = false)
-        }
+        })
         assertTrue(
             System.currentTimeMillis() - startedAt < 10_000,
             "the stop was lost — the utterance ran to completion",
@@ -197,5 +197,21 @@ class DesktopSpeechProcessTest {
             fixed(SpeechCommand("grep", listOf("-q", marker), textOnStdin = true)),
         )
         assertEquals("grep exited with 1", missing)
+    }
+
+    @Test
+    fun callersStopThatLandedBeforeTheCallIsHonoured() {
+        requirePosixTools()
+        // DesktopReadAloud's stop came before this call took its own counter:
+        // only `cancelled` carries it. Without it, `sleep 30` would run out.
+        val start = System.currentTimeMillis()
+        val r = DesktopSpeech.speakBlocking(
+            "x", 100,
+            resolve = fixed(SpeechCommand("sleep", listOf("30"), textOnStdin = false)),
+            cancelled = { true },
+        )
+        assertNull(r)
+        assertTrue(System.currentTimeMillis() - start < 10_000, "killed, not read out")
+        assertTrue(!DesktopSpeech.isSpeaking())
     }
 }

@@ -149,11 +149,16 @@ internal object DesktopSpeech {
      * [resolve] is the seam the tests use to drive the process machinery with
      * an ordinary command, so kill / failure / spawn-error behaviour is
      * checkable on a machine with no synthesiser installed.
+     *
+     * [cancelled] is the caller's own stop signal (DesktopReadAloud hands
+     * over from Soniox): a stop that landed before this call took its own
+     * stop counter would otherwise be lost and the rest read out anyway.
      */
     fun speakBlocking(
         text: String,
         ratePct: Int,
         resolve: (Int, String) -> SpeechCommand? = ::systemSpeechCommand,
+        cancelled: () -> Boolean = { false },
     ): String? {
         stop()
         val seqAtStart = stopSeq.get()
@@ -201,8 +206,8 @@ internal object DesktopSpeech {
             FileLogger.log(TAG, "dropped ${cmd.program} utterance — another card took the speaker")
             return null
         }
-        // Claim the stop that arrived while we were spawning.
-        if (stopSeq.get() != seqAtStart) stop()
+        // Claim the stop that arrived while we were spawning (ours or the caller's).
+        if (stopSeq.get() != seqAtStart || cancelled()) stop()
         FileLogger.log(TAG, "speak via ${cmd.program} (${text.length} chars, rate ${ratePct}%)")
 
         runCatching {
