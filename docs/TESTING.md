@@ -389,14 +389,19 @@ construction.
   drift.log; kolo 3 (B1): a session of the box's prefix with neither claude nor an entry of the app (a `sleep`) is not
   adopted, leaves `__anchor__` alive and is not relaunched after its `kill-session` (= v18), and the app's entry of
   a session whose pane runs no claude stays as the app wrote it (MOSH, DEFAULT, OPUS, serverId, createdAt) in the
-  manifest and the mirror, and self-heal relaunches it in DEFAULT;
+  manifest and the mirror, and self-heal relaunches it in DEFAULT; kolo 4 (B4): a claude without the app's flag
+  (a bare `claude`, a `claude -p` whose folder is then deleted) and no entry is not adopted, leaves `__anchor__` alive
+  and is neither relaunched nor self-healed (= v18), while with an entry of the app it keeps that entry; on `box`
+  an adopted session drops `__anchor__` and a stray does not, even with an entry of another name;
   the step v18 → v19 rewrites the three scripts by rename and a v18 client after it rewrites nothing back; the
   replaced v18 `restore.sh` and `drift.sh` are kept as `.v18` byte for byte, only from v18 and only once.
   `DriftPrefixesTest` (desktopTest): hradlo A (what the generator sends for `server` differs from cedfd70's
   only in the marker (MARKER, three compat lines), the installer's trap, the header comment of drift, the prefix
   reader, the two comparisons, the three B1 blocks of the adoption with proof, the two rollback copies and the
-  prefix write), the reader in bash and dash, the rollback block alone (a v19 script is never kept as `.v18`), and
-  the installer's write (once, normalizing, never for `server`, never failing the install).
+  prefix write), the reader in bash and dash, each of the two rollback blocks alone (a v19 script is never kept as
+  `.v18`), drift's overlay of the app's entries alone (an app file over 128 KB; a failing jq drops only its own names),
+  and the installer's write (once, normalizing, never for `server`, never failing the install, a prefix already there
+  found without the lock).
 - **the tmux socket guard** (B3, marker v18), in the fixture's private
   `TMUX_TMPDIR` only: the socket file deleted, the whole `tmux-<uid>` directory
   deleted, and a split brain (a second server on the same path holding part of

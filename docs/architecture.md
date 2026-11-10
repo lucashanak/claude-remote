@@ -214,16 +214,28 @@ script of a newer marker; the way back to v18 as a whole is below). An install c
 manifest, counts as "a session of ours is live" (which drops `__anchor__`) and so relaunches, are those starting with
 `claude-server-` — always, with or without the file, by their name alone as in v18 — and those starting with a line of
 `~/.claude-remote/prefixes` that prove they are the app's (kolo 3, B1: a stranger's tmux session of that name must not
-become a YOLO relaunch): claude runs in the pane (metadata from claude's command line and environ like any session,
-a missing `serverId` from the app's entry of the same name in `sessions.json`), or `sessions.json` has an entry of that
-name, which is then taken as the app wrote it (mode, model, connection type, serverId, createdAt, account — never the
-YOLO default drift gives a pane without claude). Neither: not adopted, not written, not counted (`__anchor__` stays),
-never relaunched. The restore
+become a YOLO relaunch): claude runs in the pane **with the app's signature** — one of the two flags the app
+(`ClaudeConfig`) and restore.sh always start it with, `--dangerously-skip-permissions` or
+`--allow-dangerously-skip-permissions` (kolo 4, B4: a bare `claude` typed by hand or a `claude -p` of somebody's script
+is no proof) — and then its metadata come from claude's command line and environ like any session, a missing
+`serverId` from the app's entry of the same name in `sessions.json`; or `sessions.json` has an entry of that name
+(claude without the signature or no claude at all), which is then taken as the app wrote it (mode, model, connection
+type, serverId, createdAt, account — never the YOLO default drift gives a command line without a flag). Neither: not
+adopted, not written, not counted (`__anchor__` stays), never relaunched. The app's entries reach jq from a file
+(`--slurpfile`), not as one argument, which stops at 128 KB; if that jq fails anyway only these sessions drop out of
+the tick, `claude-server-*` are adopted as always. A foreign script that starts claude with one of the two flags in
+a session of the box's prefix still looks like the app's (a limit). On a box other than `server`, the first adoption
+writes `sessions.restore.json`, and from then on drift's mirror copies it over `sessions.json`: an entry of the app
+whose tmux session is not alive at that moment (dead when the box first runs v19, or dead within a tick of its
+launch) is dropped from `sessions.json`, so a reboot with no client connected does not bring it back — the same as on
+`server`, where such a session is missing from the manifest too; a client that connects rebuilds it (review D3 N12,
+a limit, the fix is handed over). The restore
 installer adds the box's own prefix (`TmuxNameParser.prefixFor(server name)`, e.g. `claude-box-`) on every install,
 outside the marker check, before its end line: under `flock -w 5` on `sessions.lock`, the file rewritten whole (tmp
 + `mv`, keeping only valid lines) because drift reads it without the lock; the default prefix gets no line, so the
 box `server` keeps no file. A name drift cannot match is logged to install.log (`PREFIX_UNSUPPORTED`), and a prefix
-that cannot be written (`PREFIX_NOT_WRITTEN`) never fails the install — the client then does not remember the install
+that cannot be written (`PREFIX_NOT_WRITTEN`; a prefix already in the file is found before the lock, so a held lock
+never says it) never fails the install — the client then does not remember the install
 as done, so its next launch writes the prefix again (review D2 adv N5). Both the reader and the writer take only lines
 `claude-<name>-` where `<name>` is ASCII letters, digits, `_` and `-` not starting with `-` (the class spelled out,
 no locale): an empty, blank, CRLF or glob line, `claude-` alone or `__anchor__` is skipped without a word — an

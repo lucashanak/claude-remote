@@ -6,6 +6,10 @@ import java.io.File
 import java.nio.file.Files
 import java.security.MessageDigest
 import java.util.concurrent.TimeUnit
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import kotlin.test.AfterTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -104,30 +108,75 @@ class DriftPrefixesTest {
      * Review D2 kód K2 / adv N4: v19's compat line names v18 too, so "the replaced script is v18" also holds for a v19
      * script (one a second installer put there in between). The copy itself must then not be v19: no `.v18` from it and
      * no temp file left. A v18 script is copied byte for byte, published by `ln` (which never replaces a copy).
-     * The installer's own rollback block for drift.sh, run alone in bash.
+     * Each of the installer's two rollback blocks (restore.sh, drift.sh: review D3 N-T9), run alone in bash.
      */
     @Test fun theRollbackCopyIsNeverAV19Script() {
-        val rollback = block(SessionPersistenceService.INSTALL_RESTORE_COMMAND,
-            "            # ---- rollback copy of drift.sh (D6-S) ----", "            # ---- end of the rollback copy of drift.sh ----")
-        assertTrue(rollback.any { "ln \"\$DRIFT.v18.tmp.\$\$\" \"\$DRIFT.v18\"" in it } && rollback.none { "mv -f" in it }, "published by ln, never mv -f")
-        val compat = "# marker-compat (do NOT remove): " + (6..18).joinToString(" ") { "claude-remote-restore-v$it" }
-        for ((what, script, copied) in listOf(
-            Triple("v19", "#!/usr/bin/env bash\n$compat claude-remote-restore-v19\nexit 0\n", false),
-            Triple("v18", "#!/usr/bin/env bash\n$compat\nexit 0\n", true),
-        )) {
-            val home = freshHome()
-            val drift = File(home, ".claude-remote/drift.sh").apply { writeText(script) }
-            val r = run(listOf("bash", "-c", "set -e\nDRIFT=\"\$HOME/.claude-remote/drift.sh\"\n" + rollback.joinToString("\n") + "\necho DONE\n"), home, dir = home)
-            assertEquals(0, r.exit, "$what: ${r.err}")
-            assertEquals("DONE", r.out.trim(), what)
-            val copy = File(home, ".claude-remote/drift.sh.v18")
-            assertEquals(copied, copy.exists(), "$what: a copy ${if (copied) "is" else "is not"} made")
-            if (copied) assertEquals(script, copy.readText(), "$what: byte for byte")
-            assertEquals(copied, File(home, ".claude-remote/install.log").readTextOrNull()?.contains("kept as drift.sh.v18") == true, what)
-            assertEquals(listOf("drift.sh") + (if (copied) listOf("drift.sh.v18", "install.log") else emptyList()),
-                File(home, ".claude-remote").list()!!.sorted(), "$what: no temp file left")
-            assertEquals(script, drift.readText(), "$what: the script itself untouched")
+        for ((name, variable) in listOf("restore.sh" to "SCRIPT", "drift.sh" to "DRIFT")) {
+            val rollback = block(SessionPersistenceService.INSTALL_RESTORE_COMMAND,
+                "            # ---- rollback copy of $name (D6-S) ----", "            # ---- end of the rollback copy of $name ----")
+            assertTrue(rollback.any { "ln \"\$$variable.v18.tmp.\$\$\" \"\$$variable.v18\"" in it } && rollback.none { "mv -f" in it },
+                "$name: published by ln, never mv -f")
+            val compat = "# marker-compat (do NOT remove): " + (6..18).joinToString(" ") { "claude-remote-restore-v$it" }
+            for ((what, script, copied) in listOf(
+                Triple("v19", "#!/usr/bin/env bash\n$compat claude-remote-restore-v19\nexit 0\n", false),
+                Triple("v18", "#!/usr/bin/env bash\n$compat\nexit 0\n", true),
+            )) {
+                val home = freshHome()
+                val target = File(home, ".claude-remote/$name").apply { writeText(script) }
+                val r = run(listOf("bash", "-c", "set -e\n$variable=\"\$HOME/.claude-remote/$name\"\n" + rollback.joinToString("\n") + "\necho DONE\n"), home, dir = home)
+                assertEquals(0, r.exit, "$name $what: ${r.err}")
+                assertEquals("DONE", r.out.trim(), "$name $what")
+                val copy = File(home, ".claude-remote/$name.v18")
+                assertEquals(copied, copy.exists(), "$name $what: a copy ${if (copied) "is" else "is not"} made")
+                if (copied) assertEquals(script, copy.readText(), "$name $what: byte for byte")
+                assertEquals(copied, File(home, ".claude-remote/install.log").readTextOrNull()?.contains("kept as $name.v18") == true, "$name $what")
+                assertEquals((listOf(name) + (if (copied) listOf("$name.v18", "install.log") else emptyList())).sorted(),
+                    File(home, ".claude-remote").list()!!.sorted(), "$name $what: no temp file left")
+                assertEquals(script, target.readText(), "$name $what: the script itself untouched")
+            }
         }
+    }
+
+    /**
+     * Review D3 adv N10: drift's overlay of the app's entries (B1), run alone in bash. The entries reach jq from a file,
+     * so an app's sessions.json over 128 KB (one execve argument's limit) still adopts; and if that jq fails anyway only
+     * the names of the block drop out of the tick — `claude-server-*` stays — and `__anchor__` is not dropped for them.
+     */
+    @Test fun whenTheOverlayOfTheAppsEntriesFailsOnlyItsOwnNamesDropOut() {
+        val overlayBlock = block(SessionPersistenceService.INSTALL_RESTORE_COMMAND,
+            "# ---- the app's entry of a session only a line of prefixes names (B1) ----", "# ---- end of the app's entry ----")
+        fun row(n: String) = """{"id":"$n","serverId":"","folder":"/w/$n","mode":"YOLO","model":"DEFAULT","tmuxSessionName":"$n","connectionType":"SSH","alias":"","claudeSessionId":null,"createdAt":0,"accountSlug":null}"""
+        val entryB = """{"id":"tab-1","serverId":"srv-box","folder":"/w/b","mode":"DEFAULT","model":"OPUS","tmuxSessionName":"claude-box-b","connectionType":"MOSH","alias":"","claudeSessionId":null,"createdAt":1762700000000,"accountSlug":null}"""
+        val filler = (0 until 1_500).joinToString(",") { """{"tmuxSessionName":"claude-box-old-$it--a-long-alias","folder":"/home/someone/projects/project-with-a-long-name-$it","serverId":"srv-box-0123456789abcdef"}""" }
+        val big = "[$entryB,{\"tmuxSessionName\":\"claude-box-c\",\"serverId\":\"srv-box-c\",\"mode\":\"DEFAULT\"},$filler]"
+        assertTrue(big.length > 140_000, "the app's entries are over one argument's 128 KB: ${big.length}")
+        fun overlay(failingJq: Boolean): Pair<String, String> {
+            val home = freshHome()
+            val app = File(home, "app.json").apply { writeText(big) }
+            val anchor = File(home, "anchor.log")
+            val script = buildString {
+                append("tmux() { printf '%s\\n' \"\$*\" >> \"\$HOME/anchor.log\"; }\n")
+                if (failingJq) append("jq() { case \" \$* \" in *\" --slurpfile \"*) return 5;; esac; command jq \"\$@\"; }\n")
+                append("APP_JSON=\$(cat \"\$HOME/app.json\")\n")
+                append("LIVE='[${row("claude-server-a")},${row("claude-box-b")},${row("claude-box-c")}]'\n")
+                append("OWN_META=' a:claude-box-b c:claude-box-c'\n")
+                append(overlayBlock.joinToString("\n")).append("\nprintf '%s' \"\$LIVE\"\n")
+            }
+            val r = run(listOf("bash", "-c", script), home, dir = home)
+            assertEquals(0, r.exit, r.err)
+            assertTrue(app.isFile)
+            return r.out.trim() to (if (anchor.isFile) anchor.readText() else "")
+        }
+        fun names(live: String) = Json.parseToJsonElement(live).jsonArray.map { it.jsonObject["tmuxSessionName"]!!.jsonPrimitive.content }
+        val (whole, killed) = overlay(failingJq = false)
+        assertEquals(listOf("claude-server-a", "claude-box-b", "claude-box-c"), names(whole))
+        assertEquals(Json.parseToJsonElement(entryB), Json.parseToJsonElement(whole).jsonArray[1], "a: the app's entry as it wrote it, from an app file over 128 KB")
+        assertEquals(Json.parseToJsonElement(row("claude-box-c").replace("\"serverId\":\"\"", "\"serverId\":\"srv-box-c\"")), Json.parseToJsonElement(whole).jsonArray[2],
+            "c: its own row with the serverId of the app's entry")
+        assertEquals("kill-session -t __anchor__\n", killed, "an adopted session drops the anchor")
+        val (dropped, notKilled) = overlay(failingJq = true)
+        assertEquals(listOf("claude-server-a"), names(dropped), "the overlay failed: only its names drop out")
+        assertEquals("", notKilled, "nothing adopted: the anchor stays")
     }
 
     private fun File.readTextOrNull(): String? = if (isFile) readText() else null
@@ -301,6 +350,15 @@ class DriftPrefixesTest {
             assertTrue("PREFIX_NOT_WRITTEN" in r.out.lines(), r.out)
             assertTrue(ms in 4_500..30_000, "waited $ms ms for the lock (flock -w 5)")
             assertFalse(prefixesOf(home).exists())
+            // review D3 N11: a prefix already in the file is found without the lock — never NOT_WRITTEN, no wait
+            prefixesOf(home).writeText("claude-box-\n")
+            val t1 = System.nanoTime()
+            val again = install(home, TmuxNameParser.prefixFor("box"))
+            val ms1 = (System.nanoTime() - t1) / 1_000_000
+            assertEquals(0, again.exit, again.out)
+            assertTrue(again.out.lines().none { it.startsWith("PREFIX_") }, "already there: nothing to say\n${again.out}")
+            assertTrue(ms1 < 4_500, "waited $ms1 ms for a lock it does not need")
+            assertEquals("claude-box-\n", prefixesOf(home).readText())
         } finally {
             holder.destroyForcibly().waitFor(10, TimeUnit.SECONDS)
         }

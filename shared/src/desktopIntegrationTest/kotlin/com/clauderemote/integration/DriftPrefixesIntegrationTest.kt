@@ -213,7 +213,7 @@ class DriftPrefixesIntegrationTest {
             installV19(TmuxNameParser.DEFAULT_PREFIX)
             File(crDir(), "prefixes").writeText((JUNK + listOf("claude-server-", "claude-server-lan-", "claude-box-", "claude-box-lan-")).joinToString("\n") + "\n")
             seed(listOf("claude-server-lan-1", "claude-box-lan-c", "claude-test", "__anchor__", "other", "claude-boxer"), emptyList(),
-                claude = mapOf("claude-box-lan-c" to emptyList(), "claude-boxer" to emptyList()))
+                claude = mapOf("claude-box-lan-c" to listOf("--allow-dangerously-skip-permissions"), "claude-boxer" to listOf("--allow-dangerously-skip-permissions")))
             tickTwice()
         }
         assertEquals(listOf("claude-box-lan-c", "claude-server-lan-1"), rows(mixed.restore).map { it.name() }, "one row each, nothing foreign: ${mixed.restore}")
@@ -253,21 +253,26 @@ class DriftPrefixesIntegrationTest {
      * B1 (review D2 adv N2, `probe-mirror.sh`): on the box `box` the app's entry of a session whose pane runs no claude
      * at the first tick (MOSH, DEFAULT, OPUS, its serverId and createdAt) stays as the app wrote it — in the manifest, in
      * the mirror, and in what self-heal relaunches (DEFAULT, never `--dangerously-skip-permissions`). A pane that runs
-     * claude is adopted from claude's command line, with the serverId of the app's entry when there is one.
+     * claude with the app's flag is adopted from claude's command line, with the serverId of the app's entry when there
+     * is one; a pane whose claude lacks the flag (B4) keeps the app's entry like a pane without claude.
      */
     @Test fun theAppsEntryOfASessionWithoutClaudeStaysAsTheAppWroteIt() = world {
         installV19(TmuxNameParser.prefixFor("box"))
         val work = File(fixture.home, "w/claude-box-work").apply { mkdirs() }.absolutePath
         val entries = """[{"id":"tab-1","serverId":"srv-box-123","folder":"$work","mode":"DEFAULT","model":"OPUS","tmuxSessionName":"claude-box-work","connectionType":"MOSH","alias":"","claudeSessionId":null,"createdAt":1762700000000,"accountSlug":null},""" +
-            """{"id":"tab-2","serverId":"srv-box-123","folder":"/elsewhere","mode":"YOLO","model":"DEFAULT","tmuxSessionName":"claude-box-run","connectionType":"SSH","alias":"","claudeSessionId":null,"createdAt":1762700000001,"accountSlug":null}]"""
+            """{"id":"tab-2","serverId":"srv-box-123","folder":"/elsewhere","mode":"YOLO","model":"DEFAULT","tmuxSessionName":"claude-box-run","connectionType":"SSH","alias":"","claudeSessionId":null,"createdAt":1762700000001,"accountSlug":null},""" +
+            """{"id":"tab-3","serverId":"srv-box-123","folder":"/bare","mode":"DEFAULT","model":"HAIKU","tmuxSessionName":"claude-box-bare","connectionType":"MOSH","alias":"","claudeSessionId":null,"createdAt":1762700000002,"accountSlug":null}]"""
         File(crDir(), "sessions.json").writeText(entries)
         val before = rows(entries).associateBy { it.name() }
-        seed(listOf("claude-box-work", "claude-box-run", "claude-box-new", "claude-box-stray"), emptyList(),
+        seed(listOf("claude-box-work", "claude-box-run", "claude-box-new", "claude-box-stray", "claude-box-bare", "claude-box-yolo"), emptyList(),
             claude = mapOf("claude-box-run" to listOf("--permission-mode", "auto", "--allow-dangerously-skip-permissions"),
+                "claude-box-bare" to emptyList(), "claude-box-yolo" to listOf("--dangerously-skip-permissions"),
                 "claude-box-new" to listOf("--model", "sonnet", "--allow-dangerously-skip-permissions")))
         val out = tickTwice()
         val restore = rows(out.restore).associateBy { it.name() }
-        assertEquals(setOf("claude-box-work", "claude-box-run", "claude-box-new"), restore.keys, "claude-box-stray (no claude, no entry) not adopted")
+        assertEquals(setOf("claude-box-work", "claude-box-run", "claude-box-new", "claude-box-bare", "claude-box-yolo"), restore.keys, "claude-box-stray (no claude, no entry) not adopted")
+        assertEquals(before.getValue("claude-box-bare"), rows(File(crDir(), "sessions.restore.json").readText()).single { it.name() == "claude-box-bare" },
+            "claude without the app's flag (B4): the app's entry as the app wrote it, never the YOLO default of its command line")
         assertEquals(before.getValue("claude-box-work"), rows(File(crDir(), "sessions.restore.json").readText()).single { it.name() == "claude-box-work" },
             "the app's entry as the app wrote it")
         assertEquals(before.getValue("claude-box-work"), rows(File(crDir(), "sessions.json").readText()).single { it.name() == "claude-box-work" },
@@ -279,6 +284,7 @@ class DriftPrefixesIntegrationTest {
         val new = restore.getValue("claude-box-new")
         assertEquals("SONNET" to "DEFAULT", new["model"]!!.jsonPrimitive.content to new["mode"]!!.jsonPrimitive.content)
         assertEquals("", new["serverId"]!!.jsonPrimitive.content, "no entry: no serverId")
+        assertEquals("YOLO", restore.getValue("claude-box-yolo")["mode"]!!.jsonPrimitive.content, "the app's other flag is its signature too")
 
         // gone without a tombstone: self-heal relaunches the app's session as the app launched it, the stray stays gone
         fixture.tmux("kill-session", "-t", "=claude-box-work")
@@ -289,6 +295,61 @@ class DriftPrefixesIntegrationTest {
         assertContains(cmd, "--model opus --allow-dangerously-skip-permissions", message = cmd)
         assertFalse(" --dangerously-skip-permissions" in cmd, "relaunched as YOLO: $cmd")
         assertFalse("claude-box-stray" in fixture.tmuxSessions(), "the stray was relaunched")
+    }
+
+    /**
+     * B4 (review D3 adv N9, sondy S2 a S3): on the box `box` a session of the box's prefix whose pane runs a claude
+     * without either flag the app and restore.sh always start it with — a bare `claude` typed by hand, a `claude -p` of
+     * somebody's script — and no entry of the app is not adopted: nothing written, `__anchor__` stays, and after its
+     * `kill-session` (for the second one with its folder gone) no relaunch and no self-heal line. The same as v18.
+     */
+    @Test fun aSessionOfTheBoxsPrefixWhereClaudeRunsWithoutTheAppsFlagIsLeftAlone() {
+        val live = listOf("claude-box-notes", "claude-box-ci", "__anchor__")
+        fun World.scenario(): Pair<Outcome, List<String>> {
+            seed(live, emptyList(), claude = mapOf("claude-box-notes" to emptyList(),
+                "claude-box-ci" to listOf("-p", "summarize", "--output-format", "json")))
+            val first = tickTwice()
+            fixture.tmux("kill-session", "-t", "=claude-box-notes")
+            fixture.tmux("kill-session", "-t", "=claude-box-ci")
+            assertTrue(File(fixture.home, "w/claude-box-ci").delete(), "the folder of claude-box-ci")
+            tick(); tick()
+            return first to fixture.tmuxSessions().filter { it != SshdFixture.KEEPALIVE_SESSION }.sorted()
+        }
+        val v18 = world { installV18(); scenario() }
+        val box = world {
+            installV19(TmuxNameParser.prefixFor("box"))
+            assertEquals("claude-box-\n", File(crDir(), "prefixes").readText())
+            scenario().also {
+                val restoreLog = File(crDir(), "restore.log").readTextOrEmpty()
+                assertFalse("claude-box-notes" in restoreLog || "claude-box-ci" in restoreLog, "relaunched: $restoreLog")
+                assertFalse("self-heal" in File(crDir(), "drift.log").readTextOrEmpty(), "self-heal: ${fixture.driftLog()}")
+            }
+        }
+        assertEquals(v18, box, "= v18")
+        assertEquals("", box.first.restore, "not adopted, nothing written")
+        assertEquals("", box.first.app, "nothing mirrored")
+        assertEquals("", box.first.log, "nothing logged")
+        assertEquals(live.sorted(), box.first.live, "__anchor__ lives on: no session of ours")
+        assertEquals(listOf("__anchor__"), box.second, "neither relaunched after its kill-session")
+    }
+
+    /**
+     * Review D3 test N-T8: on the box `box`, where no `claude-server-*` lives to drop `__anchor__` first, the adoption of
+     * a session of the box's prefix drops it, and a stray of that prefix does not — not even with an entry of the app
+     * of another name in `sessions.json`.
+     */
+    @Test fun theAnchorGoesForAnAdoptedSessionOfTheBoxsPrefixAndStaysForAStray() = world {
+        installV19(TmuxNameParser.prefixFor("box"))
+        File(crDir(), "sessions.json").writeText("""[{"id":"tab-9","serverId":"srv-box-123","folder":"/elsewhere","mode":"DEFAULT","model":"DEFAULT","tmuxSessionName":"claude-box-other","connectionType":"SSH","alias":"","claudeSessionId":null,"createdAt":1,"accountSlug":null}]""")
+        fun live() = fixture.tmuxSessions().filter { it != SshdFixture.KEEPALIVE_SESSION }.sorted()
+        seed(listOf("claude-box-stray", "__anchor__"), emptyList())
+        tick()
+        assertEquals(listOf("__anchor__", "claude-box-stray"), live(), "a stray of the box's prefix is no session of ours")
+        assertFalse("claude-box-stray" in File(crDir(), "sessions.restore.json").readTextOrEmpty(), "the stray adopted")
+        seed(listOf("claude-box-x"), emptyList(), claude = mapOf("claude-box-x" to listOf("--allow-dangerously-skip-permissions")))
+        tick()
+        assertEquals(listOf("claude-box-x"), rows(File(crDir(), "sessions.restore.json").readText()).map { it.name() })
+        assertEquals(listOf("claude-box-stray", "claude-box-x"), live(), "the adopted claude-box-x drops __anchor__")
     }
 
     /**

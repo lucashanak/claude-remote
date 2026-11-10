@@ -788,12 +788,12 @@ find_claude_descendant() {
 }
 
 # ---- sessions only a line of prefixes names (B1) ----
-# A session whose name starts with ${TmuxNameParser.DEFAULT_PREFIX} is ours by its name alone, as in v18 (and only such a session
-# makes the __anchor__ check above). One that only a line of ~/.claude-remote/prefixes names may as well be somebody
-# else's tmux session of that name, so drift adopts it only with proof: claude runs in its pane (its metadata come
-# from claude's cmdline and environ as for any session, a missing serverId from the app's entry of that name), or the
-# app's sessions.json has an entry of that name, which is then kept as the app wrote it (never the YOLO default of a
-# pane without claude). Neither: not adopted, not written, not counted as a live session of ours, never relaunched.
+# A session whose name starts with ${TmuxNameParser.DEFAULT_PREFIX} is ours by its name alone, as in v18 (and only such a session makes
+# the __anchor__ check above). One only a line of ~/.claude-remote/prefixes names may be somebody else's, so drift
+# adopts it only with proof: claude runs in its pane with one of the two flags the app and restore.sh always start it
+# with (metadata from claude's cmdline and environ, a missing serverId from the app's entry of that name), or the app's
+# sessions.json has an entry of that name, kept as the app wrote it (claude without the flag gets no YOLO default).
+# Neither: not adopted, not written, not counted as a live session of ours, never relaunched.
 APP_JSON="[]"; OWN_META=""
 if [ "${'$'}PFX" != "${TmuxNameParser.DEFAULT_PREFIX}" ] && [ -f "${'$'}SF_APP" ]; then
     APP_JSON=${'$'}(jq -c 'if type == "array" then map(select(type == "object" and (.tmuxSessionName | type) == "string")) else [] end' "${'$'}SF_APP" 2>/dev/null)
@@ -822,7 +822,11 @@ for s in ${'$'}(tmux -u list-sessions -F '#{session_name}' 2>/dev/null); do
     # ---- a session only a line of prefixes names (B1) ----
     case "${'$'}s" in
         "${TmuxNameParser.DEFAULT_PREFIX}"*) ;;
-        *)  if [ -n "${'$'}pid" ]; then OWN_META="${'$'}OWN_META c:${'$'}s"
+        *)  sig=""
+            [ -n "${'$'}pid" ] && case " ${'$'}(tr '\0' ' ' < "/proc/${'$'}pid/cmdline" 2>/dev/null) " in
+                *" --dangerously-skip-permissions "*|*" --allow-dangerously-skip-permissions "*) sig=1;;
+            esac
+            if [ -n "${'$'}sig" ]; then OWN_META="${'$'}OWN_META c:${'$'}s"
             elif app_has "${'$'}s"; then OWN_META="${'$'}OWN_META a:${'$'}s"
             else continue
             fi;;
@@ -896,20 +900,25 @@ if [ -n "${'$'}LIVE_TBL" ]; then
     [ -n "${'$'}LIVE" ] || LIVE="[]"
 fi
 # ---- the app's entry of a session only a line of prefixes names (B1) ----
-# a:<name> (no claude in the pane) is the app's entry as it stands; c:<name> (claude runs) gets the entry's serverId.
-# If this jq fails nothing is appended this tick (an entry already in the manifest stays as it is).
+# a:<name> is the app's entry as it stands, c:<name> (claude with the app's flag) gets the entry's serverId. The entries
+# come from a file (an execve argument stops at 128 KB); if this jq fails, only these names miss this tick.
 if [ -n "${'$'}OWN_META" ]; then
-    LIVE=${'$'}(printf '%s' "${'$'}LIVE" | jq -c --argjson app "${'$'}APP_JSON" --arg own "${'$'}OWN_META" '
-        (${'$'}app | map({key: .tmuxSessionName, value: .}) | from_entries) as ${'$'}am
+    if NL=${'$'}(printf '%s' "${'$'}LIVE" | jq -c --slurpfile app0 <(printf '%s' "${'$'}APP_JSON") --arg own "${'$'}OWN_META" '
+        (${'$'}app0[0] | map({key: .tmuxSessionName, value: .}) | from_entries) as ${'$'}am
         | (${'$'}own | split(" ") | map(select(length > 0) | {key: .[2:], value: .[0:1]}) | from_entries) as ${'$'}om
         | map(.tmuxSessionName as ${'$'}n
             | if ${'$'}om[${'$'}n] == "a" then ${'$'}am[${'$'}n]
               elif ${'$'}om[${'$'}n] == "c" then . + {serverId: ((${'$'}am[${'$'}n].serverId // "") | if type == "string" then . else "" end)}
               else . end)
-        | map(select(type == "object"))' 2>/dev/null) || LIVE=""
-    [ -n "${'$'}LIVE" ] || LIVE="[]"
-    # an adopted session of ours lives: the anchor goes, as above for ${TmuxNameParser.DEFAULT_PREFIX}*
-    tmux kill-session -t __anchor__ 2>/dev/null || true
+        | map(select(type == "object"))' 2>/dev/null) && [ -n "${'$'}NL" ]; then
+        LIVE=${'$'}NL
+        # an adopted session of ours lives: the anchor goes, as above for ${TmuxNameParser.DEFAULT_PREFIX}*
+        tmux kill-session -t __anchor__ 2>/dev/null || true
+    else
+        LIVE=${'$'}(printf '%s' "${'$'}LIVE" | jq -c --arg own "${'$'}OWN_META" '(${'$'}own | split(" ") | map(.[2:])) as ${'$'}o
+            | map(select(.tmuxSessionName as ${'$'}n | ${'$'}o | any(.[]; . == ${'$'}n) | not))' 2>/dev/null)
+        [ -n "${'$'}LIVE" ] || LIVE="[]"
+    fi
 fi
 # ---- end of the app's entry ----
 HDR="${'$'}HDR
@@ -1293,8 +1302,8 @@ DTIMER_EOF
         /**
          * D6-S (kritika D2 N20): adds [prefix] to `~/.claude-remote/prefixes`, which drift.sh reads, on every install
          * (outside the marker, so a box already on the current scripts gets it too). The same check as drift's reader;
-         * the default prefix needs no line (drift always has it, so the box `server` keeps no file); under the manifest
-         * lock; the file is written whole (tmp + mv, valid lines only), because drift reads it without the lock and
+         * the default prefix needs no line (drift always has it, so the box `server` keeps no file); a prefix already in
+         * the file is found before the lock (review D3 N11), any other is added under the manifest lock; the file is written whole (tmp + mv, valid lines only), because drift reads it without the lock and
          * must never see half a line. Never fails the install (it runs under `set -e`): a prefix not written only means
          * drift does not adopt this box's sessions yet. An unsupported name is logged to install.log.
          */
@@ -1309,6 +1318,8 @@ elif [ "${'$'}CR_PREFIX" != "${TmuxNameParser.DEFAULT_PREFIX}" ]; then
     (
         PF="${'$'}HOME/.claude-remote/prefixes"
         trap 'rm -f "${'$'}PF.tmp.${'$'}${'$'}"' EXIT
+        # already there: no lock needed (the file only ever changes by mv), so a held lock never says NOT_WRITTEN
+        grep -qxF -- "${'$'}CR_PREFIX" "${'$'}PF" 2>/dev/null && exit 0
         flock -w 5 9 || exit 1
         # mv onto a directory would move the file into it
         [ ! -d "${'$'}PF" ] || exit 1
