@@ -164,8 +164,11 @@ internal object RecentlyClosed {
             ?: ReopenTarget.Nothing
     }
 
-    /** "Přejít na ni" is offered only for the app's own sessions (the script names one on its own tmux socket only). */
-    fun canGoTo(tmuxName: String): Boolean = tmuxName.startsWith("claude-server-")
+    /**
+     * "Přejít na ni" is offered only for the app's own sessions (the script names one on its own tmux socket only, and
+     * `cr-session` knows only the box `server`'s prefix).
+     */
+    fun canGoTo(tmuxName: String): Boolean = tmuxName.startsWith(com.clauderemote.model.TmuxNameParser.DEFAULT_PREFIX)
 
     /** The UI's reaction to [result] of restoring [record]. */
     fun actionFor(result: RestoreResult, record: ClosedRecord, serverName: String): RestoreAction {

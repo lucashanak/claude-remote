@@ -59,25 +59,25 @@ internal sealed interface TmuxLaunchDecision {
  */
 internal object TmuxPeerLiveness {
 
-    /** Only our own sessions count as peers; a user's unrelated tmux session does not. */
-    const val SESSION_PREFIX = "claude-server-"
+    /** Only our own sessions count as peers; a user's unrelated tmux session does not. The box `server`'s prefix. */
+    const val SESSION_PREFIX = com.clauderemote.model.TmuxNameParser.DEFAULT_PREFIX
 
     /** Keepalive session the restore scripts park on the server; never a peer. */
     const val ANCHOR = "__anchor__"
 
     /**
      * True iff [listSessionsOutput] (`tmux -u list-sessions -F '#{session_name}'`)
-     * names at least one live session that is ours, is not [excludeTmuxName],
-     * and is not the [ANCHOR] keepalive.
+     * names at least one live session that is ours (starts with one of [prefixes]: the box's own and the default,
+     * `TmuxNameParser.livePrefixes`, D6-K), is not [excludeTmuxName], and is not the [ANCHOR] keepalive.
      *
      * Empty output — a dead tmux server, or a failed exec whose stderr was
      * swallowed — yields false, which is what makes a server-wide outage fall
      * through to rebuild instead of forgetting every session.
      */
-    fun hasOtherLivePeer(listSessionsOutput: String, excludeTmuxName: String): Boolean =
+    fun hasOtherLivePeer(listSessionsOutput: String, excludeTmuxName: String, prefixes: Set<String> = setOf(SESSION_PREFIX)): Boolean =
         listSessionsOutput.lineSequence()
             .map { it.trim() }
-            .any { it.startsWith(SESSION_PREFIX) && it != excludeTmuxName && it != ANCHOR }
+            .any { com.clauderemote.model.TmuxNameParser.hasPrefix(it, prefixes) && it != excludeTmuxName && it != ANCHOR }
 }
 
 /**

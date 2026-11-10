@@ -1406,6 +1406,7 @@ DTIMER_EOF
         },
         isBackground = isBackground,
         onRound = onRound,
+        livePrefixesOf = ::livePrefixes,
     )
 
     /**
@@ -1477,6 +1478,10 @@ DTIMER_EOF
             }
         }
     }
+
+    /** D6-K: the prefixes whose live session proves [serverId]'s tmux is up: its own (by its name) and the default. */
+    private fun livePrefixes(serverId: String): Set<String> =
+        com.clauderemote.model.TmuxNameParser.livePrefixes(serverStorage.getServer(serverId)?.name)
 
     /** `by` of a close record: a user close is this install's, a prune (not user-initiated) is `prune`. */
     private fun closeRecordBy(userInitiated: Boolean): String = if (userInitiated) closedBy() else "prune"
@@ -1639,7 +1644,7 @@ DTIMER_EOF
                 // The merge semantics (and why this is a merge at all) live in
                 // ManifestCommands.pushMerge, which is a pure builder so the
                 // shell can be bash -n'd by ManifestCommandSyntaxTest.
-                ch.setCommand(ManifestCommands.pushMerge(serverId, payload.length))
+                ch.setCommand(ManifestCommands.pushMerge(serverId, payload.length, livePrefixes(serverId)))
                 ch.inputStream = null
                 val os = ch.outputStream
                 ch.connect(5000)
@@ -1678,7 +1683,7 @@ DTIMER_EOF
             val payload = storage.serializeForServer(serverId)
             val res = registry.execRun(
                 serverId,
-                ManifestCommands.pushMerge(serverId, payload.length),
+                ManifestCommands.pushMerge(serverId, payload.length, livePrefixes(serverId)),
                 stdin = payload.toByteArray(Charsets.UTF_8),
                 totalMs = 15_000,
             )

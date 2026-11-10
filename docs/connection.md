@@ -1092,7 +1092,11 @@ facts and (when it has a `sessions/<pid>.json`) the session id if its transcript
 Per tab the result decides:
 
 - **forget**: tombstoned AND absent from `list-sessions` AND at least one other live
-  `claude-server-*` session exists (a dead tmux server never counts as proof);
+  session of ours exists — one starting with the box's own prefix `claude-<server>-` or the default
+  `claude-server-` (`TmuxNameParser.livePrefixes`, compared as fixed strings; dávka D6-K, the same set for the
+  remote scan's prune and the manifest push's guard) — a dead tmux server never counts as proof. Before D6-K
+  only `claude-server-*` counted, so on a box named otherwise forget and prune never ran; drift, `cr-session` and
+  Jarvis still know only `claude-server-` (D6-S, `tools/jarvis`);
 - **adopt the real session id**: the shallowest process of the pane's subtree that has a
   session file wins (the manifest is the weaker fallback); an id already owned by another
   tab is refused;

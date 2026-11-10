@@ -133,6 +133,8 @@ internal class ExecServerReconciler(
      * here): the app adopts `opened.d` markers from it (§15.4). Must be quick and must not call back into this class.
      */
     private val onRound: (serverId: String, snapshot: ReconcileSnapshot) -> Unit = { _, _ -> },
+    /** D6-K: the prefixes whose live session proves the server's tmux is up (`TmuxNameParser.livePrefixes` of its name). */
+    private val livePrefixesOf: (serverId: String) -> Set<String> = { setOf(com.clauderemote.model.TmuxNameParser.DEFAULT_PREFIX) },
 ) : ServerReconciler {
     private class Round(val at: Long, val names: Set<String>, val snapshot: ReconcileSnapshot)
 
@@ -223,7 +225,8 @@ internal class ExecServerReconciler(
     private suspend fun apply(snap: ReconcileSnapshot, sessionIds: List<String>, allowForget: Boolean = true) {
         for (sid in sessionIds) {
             val name = tmuxNameOf(sid) ?: continue
-            if (snap.closeVerdict(name) == CloseVerdict.FORGET) {
+            val prefixes = (registered[sid] ?: serverIdOf(sid))?.let(livePrefixesOf) ?: setOf(com.clauderemote.model.TmuxNameParser.DEFAULT_PREFIX)
+            if (snap.closeVerdict(name, prefixes) == CloseVerdict.FORGET) {
                 if (!allowForget || !registered.containsKey(sid)) continue
                 // A second round (or checkClosed) while the teardown runs must not forget the same tab again.
                 if (!forgetting.add(sid)) continue
@@ -273,13 +276,14 @@ internal class ExecServerReconciler(
         val serverId = registered[sessionId] ?: return
         val name = tmuxNameOf(sessionId) ?: return
         var r = round(serverId, maxAgeMs = 0) ?: return
-        if (r.snapshot.closeVerdict(name) == CloseVerdict.FORGET) { apply(r.snapshot, listOf(sessionId)); return }
+        val prefixes = livePrefixesOf(serverId)
+        if (r.snapshot.closeVerdict(name, prefixes) == CloseVerdict.FORGET) { apply(r.snapshot, listOf(sessionId)); return }
         // Still present in tmux: the pane may be on its way out. One more look.
         if (r.snapshot.tmuxNames?.contains(name) == true) {
             delay(recheckMs)
             if (!registered.containsKey(sessionId)) return
             r = round(serverId, maxAgeMs = 0) ?: return
-            if (r.snapshot.closeVerdict(name) == CloseVerdict.FORGET) apply(r.snapshot, listOf(sessionId))
+            if (r.snapshot.closeVerdict(name, prefixes) == CloseVerdict.FORGET) apply(r.snapshot, listOf(sessionId))
         }
     }
 

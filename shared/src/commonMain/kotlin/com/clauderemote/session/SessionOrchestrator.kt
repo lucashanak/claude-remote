@@ -2096,7 +2096,7 @@ class SessionOrchestrator(
             // still tracked — a network blip must never read as "closed".
             tombstoned = { fetchCloseState()?.tombstoned == true },
             stillTracked = { fetchCloseState()?.tracked ?: true },
-            hasLivePeers = { serverHasOtherLiveSession(sshManager, session.tmuxSessionName) },
+            hasLivePeers = { serverHasOtherLiveSession(sshManager, session.tmuxSessionName, TmuxNameParser.livePrefixes(session.server.name)) },
             hasTranscript = {
                 // Only a confident YES is taken. A NO can be wrong too — the probe
                 // does not see an account's own projects/ dir — and an unknown is
@@ -2210,8 +2210,8 @@ class SessionOrchestrator(
     }
 
     /**
-     * True iff the tmux server is PROVABLY up with ≥1 OTHER live `claude-server-*`
-     * session besides [excludeTmuxName] (and the `__anchor__` keepalive). Used to
+     * True iff the tmux server is PROVABLY up with ≥1 OTHER live session of ours (one starting with a prefix of
+     * [prefixes]: `TmuxNameParser.livePrefixes` of the box, D6-K) besides [excludeTmuxName] (and the `__anchor__` keepalive). Used to
      * disambiguate "one session was closed on another device" (peers still alive)
      * from a WHOLE-server tmux death (list empty / server down / exec error) — the
      * latter must NOT be treated as closed-elsewhere or a transient server-wide
@@ -2219,7 +2219,11 @@ class SessionOrchestrator(
      * do NOT assume peers are alive). Exposed `internal` so App.kt can reuse the
      * same liveness gate via the orchestrator.
      */
-    internal suspend fun serverHasOtherLiveSession(sshManager: SshManager, excludeTmuxName: String): Boolean {
+    internal suspend fun serverHasOtherLiveSession(
+        sshManager: SshManager,
+        excludeTmuxName: String,
+        prefixes: Set<String> = setOf(TmuxNameParser.DEFAULT_PREFIX),
+    ): Boolean {
         return try {
             val jsch = sshManager.getSession() ?: return false
             // `tmux -u`: without it tmux decides UTF-8 support from the CLIENT's
@@ -2238,7 +2242,7 @@ class SessionOrchestrator(
             val out = execCapture(jsch, "tmux -u list-sessions -F '#{session_name}' 2>/dev/null")
             // Parsing lives in TmuxPeerLiveness so it is testable without SSH;
             // the exec round-trip and the fail-closed catch below stay here.
-            TmuxPeerLiveness.hasOtherLivePeer(out, excludeTmuxName)
+            TmuxPeerLiveness.hasOtherLivePeer(out, excludeTmuxName, prefixes)
         } catch (e: Exception) {
             false
         }

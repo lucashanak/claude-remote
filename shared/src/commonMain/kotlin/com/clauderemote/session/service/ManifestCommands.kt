@@ -500,10 +500,15 @@ ONOW=${'$'}(date +%s); for f in "${'$'}D"/opened.d/*; do [ -f "${'$'}f" ] || con
      * Reads [payloadLength] only for the push.log line; the payload itself is
      * streamed to the command's stdin by the caller.
      */
-    fun pushMerge(serverId: String, payloadLength: Int): String {
+    fun pushMerge(serverId: String, payloadLength: Int, prefixes: Set<String> = setOf(com.clauderemote.model.TmuxNameParser.DEFAULT_PREFIX)): String {
         // Interpolated inside a double-quoted shell string, so a quote in the
         // id would break out of it.
         val safeServerId = serverId.replace("\"", "")
+        // D6-K: "a live session of ours" = one starting with a prefix of [prefixes] (TmuxNameParser.livePrefixes), each
+        // compared as a fixed string (awk index, the prefix from the environment): a server name is never a pattern
+        val ours = prefixes.toList()
+        val oursEnv = ours.indices.joinToString(" ") { "CR_P$it=${sq(ours[it])}" }
+        val oursTest = ours.indices.joinToString("||") { "index(\$0,ENVIRON[\"CR_P$it\"])==1" }
         return (
             "set -u; D=\"\$HOME/.claude-remote\"; mkdir -p \"\$D\"; " +
             "LOCK=\"\$D/sessions.lock\"; touch \"\$LOCK\"; " +
@@ -512,7 +517,7 @@ ONOW=${'$'}(date +%s); for f in "${'$'}D"/opened.d/*; do [ -f "${'$'}f" ] || con
             "if command -v jq >/dev/null 2>&1; then " +
               // WHOLE-SERVER-DEATH GUARD: the merge below prunes any OLD peer
               // entry whose tmux name isn't in the LIVE set. If tmux itself
-              // errors (server gone) or no claude-server-* sessions are live,
+              // errors (server gone) or no session of ours is live,
               // LIVE is effectively empty and the merge would drop EVERY other
               // client's sessions from the shared manifest. Skip the push
               // entirely so a transient server death can't shrink the source of
@@ -520,8 +525,8 @@ ONOW=${'$'}(date +%s); for f in "${'$'}D"/opened.d/*; do [ -f "${'$'}f" ] || con
               // get re-pushed once the server is actually back up.
               "if ! tmux list-sessions >/dev/null 2>&1; then " +
                 "echo \"[\$(date -u +%FT%TZ)] push(merge): tmux down — skip (preserve shared manifest)\" >> \"\$D/push.log\"; " +
-              "elif [ \"\$(tmux -u list-sessions -F '#{session_name}' 2>/dev/null | grep -c '^claude-server-')\" -eq 0 ]; then " +
-                "echo \"[\$(date -u +%FT%TZ)] push(merge): no live claude-server-* — skip (preserve shared manifest)\" >> \"\$D/push.log\"; " +
+              "elif [ \"\$(tmux -u list-sessions -F '#{session_name}' 2>/dev/null | $oursEnv awk '$oursTest{n++} END{print n+0}')\" -eq 0 ]; then " +
+                "echo \"[\$(date -u +%FT%TZ)] push(merge): no live session of ours — skip (preserve shared manifest)\" >> \"\$D/push.log\"; " +
               "else " +
                 // `-u` is load-bearing here: this LIVE set decides which peer
                 // entries survive the merge. Read without it, a session whose
@@ -615,14 +620,14 @@ internal class ReconcileSnapshot(
 ) {
     /**
      * Forget iff tombstoned ∧ absent from `list-sessions` ∧ at least one OTHER live
-     * `claude-server-*` session exists (a dead tmux server or an empty listing never
-     * counts as proof). Anything unknown is [CloseVerdict.UNKNOWN].
+     * session of ours exists — one starting with a prefix of [prefixes], the box's own and the default (D6-K) — (a
+     * dead tmux server or an empty listing never counts as proof). Anything unknown is [CloseVerdict.UNKNOWN].
      */
-    fun closeVerdict(tmuxName: String): CloseVerdict {
+    fun closeVerdict(tmuxName: String, prefixes: Set<String> = setOf(com.clauderemote.model.TmuxNameParser.DEFAULT_PREFIX)): CloseVerdict {
         val tomb = tombstoned ?: return CloseVerdict.UNKNOWN
         val live = tmuxNames ?: return CloseVerdict.UNKNOWN
         if (tmuxName !in tomb || tmuxName in live) return CloseVerdict.KEEP
-        return if (com.clauderemote.session.TmuxPeerLiveness.hasOtherLivePeer(tmuxListing.orEmpty(), tmuxName)) {
+        return if (com.clauderemote.session.TmuxPeerLiveness.hasOtherLivePeer(tmuxListing.orEmpty(), tmuxName, prefixes)) {
             CloseVerdict.FORGET
         } else {
             CloseVerdict.KEEP

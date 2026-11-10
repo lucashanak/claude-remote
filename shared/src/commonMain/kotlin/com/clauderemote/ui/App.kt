@@ -517,14 +517,16 @@ fun App(
                 //    guard the prune would forget EVERY tab on that server (the
                 //    recurring mass session-loss bug). So a tab is only prunable
                 //    when its server's successful scan shows it is genuinely UP:
-                //    ≥1 OTHER live claude-server-* session still exists. If a
-                //    server's scan succeeded but its live claude-server-* set is
+                //    ≥1 OTHER live session of ours still exists (its own prefix or
+                //    the default, TmuxNameParser.livePrefixes). If a
+                //    server's scan succeeded but its live set of ours is
                 //    empty while local tabs remain, treat it as a whole-server
                 //    outage and prune nothing on that server this cycle.
                 val serversWithLiveClaudeSession: Set<String> =
                     perServer.mapNotNull { (serverId, scanned) ->
+                        val ours = com.clauderemote.model.TmuxNameParser.livePrefixes(servers.firstOrNull { it.id == serverId }?.name)
                         if (scanned != null &&
-                            scanned.any { it.tmuxSession.name.startsWith("claude-server-") }
+                            scanned.any { com.clauderemote.model.TmuxNameParser.hasPrefix(it.tmuxSession.name, ours) }
                         ) serverId else null
                     }.toSet()
                 val confirmedAbsent = tabManager.tabs.value.filter { tab ->

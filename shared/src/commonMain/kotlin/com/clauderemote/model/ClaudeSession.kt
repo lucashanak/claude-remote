@@ -119,11 +119,31 @@ object TmuxNameParser {
      */
     fun sanitize(tmuxName: String): String = tmuxName.replace('.', '_').replace(':', '_')
 
+    /**
+     * D6-K: the prefix of every session the app names on the box called [serverName] — the one place it is spelled.
+     * Sanitized like the names themselves, so `a.b` gives `claude-a_b-`, which is what tmux holds.
+     */
+    fun prefixFor(serverName: String): String = sanitize("claude-$serverName-")
+
+    /** The prefix of the box named `server` (the dev box): drift, `cr-session` and Jarvis know only this one. */
+    const val DEFAULT_PREFIX = "claude-server-"
+
+    /**
+     * D6-K: the prefixes whose live session proves that the tmux server of the box [serverName] is up (liveness of
+     * forget and prune, the manifest push's guard): the box's own and [DEFAULT_PREFIX] (kritika D2 N21). Null name
+     * (unknown server) = [DEFAULT_PREFIX] only, as before.
+     */
+    fun livePrefixes(serverName: String?): Set<String> =
+        if (serverName == null) setOf(DEFAULT_PREFIX) else linkedSetOf(prefixFor(serverName), DEFAULT_PREFIX)
+
+    /** True when [tmuxName] starts with one of [prefixes] (fixed strings, never a pattern). */
+    fun hasPrefix(tmuxName: String, prefixes: Set<String>): Boolean = prefixes.any { tmuxName.startsWith(it) }
+
     fun build(serverName: String, folder: String, isYolo: Boolean, alias: String = ""): String {
         val folderPart = folder.trimEnd('/').substringAfterLast('/').ifBlank { folder }
         val yolo = if (isYolo) "-yolo" else ""
         val aliasPart = if (alias.isNotBlank()) "--${alias.replace(" ", "-")}" else ""
-        val prefix = "claude-${serverName}-"
+        val prefix = prefixFor(serverName)
         val suffix = "${yolo}${aliasPart}"
         // Never truncate inside the -yolo/--alias suffix. A cut alias fragment
         // (e.g. "--mission-critical" clipped to "--mis") is re-parsed as the
@@ -141,7 +161,8 @@ object TmuxNameParser {
     data class Parsed(val folder: String, val isYolo: Boolean, val alias: String)
 
     fun parse(tmuxName: String, serverName: String): Parsed {
-        val prefix = "claude-${serverName}-"
+        // D6-K: sanitized like build()'s — a name built for `a.b` starts `claude-a_b-` (it never matched before)
+        val prefix = prefixFor(serverName)
         var remainder = if (tmuxName.startsWith(prefix)) tmuxName.removePrefix(prefix) else tmuxName
         // Extract alias (after --)
         val alias = if (remainder.contains("--")) {
