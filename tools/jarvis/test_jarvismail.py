@@ -405,6 +405,32 @@ class I1TargetTest(Base):
         self.tp.name = "claude-server-jine"
         self.assertNotPasted(rec, "dead")
 
+    def _without_tmux(self, pid=200):
+        f = os.path.join(self.fx.home, ".claude", "sessions", f"{pid}.json")
+        with open(f) as fh:
+            d = json.load(fh)
+        d.pop("tmux", None)
+        with open(f, "w") as fh:
+            json.dump(d, fh)
+
+    def test_record_without_tmux_is_found_by_ancestry(self):
+        # Claude 2.1.319 after a --resume restart writes no `tmux`: Jarvis's wakes and mail stood on "no-claude"
+        rec, _ = self.send()
+        self._without_tmux()
+        self.assertEqual(self.deliver(rec), "delivered")
+
+    def test_record_without_tmux_not_below_the_pane(self):
+        rec, _ = self.send()
+        self._without_tmux()
+        self.fx.ppids[200] = 1
+        self.assertNotPasted(rec, "no-claude")
+
+    def test_record_without_tmux_dead_or_reused_pid(self):
+        rec, _ = self.send()
+        self._without_tmux()
+        self.fx.procs[200] = "999"
+        self.assertNotPasted(rec, "no-claude")
+
     def test_registry_pane_belongs_to_another_session(self):
         rec, _ = self.send()
         self.fx.registry(TARGET, 200, "%3")  # record names a pane of OTHER

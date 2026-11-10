@@ -1065,12 +1065,14 @@ class Mail:
         if not panes:
             return "dead"
         by_pane = {p[0]: p for p in panes}
-        regs = [r for r in J.read_registry(self.env) if r.alive and r.pane in by_pane]
+        # A record without `tmux` (Claude 2.1.319 after a --resume restart, 2026-11-10: Jarvis and 13 others) is matched
+        # by ancestry alone, as the digest does (`jarvislib._pane_of`): its pid must still run below this pane's process.
+        regs = [r for r in J.read_registry(self.env) if r.alive and (r.pane in by_pane or (r.pane is None and not r.tmux))]
         for p in panes:
             if p[2] != name or p[3]:
                 continue
             for r in sorted(regs, key=lambda r: (r.started_at or 0, r.pid)):
-                if r.pane == p[0] and J.is_descendant(self.env, r.pid, p[1]):
+                if r.pane in (p[0], None) and J.is_descendant(self.env, r.pid, p[1]):
                     return Target(name, p[0], p[1], r.pid, r)
         return "no-claude"
 
