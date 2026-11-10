@@ -28,13 +28,22 @@ Details live in `docs/`; this file only points at the places of truth and at the
   `sendTerminalReply`; watch/notification replies through `ReplyGuard` over exec. A reconnect never ends ACTIVE over a dead shell, the
   SSH attach line ends with `|| exit 1`, and an early death after "success" counts as a failed attempt (backoff 4 s → 60 s).
 - **Big exec requests** — nothing over 4 KB as an exec argument (`ExecArgumentSizeTest`); larger payloads go over stdin, paced (the
-  80 KB restore installer through cloudflared left a transport that opened no channels). Bootstrap, hooks v2, streamd and reconcile
-  are still capped exceptions.
+  80 KB restore installer through cloudflared left a transport that opened no channels). Close, close facts, restore and the
+  `cr-session` install go through `StdinScript` (short launcher, body on stdin, runs only when the end marker arrived; no
+  `__CR_END__` = never success: close → fallback, facts → null, restore → Unknown, install → SESSIONOPS_FAILED). Bootstrap,
+  hooks v2, streamd, reconcile and the ET server install are still capped exceptions.
 - **Fresh launch** — `SessionOrchestrator.launchSession` creates the session first over exec (`ClaudeConfig.buildFreshCreateCommand`:
   `new-session -d -e CR_LAUNCH=<nonce>`), only then adds the tab, which attaches. Never kill or adopt a session that holds the name;
   never let a tab exist before its name is ours. Socket heal: `tmux-sockheal.sh`/`sg_guard` generated in `SessionPersistenceService`.
 - **Forget rules** — `session/service/ServerReconciler.kt` + `ManifestCommands.reconcileAll`: forget only if tombstoned ∧ absent from
-  `list-sessions` ∧ another live `claude-server-*` exists; an unknown/truncated section never forgets.
+  `list-sessions` ∧ another live session of the box's own prefix or of `claude-server-` exists; an unknown/truncated section never
+  forgets.
+- **Session-name prefix** — one place: `TmuxNameParser.prefixFor(serverName)` / `DEFAULT_PREFIX` (`claude-server-`); a literal
+  elsewhere fails `TmuxPrefixGateTest` (named exceptions: Jarvis, `cr-session` bodies). Liveness for forget, prune and the push guard =
+  own prefix ∪ `claude-server-`, compared as fixed strings. A box with another name gets its prefix in `~/.claude-remote/prefixes`
+  (written by the installer; drift reads only lines that pass `cr_prefix_ok`). Drift adopts a session of a non-default prefix only
+  when claude runs there with the app's `--dangerously-skip-permissions`/`--allow-dangerously-skip-permissions`, or when the app's
+  `sessions.json` has the entry (then its metadata is kept, never a default YOLO).
 - **Hooks** — `HookCommands.kt` (install/merge/`hook-ev.sh`), `HookEventReducer.kt`, `NotificationService` watcher. Claude 2.1.316
   hot-reloads `settings.json` within ~1 s, so installing hooks affects every live session at once: install only on the explicit
   per-server Settings action; `~/.claude-remote/hookev.off` is the instant off switch.
@@ -59,15 +68,19 @@ Details live in `docs/`; this file only points at the places of truth and at the
 - Debug builds hide release-only compile errors: always also run `:shared:compileReleaseKotlinAndroid :androidApp:compileReleaseKotlin`.
 - Other sessions work on `main` in this same checkout: unpushed work belongs on a branch, or it may be pushed by someone else.
 - The restore installer is marker-driven (`MARKER` in `SessionPersistenceService`): a generator change without a marker bump never
-  reaches a box that has the marker, and a bump rewrites the live scripts on the next launch of any client. Until 2026-11-07 the live
-  box still ran v17.
-- `claude-server-` is hard-coded (`TmuxLaunchDecision`, the push guard in `ManifestCommands`, `drift.sh`): a server named other than
-  `server` gets no drift and no forget. Open.
+  reaches a box that has the marker, and a bump rewrites the live scripts on the next launch of any client. The live box runs v19
+  since 2026-11-10 (installed under supervision by the lead). The v19 installer kept `drift.sh.v18`/`restore.sh.v18` next to them;
+  moving them back is the second exception to "never edit drift/restore" and only with Lukáš's explicit consent that day (a v19
+  client launching later rewrites them again — then the way back is a v20 hotfix).
+- Drift's `for s in $(tmux list-sessions …)` splits names with a space: `claude-server-My Project` is adopted as `claude-server-My`
+  and self-heal starts a duplicate claude. Open (HIGH, predates v19; see `davka-D/predavka-D.md`).
 - Generated shell: never a variable as the command (`$T tmux …`) — zsh does not word-split it; spell `timeout 3 tmux` in both branches.
-- The ET bootstrap kills every `flock` process of the user older than 30 s on the server — other sessions' locks included. Open bug.
+- `~/.cache/davka-a/sockguard.py` calls `tmux display` on the default socket: do not hand it to agents; take the server pid from `ss`.
 - Mutation runs: never a glob that matches your own runner (a recursion took the box to load 1400 on 2026-11-07); run mutants
   serially with `timeout`, and build with `--max-workers=2 -Pkotlin.daemon.jvmargs=-Xmx3g` while other sessions build.
-- `LiveFileCanary` tolerates exactly `~/.claude-remote/jarvis/status.json` and `d-state.json` (rewritten every ~5 s by `jarvis-d`).
+- `LiveFileCanary` tolerates exactly `~/.claude-remote/jarvis/status.json` and `d-state.json` (rewritten every ~5 s by `jarvis-d`);
+  `~/.cache/claude-remote/jarvis-alerts` and `events` are append-tier. The live app rotates `events` after 1000 lines
+  (`events.rotated` appears): a "truncated" alarm on it during a run is that rotation — rerun the class once.
 
 ## Build and test
 See `docs/building.md` and `docs/TESTING.md` (gradle 8.11.1 in `~/.local/gradle/`, JDK `~/jdks/jdk-21.0.5+11`; integration tests
