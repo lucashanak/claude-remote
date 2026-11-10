@@ -31,6 +31,19 @@ private const val NO_SESSION_RE = "can't find session|no server running|error co
 private const val REFRESH_MS = 2_500L
 
 /**
+ * D5: the decision probe's bound past the open's floor — the wait for a permit and the read. Its fixed 2 s bound left
+ * 1.4 s after a 0.6 s permit wait in the reconnect sweep, below Cloudflare's 1.5 s floor: no open, a fail-open probe
+ * (phone v1.0.563, 28 times in one sweep).
+ */
+private const val PROBE_SLACK_MS = 2_000L
+
+/**
+ * The bound of [TmuxProbes.probeTmuxSession] by server: Cloudflare's floor (the slowest route's, whichever transport
+ * the exec ends up on) plus [PROBE_SLACK_MS] — so a permit wait of up to [PROBE_SLACK_MS] still leaves the open its floor.
+ */
+internal fun probeBudgetMs(): Long = com.clauderemote.connection.ChannelOpen.tuning.minOpenCfMs + PROBE_SLACK_MS
+
+/**
  * Trailing-edge window for coalescing a burst of kickRedraw calls into one
  * server-side resize/refresh. A tab switch alone fires several kicks inside the
  * same second (replay kick + the Android view poke at 300/800ms + the resize
@@ -268,7 +281,7 @@ internal class TmuxProbes(
      */
     suspend fun probeTmuxSession(serverId: String, sessionName: String): Boolean = try {
         // interactive (SHORT): it decides launch/attach and what an ended attach means (review C1-1 adv 4), never skipped
-        val out = registry.execRead(serverId, hasSessionCmd(sessionName), totalMs = 2_000)?.trim()
+        val out = registry.execRead(serverId, hasSessionCmd(sessionName), totalMs = probeBudgetMs())?.trim()
         out == null || !out.endsWith("NO")
     } catch (e: kotlinx.coroutines.CancellationException) {
         throw e

@@ -126,11 +126,15 @@ class OrchestratorLaunchModeTest {
             claudeSessionId = session.claudeSessionId, resume = resume, accountSlug = session.accountSlug, onExisting = onExisting,
         )
 
+    /** D2: what the tab's shell receives for a launch line — it ends the login shell when the line fails. */
+    private fun orExit(cmd: String) = "{ $cmd; } || exit 1"
+
     /** The same launch in the three anchor modes: the exact one sent must be [want], and the three must differ (else the check proves nothing). */
     private fun assertMode(what: String, sent: String, o: SessionOrchestrator, session: ClaudeSession, resume: Boolean?, want: String) {
-        val refuse = launch(session, resume, ClaudeConfig.OnExisting.Refuse)
-        val attachSingleClient = launch(session, resume, ClaudeConfig.OnExisting.Attach(o.buildAttachCommand(session.tmuxSessionName)))
-        val attachPlain = launch(session, resume, ClaudeConfig.OnExisting.Attach())
+        // D2: each mode as the tab's shell gets it (`{ …; } || exit 1`); the builder's own text is unchanged (TmuxRunGoldenTest)
+        val refuse = orExit(launch(session, resume, ClaudeConfig.OnExisting.Refuse))
+        val attachSingleClient = orExit(launch(session, resume, ClaudeConfig.OnExisting.Attach(o.buildAttachCommand(session.tmuxSessionName))))
+        val attachPlain = orExit(launch(session, resume, ClaudeConfig.OnExisting.Attach()))
         assertEquals(3, setOf(refuse, attachSingleClient, attachPlain).size, "fixture: the three modes give three commands")
         val expected = when (want) {
             "refuse" -> refuse
@@ -141,6 +145,8 @@ class OrchestratorLaunchModeTest {
             refuse -> "refuse"
             attachSingleClient -> "attach with the single-client preamble"
             attachPlain -> "plain attach (no single-client preamble)"
+            launch(session, resume, ClaudeConfig.OnExisting.Refuse), launch(session, resume, ClaudeConfig.OnExisting.Attach(o.buildAttachCommand(session.tmuxSessionName))) ->
+                "the launch line WITHOUT `{ …; } || exit 1` (a refusal leaves a bare login shell)"
             else -> "another command"
         }
         assertEquals(expected, sent, "$what must send the anchor in mode '$want', it sent: $got")
@@ -204,7 +210,7 @@ class OrchestratorLaunchModeTest {
         val b = body(fn)
         val start = b.indexOf("val $variable = if (isNewTmuxSession) {").also { assertTrue(it >= 0, "$fn: `val $variable = if (isNewTmuxSession)` not found") }
         val split = b.indexOf("} else {", start).also { assertTrue(it > start, "$fn: no else branch") }
-        val end = b.indexOf("\"\${buildAttachCommand(session.tmuxSessionName)} 2>/dev/null || { \$relaunch ; }\"", split)
+        val end = b.indexOf("\"\${buildAttachCommand(session.tmuxSessionName)} 2>/dev/null || { \$relaunch ; }", split)
             .also { assertTrue(it > split, "$fn: the relaunch is `attach || { relaunch ; }`") }
         return b.substring(start, split) to b.substring(split, end)
     }
@@ -233,6 +239,69 @@ class OrchestratorLaunchModeTest {
         val rebuild = b.substring(b.indexOf("is TmuxLaunchDecision.Rebuild ->"))
         val modes = Regex("""onExisting = [^\n]*""").findAll(rebuild).map { it.value.trim() }.toList()
         assertEquals(listOf(attach, attach, attach), modes, "sendTmuxCommand, Rebuild: each of the three branches attaches with buildAttachCommand")
+    }
+
+    /**
+     * D2: every launch line of `sendTmuxCommand` ends the login shell when it fails (a sockheal refusal is `false`):
+     * FreshLaunch, and each of the three Rebuild branches — the third (`resume == false`) only reachable in the source.
+     */
+    @Test fun everyLaunchLineOfSendTmuxCommandEndsTheShellWhenItFails() {
+        val b = body("sendTmuxCommand")
+        assertTrue("fun orExit(cmd: String) = \"{ \$cmd; } || exit 1\"" in b, "the wrapper: {{ cmd; }} || exit 1")
+        val fresh = b.substring(b.indexOf("is TmuxLaunchDecision.FreshLaunch ->"), b.indexOf("is TmuxLaunchDecision.Attach ->"))
+        assertTrue("is TmuxLaunchDecision.FreshLaunch -> orExit(ClaudeConfig.buildTmuxLaunchCommand(" in fresh, "FreshLaunch: $fresh")
+        val attachLine = b.substring(b.indexOf("is TmuxLaunchDecision.Attach ->")).lineSequence().first()
+        assertTrue(attachLine.trimEnd().endsWith("+ \" || exit 1\""), "Attach: $attachLine")
+        val rebuild = b.substring(b.indexOf("is TmuxLaunchDecision.Rebuild ->"))
+        val launches = Regex("""\n\s*(\S*)ClaudeConfig\.buildTmuxLaunchCommand\(""").findAll(rebuild).map { it.groupValues[1] }.toList()
+        assertEquals(listOf("orExit(", "orExit(", "orExit("), launches, "Rebuild: each of the three branches is wrapped")
+    }
+
+    /**
+     * D2 (kritika D2-6): ET types its line into a login shell too — a relaunch that fails after the failed attach ends
+     * that shell (`|| exit 1`). Mosh's startup command is the session's own process: it ends with it, no exit needed.
+     */
+    @Test fun etEndsItsLoginShellWhenTheRelaunchFailsToo() {
+        val et = body("connectEt")
+        assertTrue("\"\${buildAttachCommand(session.tmuxSessionName)} 2>/dev/null || { \$relaunch ; } || exit 1\"" in et,
+            "ET: attach || {{ relaunch ; }} || exit 1")
+        val mosh = body("connectMosh")
+        assertTrue("\"\${buildAttachCommand(session.tmuxSessionName)} 2>/dev/null || { \$relaunch ; }\"" in mosh, "mosh unchanged")
+    }
+
+    /**
+     * D2, the sent line itself in a shell (bash and dash): when the socket guard refuses (exit 1), the line ends the shell
+     * — nothing after it runs. Scratch HOME with a guard stub; no tmux is reached (the guard's branch comes first).
+     */
+    @Test fun aSentLaunchLineEndsTheShellWhenTheSocketGuardRefuses() {
+        val root = java.io.File(System.getProperty("java.io.tmpdir")).resolve("d2-exit-${System.nanoTime()}").also { it.mkdirs() }
+        try {
+            val home = java.io.File(root, "home").also { java.io.File(it, ".claude-remote").mkdirs() }
+            java.io.File(home, ".claude-remote/tmux-sockheal.sh").apply {
+                writeText("#!/bin/sh\necho 'sockheal: refused' >&2\nexit 1\n"); setExecutable(true)
+            }
+            fun line(session: ClaudeSession, isNew: Boolean, transcript: Boolean = false): String =
+                sent(session, isNew, transcript = transcript).let { (o, cmd) -> o.shutdownForTest(); orchestrator = null; cmd }
+            val lines = listOf(
+                "FreshLaunch" to line(tab(claudeSessionId = uuid), isNew = true),
+                "Rebuild without a session id" to line(tab(claudeSessionId = null), isNew = false),
+                "Rebuild with --resume" to line(tab(claudeSessionId = uuid), isNew = false, transcript = true),
+                "Rebuild with the server-side check" to line(tab(claudeSessionId = uuid), isNew = false),
+            )
+            for (shell in listOf("bash", "dash").filter { java.io.File("/bin/$it").exists() || java.io.File("/usr/bin/$it").exists() }) {
+                for ((what, line) in lines) {
+                    val p = ProcessBuilder(shell, "-c", "$line\necho STILL-IN-THE-LOGIN-SHELL").redirectErrorStream(true)
+                        .also { it.environment()["HOME"] = home.absolutePath }.start()
+                    assertTrue(p.waitFor(20, java.util.concurrent.TimeUnit.SECONDS), "$shell, $what: finished")
+                    val out = p.inputStream.bufferedReader().readText()
+                    assertTrue("sockheal: refused" in out, "$shell, $what: the guard ran: $out")
+                    assertTrue("STILL-IN-THE-LOGIN-SHELL" !in out, "$shell, $what: the refused line must end the shell: $out")
+                    assertEquals(1, p.exitValue(), "$shell, $what: exit 1")
+                }
+            }
+        } finally {
+            com.clauderemote.testsupport.safeDeleteTree(root)
+        }
     }
 
     /**

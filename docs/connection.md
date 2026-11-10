@@ -166,13 +166,23 @@ login shell under an ACTIVE tab). NO leads to Rebuild, whose launch line goes th
 brings the socket back, then the existing session is attached; nothing is killed); ForgetClosedElsewhere on NO stays
 as since 18faa58: only for a tombstoned name, or an untracked one while other live sessions answer (they cannot when
 the socket is gone). Any other failure (tmux missing, a socket path too long, no permission) prints nothing:
-fail-open, kolo 4 adv N8; and the SSH attach line (`buildAttachCommand … || exit 1`, kolo 6) ends the login shell when
-the attach fails, so the loss goes the usual reconnect way instead of a bare bash under an ACTIVE tab. A loss within
+fail-open, kolo 4 adv N8; and every line `sendTmuxCommand` types into the login shell ends that shell when it fails:
+the SSH attach line (`buildAttachCommand … || exit 1`, kolo 6) and the launch line of each Rebuild branch and of
+FreshLaunch (`{ <launch>; } || exit 1`, dávka D2) — so a failed attach, or a `tmux-sockheal.sh` that refuses (split
+brain, its lock held: the line's `false`), goes the usual reconnect way instead of a bare bash under an ACTIVE tab. The
+wrapper is added in the orchestrator, never in `ClaudeConfig.buildTmuxLaunchCommand` (which `cr-session` and the
+detached create share; `TmuxRunGoldenTest` pins its bytes). ET types its line into a login shell too: `<attach>
+2>/dev/null || { <relaunch> ; } || exit 1` (D2); mosh runs its command as the session's own process, which ends with
+it. FreshLaunch in a tab is a dead backstop: every entry calls it with `isNewTmuxSession = false`, `launchSession`
+creates new sessions over exec. A loss within
 5 s of a reconnect that ended ACTIVE counts as a failed attempt (kolo 7, adv N1: on a slow link the failed attach's
 exit comes after ACTIVE, and every round began at attempt 1 with no wait, ~1.6 s apart for ever): such losses in a row
-wait 4 s, 8 s, 16 s … (cap 60 s); a connection that held longer starts the count over. Not covered (older, in the
-hand-over): an attach that ENDS with status 0 — another client detached ours — and a Rebuild whose `tmux-sockheal.sh`
-refuses (its lock is held) still leave the login shell under the ACTIVE tab. The probes are
+wait 4 s, 8 s, 16 s … (cap 60 s); a connection that held longer starts the count over. A sockheal that keeps refusing
+thus reconnects every 4 … 60 s for as long as it refuses; each refusal is on the tab's terminal and in
+`~/.claude-remote/sockheal.log` (one line per cause per 15 min). Not covered (older, in the hand-over): a tmux client
+that ENDS with status 0 — another client detached ours, `prefix d` — still leaves the login shell under the ACTIVE tab
+(an unconditional `; exit` would make two tabs of one device on one session detach each other for ever through the
+single-client preamble: dávka E). The probes are
 spelled out in both branches of
 `if command -v timeout …; then timeout 3 tmux …; else tmux …; fi`, never a command kept in a shell variable: zsh does
 not word-split an unquoted `$CR_T`, so round 2's `$CR_T tmux has-session` ran `timeout 3` as one command name and
@@ -667,7 +677,11 @@ confirmation is late without sending CLOSE (`Channel.connect` sets `connected=fa
 the late confirmation, so sshd kept that session for the life of the transport (P-1: 11 stalls of 6 s, then 3 of 3
 channels refused). `ChannelOpen.connect(ch, budgetMs)` is now the one way the exec layer (`PooledRemoteExec`,
 `execReadWithWatchdog`), the transcript and status polls and the tmux probes open a channel:
-- below the route's floor no OPEN is sent at all: `TIMEOUT` (`cf` 1 500 ms, `lan` 300 ms);
+- below the route's floor no OPEN is sent at all: `TIMEOUT` (`cf` 1 500 ms, `lan` 300 ms). The floor is checked
+  against what is LEFT of the caller's bound after its wait for a permit, so a caller's bound must cover the floor plus
+  that wait plus the read: the probe that decides launch/attach (`probeTmuxSession` by server) has Cloudflare's floor
+  + 2 s (`probeBudgetMs`, dávka D5; its fixed 2 s left 1.4 s after a 0.6 s permit wait in the phone's first sweep after
+  a start — 28 fail-open probes in one second, v1.0.563);
 - the open runs detached: the caller waits its budget, the open goes on up to 20 s (`cf`) / 10 s (`lan`), or the
   caller's budget if longer. An open the caller gave up on runs `true` instead of its command (the swap can lose a
   race with an answer arriving in that very instant) and is closed with CLOSE once confirmed — no orphan. Its slot

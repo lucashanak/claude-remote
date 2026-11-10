@@ -2100,12 +2100,17 @@ class SessionOrchestrator(
             FileLogger.log(TAG, "Tmux '${session.tmuxSessionName}' missing + untracked but NO live peer sessions — treating as whole-server outage, rebuilding/--resume instead of forgetting")
         }
 
+        // D2: every line this decision sends ends the login shell when it fails — a sockheal that refuses (`false`), a
+        // refused or failed attach — so the loss goes the usual reconnect way and no bare bash is left under an ACTIVE
+        // tab, where typed input would run as commands. Only here: buildTmuxLaunchCommand also feeds `cr-session` and the
+        // detached create, which must not exit their shell. A tmux client that ends with status 0 (a detach) is not covered.
+        fun orExit(cmd: String) = "{ $cmd; } || exit 1"
         val command = when (decision) {
             is TmuxLaunchDecision.ForgetClosedElsewhere -> return // unreachable: threw above
             // V14: a fresh launch never kills and never adopts a session that holds its name — the anchor refuses.
             // V16: launchSession creates new sessions over exec before the tab exists and attaches them, so this is only
             // the backstop of a launch in the tab.
-            is TmuxLaunchDecision.FreshLaunch -> ClaudeConfig.buildTmuxLaunchCommand(
+            is TmuxLaunchDecision.FreshLaunch -> orExit(ClaudeConfig.buildTmuxLaunchCommand(
                 tmuxSessionName = session.tmuxSessionName,
                 folder = session.folder,
                 mode = session.mode,
@@ -2114,7 +2119,7 @@ class SessionOrchestrator(
                 resume = false,
                 accountSlug = session.accountSlug,
                 onExisting = ClaudeConfig.OnExisting.Refuse,
-            )
+            ))
             // See buildAttachCommand for the attach semantics (single client per
             // device, no -d, manual window sizing, exact target).
             // kolo 6 (adv H1): a failed attach ends the login shell (the transport's loss then goes the usual reconnect
@@ -2125,19 +2130,19 @@ class SessionOrchestrator(
             is TmuxLaunchDecision.Rebuild -> when {
                 !decision.withSessionId -> {
                     FileLogger.log(TAG, "Tmux '${session.tmuxSessionName}' missing and no claudeSessionId — fresh launch")
-                    ClaudeConfig.buildTmuxLaunchCommand(
+                    orExit(ClaudeConfig.buildTmuxLaunchCommand(
                         tmuxSessionName = session.tmuxSessionName,
                         folder = session.folder,
                         mode = session.mode,
                         model = session.model,
                         accountSlug = session.accountSlug,
                         onExisting = ClaudeConfig.OnExisting.Attach(buildAttachCommand(session.tmuxSessionName)),
-                    )
+                    ))
                 }
                 decision.resume != false -> {
                     val how = if (decision.resume == true) "claude --resume" else "a server-side transcript check for"
                     FileLogger.log(TAG, "Tmux '${session.tmuxSessionName}' missing — rebuilding with $how ${session.claudeSessionId}")
-                    ClaudeConfig.buildTmuxLaunchCommand(
+                    orExit(ClaudeConfig.buildTmuxLaunchCommand(
                         tmuxSessionName = session.tmuxSessionName,
                         folder = session.folder,
                         mode = session.mode,
@@ -2146,14 +2151,14 @@ class SessionOrchestrator(
                         resume = decision.resume,
                         accountSlug = session.accountSlug,
                         onExisting = ClaudeConfig.OnExisting.Attach(buildAttachCommand(session.tmuxSessionName)),
-                    )
+                    ))
                 }
                 else -> {
                     // A session launched but never interacted with has no jsonl,
                     // so `--resume` would print "No conversation found" — relaunch
                     // fresh with the SAME --session-id so later restarts resume.
                     FileLogger.log(TAG, "Tmux '${session.tmuxSessionName}' missing and no transcript for ${session.claudeSessionId} — fresh launch with same --session-id")
-                    ClaudeConfig.buildTmuxLaunchCommand(
+                    orExit(ClaudeConfig.buildTmuxLaunchCommand(
                         tmuxSessionName = session.tmuxSessionName,
                         folder = session.folder,
                         mode = session.mode,
@@ -2162,7 +2167,7 @@ class SessionOrchestrator(
                         resume = false,
                         accountSlug = session.accountSlug,
                         onExisting = ClaudeConfig.OnExisting.Attach(buildAttachCommand(session.tmuxSessionName)),
-                    )
+                    ))
                 }
             }
         }
@@ -2638,7 +2643,9 @@ class SessionOrchestrator(
                 accountSlug = session.accountSlug,
                 onExisting = ClaudeConfig.OnExisting.Attach(buildAttachCommand(session.tmuxSessionName)),
             )
-            "${buildAttachCommand(session.tmuxSessionName)} 2>/dev/null || { $relaunch ; }"
+            // D2: a relaunch that fails too (its sockheal refused: `false`) ends the login shell ET typed this into —
+            // never a bare shell under the ET tab; the et client's exit then takes the onDisconnect reconnect below
+            "${buildAttachCommand(session.tmuxSessionName)} 2>/dev/null || { $relaunch ; } || exit 1"
         }
         val tmuxCmd = "clear 2>/dev/null; $attachCmd"
 
@@ -2847,11 +2854,13 @@ class SessionOrchestrator(
                 ch.setCommand(command)
                 ch.inputStream = null
                 val input = ch.inputStream
-                ch.connect(10000)
                 try {
+                    // D1: ChannelOpen (floor, detached open, CLOSE of a late confirmation) — a bare ch.connect(t) that
+                    // times out leaks an sshd slot (JSch 0.2.21 sends no CLOSE for it)
+                    com.clauderemote.connection.ChannelOpen.connect(ch, 10_000)
                     kotlinx.coroutines.runInterruptible { input.bufferedReader().readText() }
                 } finally {
-                    try { ch.disconnect() } catch (_: Exception) {}
+                    com.clauderemote.connection.ChannelOpen.disconnect(ch)
                 }
             }
         }
@@ -2862,7 +2871,7 @@ class SessionOrchestrator(
     // etserver as a plain user process — no root, no package manager, no server
     // config. Idempotent via a version marker; reuses a running instance.
     // Prints "ET_READY port=<P>" on success, or an ET_* marker to fall back.
-    private val ETSERVER_INSTALL = """
+    internal val ETSERVER_INSTALL = """
         CR="${'$'}HOME/.claude-remote"; mkdir -p "${'$'}CR"
         VER="claude-remote-etserver v7.0.0-1"
         case "${'$'}(uname -m)" in x86_64) A=x64 ;; *) echo "ET_UNSUPPORTED_ARCH:${'$'}(uname -m)"; exit 0 ;; esac
@@ -2880,16 +2889,12 @@ class SessionOrchestrator(
           AGE=${'$'}(ps -o etimes= -p "${'$'}p" 2>/dev/null | tr -d ' ')
           [ "${'$'}{AGE:-0}" -gt 30 ] 2>/dev/null && kill "${'$'}p" 2>/dev/null
         done
-        # Reap flock waiters stuck on the etserver lock from the pre-fix deadlock:
-        # the daemon used to INHERIT lock fd 9 and hold it for its whole life, so
-        # every later run's `flock 9` blocked forever (15+ leaked bash/flock). A
-        # healthy `flock -w 5` now exits in <5s, so any flock older than 30s is a
-        # legacy deadlocked waiter — kill it (own-process only; kill fails silently
-        # otherwise). Killing it unblocks its parent bash too.
-        for p in ${'$'}(pgrep -x flock 2>/dev/null); do
-          AGE=${'$'}(ps -o etimes= -p "${'$'}p" 2>/dev/null | tr -d ' ')
-          [ "${'$'}{AGE:-0}" -gt 30 ] 2>/dev/null && kill "${'$'}p" 2>/dev/null
-        done
+        # No flock reaper here (D1). One used to kill EVERY flock process of the
+        # user older than 30 s, meant for the waiters of the old etserver.lock
+        # deadlock — and with them other sessions' `( flock -x 9; … ) 9<>LOCK`
+        # waiters (their body then ran WITHOUT the lock) and the integration lock.
+        # The lock below is etserver.start.lock with a bounded `-w 5`: no waiter
+        # of it can get stuck, and old waiters on etserver.lock block nothing here.
         # Single-flight across concurrent SSH execs. Two sessions' first ET
         # connect used to each run this and each start an etserver on a bumped
         # port, both sharing one serverfifo → et.sock races away and every
@@ -2951,6 +2956,10 @@ class SessionOrchestrator(
     /** Test seam (kolo 4): stands in for [ensureEtServer] (its install script must never run in a test). Null in production. */
     @Volatile internal var etServerSeam: ((com.jcraft.jsch.Session) -> Int?)? = null
 
+    /** The exec command [ensureEtServer] sends: [ETSERVER_INSTALL] under a server-side `timeout 12` (see there). */
+    internal val etServerInstallCommand: String
+        get() = "timeout 12 sh -c '" + ETSERVER_INSTALL.replace("'", "'\\''") + "'"
+
     private suspend fun ensureEtServer(jsch: com.jcraft.jsch.Session): Int? {
         etServerSeam?.let { return it(jsch) }
         // Wrap the whole install in a server-side `timeout 12`: execCapture's
@@ -2960,8 +2969,7 @@ class SessionOrchestrator(
         // the server-side process is reaped BEFORE we give up, so nothing leaks.
         // Single-quote-wrap for the outer login shell so the script reaches
         // `sh -c` verbatim (its own `$…` expand in the inner sh, not out here).
-        val wrapped = "timeout 12 sh -c '" + ETSERVER_INSTALL.replace("'", "'\\''") + "'"
-        val out = execCapture(jsch, wrapped)
+        val out = execCapture(jsch, etServerInstallCommand)
         val port = Regex("ET_READY port=(\\d+)").find(out)?.groupValues?.get(1)?.toIntOrNull()
         if (port == null) FileLogger.log(TAG, "etserver not ready: ${out.trim().takeLast(200)}")
         return port

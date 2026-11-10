@@ -112,7 +112,8 @@ class HasSessionNoServerIntegrationTest {
         assertTrue(listens(f.tmuxSocket.absolutePath), "the server still listens")
         runBlocking { withTimeout(120_000) { orchestrator.reconnectSession("t1") } }
         // has-session said NO: the Rebuild's launch line (through sockheal where installed), not the plain attach
-        assertTrue(logLines.any { "Attaching to tmux:" in it && "|| exit 1" !in it }, "the reconnect rebuilt: ${logLines.filter { "Attaching" in it }}")
+        // (D2: the Rebuild's line ends with `|| exit 1` too — its launch, not `|| exit 1`, tells it from the plain attach)
+        assertTrue(logLines.any { "Attaching to tmux:" in it && "new-session" in it }, "the reconnect rebuilt: ${logLines.filter { "Attaching" in it }}")
         typedInputNeverRunsInABareShell(tio)
     }
 
@@ -135,6 +136,50 @@ class HasSessionNoServerIntegrationTest {
             typedInputNeverRunsInABareShell(tio)
         } finally {
             dir.setReadable(true, true); dir.setExecutable(true, true)
+        }
+    }
+
+    /**
+     * D2 (N2 of overeni-int-5-adv): a Rebuild whose socket guard REFUSES — the real `tmux-sockheal.sh` the app installs
+     * (cut out of `SessionPersistenceService.INSTALL_RESTORE_COMMAND`), in the fixture's private HOME, with its heal
+     * lock `tmux-server.lock` held by someone else for longer than its 2 s wait (and its second look). Its launch line
+     * prints the refusal and runs `false`; `{ …; } || exit 1` ends the login shell: the loss goes the reconnect way.
+     * Before D2 the login shell lived on under the tab and what was typed ran in it (`BARE--42`). The refusal is logged
+     * on the server (`sockheal.log`, kritika Hrozba 5: a lasting refusal must be visible).
+     */
+    @Test fun aRebuildWhoseSocketGuardRefusesEndsTheLoginShell() {
+        val tio = setUpTab()
+        val f = fixture!!
+        val installer = com.clauderemote.session.service.SessionPersistenceService.INSTALL_RESTORE_COMMAND
+        val from = installer.indexOf('\n', installer.indexOf("<<'SOCKHEAL_EOF'")) + 1
+        val to = installer.indexOf("\nSOCKHEAL_EOF\n", from)
+        assertTrue(from > 0 && to > from, "the installer carries tmux-sockheal.sh")
+        File(f.home, ".claude-remote").mkdirs()
+        File(f.home, ".claude-remote/tmux-sockheal.sh").apply { writeText(installer.substring(from, to + 1)); setExecutable(true) }
+        assertTrue(f.tmuxSocket.delete(), "socket file deleted (the guard's heal case)")
+        assertTrue(listens(f.tmuxSocket.absolutePath), "the server still listens")
+        val lock = File(f.home, ".claude-remote/tmux-server.lock")
+        val release = File(f.root, "release-heal-lock")
+        val holder = ProcessBuilder("flock", lock.absolutePath, "sh", "-c", "while [ ! -e \"\$1\" ]; do sleep 0.02; done", "holder", release.absolutePath)
+            .redirectErrorStream(true).redirectOutput(ProcessBuilder.Redirect.DISCARD).start()
+        f.trackPid(holder.pid())
+        try {
+            val end0 = System.currentTimeMillis() + 10_000
+            while (ProcessBuilder("flock", "-n", lock.absolutePath, "true").start().waitFor() == 0 && System.currentTimeMillis() < end0) Thread.sleep(20)
+            runBlocking { withTimeout(120_000) { orchestrator.reconnectSession("t1") } }
+            assertTrue(logLines.any { "Attaching to tmux:" in it && "new-session" in it }, "the reconnect rebuilt: ${logLines.filter { "Attaching" in it }}")
+            // the guard waits 2 s for the lock, looks once more after 0.5 s, waits 2 s again: then `false`, then the exit
+            val end = System.currentTimeMillis() + 20_000
+            while (logLines.none { "Connection lost" in it } && System.currentTimeMillis() < end) Thread.sleep(50)
+            assertTrue(logLines.any { "Connection lost" in it }, "the refused launch line ended the login shell: ${logLines.takeLast(20)}")
+            typedInputNeverRunsInABareShell(tio)
+            assertTrue(logLines.any { "Attaching to tmux:" in it && "new-session" in it && it.trimEnd().endsWith("|| exit 1") },
+                "the Rebuild's launch line ends in || exit 1: ${logLines.filter { "Attaching" in it }}")
+            val sockheal = File(f.home, ".claude-remote/sockheal.log").let { if (it.isFile) it.readText() else "" }
+            assertTrue("could not take" in sockheal, "the refusal is in sockheal.log: $sockheal")
+        } finally {
+            release.createNewFile()
+            if (!holder.waitFor(5, java.util.concurrent.TimeUnit.SECONDS)) holder.destroyForcibly()
         }
     }
 

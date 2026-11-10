@@ -150,4 +150,44 @@ class TmuxProbeClassTest {
             }
         }
     }
+
+    /**
+     * D5 (phone v1.0.563, 28x in the first sweep): over a Cloudflare exec transport whose six SHORT permits are all taken,
+     * the decision probe waits [permitWaitMs] for one. Its fixed 2 s bound then left ~1.4 s, below Cloudflare's 1.5 s
+     * floor: no open, a fail-open "alive". Its bound now covers the floor plus the wait.
+     */
+    private fun probeAfterAPermitWait(permitWaitMs: Long) {
+        val opened = CopyOnWriteArrayList<String>()
+        val (sess, gate) = execTransport("NO\n", cf = true, opened = opened)
+        val o = wire(gate, sess)
+        runBlocking {
+            withTimeout(20_000) {
+                val releases = (1..6).map { CompletableDeferred<Unit>() }
+                val holders = releases.map { r -> async(Dispatchers.IO) { gate.use(server.id, ExecKind.SHORT) { r.await() } } }
+                while (gate.held(server.id).first < 6) delay(5)
+                val probes = field<com.clauderemote.session.service.TmuxProbes>(o, "tmuxProbes")
+                val probe = async(Dispatchers.IO) { probes.probeTmuxSession(server.id, "claude-box-gone") }
+                delay(permitWaitMs)
+                releases[0].complete(Unit)
+                val alive = probe.await()
+                releases.forEach { it.complete(Unit) }
+                holders.forEach { it.await() }
+                val floorLines = logLines.filter { "floor" in it || "probe" in it }
+                assertTrue(opened.any { "has-session" in it }, "a ${permitWaitMs} ms permit wait: the probe still opened its channel: $opened $floorLines")
+                assertTrue(!alive, "a ${permitWaitMs} ms permit wait: its NO was heard (not a fail-open): $floorLines")
+                assertTrue(logLines.none { "below the cf floor" in it }, "no open refused below the floor: $floorLines")
+            }
+        }
+    }
+
+    @Test fun theDecisionProbeOverCloudflareStillOpensAfterAPermitWaitOf600ms() = probeAfterAPermitWait(600)
+
+    /** 1.2 s: the bound must be Cloudflare's floor plus the wait on any route (Lan's 0.3 s floor + 2 s would not do). */
+    @Test fun theDecisionProbeOverCloudflareStillOpensAfterAPermitWaitOf1200ms() = probeAfterAPermitWait(1_200)
+
+    /** The bound follows the floor (ChannelOpen.tuning), not a constant: a 3 s floor still leaves the open its floor. */
+    @Test fun theDecisionProbeBoundFollowsTheCloudflareFloor() {
+        ChannelOpen.tuning = ChannelOpen.Tuning(minOpenCfMs = 3_000)
+        probeAfterAPermitWait(1_200)
+    }
 }
