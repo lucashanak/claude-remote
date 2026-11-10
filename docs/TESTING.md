@@ -386,7 +386,8 @@ construction.
   (no `prefixes` file, or one of junk plus the default) the same manifest, mirror, log (times normalized) and
   tombstones; on `box` the only difference is the adoption of `claude-box-b`; a file of broken lines adopts
   nothing and leaves `__anchor__` alive; overlapping prefixes give one row; a second tick adds 0 B to drift.log;
-  the step v18 → v19 rewrites the three scripts by rename and a v18 client after it rewrites nothing back.
+  the step v18 → v19 rewrites the three scripts by rename and a v18 client after it rewrites nothing back; the
+  replaced v18 `restore.sh` and `drift.sh` are kept as `.v18` byte for byte, only from v18 and only once.
   `DriftPrefixesTest` (desktopTest): hradlo A (what the generator sends for `server` differs from cedfd70's
   only in the marker, the prefix reader, the two comparisons and the prefix write), the reader in bash and dash,
   and the installer's write (once, normalizing, never for `server`, never failing the install).

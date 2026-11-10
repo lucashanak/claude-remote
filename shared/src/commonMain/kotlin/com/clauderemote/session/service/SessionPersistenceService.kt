@@ -340,7 +340,7 @@ cr_prefix_ok() {
         LOCK="${'$'}HOME/.claude-remote/sessions.lock"
         MARKER="claude-remote-restore-v19"
         # An install cut short (set -e, a dropped SSH session) must not leave a temp script behind.
-        trap 'rm -f "${'$'}SCRIPT.tmp.${'$'}${'$'}" "${'$'}DRIFT.tmp.${'$'}${'$'}" "${'$'}SOCKHEAL.tmp.${'$'}${'$'}"' EXIT
+        trap 'rm -f "${'$'}SCRIPT.tmp.${'$'}${'$'}" "${'$'}DRIFT.tmp.${'$'}${'$'}" "${'$'}SOCKHEAL.tmp.${'$'}${'$'}" "${'$'}SCRIPT.v18.tmp.${'$'}${'$'}" "${'$'}DRIFT.v18.tmp.${'$'}${'$'}"' EXIT
         touch "${'$'}LOCK"
         echo "[${'$'}(date -u +%FT%TZ)] install: invoked by client" >> "${'$'}HOME/.claude-remote/install.log"
         if ! grep -q "${'$'}MARKER" "${'$'}SCRIPT" 2>/dev/null; then
@@ -612,6 +612,15 @@ else
 fi
 RESTORE_EOF
             chmod +x "${'$'}SCRIPT.tmp.${'$'}${'$'}"
+            # ---- rollback copy of restore.sh (D6-S) ----
+            # Kept once when the script replaced here is v18 (kritika D2 N17): moving it back is the way back to v18, by
+            # hand and only with Lukáš's consent that day (any v19 client's next install rewrites it to v19 again).
+            if grep -qE 'claude-remote-restore-v18( |${'$'})' "${'$'}SCRIPT" 2>/dev/null && [ ! -e "${'$'}SCRIPT.v18" ]; then
+                { cp -p "${'$'}SCRIPT" "${'$'}SCRIPT.v18.tmp.${'$'}${'$'}" && mv -f "${'$'}SCRIPT.v18.tmp.${'$'}${'$'}" "${'$'}SCRIPT.v18" \
+                    && echo "[${'$'}(date -u +%FT%TZ)] install: the v18 restore.sh kept as restore.sh.v18 (rollback)" >> "${'$'}HOME/.claude-remote/install.log"; } 2>/dev/null \
+                    || rm -f "${'$'}SCRIPT.v18.tmp.${'$'}${'$'}"
+            fi
+            # ---- end of the rollback copy of restore.sh ----
             mv -f "${'$'}SCRIPT.tmp.${'$'}${'$'}" "${'$'}SCRIPT"
             echo "RESTORE_SCRIPT_INSTALLED"
         else
@@ -1061,6 +1070,15 @@ if [ -f "${'$'}SF" ]; then
 fi
 DRIFT_EOF
             chmod +x "${'$'}DRIFT.tmp.${'$'}${'$'}"
+            # ---- rollback copy of drift.sh (D6-S) ----
+            # Kept once when the script replaced here is v18 (kritika D2 N17): moving it back is the way back to v18, by
+            # hand and only with Lukáš's consent that day (any v19 client's next install rewrites it to v19 again).
+            if grep -qE 'claude-remote-restore-v18( |${'$'})' "${'$'}DRIFT" 2>/dev/null && [ ! -e "${'$'}DRIFT.v18" ]; then
+                { cp -p "${'$'}DRIFT" "${'$'}DRIFT.v18.tmp.${'$'}${'$'}" && mv -f "${'$'}DRIFT.v18.tmp.${'$'}${'$'}" "${'$'}DRIFT.v18" \
+                    && echo "[${'$'}(date -u +%FT%TZ)] install: the v18 drift.sh kept as drift.sh.v18 (rollback)" >> "${'$'}HOME/.claude-remote/install.log"; } 2>/dev/null \
+                    || rm -f "${'$'}DRIFT.v18.tmp.${'$'}${'$'}"
+            fi
+            # ---- end of the rollback copy of drift.sh ----
             mv -f "${'$'}DRIFT.tmp.${'$'}${'$'}" "${'$'}DRIFT"
             echo "DRIFT_SCRIPT_INSTALLED"
         fi

@@ -45,7 +45,8 @@ class DriftPrefixesTest {
     /**
      * Hradlo A: what the app sends for the box `server` differs from cedfd70's only in the marker (MARKER, the three
      * compat lines), drift's prefix reader (one block), drift's two comparisons that knew only `claude-server-` (and
-     * the header comment that said so), and the prefix write before the end line.
+     * the header comment that said so), the prefix write before the end line, and (D6S-zaloha) the rollback copies of
+     * a v18 restore.sh and drift.sh with their temp files in the installer's trap.
      */
     @Test fun forServerTheInstallerChangedOnlyTheMarkerThePrefixesAndTheTwoComparisons() {
         val old = (golden() + "\n" + SessionPersistenceService.INSTALL_RESTORE_END + "\n").lines()
@@ -53,9 +54,12 @@ class DriftPrefixesTest {
         val (removed, added) = lineDiff(old, new)
         val compat18 = "# marker-compat (do NOT remove): " + (6..18).joinToString(" ") { "claude-remote-restore-v$it" }
         val compat19 = "$compat18 claude-remote-restore-v19"
+        val trap18 = "        trap 'rm -f \"\$SCRIPT.tmp.\$\$\" \"\$DRIFT.tmp.\$\$\" \"\$SOCKHEAL.tmp.\$\$\"' EXIT"
+        val trap19 = "        trap 'rm -f \"\$SCRIPT.tmp.\$\$\" \"\$DRIFT.tmp.\$\$\" \"\$SOCKHEAL.tmp.\$\$\" \"\$SCRIPT.v18.tmp.\$\$\" \"\$DRIFT.v18.tmp.\$\$\"' EXIT"
         assertEquals(
             listOf(
                 "        MARKER=\"claude-remote-restore-v18\"",
+                trap18,
                 compat18,
                 compat18,
                 "# the LIVE claude-server-* tmux sessions every minute. Self-healing: re-adds",
@@ -68,19 +72,23 @@ class DriftPrefixesTest {
         )
         val reader = block(SessionPersistenceService.INSTALL_RESTORE_COMMAND, "# ---- prefixes of this box (D6-S) ----", "# ---- end of prefixes ----")
         val write = SessionPersistenceService.prefixWrite(TmuxNameParser.DEFAULT_PREFIX).lines()
+        // the rollback copies of the v18 restore.sh and drift.sh (D6S-zaloha) and their temp files in the trap
+        fun rollback(name: String) = block(SessionPersistenceService.INSTALL_RESTORE_COMMAND,
+            "            # ---- rollback copy of $name (D6-S) ----", "            # ---- end of the rollback copy of $name ----")
         assertEquals(
-            listOf("        MARKER=\"claude-remote-restore-v19\"", compat19, compat19,
+            listOf("        MARKER=\"claude-remote-restore-v19\"", trap19,
+                compat19) + rollback("restore.sh") + listOf(compat19,
                 "# the LIVE tmux sessions of this box (claude-server-* and the prefixes file) every minute. Self-healing: re-adds") +
                 reader +
                 listOf(
                     "if tmux -u list-sessions -F '#{session_name}' 2>/dev/null | { while IFS= read -r s; do is_ours \"\$s\" && exit 0; done; exit 1; }; then",
                     "    is_ours \"\$s\" || continue",
-                    compat19,
-                ) + write,
+                ) + rollback("drift.sh") + listOf(compat19) + write,
             added,
             "added lines",
         )
         assertTrue(reader.size in 20..40 && write.size in 20..45, "the reader (${reader.size}) and the write (${write.size}) are small blocks")
+        assertEquals(9, rollback("drift.sh").size)
     }
 
     // ---- the reader (drift.sh) --------------------------------------------------------------------

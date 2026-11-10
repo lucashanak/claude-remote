@@ -222,12 +222,42 @@ class DriftPrefixesIntegrationTest {
             assertContains(log, "${f.name} missing claude-remote-restore-v19 — rewriting; prior marker line: # marker-compat (do NOT remove): " +
                 (6..18).joinToString(" ") { "claude-remote-restore-v$it" } + "\n", message = log)
         }
+        // D6S-zaloha: the replaced v18 restore.sh and drift.sh are kept next to them, byte for byte; the guard script
+        // gets no copy (its v19 differs from v18 only in the compat line)
+        val copies = listOf("restore.sh" to "RESTORE_EOF", "drift.sh" to "DRIFT_EOF").map { (name, eof) ->
+            val copy = File(crDir(), "$name.v18")
+            assertEquals(heredoc(golden(), eof), copy.readTextOrEmpty(), "$name.v18 is the v18 script")
+            assertContains(log, "install: the v18 $name kept as $name.v18 (rollback)")
+            copy
+        }
+        assertFalse(File(crDir(), "tmux-sockheal.sh.v18").exists())
         val now = files.map { it.readText() }
         assertTrue("PRESENT" in installV19(TmuxNameParser.DEFAULT_PREFIX))
         val old = installV18()
         assertTrue("RESTORE_SCRIPT_PRESENT" in old.lines() && "INSTALLED" !in old, "a v18 client rewrote v19 scripts:\n$old")
         assertEquals(now, files.map { it.readText() }, "nothing rewritten after v19")
+        assertEquals(listOf("RESTORE_EOF", "DRIFT_EOF").map { heredoc(golden(), it) }, copies.map { it.readText() }, "the copies stay")
         assertTrue(crDir().list()!!.none { ".tmp." in it }, "temp files left")
+    }
+
+    /** D6S-zaloha: a script of another marker than v18 gets no copy, and a copy already there is never overwritten. */
+    @Test fun theRollbackCopyIsMadeOnlyFromV18AndOnlyOnce() {
+        world {
+            crDir().mkdirs()
+            val v17 = "#!/usr/bin/env bash\n# marker-compat (do NOT remove): " + (6..17).joinToString(" ") { "claude-remote-restore-v$it" } + "\nexit 0\n"
+            File(crDir(), "restore.sh").writeText(v17)
+            File(crDir(), "drift.sh").writeText(v17)
+            val out = installV19(TmuxNameParser.DEFAULT_PREFIX)
+            assertTrue("DRIFT_SCRIPT_INSTALLED" in out.lines(), out)
+            assertTrue(crDir().list()!!.none { it.endsWith(".v18") }, "a copy of a v17 script: ${crDir().list()!!.toList()}")
+        }
+        world {
+            installV18()
+            File(crDir(), "drift.sh.v18").writeText("an earlier copy\n")
+            installV19(TmuxNameParser.DEFAULT_PREFIX)
+            assertEquals("an earlier copy\n", File(crDir(), "drift.sh.v18").readText(), "an existing copy was overwritten")
+            assertEquals(heredoc(golden(), "RESTORE_EOF"), File(crDir(), "restore.sh.v18").readText())
+        }
     }
 
     // ---- helpers ----------------------------------------------------------------------------------
@@ -238,6 +268,12 @@ class DriftPrefixesIntegrationTest {
     private fun JsonObject.name() = this["tmuxSessionName"]!!.jsonPrimitive.content
 
     private fun inode(f: File): Any? = Files.readAttributes(f.toPath(), BasicFileAttributes::class.java).fileKey()
+
+    /** The body of the heredoc `<<'[eof]'` in [script], its last newline included. */
+    private fun heredoc(script: String, eof: String): String {
+        val start = script.indexOf('\n', script.indexOf("<<'$eof'")) + 1
+        return script.substring(start, script.indexOf("\n$eof\n", start) + 1)
+    }
 
     private fun golden(): String {
         val rel = "src/desktopTest/resources/golden/restore-installer-v18.sh"

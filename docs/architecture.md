@@ -225,6 +225,13 @@ adds nothing to drift.log with the file or without it. On the box `server` v19 d
 (`DriftPrefixesIntegrationTest` runs both over the same world). A client older than v19 writes no prefix, so a box
 with another name has no adoption until a v19 client launched there once.
 
+**The way back to v18.** When the installer replaces a v18 `restore.sh` or `drift.sh` it first keeps it next to
+it as `restore.sh.v18` / `drift.sh.v18` (copied, then renamed into place; logged to install.log; only from a v18
+script, never overwriting a copy that is there; `tmux-sockheal.sh` gets none, its v19 differs only in the compat line).
+Moving the two copies back is the rollback to v18 — an exception to "never edit drift/restore by hand" that only
+the lead may use, and only with Lukáš's explicit consent that day. It holds only while no v19 client launches a
+session on that box (its next install rewrites both to v19 again); otherwise the way back is a hotfix v20.
+
 `tmux-sockheal.sh` exits 0 (nothing to do), 3 (it was unusable and is usable again) or 1 (refused). A heal that
 failed (lock not taken within 2 s, listeners changed meanwhile, socket not back) mostly lost a race with another
 tab, so the app's guard looks once more after 0.5 s before it refuses. A socket file that vanishes between the
