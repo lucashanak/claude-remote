@@ -473,4 +473,147 @@ class TalkMachineTest {
         on(TalkEvent.SendDone(TalkSendResult.Sent(serverAtMs = 1_000_011_000)))
         assertEquals(TalkPhase.THINKING, s.phase)
     }
+
+    // ---- F5c: Jarvis' own reports in a running conversation ----
+
+    @Test fun aReportWhileListeningToSilenceIsReadAtOnceThenItListensAgain() {
+        listening()
+        on(TalkEvent.Report("Citace dokončila práci a pushnula."), 2_000)
+        assertEquals(TalkPhase.SPEAKING, s.phase)
+        assertEquals(listOf(TalkEffect.CancelListening, TalkEffect.Speak("Citace dokončila práci a pushnula.")), fx)
+        on(TalkEvent.SpeechDone, 3_000)
+        assertEquals(TalkPhase.LISTENING, s.phase, "he may answer right away")
+        assertEquals(listOf(TalkEffect.Tone(TalkTone.LISTEN), TalkEffect.Listen()), fx)
+    }
+
+    @Test fun aReportNeverTalksOverLukasWords() {
+        listening()
+        on(TalkEvent.Report("Relay stojí na limitu.", speechUnderway = true), 1_000)
+        assertEquals(TalkPhase.LISTENING, s.phase)
+        assertEquals(emptyList(), fx, "the microphone stays open under his words")
+        assertEquals(listOf("Relay stojí na limitu."), s.reports)
+        // his utterance goes to Jarvis; the report waits through the exchange and comes after the answer
+        on(TalkEvent.Heard("co dělá soniox"))
+        assertEquals(TalkPhase.SENDING, s.phase)
+        on(TalkEvent.SendDone(TalkSendResult.Sent()), 300)
+        on(TalkEvent.Answer("Soniox běží.", now + 4_000), 4_000)
+        assertEquals(listOf(TalkEffect.Speak("Soniox běží.")), fx)
+        on(TalkEvent.SpeechDone, 2_000)
+        assertEquals(TalkPhase.SPEAKING, s.phase, "the waiting report is read before the microphone opens")
+        assertEquals(listOf(TalkEffect.Speak("Relay stojí na limitu.")), fx)
+        assertTrue(s.reports.isEmpty())
+        on(TalkEvent.SpeechDone, 2_000)
+        assertEquals(TalkPhase.LISTENING, s.phase)
+    }
+
+    @Test fun aReportWhileTheUtteranceIsBeingFinishedWaits() {
+        listening()
+        on(TalkEvent.Button)
+        on(TalkEvent.Report("Hotovo."), 100)
+        assertEquals(TalkPhase.LISTENING, s.phase)
+        assertEquals(listOf("Hotovo."), s.reports)
+    }
+
+    @Test fun aReportDuringAReadingOrWhileJarvisThinksIsQueued() {
+        thinking()
+        on(TalkEvent.Report("Hlídka na deploy se splnila."), 1_000)
+        assertEquals(TalkPhase.THINKING, s.phase, "the answer to his prompt comes first")
+        assertEquals(emptyList(), fx)
+        on(TalkEvent.Answer("Všechno běží.", now + 2_000), 2_000)
+        on(TalkEvent.Report("Druhá věc."), 500)
+        assertEquals(TalkPhase.SPEAKING, s.phase)
+        assertEquals(emptyList(), fx, "never over a reading")
+        on(TalkEvent.SpeechDone, 1_000)
+        assertEquals(listOf(TalkEffect.Speak("Hlídka na deploy se splnila.")), fx, "oldest first")
+        on(TalkEvent.SpeechDone, 1_000)
+        assertEquals(listOf(TalkEffect.Speak("Druhá věc.")), fx)
+        on(TalkEvent.SpeechDone, 1_000)
+        assertEquals(TalkPhase.LISTENING, s.phase)
+    }
+
+    @Test fun theButtonAsksForTheFloorAndLeavesReportsQueued() {
+        thinking()
+        on(TalkEvent.Answer("Odpověď.", now + 1_000), 1_000)
+        on(TalkEvent.Report("Hlášení."), 100)
+        on(TalkEvent.Button, 100)
+        assertEquals(TalkPhase.LISTENING, s.phase, "he pressed to talk, not to hear a report")
+        assertEquals(listOf("Hlášení."), s.reports)
+        // nothing heard (blank): the report that waited is read then
+        on(TalkEvent.Heard(""), 5_000)
+        assertEquals(TalkPhase.SPEAKING, s.phase)
+        assertEquals(listOf(TalkEffect.Speak("Hlášení.")), fx)
+    }
+
+    @Test fun reportsAreCappedAndDroppedWhenTheModeEnds() {
+        thinking()
+        (1..5).forEach { on(TalkEvent.Report("r$it"), 10) }
+        assertEquals(listOf("r3", "r4", "r5"), s.reports, "the newest ${TalkMachine.REPORTS_MAX} wait")
+        tick(TalkMachine.GIVE_UP_MS)
+        on(TalkEvent.SpeechDone, 1_000)
+        assertEquals(listOf(TalkEffect.Speak("r3")), fx)
+        listening2()
+        on(TalkEvent.Heard("konec"))
+        assertTrue(s.reports.isEmpty(), "the closing sentence drops what waits (the notification has it)")
+        on(TalkEvent.Report("pozdě"), 10)
+        assertTrue(s.reports.isEmpty())
+        on(TalkEvent.SpeechDone, 1_000)
+        assertEquals(TalkPhase.OFF, s.phase)
+        on(TalkEvent.Report("po konci"), 10)
+        assertEquals(TalkPhase.OFF, s.phase)
+        assertEquals(emptyList(), fx)
+    }
+
+    /** Reads what waits until the microphone opens. */
+    private fun listening2() {
+        var guard = 0
+        while (s.phase == TalkPhase.SPEAKING && guard++ < 10) on(TalkEvent.SpeechDone, 500)
+        assertEquals(TalkPhase.LISTENING, s.phase)
+    }
+
+    @Test fun aBlankReportIsNothing() {
+        listening()
+        on(TalkEvent.Report("   "))
+        assertEquals(TalkPhase.LISTENING, s.phase)
+        assertEquals(emptyList(), fx)
+    }
+
+    // ---- F5c: the headset goes away ----
+
+    @Test fun aLostHeadsetCutsTheReadingAndEndsSilentlyInEveryPhase() {
+        thinking()
+        on(TalkEvent.Answer("Dlouhá odpověď.", now + 1_000), 1_000)
+        assertEquals(TalkPhase.SPEAKING, s.phase)
+        on(TalkEvent.OutputLost, 200)
+        assertEquals(TalkPhase.OFF, s.phase)
+        assertEquals(TalkEnd.OUTPUT_LOST, s.ended)
+        assertEquals(TalkEffect.StopSpeaking, fx.first(), "the reading stops first")
+        assertTrue(has<TalkEffect.Speak>().isEmpty(), "no sentence: it would come out of the loudspeaker")
+        assertNull(TalkEnd.OUTPUT_LOST.sentence)
+        assertEquals(TalkEffect.Ended(TalkEnd.OUTPUT_LOST), fx.last())
+        // listening, and while a closing sentence is read: the same, nothing more said
+        s = TalkState(); listening()
+        on(TalkEvent.OutputLost)
+        assertEquals(TalkEnd.OUTPUT_LOST, s.ended)
+        s = TalkState(); listening()
+        on(TalkEvent.Heard("konec"))
+        assertEquals(TalkEnd.WORD, s.ending)
+        on(TalkEvent.OutputLost)
+        assertEquals(TalkPhase.OFF, s.phase)
+        assertTrue(has<TalkEffect.Speak>().isEmpty())
+        assertEquals("Sluchátka se odpojila – konverzace ukončena", JarvisTalk.label(s))
+    }
+
+    @Test fun m3ALeadingSlashOrBangIsKeptPlainText() {
+        // a visible mark, not a space (the input box may trim a leading space)
+        assertEquals("› /clear", TalkWords.plain("/clear"))
+        assertEquals("› !rm -rf x", TalkWords.plain("  !rm -rf x"))
+        assertEquals("› /x", TalkWords.plain("\u200b/x"), "an invisible character before it does not hide it")
+        assertFalse(TalkWords.plain("/clear").trim().startsWith("/"), "trimmed it is still no slash command")
+        // the voice prompt is safe by its prefix: it always starts with "[hlas] "
+        assertTrue(TalkWords.prompt("/clear").startsWith("[hlas] "))
+        assertTrue(TalkWords.prompt("!ls").startsWith("[hlas] "))
+        assertEquals("ano /clear", TalkWords.plain("ano /clear"), "only at the start")
+        assertEquals("ano", TalkWords.plain("ano"))
+        assertEquals("", TalkWords.plain("  "))
+    }
 }

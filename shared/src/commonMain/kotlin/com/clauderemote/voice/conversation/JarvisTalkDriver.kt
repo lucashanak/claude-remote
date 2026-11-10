@@ -23,6 +23,11 @@ interface TalkEars {
     fun finish()
     /** Close the microphone; no callback matters any more. */
     fun cancel()
+    /**
+     * The utterance now open has already heard words (a partial transcript): Jarvis' own report then waits instead of
+     * closing the microphone under Lukáš (F5c). Any thread; false when the platform cannot tell.
+     */
+    fun hearing(): Boolean = false
 }
 
 /** The platform's read-aloud. [speak]'s [onDone] must come exactly once — after the text, a stop or an error. */
@@ -76,6 +81,9 @@ class JarvisTalkDriver(
     /** A [TalkEffect.Listen] with a delay is due: opened on the loop, so it is ordered against a CancelListening. */
     private class ListenDue(val gen: Int)
 
+    /** Jarvis' report; whether words are being heard is asked when the loop takes it, not when it was posted. */
+    private class ReportIn(val text: String)
+
     /** Whether the send under way is still wanted ([TalkEffect.CancelSend] clears it; a started exec is never cut). */
     @kotlin.concurrent.Volatile private var sendWanted: java.util.concurrent.atomic.AtomicBoolean? = null
     @kotlin.concurrent.Volatile private var job: Job? = null
@@ -98,6 +106,15 @@ class JarvisTalkDriver(
 
     fun stop() { events.trySend(TalkEvent.Stop) }
 
+    /**
+     * The headset it reads into is gone (F5c): the platform has already stopped the reading itself; the loop ends
+     * without a sentence (it would come out of the loudspeaker).
+     */
+    fun outputLost() { events.trySend(TalkEvent.OutputLost) }
+
+    /** Jarvis said [text] on his own (F5c): read when the loop is free, never over Lukáš's words. */
+    fun report(text: String) { events.trySend(ReportIn(text)) }
+
     /** Completes when the conversation has ended. */
     suspend fun join() { job?.join() }
 
@@ -116,7 +133,7 @@ class JarvisTalkDriver(
                     if (m.gen == listenGen) openEars(m.gen)
                     continue
                 }
-                val e = m as TalkEvent
+                val e = if (m is ReportIn) TalkEvent.Report(m.text, runCatching { ears.hearing() }.getOrDefault(true)) else m as TalkEvent
                 val step = TalkMachine.reduce(state, e, clock())
                 if (step.state.phase != state.phase) FileLogger.log(TAG, "${state.phase} -> ${step.state.phase} on ${e::class.simpleName}")
                 state = step.state
@@ -190,6 +207,11 @@ interface JarvisTalkHost {
     fun start()
     fun stop()
     fun button()
+    /**
+     * Jarvis said [text] on his own (F5c: jsay/jblock/jask): true when a running conversation took it (it is read
+     * there, queued behind Lukáš's words); false = no conversation runs, the caller decides (headset or nothing).
+     */
+    fun report(text: String): Boolean = false
 }
 
 /**
@@ -217,11 +239,15 @@ object JarvisTalk {
 
     fun button() { host?.button() }
 
+    /** [JarvisTalkHost.report] of the platform; false = no conversation runs (or none can on this platform). */
+    fun report(text: String): Boolean = host?.report(text) == true
+
     /** The UI line for [s]. */
     fun label(s: TalkState): String = when (s.phase) {
         TalkPhase.OFF -> when (s.ended) {
             null -> "Konverzace s Jarvisem"
             TalkEnd.BUTTON -> "Konverzace ukončena"
+            TalkEnd.OUTPUT_LOST -> "Sluchátka se odpojila – konverzace ukončena"
             else -> s.ended.sentence ?: "Konverzace ukončena"
         }
         TalkPhase.LISTENING -> if (s.awaiting) "Poslouchám… (Jarvis ještě odpoví)" else "Poslouchám…"

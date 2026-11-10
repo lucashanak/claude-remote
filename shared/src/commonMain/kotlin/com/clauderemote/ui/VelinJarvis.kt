@@ -71,6 +71,17 @@ internal class JarvisPanelState {
     /** Alerts shown in the Jarvis tab: those pending when it was opened plus what came since (newest first). */
     var recentAlerts by mutableStateOf<List<JarvisAlert>>(emptyList())
 
+    companion object {
+        const val RECENT_MAX = 20
+
+        /**
+         * The list of the Jarvis tab: pending alerts, Jarvis' own sentences (F5c, seen or not) and what was listed
+         * before, once each, newest first by the device's time of the alert.
+         */
+        fun mergeRecent(pending: List<JarvisAlert>, said: List<JarvisAlert>, shown: List<JarvisAlert>): List<JarvisAlert> =
+            (pending + said + shown).distinctBy { it.id }.sortedByDescending { it.atMs }.take(RECENT_MAX)
+    }
+
     suspend fun loadTasks(orch: SessionOrchestrator, server: SshServer?) {
         if (server == null) { tasksError = "Jarvis není na žádném známém serveru"; return }
         tasksLoading = true
@@ -319,6 +330,14 @@ internal fun JarvisPane(
                         onSelect = onRouting,
                         label = { if (it == AlertRouting.PER_SESSION) "Každá session" else "Přes Jarvise" },
                     )
+                    // F5c: his own sentences in the headset outside a conversation (only where there is a reader)
+                    com.clauderemote.voice.conversation.JarvisAloud.headset?.let { h ->
+                        var on by remember { mutableStateOf(h.enabled) }
+                        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Text("Číst Jarvise ve sluchátkách", style = CRType.bodyDim, color = c.text, modifier = Modifier.weight(1f))
+                            androidx.compose.material3.Switch(checked = on, onCheckedChange = { v -> h.enabled = v; on = v })
+                        }
+                    }
                     Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         OutlinedButton(enabled = !state.briefingLoading && server != null, onClick = { scope.launch { state.loadBriefing(orch, server) } }) {
                             Text(if (state.briefingLoading) "Briefing…" else "Briefing")
@@ -430,11 +449,13 @@ private fun AlertLine(
     undoing: Set<Pair<String, String>>,
 ) {
     val c = CRTheme.colors
-    val (glyph, color) = when (a.kind) {
-        JarvisAlertKind.BLOCK -> "▲" to c.approval
-        JarvisAlertKind.INCIDENT -> "⚠" to c.disconnected
-        JarvisAlertKind.DONE -> "✓" to c.ready
-        JarvisAlertKind.INFO -> "•" to c.textDim
+    val glyph = com.clauderemote.session.service.JarvisMerged.glyph(a.kind)
+    val color = when (a.kind) {
+        JarvisAlertKind.BLOCK, JarvisAlertKind.JBLOCK, JarvisAlertKind.JBLOCKASK -> c.approval
+        JarvisAlertKind.INCIDENT -> c.disconnected
+        JarvisAlertKind.DONE -> c.ready
+        JarvisAlertKind.INFO -> c.textDim
+        JarvisAlertKind.JSAY, JarvisAlertKind.JASK -> c.accent
     }
     Row(
         Modifier.fillMaxWidth().let { m -> a.tmux?.let { t -> m.clickable { onOpenTmux(a.serverId, t) } } ?: m }.padding(vertical = 2.dp),
@@ -442,7 +463,11 @@ private fun AlertLine(
         horizontalArrangement = Arrangement.spacedBy(8.dp),
     ) {
         Text(glyph, style = CRType.mono, color = color)
-        Text(a.text, style = CRType.bodyDim, color = c.text, modifier = Modifier.weight(1f), maxLines = 3, overflow = TextOverflow.Ellipsis)
+        // his own sentences (≤ 400 chars) are shown whole enough to read; template lines stay short
+        Text(
+            a.text, style = CRType.bodyDim, color = c.text, modifier = Modifier.weight(1f),
+            maxLines = if (a.kind.own) 8 else 3, overflow = TextOverflow.Ellipsis,
+        )
         Text(Velin.formatAge(a.atMs, now), style = CRType.monoTiny, color = c.textDim)
         // a closed session has nothing to open: its line offers the undo instead (closed.jsonl decides if it still can)
         val undo = JarvisUndo.undoButtonEnabled(a, undoing)

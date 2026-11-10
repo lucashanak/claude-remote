@@ -34,6 +34,11 @@ enum class TalkEnd(val sentence: String?) {
      * leaves it paused for good, the microphone closed. [TalkMachine.SPEAK_MAX_MS] ends the mode instead of hanging.
      */
     STALLED("Čtení se zaseklo, končím konverzaci."),
+    /**
+     * F5c: the headset the conversation was read into went away (unplugged, Bluetooth dropped). The reading stops at
+     * once and nothing more is said: the next word would come out of the phone's loudspeaker.
+     */
+    OUTPUT_LOST(null),
 }
 
 enum class TalkTone {
@@ -72,6 +77,11 @@ data class TalkState(
     val sttFailures: Int = 0,
     /** Jarvis' answer that came while a notice was being read; read right after it. */
     val queuedAnswer: String? = null,
+    /**
+     * Jarvis' own reports (F5c: jsay/jblock/jask from a wake) that came while Lukáš spoke, something was read, or a
+     * prompt was out: read, oldest first, the next time the loop would open the microphone ([TalkMachine.REPORTS_MAX]).
+     */
+    val reports: List<String> = emptyList(),
     /** SPEAKING the closing sentence of this end. */
     val ending: TalkEnd? = null,
     /** OFF after a conversation: how it ended (the UI says it). */
@@ -100,6 +110,13 @@ sealed interface TalkEvent {
     data object Button : TalkEvent
     /** "Ukončit". */
     data object Stop : TalkEvent
+    /**
+     * Jarvis said something on his own (F5c: a report after a wake, not the answer to our prompt). [speechUnderway] =
+     * the microphone has already heard words of the utterance now open: then it waits, he is not talked over.
+     */
+    data class Report(val text: String, val speechUnderway: Boolean = false) : TalkEvent
+    /** F5c: the headset the mode reads into is gone (AudioDeviceCallback / BECOMING_NOISY): end silently, now. */
+    data object OutputLost : TalkEvent
     /** Every [JarvisTalkDriver.TICK_MS]; [routeOk] = Jarvis' session can be reached right now. */
     data class Tick(val routeOk: Boolean) : TalkEvent
 }
@@ -154,6 +171,8 @@ object TalkMachine {
     const val SPEAK_MAX_MS = 5 * 60_000L
     /** At most this many turns are held during one send. */
     const val HELD_MAX = 4
+    /** At most this many of Jarvis' own reports wait to be read (the oldest go first when more come). */
+    const val REPORTS_MAX = 3
 
     const val NOT_ANSWERED = "Jarvis zatím neodpověděl, poslouchám dál."
     const val NO_TEXT = "Jarvis odpověděl, ale text nemám. Je v aplikaci."
@@ -173,6 +192,11 @@ object TalkMachine {
                 off(s, TalkEnd.BUTTON),
                 listOf(TalkEffect.CancelSend, TalkEffect.CancelListening, TalkEffect.StopSpeaking, TalkEffect.Ended(TalkEnd.BUTTON)),
             )
+            // even a closing sentence is cut: it would finish on the loudspeaker
+            TalkEvent.OutputLost -> TalkStep(
+                off(s, TalkEnd.OUTPUT_LOST),
+                listOf(TalkEffect.StopSpeaking, TalkEffect.CancelSend, TalkEffect.CancelListening, TalkEffect.Ended(TalkEnd.OUTPUT_LOST)),
+            )
             is TalkEvent.Tick -> tick(s, e.routeOk, now)
             is TalkEvent.Heard -> heard(s, e.text, now)
             is TalkEvent.SttFailed -> if (s.phase != TalkPhase.LISTENING) TalkStep(s) else sttFailed(s, now, emptyList())
@@ -180,6 +204,7 @@ object TalkMachine {
             is TalkEvent.Answer -> answer(s, e, now)
             TalkEvent.SpeechDone -> speechDone(s, now)
             TalkEvent.Button -> button(s, now)
+            is TalkEvent.Report -> report(s, e, now)
             TalkEvent.Start -> TalkStep(s)
         }
     }
@@ -187,8 +212,12 @@ object TalkMachine {
     private fun heard(s: TalkState, raw: String, now: Long): TalkStep {
         if (s.phase != TalkPhase.LISTENING) return TalkStep(s)
         val text = raw.trim()
-        // Nothing said before the STT's own guard ran out: listen again; the silence clock keeps running.
-        if (text.isEmpty()) return TalkStep(s.copy(sttFailures = 0, finishingSinceMs = null), listOf(TalkEffect.Listen()))
+        // Nothing said before the STT's own guard ran out: listen again (a report that waited for this utterance is read
+        // first); the silence clock keeps running.
+        if (text.isEmpty()) {
+            val st = s.copy(sttFailures = 0, finishingSinceMs = null)
+            return nextReport(st, now) ?: TalkStep(st, listOf(TalkEffect.Listen()))
+        }
         if (TalkWords.isEnd(text)) return end(s.copy(heard = text, finishingSinceMs = null), TalkEnd.WORD, now)
         return TalkStep(
             s.copy(
@@ -299,12 +328,13 @@ object TalkMachine {
                 s.copy(sinceMs = now, queuedAnswer = null),
                 listOf(TalkEffect.StopSpeaking, TalkEffect.Speak(s.queuedAnswer)),
             )
-            else -> listen(s, now, listOf(TalkEffect.StopSpeaking))
+            // the button means "let me talk": his waiting reports stay queued for after the next exchange
+            else -> listen(s, now, listOf(TalkEffect.StopSpeaking), flush = false)
         }
         // "I'm done": the utterance ends now instead of after the silence pause
         TalkPhase.LISTENING -> TalkStep(s.copy(finishingSinceMs = s.finishingSinceMs ?: now), listOf(TalkEffect.FinishListening))
         // he wants to add something; Jarvis' answer is still read when it comes
-        TalkPhase.THINKING -> listen(s, now)
+        TalkPhase.THINKING -> listen(s, now, flush = false)
         TalkPhase.SENDING, TalkPhase.OFF -> TalkStep(s)
     }
 
@@ -341,17 +371,58 @@ object TalkMachine {
         listOf(TalkEffect.Speak(sentence)),
     )
 
-    private fun listen(s: TalkState, now: Long, before: List<TalkEffect> = emptyList()) = TalkStep(
-        s.copy(phase = TalkPhase.LISTENING, sinceMs = now, quietSinceMs = now, finishingSinceMs = null),
-        before + listOf(TalkEffect.Tone(TalkTone.LISTEN), TalkEffect.Listen()),
-    )
+    /**
+     * Back to the microphone — unless [flush] and a report of Jarvis waits: that is read first (the microphone opens
+     * after it, through [speechDone]). The button never flushes: it is Lukáš asking for the floor.
+     */
+    private fun listen(s: TalkState, now: Long, before: List<TalkEffect> = emptyList(), flush: Boolean = true): TalkStep {
+        if (flush) nextReport(s, now, before)?.let { return it }
+        return TalkStep(
+            s.copy(phase = TalkPhase.LISTENING, sinceMs = now, quietSinceMs = now, finishingSinceMs = null),
+            before + listOf(TalkEffect.Tone(TalkTone.LISTEN), TalkEffect.Listen()),
+        )
+    }
+
+    /** Read the oldest waiting report (null = none waits). The silence clock restarts: he has just been spoken to. */
+    private fun nextReport(s: TalkState, now: Long, before: List<TalkEffect> = emptyList()): TalkStep? {
+        val r = s.reports.firstOrNull() ?: return null
+        return TalkStep(
+            s.copy(
+                phase = TalkPhase.SPEAKING, sinceMs = now, quietSinceMs = now, finishingSinceMs = null,
+                reports = s.reports.drop(1),
+            ),
+            before + TalkEffect.Speak(r),
+        )
+    }
+
+    /**
+     * Jarvis' own report (F5c). Read at once only while the microphone listens to silence (no words heard yet, not
+     * being finished): the microphone closes, the report is read, then it listens again — Lukáš may answer right
+     * away. While he speaks, while something is read, while a prompt is out or Jarvis thinks, it waits in [TalkState.reports]
+     * and is read the next time the loop would listen. A closing sentence drops it (the mode is ending; the
+     * notification carries it).
+     */
+    private fun report(s: TalkState, e: TalkEvent.Report, now: Long): TalkStep {
+        val text = e.text.trim().takeIf { it.isNotEmpty() } ?: return TalkStep(s)
+        if (s.ending != null) return TalkStep(s)
+        if (s.phase == TalkPhase.LISTENING && !e.speechUnderway && s.finishingSinceMs == null) {
+            return TalkStep(
+                s.copy(phase = TalkPhase.SPEAKING, sinceMs = now, quietSinceMs = now),
+                listOf(TalkEffect.CancelListening, TalkEffect.Speak(text)),
+            )
+        }
+        return TalkStep(s.copy(reports = (s.reports + text).takeLast(REPORTS_MAX)))
+    }
 
     /** End with [why]'s sentence said once (the microphone closes first), or at once when it has none. */
     private fun end(s: TalkState, why: TalkEnd, now: Long): TalkStep {
         val stopAll = listOf(TalkEffect.CancelSend, TalkEffect.CancelListening, TalkEffect.StopSpeaking)
         val sentence = why.sentence ?: return TalkStep(off(s, why), stopAll + TalkEffect.Ended(why))
         return TalkStep(
-            s.copy(phase = TalkPhase.SPEAKING, sinceMs = now, ending = why, notice = sentence, queuedAnswer = null, heldAnswers = emptyList()),
+            s.copy(
+                phase = TalkPhase.SPEAKING, sinceMs = now, ending = why, notice = sentence, queuedAnswer = null,
+                heldAnswers = emptyList(), reports = emptyList(),
+            ),
             stopAll + TalkEffect.Speak(sentence),
         )
     }
@@ -380,6 +451,33 @@ object TalkWords {
     fun prompt(heard: String): String {
         val clean = heard.replace(INVISIBLE, " ").replace(SPACES, " ").trim()
         return fit(PREFIX + clean)
+    }
+
+    /**
+     * F5c: the text of "Ano"/"Odpovědět" on Jarvis' notification — the same cleaning and cap as [prompt], without the
+     * spoken prefix (it is typed, not heard). Empty = nothing to send.
+     */
+    fun plain(typed: String): String {
+        val t = typed.replace(INVISIBLE, " ").replace(SPACES, " ").trim()
+        if (t.isEmpty()) return t
+        // rev-f5c-app M3: a leading "/" is a slash command and "!" the bash mode in Claude Code's input. A space in
+        // front might be trimmed by the input box, so a visible neutral mark goes first and keeps it plain text.
+        return fit(if (t[0] == '/' || t[0] == '!') NEUTRAL + t else t)
+    }
+
+    /** What goes in front of a typed answer starting with "/" or "!". */
+    const val NEUTRAL = "› "
+
+    const val EMPTY = "Prázdná odpověď, neposláno."
+
+    /**
+     * The one sentence "Ano"/"Odpovědět" of a notification ends with ([TalkSendResult] of the answer path), and
+     * whether it went in. A maybe is said as such: it may have been typed.
+     */
+    fun answerOutcome(r: TalkSendResult, sent: String): Pair<Boolean, String> = when (r) {
+        is TalkSendResult.Sent -> true to sent
+        is TalkSendResult.Maybe -> false to "Nevím, jestli to Jarvisovi odešlo – podívej se k němu."
+        is TalkSendResult.Refused -> false to r.sentence
     }
 
     private fun cost(c: Char): Int = when {

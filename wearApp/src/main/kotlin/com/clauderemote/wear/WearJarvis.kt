@@ -185,11 +185,14 @@ object JarvisRecentStore {
         }
     }
 
-    /** "▲", "✓", "⚠", "•" — the glyphs of the phone's merged notification. */
+    /** "▲", "✓", "⚠", "•" — the glyphs of the phone's merged notification (F5c: "»" Jarvis says, "?" he asks). */
     fun glyph(kind: String): String = when (kind) {
-        "block" -> "▲"
+        "block", "jblock" -> "▲"
         "incident" -> "⚠"
         "done" -> "✓"
+        "jsay" -> "»"
+        "jask" -> "?"
+        "jblockask" -> "▲?"
         else -> "•"
     }
 }

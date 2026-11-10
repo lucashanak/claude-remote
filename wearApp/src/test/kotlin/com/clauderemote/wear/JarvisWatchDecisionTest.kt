@@ -52,4 +52,28 @@ class JarvisWatchDecisionTest {
             WearDataListenerService.WEAR_JSON.decodeFromString<WearSessionsPayload>(new).jarvis!!.undo,
         )
     }
+
+    // F5c: Jarvis' question gets "Ano" on the wrist; a new question (another id) is new content even with the same text
+    @Test fun anotherQuestionIsNewContent() {
+        val q1 = info().copy(askId = "j-1")
+        val q2 = info().copy(askId = "j-2")
+        assertEquals(Action.Skip, JarvisWatchDecision.decide(q1, 0, JarvisWatchDecision.key(q1), null))
+        assertEquals(Action.Post(buzz = false), JarvisWatchDecision.decide(q2, 0, JarvisWatchDecision.key(q1), null))
+        // the Ano going away (he said something after) also reposts, so the action disappears
+        assertEquals(Action.Post(buzz = false), JarvisWatchDecision.decide(info(), 0, JarvisWatchDecision.key(q1), null))
+    }
+
+    @Test fun anOlderPhonesPayloadHasNoQuestion() {
+        val json = kotlinx.serialization.json.Json { ignoreUnknownKeys = true }
+        val i = json.decodeFromString<WearJarvisInfo>("""{"pending":1,"text":"» x","notify":true}""")
+        assertEquals(null, i.askId)
+        assertEquals("j-7", json.decodeFromString<WearJarvisInfo>("""{"pending":1,"text":"? x","notify":true,"askId":"j-7"}""").askId)
+    }
+
+    @Test fun theNewKindsHaveThePhonesGlyphs() {
+        assertEquals(
+            listOf("▲", "»", "?", "▲?", "▲", "•"),
+            listOf("jblock", "jsay", "jask", "jblockask", "block", "future").map { JarvisRecentStore.glyph(it) },
+        )
+    }
 }

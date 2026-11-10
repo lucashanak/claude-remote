@@ -68,6 +68,11 @@
             android:name="com.clauderemote.PlayReceiver"
             android:exported="false" />
 
+        <!-- Jarvis' question (F5c): "Ano" / "Odpovědět" of a jask notification, into Jarvis' pane only. -->
+        <receiver
+            android:name="com.clauderemote.JarvisAskReceiver"
+            android:exported="false" />
+
         <!-- Jarvis' conversation mode (F5a): mic + headset button while it runs. specialUse only for the failure path:
              a refused microphone start must still call startForeground once before it stops (no crash). -->
         <service

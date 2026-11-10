@@ -20,6 +20,8 @@ class JarvisTalkDriverTest {
         override fun listen(onHeard: (String) -> Unit, onError: (String) -> Unit) { listens++; heard = onHeard; error = onError }
         override fun finish() { finishes++ }
         override fun cancel() { cancels++ }
+        var words = false
+        override fun hearing() = words
     }
 
     private class Mouth : TalkMouth {
@@ -201,5 +203,45 @@ class JarvisTalkDriverTest {
         assertEquals(listOf("Ahoj."), mouth.said)
         d.stop(); runCurrent()
         d.join()
+    }
+
+    @Test fun aReportIsReadOnlyWhenTheMicrophoneHearsNoWords() = runTest {
+        val d = driver()
+        d.start(); runCurrent()
+        // words already heard in this utterance: the report waits, the microphone stays open
+        ears.words = true
+        d.report("Relay stojí na limitu."); runCurrent()
+        assertEquals(TalkPhase.LISTENING, d.state.phase)
+        assertEquals(emptyList(), mouth.said)
+        assertEquals(0, ears.cancels)
+        // his utterance turned out blank (noise): the waiting report is read now
+        ears.words = false
+        ears.heard!!(""); runCurrent()
+        assertEquals(listOf("Relay stojí na limitu."), mouth.said)
+        mouth.done!!(); runCurrent()
+        assertEquals(TalkPhase.LISTENING, d.state.phase)
+        // silence: a new report closes the microphone and is read at once
+        val listensBefore = ears.listens
+        d.report("Citace pushnula."); runCurrent()
+        assertEquals(TalkPhase.SPEAKING, d.state.phase)
+        assertEquals("Citace pushnula.", mouth.said.last())
+        assertTrue(ears.cancels >= 1)
+        mouth.done!!(); runCurrent()
+        assertEquals(listensBefore + 1, ears.listens, "and it listens again after it")
+        d.stop(); runCurrent()
+    }
+
+    @Test fun aLostHeadsetStopsTheMouthAndEndsTheLoop() = runTest {
+        val d = driver()
+        d.start(); runCurrent()
+        ears.heard!!("co je nového"); runCurrent()
+        link.turns.emit(JarvisTurn(testScheduler.currentTime, "Dlouhá odpověď.")); runCurrent()
+        assertEquals(TalkPhase.SPEAKING, d.state.phase)
+        val stops = mouth.stops
+        d.outputLost(); runCurrent()
+        assertTrue(mouth.stops > stops, "the reading is stopped")
+        d.join()
+        assertEquals(TalkEnd.OUTPUT_LOST, d.state.ended)
+        assertEquals(listOf("Dlouhá odpověď."), mouth.said, "nothing more is said")
     }
 }

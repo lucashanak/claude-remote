@@ -49,6 +49,12 @@ object DesktopJarvisTalk {
             override fun stop() { driver?.stop() }
 
             override fun button() { driver?.button() }
+
+            override fun report(text: String): Boolean {
+                val d = driver ?: return false
+                d.report(text)
+                return true
+            }
         }
     }
 
@@ -58,13 +64,18 @@ object DesktopJarvisTalk {
 /** One utterance at a time through the desktop Soniox dictation; the end of speech after 1.2 s of silence. */
 internal class DesktopTalkEars : TalkEars {
     private var current: DesktopDictation? = null
+    /** A partial with words arrived in the utterance now open (F5c: Jarvis' report then waits for it). */
+    @Volatile private var words = false
+
+    override fun hearing(): Boolean = words
 
     @Synchronized override fun listen(onHeard: (String) -> Unit, onError: (String) -> Unit) {
         current?.stop()
+        words = false
         val d = DesktopDictation(
             apiKey = desktopSonioxApiKey(),
             silenceMs = END_OF_SPEECH_MS,
-            onPartial = {},
+            onPartial = { p -> if (p.isNotBlank()) words = true },
             onFinal = onHeard,
             onError = onError,
         )
@@ -74,7 +85,7 @@ internal class DesktopTalkEars : TalkEars {
 
     @Synchronized override fun finish() { current?.stop() }
 
-    @Synchronized override fun cancel() { current?.stop(); current = null }
+    @Synchronized override fun cancel() { current?.stop(); current = null; words = false }
 
     private companion object {
         const val END_OF_SPEECH_MS = 1_200

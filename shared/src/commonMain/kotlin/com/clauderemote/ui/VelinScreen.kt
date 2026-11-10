@@ -192,9 +192,10 @@ internal fun VelinScreen(
     }
     // The Jarvis tab shows what was pending when it opened and what came since; being shown is being seen, but only
     // while the user is at the device (a minimized desktop window shows nobody anything). `now` re-checks presence.
-    LaunchedEffect(tab, feed.pending, now) {
+    LaunchedEffect(tab, feed.pending, feed.said, now) {
         if (tab != VelinTab.JARVIS) return@LaunchedEffect
-        jarvis.recentAlerts = (feed.pending + jarvis.recentAlerts).distinctBy { it.id }.take(20)
+        // F5c: what he said in his own words is listed whether or not it was seen elsewhere; newest on top
+        jarvis.recentAlerts = JarvisPanelState.mergeRecent(feed.pending, feed.said, jarvis.recentAlerts)
         if (feed.pending.isNotEmpty()) sessionOrchestrator.jarvisAlerts.acknowledgeIfPresent()
     }
     val refresh: () -> Unit = {

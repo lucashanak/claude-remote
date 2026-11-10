@@ -77,6 +77,12 @@ object AndroidJarvisTalk {
             override fun stop() { JarvisTalkService.driver?.stop() }
 
             override fun button() { JarvisTalkService.driver?.button() }
+
+            override fun report(text: String): Boolean {
+                val d = JarvisTalkService.driver ?: return false
+                d.report(text)
+                return true
+            }
         }
     }
 }
@@ -105,6 +111,7 @@ class JarvisTalkService : Service() {
     private var media: MediaSession? = null
     private var wake: PowerManager.WakeLock? = null
     private var lastPressMs = 0L
+    private var lossWatch: HeadsetLossWatch? = null
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -165,6 +172,14 @@ class JarvisTalkService : Service() {
             onState = { s -> JarvisTalk.publish(s); updateNotification(s) },
         )
         driver = d
+        // F5c: the headset it reads into goes away → the reading stops at once and the mode ends silently (its next
+        // word would come out of the loudspeaker). The route-lost 5 s grace is about Jarvis' session, not this.
+        lossWatch = HeadsetLossWatch(
+            applicationContext,
+            // the reading stops at once (its onDone moves the loop on); a mere route switch keeps the mode
+            onStopReading = { SonioxTts.stop(); TtsHolder.stop() },
+            onLost = { d.outputLost() },
+        ).also { it.start() }
         // renewed on a clock, not on state changes: a quiet stretch (Jarvis thinking, a paused reading) must not
         // let it lapse while the mode runs; it ends with the mode
         scope.launch {
@@ -187,6 +202,8 @@ class JarvisTalkService : Service() {
     }
 
     private fun finishService() {
+        lossWatch?.stop()
+        lossWatch = null
         SonioxTtsPlayer.onMediaButton = null
         driver = null
         FileLogger.log(TAG, "conversation ended")
@@ -279,6 +296,8 @@ class JarvisTalkService : Service() {
     }
 
     override fun onDestroy() {
+        lossWatch?.stop()
+        lossWatch = null
         SonioxTtsPlayer.onMediaButton = null
         driver?.stop()
         driver = null
@@ -295,13 +314,22 @@ class JarvisTalkService : Service() {
 /** One utterance at a time through Soniox real-time STT; the end of speech after [END_OF_SPEECH_MS] of silence. */
 internal class SonioxTalkEars(private val context: Context) : TalkEars {
     @Volatile private var current: SonioxDictation? = null
+    /** A partial with words arrived in the utterance now open (F5c: Jarvis' report then waits for it). */
+    @Volatile private var words = false
+
+    override fun hearing(): Boolean = words
 
     override fun listen(onHeard: (String) -> Unit, onError: (String) -> Unit) {
         val key = sonioxConfig(context).apiKey
+        words = false
         postOnMain {
             current?.stop()
+            words = false
             // single-shot: Mic.open takes the Bluetooth headset's mic when one is connected (SCO), else the phone's
-            val d = SonioxDictation(context, key, continuous = false, onFinal = onHeard, onError = onError, silenceMs = END_OF_SPEECH_MS)
+            val d = SonioxDictation(
+                context, key, continuous = false, onFinal = onHeard, onError = onError, silenceMs = END_OF_SPEECH_MS,
+                onPartial = { p -> if (p.isNotBlank()) words = true },
+            )
             current = d
             d.start()
         }
@@ -309,7 +337,7 @@ internal class SonioxTalkEars(private val context: Context) : TalkEars {
 
     override fun finish() { postOnMain { current?.stop() } }
 
-    override fun cancel() { postOnMain { current?.stop(); current = null } }
+    override fun cancel() { words = false; postOnMain { current?.stop(); current = null } }
 
     companion object {
         /** A conversation turn ends sooner than a dictation (the dictation default is 4 s). */

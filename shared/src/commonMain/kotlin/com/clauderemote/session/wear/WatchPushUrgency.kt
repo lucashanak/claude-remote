@@ -50,9 +50,10 @@ object WatchPushUrgency {
     /**
      * The push of a Jarvis alert: urgent exactly when the phone's batcher let it vibrate ([buzz], which it does only
      * for block, done and incident, at most once per 5 min) — that is when the watch vibrates too (buzzAt grew).
-     * Everything else Jarvis changes (an info, a cleared count, the lease, the routing) only updates the wrist.
+     * Everything else Jarvis changes (an info, a cleared count, the lease, the routing) only updates the wrist. Of
+     * Jarvis' own sentences (F5c) only a jblock vibrates the wrist ([com.clauderemote.session.service.JarvisAlertKind.wristBuzz]).
      */
-    fun jarvisAlertUrgent(kind: com.clauderemote.session.service.JarvisAlertKind, buzz: Boolean): Boolean = buzz && kind.urgent
+    fun jarvisAlertUrgent(kind: com.clauderemote.session.service.JarvisAlertKind, buzz: Boolean): Boolean = buzz && kind.wristBuzz
 }
 
 /**

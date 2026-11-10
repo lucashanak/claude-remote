@@ -26,13 +26,45 @@ enum class JarvisAlertKind(val wire: String) {
     INFO("info"),
     /** Many sessions started or ended within a minute: one item for all of them. */
     INCIDENT("incident"),
+    /**
+     * F5c (2026-11-10): Jarvis says something in his own words after a wake (a task finished, a step he took, the
+     * round). Normal priority. Since F5c the template kinds above are only the fallback when he does not answer.
+     */
+    JSAY("jsay"),
+    /** His report holds something that blocks Lukáš (perm/ask/waiting, a session stuck on a limit, an incident). */
+    JBLOCK("jblock"),
+    /** His report ends with a question on the ONE proposal waiting ("… Ano?"): the alert offers Ano and Odpovědět. */
+    JASK("jask"),
+    /**
+     * F5c kolo 3 (server review): both at once — the batch held something that blocks Lukáš AND the report ends with
+     * the question on the one proposal. Loud and on the wrist like [JBLOCK], Ano/Odpovědět like [JASK].
+     */
+    JBLOCKASK("jblockask"),
     ;
 
     /**
-     * "HNED" of navrh §3 bod 10: the kinds that may vibrate a phone or a watch (contract 2026-11-08: block, done,
-     * incident). Only INFO joins the merged notification quietly.
+     * "HNED" of navrh §3 bod 10: the kinds that may make a sound on the phone (contract 2026-11-08: block, done,
+     * incident; F5c: all three of Jarvis' own). Only INFO joins the merged notification quietly.
      */
     val urgent: Boolean get() = this != INFO
+
+    /** Jarvis' own sentence (F5c), not a template line of jarvis-d. */
+    val own: Boolean get() = this == JSAY || this == JBLOCK || this == JASK || this == JBLOCKASK
+
+    /** Ends with the question on the one waiting proposal: Ano and Odpovědět may answer it. */
+    val asks: Boolean get() = this == JASK || this == JBLOCKASK
+
+    /**
+     * What blocks Lukáš: loud on the phone, and its sound is never held back by a lesser alert's 60 s spacing
+     * ([JarvisAlertBatcher], rev-f5c-app L5).
+     */
+    val blocking: Boolean get() = this == BLOCK || this == INCIDENT || this == JBLOCK || this == JBLOCKASK
+
+    /**
+     * The kinds that vibrate the WRIST: the template's HNED kinds and, of Jarvis' own, only the blocking ones (F5c
+     * brief: "jblock vysoká priorita a hodinky"). A jsay or jask only updates the watch.
+     */
+    val wristBuzz: Boolean get() = this == BLOCK || this == DONE || this == INCIDENT || this == JBLOCK || this == JBLOCKASK
 
     companion object {
         fun of(wire: String): JarvisAlertKind? = entries.firstOrNull { it.wire == wire }
@@ -53,9 +85,10 @@ data class JarvisAlert(
 )
 
 /**
- * The contract's line: `claude-remote-jarvis <id> <block|done|info|incident> <ms> <b64 text> <b64 tmux|->` and the
- * heartbeat `claude-remote-jarvis hb <ms>`. Anything else is not understood and returns null (a torn or future line
- * never breaks the tail).
+ * The contract's line: `claude-remote-jarvis <id> <block|done|info|incident|jsay|jblock|jask> <ms> <b64 text> <b64
+ * tmux|->` and the heartbeat `claude-remote-jarvis hb <ms>`. Anything else is not understood and returns null (a torn
+ * or future line never breaks the tail). Jarvis' own text (F5c, ≤ 400 chars by the contract) is data: shown and read
+ * aloud, never run.
  */
 object JarvisAlertLine {
     const val PREFIX = "claude-remote-jarvis"
@@ -101,7 +134,36 @@ data class JarvisFeed(
     val serverId: String? = null,
     /** Alerts not yet seen by the user, newest first. */
     val pending: List<JarvisAlert> = emptyList(),
+    /**
+     * What Jarvis said in his own words (F5c: jsay/jblock/jask), newest first, whether or not it was seen — the Velín's
+     * list and the Ano of a jask read it. Includes the replay of the tail (history, not raised) up to [JarvisAlertHub.SAID_MAX_AGE_MS].
+     */
+    val said: List<JarvisAlert> = emptyList(),
+    /**
+     * The newest alert of ANY kind seen (template lines too, replayed ones too): a question is offered for Ano only
+     * while nothing came after it (rev-f5c-app M2 — the phone's notification is replaced by any later alert).
+     */
+    val latest: JarvisAlert? = null,
+    /** Questions already answered from this device ("ano" or a reply that went in, or may have): never offered again (H1). */
+    val answered: Set<String> = emptySet(),
 )
+
+/** Where the answered question ids are kept across restarts (the tail's replay would offer them again otherwise). */
+interface JarvisAnsweredStore {
+    fun load(): List<String>
+    fun save(ids: List<String>)
+}
+
+/** [JarvisAnsweredStore] in the app's preferences: one line of ids (they never hold a space or a comma). */
+class JarvisAnsweredPrefs(private val prefs: com.clauderemote.storage.KeyValueStore) : JarvisAnsweredStore {
+    override fun load(): List<String> = prefs.getString(KEY, "").split(',').map { it.trim() }.filter { it.isNotEmpty() }
+    // durable at once: a process killed right after the answer must not offer the question again
+    override fun save(ids: List<String>) = prefs.putStringSync(KEY, ids.joinToString(","))
+
+    private companion object {
+        const val KEY = "jarvis_answered_asks"
+    }
+}
 
 /** A lease edge of one server ([JarvisAlertSink.onLeaseChanged]). */
 data class JarvisLeaseEdge(
@@ -157,6 +219,12 @@ class JarvisAlertHub(private val clock: () -> Long = { System.currentTimeMillis(
         /** A pending alert nobody looked at for this long is dropped from the count (it is stale by then). */
         const val PENDING_TTL_MS = 2L * 60 * 60 * 1000
         const val PENDING_MAX = 50
+        /** How far back Jarvis' own sentences are kept for the Velín (a replayed one older than this is not). */
+        const val SAID_MAX_AGE_MS = 12L * 60 * 60 * 1000
+        const val SAID_MAX = 20
+        /** A line timed later than this beyond the device's now is put at now (rev-f5c-app L3: it would stay on top). */
+        const val FUTURE_SLACK_MS = 60_000L
+        const val ANSWERED_MAX = 100
         private const val SEEN_MAX = 1000
         private const val TICK_MS = 20_000L
         private const val TAG = "JarvisAlerts"
@@ -170,6 +238,10 @@ class JarvisAlertHub(private val clock: () -> Long = { System.currentTimeMillis(
     private val coldUntil = HashMap<String, Long>()
     private val watcherUp = HashSet<String>()
     private var pending = ArrayList<JarvisAlert>()
+    private val said = ArrayList<JarvisAlert>()
+    private var latest: JarvisAlert? = null
+    private val answered = LinkedHashSet<String>()
+    private var answeredStore: JarvisAnsweredStore? = null
     private val lastAlive = HashMap<String, Boolean>()
 
     private val _state = MutableStateFlow(JarvisFeed())
@@ -184,6 +256,32 @@ class JarvisAlertHub(private val clock: () -> Long = { System.currentTimeMillis(
     @Volatile var presence: () -> Boolean = { true }
 
     private var ticker: Job? = null
+
+    /** The platform's persistent store of answered questions; what it holds is loaded at once. */
+    fun useAnsweredStore(store: JarvisAnsweredStore) {
+        val ids = runCatching { store.load() }.getOrDefault(emptyList())
+        synchronized(lock) {
+            answeredStore = store
+            answered.addAll(ids)
+            while (answered.size > ANSWERED_MAX) answered.remove(answered.first())
+            publish(clock())
+        }
+    }
+
+    /**
+     * The question [id] was answered from here (rev-f5c-app H1): its Ano is gone on the phone, the watch and in the
+     * guard, also after a restart. Called for a Sent and for a Maybe (it may have gone in).
+     */
+    fun markAnswered(id: String) {
+        val ids = synchronized(lock) {
+            if (!answered.add(id)) return
+            while (answered.size > ANSWERED_MAX) answered.remove(answered.first())
+            publish(clock())
+            answered.toList()
+        }
+        runCatching { answeredStore?.save(ids) }.onFailure { FileLogger.log(TAG, "answered ids not saved: ${it.message}") }
+        FileLogger.log(TAG, "question $id answered")
+    }
 
     /** The watcher of [serverId] (re)connected its tail; replayed lines follow. */
     fun connected(serverId: String) {
@@ -222,13 +320,21 @@ class JarvisAlertHub(private val clock: () -> Long = { System.currentTimeMillis(
                     if (now - at < FRESH_HB_MS) coldUntil.remove(serverId)
                 }
                 is JarvisAlertLine.Parsed.Alert -> {
-                    val at = p.serverMs + skewMs
+                    // a line from the future (a server clock jump) would stay newest for good: it counts as now (L3)
+                    val at = (p.serverMs + skewMs).let { if (it > now + FUTURE_SLACK_MS) now else it }
                     val age = now - at
                     val fresh = age <= (if (isCold(serverId, now)) FIRST_SIGHTING_GRACE_MS else MAX_AGE_MS)
                     if (seen.add(p.id)) {
                         while (seen.size > SEEN_MAX) seen.remove(seen.first())
+                        val a = JarvisAlert(p.id, p.kind, p.serverMs, at, p.text, p.tmux, serverId)
+                        if (age <= SAID_MAX_AGE_MS && at >= (latest?.atMs ?: Long.MIN_VALUE)) latest = a
+                        // his own words are history even when too old to raise: the Velín lists what he said
+                        if (p.kind.own && age <= SAID_MAX_AGE_MS) {
+                            said.add(a)
+                            said.sortByDescending { it.atMs }
+                            while (said.size > SAID_MAX) said.removeAt(said.size - 1)
+                        }
                         if (fresh) {
-                            val a = JarvisAlert(p.id, p.kind, p.serverMs, at, p.text, p.tmux, serverId)
                             pending.add(0, a)
                             while (pending.size > PENDING_MAX) pending.removeAt(pending.size - 1)
                             raised = a
@@ -279,6 +385,8 @@ class JarvisAlertHub(private val clock: () -> Long = { System.currentTimeMillis(
         val edges = synchronized(lock) {
             val before = pending.size
             pending.removeAll { now - it.atMs > PENDING_TTL_MS }
+            said.removeAll { now - it.atMs > SAID_MAX_AGE_MS }
+            if (latest?.let { now - it.atMs > SAID_MAX_AGE_MS } == true) latest = null
             cleared = before > 0 && pending.isEmpty()
             val e = leaseEdges(now)
             publish(now)
@@ -323,7 +431,10 @@ class JarvisAlertHub(private val clock: () -> Long = { System.currentTimeMillis(
 
     private fun publish(now: Long): JarvisFeed {
         val newest = heartbeats.maxByOrNull { it.value }
-        val feed = JarvisFeed(heartbeats.keys.any { aliveAt(it, now) }, newest?.value, newest?.key, pending.toList())
+        val feed = JarvisFeed(
+            heartbeats.keys.any { aliveAt(it, now) }, newest?.value, newest?.key, pending.toList(), said.toList(), latest,
+            answered.toSet(),
+        )
         _state.value = feed
         return feed
     }
@@ -396,16 +507,28 @@ class JarvisAlertBatcher(private val clock: () -> Long = { System.currentTimeMil
     }
 
     private var lastBuzzAt: Long? = null
+    /** Sounds of what blocks: spaced only among themselves, so a jsay a moment earlier never silences a block (L5). */
+    private var lastBlockBuzzAt: Long? = null
 
-    /** Null = not posted (routing per session, notifications off, or no live lease: per-session alerts carry it). */
+    /**
+     * Null = not posted (routing per session, notifications off, or no live lease: per-session alerts carry it).
+     * Jarvis' own sentences (F5c) are posted whatever the routing and the lease: the routing says who carries the
+     * SESSIONS' alerts, while a jsay/jblock/jask is Jarvis talking to Lukáš (the line itself proves he was alive), and
+     * the server already keeps them to one per 5 min, 60 a day. Notifications off still silences them.
+     */
     @Synchronized
     fun decide(alert: JarvisAlert, routing: AlertRouting, alive: Boolean, notificationsEnabled: Boolean): JarvisPost? {
-        if (!notificationsEnabled || routing != AlertRouting.VIA_JARVIS || !alive) return null
+        if (!notificationsEnabled) return null
+        if (!alert.kind.own && (routing != AlertRouting.VIA_JARVIS || !alive)) return null
         if (!alert.kind.urgent) return JarvisPost(buzz = false)
         val now = clock()
-        val last = lastBuzzAt
+        // Jarvis' own blocking sentences are spaced only among blocking ones; the template kinds keep their one gap
+        val last = if (alert.kind.own && alert.kind.blocking) lastBlockBuzzAt else lastBuzzAt
         val buzz = last == null || now - last >= BUZZ_GAP_MS || now < last
-        if (buzz) lastBuzzAt = now
+        if (buzz) {
+            lastBuzzAt = now
+            if (alert.kind.blocking) lastBlockBuzzAt = now
+        }
         return JarvisPost(buzz)
     }
 }
@@ -418,15 +541,77 @@ object JarvisMerged {
 
     /** Newest first, one line per alert, the urgent glyph in front of what blocks. */
     fun lines(feed: JarvisFeed): List<String> = feed.pending.take(MAX_LINES).map { a ->
-        when (a.kind) {
-            JarvisAlertKind.BLOCK -> "▲ "
-            JarvisAlertKind.INCIDENT -> "⚠ "
-            JarvisAlertKind.DONE -> "✓ "
-            JarvisAlertKind.INFO -> "• "
-        } + a.text
+        glyph(a.kind) + " " + a.text
     } + if (feed.pending.size > MAX_LINES) listOf("… a ${feed.pending.size - MAX_LINES} dalších") else emptyList()
 
     fun text(feed: JarvisFeed): String = lines(feed).joinToString("\n")
 
+    /** One glyph per kind, the same on the phone, the desktop, the Velín and the watch. */
+    fun glyph(kind: JarvisAlertKind): String = when (kind) {
+        JarvisAlertKind.BLOCK, JarvisAlertKind.JBLOCK -> "▲"
+        JarvisAlertKind.JBLOCKASK -> "▲?"
+        JarvisAlertKind.INCIDENT -> "⚠"
+        JarvisAlertKind.DONE -> "✓"
+        JarvisAlertKind.INFO -> "•"
+        JarvisAlertKind.JSAY -> "»"
+        JarvisAlertKind.JASK -> "?"
+    }
+
     const val FAIL_OPEN_TEXT = "Jarvis neodpovídá – upozornění jdou zase přímo ze sessions"
+}
+
+/**
+ * Jarvis' own sentences on this device (F5c, 2026-11-10): the notification titled "Jarvis" with his text, and the
+ * one question that may be answered from it. Pure, so the rules are unit tests.
+ */
+object JarvisSays {
+    const val TITLE = "Jarvis"
+    /** The bare word "Ano" types into Jarvis' input; his hook decides what it approves (the lone waiting proposal). */
+    const val YES = "ano"
+    /** A question older than this is not answered with one tap any more (Jarvis has moved on, the proposal lapsed). */
+    const val ASK_MAX_AGE_MS = 30L * 60 * 1000
+
+    /** How loud the notification of [kind] is, given whether the batcher let it make a sound. */
+    enum class Loudness { HIGH, NORMAL, QUIET }
+
+    fun loudness(kind: JarvisAlertKind, buzz: Boolean): Loudness = when {
+        !buzz -> Loudness.QUIET
+        kind.blocking -> Loudness.HIGH
+        else -> Loudness.NORMAL
+    }
+
+    /**
+     * The question Ano may answer now: the NEWEST thing Jarvis said, when it asks ([JarvisAlertKind.asks]), is younger
+     * than [ASK_MAX_AGE_MS], has not been answered from here ([JarvisFeed.answered], H1) and no alert of any kind came
+     * after it ([JarvisFeed.latest], M2 — the same rule as the phone's notification, replaced by any later alert). An
+     * "ano" typed after any of that would answer whatever waits by then, not what the tap showed.
+     */
+    fun ask(feed: JarvisFeed, now: Long): JarvisAlert? {
+        val q = feed.said.firstOrNull()?.takeIf { it.kind.asks } ?: return null
+        if (q.id in feed.answered || now - q.atMs > ASK_MAX_AGE_MS) return null
+        val l = feed.latest
+        if (l != null && l.id != q.id && l.atMs >= q.atMs) return null
+        return q
+    }
+
+    /**
+     * Why Ano (or a reply) to [alertId] is not sent now, or null = send it ([ask] is still that very question). Each
+     * refusal says what is true: no question, already answered, too old, or something came after it (or the id is not
+     * known here, e.g. after a restart) — then Lukáš answers in the app, where he sees what waits.
+     */
+    fun yesRefusal(feed: JarvisFeed, alertId: String?, now: Long): String? {
+        if (alertId.isNullOrBlank()) return NOT_A_QUESTION
+        if (feed.said.any { it.id == alertId && !it.kind.asks }) return NOT_A_QUESTION
+        if (alertId in feed.answered) return ANSWERED
+        if (ask(feed, now)?.id == alertId) return null
+        val q = feed.said.firstOrNull()
+        val newerAfter = feed.latest?.let { it.id != alertId && it.atMs >= (q?.atMs ?: 0) } == true
+        if (q?.id == alertId && !newerAfter && now - q.atMs > ASK_MAX_AGE_MS) return LAPSED
+        return STALE
+    }
+
+    const val NOT_A_QUESTION = "Tohle nebyla Jarvisova otázka, neposláno."
+    const val STALE = "Jarvis od té doby řekl něco dalšího – odpověz mu v aplikaci."
+    const val ANSWERED = "Na tuhle otázku už odpověď odešla."
+    const val LAPSED = "Otázka je starší než půl hodiny – odpověz Jarvisovi v aplikaci."
 }

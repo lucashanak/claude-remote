@@ -40,6 +40,14 @@ class WearDataListenerService : WearableListenerService() {
             }
             return
         }
+        if (messageEvent.path == PATH_JARVIS_YES_RESULT) {
+            // F5c: what "Ano" of Jarvis' question did (same shape as a decision's result)
+            val r = JarvisWatchStore.decideResult(messageEvent.data) ?: return
+            WearLog.i(this, TAG, "Jarvis yes ${r.id}: ok=${r.ok} ${r.text}")
+            JarvisWatchNotifier.postResult(this, "Jarvis · ano", r.text)
+            if (r.ok) WearHaptics.success(this) else WearHaptics.error(this)
+            return
+        }
         if (messageEvent.path == PATH_JARVIS_UNDO_RESULT) {
             val r = runCatching {
                 WEAR_JSON.decodeFromString<WearJarvisUndoResult>(String(messageEvent.data, Charsets.UTF_8))
@@ -173,6 +181,7 @@ class WearDataListenerService : WearableListenerService() {
         private const val TAG = "WearDataListener"
         const val PATH_REPLY_REFUSED = "/reply-refused"
         const val PATH_JARVIS_UNDO_RESULT = "/jarvis-undo-result"
+        const val PATH_JARVIS_YES_RESULT = "/jarvis-yes-result"
         const val PATH = "/sessions"
         const val KEY_JSON = "json"
         val WEAR_JSON = Json { ignoreUnknownKeys = true }

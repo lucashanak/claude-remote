@@ -78,6 +78,11 @@
             android:name="com.clauderemote.wear.JarvisUndoReceiver"
             android:exported="false" />
 
+        <!-- Jarvis F5c: "Ano" of Jarvis' question, sent to the phone on /jarvis-yes. -->
+        <receiver
+            android:name="com.clauderemote.wear.JarvisYesReceiver"
+            android:exported="false" />
+
         <!-- Handles the PackageInstaller session result (self-update). -->
         <receiver
             android:name="com.clauderemote.wear.InstallResultReceiver"
@@ -140,6 +145,14 @@
                     android:scheme="wear"
                     android:host="*"
                     android:path="/jarvis-decide-result" />
+            </intent-filter>
+            <!-- Jarvis F5c: what "Ano" of his question did on the phone. -->
+            <intent-filter>
+                <action android:name="com.google.android.gms.wearable.MESSAGE_RECEIVED" />
+                <data
+                    android:scheme="wear"
+                    android:host="*"
+                    android:path="/jarvis-yes-result" />
             </intent-filter>
         </service>
 

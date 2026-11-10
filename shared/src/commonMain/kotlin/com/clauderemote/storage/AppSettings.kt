@@ -234,6 +234,14 @@ class AppSettings(private val prefs: KeyValueStore) {
         get() = com.clauderemote.session.service.AlertRouting.of(prefs.getString("alert_routing", "session"))
         set(value) = prefs.putString("alert_routing", value.wire)
 
+    /**
+     * Jarvis F5c: read his own sentences in the headset when no conversation runs (Android; never the loudspeaker).
+     * On by default: without a headset connected nothing is read anyway.
+     */
+    var readJarvisInHeadset: Boolean
+        get() = prefs.getBoolean("jarvis_read_in_headset", true)
+        set(value) = prefs.putBoolean("jarvis_read_in_headset", value)
+
     // Security
     var biometricLockEnabled: Boolean
         get() = prefs.getBoolean("biometric_lock_enabled", false)

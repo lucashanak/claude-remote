@@ -46,6 +46,10 @@ data class WatchDecideRequest(val id: String, val approve: Boolean, val textHash
 @Serializable
 data class WatchDecideResult(val id: String, val ok: Boolean, val text: String)
 
+/** Watch -> phone on /jarvis-yes (F5c): "Ano" of Jarvis' question [id] (a jask alert). Answered as a [WatchDecideResult]. */
+@Serializable
+data class WatchYesRequest(val id: String)
+
 /** Phone -> watch on /jarvis-news: `cr-digest delta --peek --say`, or why it could not be read. */
 @Serializable
 data class WatchNews(val ok: Boolean, val text: String)
@@ -143,9 +147,18 @@ object WatchJarvis {
     @Serializable
     data class Recent(val id: String, val kind: String, val text: String, val atMs: Long)
 
-    fun recent(pending: List<JarvisAlert>): List<Recent> = pending.take(RECENT_MAX).map { a ->
-        Recent(a.id, a.kind.wire, a.text.take(ALERT_TEXT_MAX), a.atMs)
-    }
+    /** The pending alerts and (F5c) what Jarvis said in his own words, once each, newest first. */
+    fun recent(pending: List<JarvisAlert>, said: List<JarvisAlert> = emptyList()): List<Recent> =
+        (pending + said).distinctBy { it.id }.sortedByDescending { it.atMs }.take(RECENT_MAX).map { a ->
+            Recent(a.id, a.kind.wire, a.text.take(ALERT_TEXT_MAX), a.atMs)
+        }
+
+    /**
+     * What the wrist's merged notification shows (F5c): everything pending while alerts are [carried] through Jarvis,
+     * else only his own sentences — they reach this device whatever the routing, the template lines do not.
+     */
+    fun shownFeed(feed: com.clauderemote.session.service.JarvisFeed, carried: Boolean): com.clauderemote.session.service.JarvisFeed =
+        if (carried) feed else feed.copy(pending = feed.pending.filter { it.kind.own })
 }
 
 /** Watch -> phone body of /jarvis-proposals-request. [periodic] = the page's minute tick (a poll permit, review L8). */

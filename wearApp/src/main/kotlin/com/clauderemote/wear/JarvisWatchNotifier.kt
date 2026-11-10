@@ -28,7 +28,7 @@ internal object JarvisWatchDecision {
         data class Post(val buzz: Boolean) : Action
     }
 
-    fun key(info: WearJarvisInfo): String = "${info.pending}\u0000${info.text}"
+    fun key(info: WearJarvisInfo): String = "${info.pending}\u0000${info.text}\u0000${info.askId.orEmpty()}"
 
     fun decide(info: WearJarvisInfo?, lastBuzzAt: Long, shownKey: String?, dismissedKey: String?): Action {
         if (info == null || !info.notify || info.pending <= 0 || info.text.isBlank()) return Action.Cancel
@@ -41,7 +41,8 @@ internal object JarvisWatchDecision {
 
 /**
  * Jarvis F3 on the wrist: one merged notification "Jarvis · N" instead of one per session, shown only when the phone
- * routes alerts through Jarvis and his lease is live ([WearJarvisInfo.notify]). It vibrates only when the phone's
+ * routes alerts through Jarvis and his lease is live, or (F5c) when his own sentences wait — those whatever the routing
+ * ([WearJarvisInfo.notify]); his question (jask) gets "Ano" ([JarvisYesReceiver]). It vibrates only when the phone's
  * batcher let an alert vibrate (block, done or incident, navrh §3 bod 10: HNED); everything else updates it silently.
  *
  * The last [WearJarvisInfo.buzzAt] acted on, the content shown and the content swiped away are persisted: the
@@ -58,6 +59,8 @@ object JarvisWatchNotifier {
     internal const val EXTRA_KEY = "jarvis_key"
     internal const val EXTRA_UNDO_SERVER = "jarvis_undo_server"
     internal const val EXTRA_UNDO_TMUX = "jarvis_undo_tmux"
+    internal const val EXTRA_ASK_ID = "jarvis_ask_id"
+    private const val YES_REQ = 0x2A13_0001
     private const val UNDO_RESULT_ID = 0x2A11_0003
     private const val DECIDE_RESULT_ID = 0x2A11_0004
     private const val UNDO_REQ_BASE = 0x2A12_0000
@@ -118,6 +121,13 @@ object JarvisWatchNotifier {
             .setDeleteIntent(dismissed)
             .setOnlyAlertOnce(!buzz)
             .setAutoCancel(true)
+        // F5c: "Ano" only for Jarvis' question (jask) that is still the newest thing he said; the phone checks it again.
+        info.askId?.takeIf { it.isNotBlank() }?.let { id ->
+            val pi = PendingIntent.getBroadcast(
+                context, YES_REQ, Intent(context, JarvisYesReceiver::class.java).putExtra(EXTRA_ASK_ID, id), flags,
+            )
+            b.addAction(NotificationCompat.Action.Builder(0, "Ano", pi).build())
+        }
         // F4: "Vrátit" for each close Jarvis announced; the phone decides from closed.jsonl whether it still can.
         info.undo.take(MAX_UNDO).forEach { u ->
             val pi = PendingIntent.getBroadcast(
@@ -216,5 +226,34 @@ class JarvisUndoReceiver : BroadcastReceiver() {
         timeout = Runnable { settle("Timeout") }
         handler.postDelayed(timeout, 7_500L)
         sendJarvisUndo(appContext, serverId, tmux) { r -> settle(r) }
+    }
+}
+
+/**
+ * "Ano" of Jarvis' question on the wrist (F5c): hands it to the phone on /jarvis-yes, no Activity (like
+ * [JarvisUndoReceiver]). The phone answers on /jarvis-yes-result; only a send that did not happen is said here.
+ */
+class JarvisYesReceiver : BroadcastReceiver() {
+    override fun onReceive(context: Context, intent: Intent) {
+        val appContext = context.applicationContext
+        val id = intent.getStringExtra(JarvisWatchNotifier.EXTRA_ASK_ID)
+        if (id.isNullOrBlank()) return
+        val pending = goAsync()
+        val done = java.util.concurrent.atomic.AtomicBoolean(false)
+        val handler = android.os.Handler(android.os.Looper.getMainLooper())
+        lateinit var timeout: Runnable
+        fun settle(result: String) {
+            if (!done.compareAndSet(false, true)) return
+            handler.removeCallbacks(timeout)
+            WearLog.i(appContext, "JarvisYes", "yes $id sent: $result")
+            if (result != "Sent" && result != "Timeout") {
+                JarvisWatchNotifier.postResult(appContext, "Jarvis · ano", "Neodesláno: $result")
+                WearHaptics.error(appContext)
+            }
+            pending.finish()
+        }
+        timeout = Runnable { settle("Timeout") }
+        handler.postDelayed(timeout, 7_500L)
+        sendJarvisYes(appContext, id) { r -> settle(r) }
     }
 }

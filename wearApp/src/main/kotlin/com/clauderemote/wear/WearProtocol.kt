@@ -70,6 +70,8 @@ data class WearJarvisInfo(
     val sessionId: String? = null,
     // His newest alerts, newest first (≤ 5): the Jarvis page and the tile's sentence. Older phone = none.
     val recent: List<WearJarvisRecent> = emptyList(),
+    // F5c: the id of Jarvis' question (jask) the merged notification offers "Ano" for; null = none / older phone.
+    val askId: String? = null,
 )
 
 /** Mirror of shared's WatchJarvis.Recent: one of Jarvis' alerts (Czech, one sentence, no paths). [atMs] = phone clock. */

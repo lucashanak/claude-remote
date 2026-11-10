@@ -124,4 +124,32 @@ class WatchJarvisTest {
         assertFalse(WatchJarvis.proposalsRequest(ByteArray(0)).periodic, "an older watch: interactive")
         assertFalse(WatchJarvis.proposalsRequest("garbage".encodeToByteArray()).periodic)
     }
+
+    // ── F5c ──
+
+    @Test fun recentMergesHisOwnSentencesNewestFirst() {
+        val pending = listOf(JarvisAlert("t1", JarvisAlertKind.DONE, 1, 50, "šablona", null, "s1"))
+        val said = listOf(
+            JarvisAlert("j2", JarvisAlertKind.JASK, 1, 90, "Mám ji pustit dál? Ano?", null, "s1"),
+            JarvisAlert("j1", JarvisAlertKind.JSAY, 1, 10, "Ráno.", null, "s1"),
+        )
+        assertEquals(listOf("j2", "t1", "j1"), WatchJarvis.recent(pending, said + pending.map { it }).map { it.id })
+        assertEquals("jask", WatchJarvis.recent(pending, said)[0].kind)
+    }
+
+    @Test fun theWristShowsHisOwnSentencesWhateverTheRoutingTemplatesOnlyWhenCarried() {
+        val feed = com.clauderemote.session.service.JarvisFeed(
+            pending = listOf(
+                JarvisAlert("j", JarvisAlertKind.JSAY, 1, 2, "Citace pushnula.", null, "s1"),
+                JarvisAlert("t", JarvisAlertKind.BLOCK, 1, 1, "šablona", null, "s1"),
+            ),
+        )
+        assertEquals(listOf("j", "t"), WatchJarvis.shownFeed(feed, carried = true).pending.map { it.id })
+        assertEquals(listOf("j"), WatchJarvis.shownFeed(feed, carried = false).pending.map { it.id })
+    }
+
+    @Test fun theYesRequestsFieldNameIsTheContract() {
+        val json = Json { encodeDefaults = true }
+        assertEquals(setOf("id"), json.parseToJsonElement(json.encodeToString(WatchYesRequest("j-1"))).jsonObject.keys)
+    }
 }

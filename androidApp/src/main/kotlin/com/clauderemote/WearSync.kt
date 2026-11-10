@@ -113,6 +113,11 @@ data class WearJarvisInfo(
     val sessionId: String? = null,
     /** His newest alerts (at most 5, newest first) for the watch's Jarvis page and the tile's one sentence. */
     val recent: List<com.clauderemote.session.wear.WatchJarvis.Recent> = emptyList(),
+    /**
+     * F5c: Jarvis' question (a jask that is still the newest thing he said): the wrist offers "Ano" for it, sent back on
+     * /jarvis-yes with this id and checked again here. Null = none. Trailing default: an older watch ignores it.
+     */
+    val askId: String? = null,
 )
 
 /** One "Vrátit" offer on the wrist: [tmux] on [serverId], [label] = its alias. */
@@ -535,18 +540,22 @@ object WearSync {
         // older watch build reads exactly this field to stay quiet on a completion.
         val completionAlerts = false
         val jarvisTab = runCatching { orchestrator?.jarvisTabIdForWatch() }.getOrNull()
-        val jarvis = feed?.takeIf { it.heartbeatAtMs != null || it.pending.isNotEmpty() || jarvisTab != null }?.let { f ->
+        val jarvis = feed?.takeIf { it.heartbeatAtMs != null || it.pending.isNotEmpty() || jarvisTab != null }?.let { full ->
+            // F5c: Jarvis' own sentences reach the wrist whatever the routing (like the phone's notification); the
+            // template lines only while routed through him
+            val f = com.clauderemote.session.wear.WatchJarvis.shownFeed(full, carried)
             WearJarvisInfo(
                 pending = f.pending.size,
                 text = com.clauderemote.session.service.JarvisMerged.text(f).take(WATCH_TEXT_MAX),
-                notify = carried && settings.notificationsEnabled,
+                notify = settings.notificationsEnabled && f.pending.isNotEmpty(),
                 buzzAt = jarvisBuzzAt,
                 alive = jarvisAlive,
                 undo = com.clauderemote.session.JarvisUndo.undoable(f.pending).map { a ->
                     WearJarvisUndo(a.serverId, a.tmux!!, com.clauderemote.session.JarvisUndo.alias(a.tmux!!))
                 },
                 sessionId = jarvisTab,
-                recent = com.clauderemote.session.wear.WatchJarvis.recent(f.pending),
+                recent = com.clauderemote.session.wear.WatchJarvis.recent(full.pending, full.said),
+                askId = com.clauderemote.session.service.JarvisSays.ask(full, System.currentTimeMillis())?.id,
             )
         }
         val payload = json.encodeToString<WearSessionsPayload>(

@@ -69,6 +69,19 @@ fun sendJarvisUndo(context: Context, serverId: String, tmux: String, onResult: (
     sendToPhone(context, "/jarvis-undo", json.toByteArray(Charsets.UTF_8), onResult)
 }
 
+/** Watch -> phone on /jarvis-yes (F5c): "Ano" of Jarvis' question [id] (a jask alert). */
+@Serializable
+data class WearJarvisYesRequest(val id: String)
+
+/**
+ * "Ano" of Jarvis' question: the phone sends the bare "ano" into Jarvis' pane only while that question is still the
+ * newest thing he said and he is idle with an empty input; it answers on /jarvis-yes-result.
+ */
+fun sendJarvisYes(context: Context, id: String, onResult: (String) -> Unit = {}) {
+    val json = MESSAGING_JSON.encodeToString<WearJarvisYesRequest>(WearJarvisYesRequest(id))
+    sendToPhone(context, "/jarvis-yes", json.toByteArray(Charsets.UTF_8), onResult)
+}
+
 /**
  * Body of /jarvis-proposals-request (mirror of shared's WatchProposalsRequest). [periodic] = the page's minute tick: the
  * phone reads with a poll permit, which a busy server may skip (review L8). An older phone ignores the body.

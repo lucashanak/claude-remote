@@ -63,6 +63,8 @@ class PhoneWearService : WearableListenerService() {
             "/jarvis-proposals-request" -> handleJarvisProposals(messageEvent.data, messageEvent.sourceNodeId)
             "/jarvis-decide" -> handleJarvisDecide(messageEvent.data, messageEvent.sourceNodeId)
             "/jarvis-news-request" -> handleJarvisNews(messageEvent.sourceNodeId)
+            // F5c: "Ano" of Jarvis' question on the wrist
+            "/jarvis-yes" -> handleJarvisYes(messageEvent.data, messageEvent.sourceNodeId)
             // Watch-side log line (see wearApp's WearLog) — piggybacks on the
             // phone's existing LogShipper so watch diagnostics show up in the
             // same server-side log file as the phone's, no new infra needed.
@@ -245,6 +247,37 @@ class PhoneWearService : WearableListenerService() {
             sendToWatch(sourceNodeId, "/jarvis-news", JSON.encodeToString(r))
         }
         if (!started) FileLogger.log(TAG, "Wear Jarvis news: already running, it answers")
+    }
+
+    /**
+     * "Ano" of Jarvis' question from the wrist (F5c): [com.clauderemote.session.SessionOrchestrator.jarvisYes] — only
+     * while that question is still the newest thing he said, then the bare "ano" over the checked path into his pane.
+     * Off the listener thread like the other Jarvis requests; answered on /jarvis-yes-result (a decision's shape).
+     */
+    private fun handleJarvisYes(data: ByteArray, sourceNodeId: String) {
+        val req = runCatching {
+            JSON.decodeFromString<com.clauderemote.session.wear.WatchYesRequest>(String(data, Charsets.UTF_8))
+        }.getOrNull() ?: return
+        if (req.id.isBlank()) return
+        val started = JARVIS.submit(
+            key = "yes:${req.id}",
+            limitMs = 20_000,
+            run = {
+                val o = OrchestratorHolder.orchestrator ?: return@submit com.clauderemote.session.wear.WatchDecideResult(req.id, false, NO_APP)
+                val (ok, text) = com.clauderemote.voice.conversation.TalkWords.answerOutcome(o.jarvisYes(req.id), "Poslal jsem Jarvisovi „ano“.")
+                com.clauderemote.session.wear.WatchDecideResult(req.id, ok, text)
+            },
+            onTimeout = { com.clauderemote.session.wear.WatchDecideResult(req.id, false, "Nevím, jestli to Jarvisovi odešlo – podívej se k němu.") },
+            onError = { e -> com.clauderemote.session.wear.WatchDecideResult(req.id, false, "Neodesláno (${e::class.simpleName}).") },
+        ) { r ->
+            FileLogger.log(TAG, "Wear Jarvis yes ${req.id}: ok=${r.ok} ${r.text}")
+            // the question is answered: the phone's notification of it is spent too
+            if (r.ok) JarvisNotifier.cancel(this)
+            // the question is marked answered (or refused): the wrist drops its Ano with the next snapshot
+            WearSync.pushNow(urgent = false)
+            sendToWatch(sourceNodeId, "/jarvis-yes-result", JSON.encodeToString(r))
+        }
+        if (!started) FileLogger.log(TAG, "Wear Jarvis yes ${req.id}: already running, it answers")
     }
 
     private fun handleHistoryRequest(data: ByteArray, sourceNodeId: String) {

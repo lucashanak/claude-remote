@@ -513,7 +513,18 @@ fun main() = application {
                 val post = jarvisBatcher.decide(
                     alert, appSettings.alertRouting, sessionOrchestrator.jarvisAlerts.alive(alert.serverId), appSettings.notificationsEnabled,
                 )
-                if (post?.buzz == true) {
+                if (alert.kind.own) {
+                    // F5c: his own sentence, titled "Jarvis" (every one: the server already keeps them to one per 5 min);
+                    // aloud only in a running conversation, queued behind Lukáš's words there
+                    if (post != null) sendDesktopNotification(com.clauderemote.session.service.JarvisSays.TITLE, alert.text)
+                    val route = com.clauderemote.voice.conversation.JarvisAloud.route(
+                        alert, appSettings.notificationsEnabled,
+                        conversation = { com.clauderemote.voice.conversation.JarvisTalk.report(alert.text) },
+                        headsetSetting = false,
+                        headsetConnected = { false },
+                    )
+                    com.clauderemote.util.FileLogger.log("JarvisSays", "${alert.id} (${alert.kind.wire}) posted=${post != null} aloud=$route")
+                } else if (post?.buzz == true) {
                     sendDesktopNotification(
                         com.clauderemote.session.service.JarvisMerged.title(feed),
                         com.clauderemote.session.service.JarvisMerged.text(feed),
@@ -534,6 +545,9 @@ fun main() = application {
                 }
             }
         }
+        // F5c H1: a question answered here stays answered across a restart (the desktop has no Ano today; the store
+        // keeps the rule the same on every platform)
+        sessionOrchestrator.jarvisAlerts.useAnsweredStore(com.clauderemote.session.service.JarvisAnsweredPrefs(prefs))
         // The Velín's Jarvis tab marks alerts seen only while someone is at this desktop (rev-f3-app LOW).
         sessionOrchestrator.jarvisAlerts.presence = { windowFocused && !windowState.isMinimized && DesktopPresence.userPresent }
     }

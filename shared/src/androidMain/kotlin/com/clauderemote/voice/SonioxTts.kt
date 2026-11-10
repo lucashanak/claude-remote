@@ -65,6 +65,11 @@ internal object SonioxTts {
         rate: Float,
         onFinish: () -> Unit,
         onError: ((String) -> Unit)?,
+        /**
+         * The audio focus asked for. Transient by default (music pauses while Claude reads); Jarvis' short report in
+         * the headset (F5c) asks for [AudioManager.AUDIOFOCUS_GAIN_TRANSIENT_MAY_DUCK]: the music only gets quieter.
+         */
+        focusGain: Int = AudioManager.AUDIOFOCUS_GAIN_TRANSIENT,
     ) {
         stop() // supersede anything in flight
         if (apiKey.isBlank()) {
@@ -80,7 +85,7 @@ internal object SonioxTts {
         FileLogger.log(TAG, "speak: ${text.length} chars → ${segments.size} segments " +
             segments.joinToString(",", "[", "]") { it.length.toString() })
         val ctx = context.applicationContext
-        val host = AndroidTtsHost(ctx, rate)
+        val host = AndroidTtsHost(ctx, rate, focusGain)
         val session = SonioxTtsSession(
             segments = segments,
             voice = voice,
@@ -156,7 +161,11 @@ internal class AudioTrackSink(private val rate: Float) : TtsAudioSink {
 }
 
 /** Focus, network, MediaSession and the media notification for one session. */
-private class AndroidTtsHost(private val ctx: Context, private val rate: Float) : SonioxTtsHost {
+private class AndroidTtsHost(
+    private val ctx: Context,
+    private val rate: Float,
+    private val focusGain: Int = AudioManager.AUDIOFOCUS_GAIN_TRANSIENT,
+) : SonioxTtsHost {
     private val tag = "SonioxTts"
     @Volatile var session: SonioxTtsSession? = null
     @Volatile private var ended = false
@@ -210,7 +219,7 @@ private class AndroidTtsHost(private val ctx: Context, private val rate: Float) 
 
     /** @return false when the system refused focus (e.g. during a call). */
     override fun requestFocus(): Boolean {
-        val req = focusRequest ?: AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN_TRANSIENT)
+        val req = focusRequest ?: AudioFocusRequest.Builder(focusGain)
             .setAudioAttributes(ttsAttributes)
             .setOnAudioFocusChangeListener(focusListener)
             .setWillPauseWhenDucked(false)

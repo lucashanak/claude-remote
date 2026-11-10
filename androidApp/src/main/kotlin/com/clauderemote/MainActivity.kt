@@ -314,6 +314,10 @@ class MainActivity : FragmentActivity() {
         replacedOrchestrator?.shutdown()
         // Jarvis' conversation mode (F5a): its service reaches Jarvis through whichever orchestrator is current.
         com.clauderemote.voice.AndroidJarvisTalk.install(applicationContext, OrchestratorHolder.current)
+        // F5c: Jarvis' own sentences in the headset outside a conversation (the Velín's switch reads this setting)
+        com.clauderemote.voice.JarvisHeadsetVoice.install(applicationContext)
+        // H1: questions answered from this phone stay answered across a restart (the tail's replay would offer them)
+        sessionOrchestrator.jarvisAlerts.useAnsweredStore(com.clauderemote.session.service.JarvisAnsweredPrefs(prefs))
         // Keep the Wear companion app's session list in sync (Data Layer).
         WearSync.start(applicationContext, tabManager, sessionOrchestrator)
         // WearSync already observes the tab list to prune its own per-session
@@ -483,10 +487,33 @@ class MainActivity : FragmentActivity() {
                 val post = jarvisBatcher.decide(
                     alert, appSettings.alertRouting, sessionOrchestrator.jarvisAlerts.alive(alert.serverId), appSettings.notificationsEnabled,
                 )
-                if (post != null) {
+                if (alert.kind.own) {
+                    // F5c: his own words — one notification "Jarvis" with his sentence; a jask that is still the
+                    // newest thing he said gets Ano/Odpovědět
+                    val ask = com.clauderemote.session.service.JarvisSays.ask(feed, System.currentTimeMillis())?.id == alert.id
+                    if (post != null) {
+                        JarvisNotifier.postSays(
+                            applicationContext, alert, feed, com.clauderemote.session.service.JarvisSays.loudness(alert.kind, post.buzz), ask,
+                        )
+                        if (post.buzz && alert.kind.wristBuzz) WearSync.noteJarvisBuzz()
+                    }
+                    // aloud: in a running conversation (queued behind his words), else in the headset, never the speaker
+                    val route = com.clauderemote.voice.conversation.JarvisAloud.route(
+                        alert, appSettings.notificationsEnabled,
+                        conversation = { com.clauderemote.voice.conversation.JarvisTalk.report(alert.text) },
+                        headsetSetting = appSettings.readJarvisInHeadset,
+                        headsetConnected = { com.clauderemote.voice.JarvisHeadsetVoice.connected(applicationContext) },
+                    )
+                    if (route == com.clauderemote.voice.conversation.AloudRoute.HEADSET) {
+                        com.clauderemote.voice.JarvisHeadsetVoice.offer(alert.text, ask)
+                    }
+                    FileLogger.log("JarvisSays", "${alert.id} (${alert.kind.wire}) posted=${post != null} aloud=$route")
+                } else if (post != null) {
                     JarvisNotifier.post(applicationContext, feed, post.buzz)
                     if (post.buzz) WearSync.noteJarvisBuzz()
                 }
+                // M2: any later alert, posted here or not, takes the Ano of an earlier question off the notification
+                JarvisNotifier.dropAskIfGone(applicationContext, feed, System.currentTimeMillis())
                 // Urgent only when the watch vibrates for it too (block/done/incident the batcher let through).
                 WearSync.pushNow(
                     urgent = com.clauderemote.session.wear.WatchPushUrgency.jarvisAlertUrgent(alert.kind, post?.buzz == true),

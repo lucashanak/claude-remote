@@ -35,6 +35,7 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.withPermit
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlin.random.Random
 
@@ -3407,7 +3408,69 @@ class SessionOrchestrator(
     suspend fun sendJarvisVoice(
         prompt: String,
         stillWanted: () -> Boolean = { true },
+    ): com.clauderemote.voice.conversation.TalkSendResult =
+        // the same lock as Ano/Odpovědět: a spoken prompt never lands between an answer's Enter and its hook
+        jarvisAnswerLock.withLock { sendJarvisChecked(prompt, stillWanted, "voice prompt") }
+
+    /**
+     * F5c: "Ano" and "Odpovědět" of Jarvis' own notification (phone, watch). Exactly the conversation mode's path
+     * ([sendJarvisVoice]: his tab only, idle at his prompt, his input box empty, checked again on the server), the
+     * text as typed (one line, invisible characters out, capped like a spoken prompt), no `[hlas]` prefix: it is
+     * Lukáš writing to him. Refused = nothing typed, never sent later.
+     */
+    suspend fun sendJarvisAnswer(text: String): com.clauderemote.voice.conversation.TalkSendResult =
+        jarvisAnswerLock.withLock { sendJarvisAnswerLocked(text) }
+
+    /** [sendJarvisAnswer] for a caller that already holds [jarvisAnswerLock] (the Mutex is not reentrant). */
+    private suspend fun sendJarvisAnswerLocked(text: String): com.clauderemote.voice.conversation.TalkSendResult {
+        val t = com.clauderemote.voice.conversation.TalkWords.plain(text)
+        if (t.isEmpty()) return com.clauderemote.voice.conversation.TalkSendResult.Refused(com.clauderemote.voice.conversation.TalkWords.EMPTY)
+        return sendJarvisChecked(t, { true }, "answer")
+    }
+
+    /**
+     * "Ano" of a jask: only while that alert is still the question on offer
+     * ([com.clauderemote.session.service.JarvisSays.ask]: newest, not answered, nothing after it, ≤ 30 min); then the
+     * bare "ano" over [sendJarvisAnswer]. What it approves is decided by Jarvis' hook (the lone waiting proposal).
+     */
+    suspend fun jarvisYes(alertId: String?): com.clauderemote.voice.conversation.TalkSendResult =
+        answerJarvisQuestion(alertId, com.clauderemote.session.service.JarvisSays.YES, "yes")
+
+    /** "Odpovědět" of a jask: the typed text, under the same rule as Ano (a typed "ano" approves just the same). */
+    suspend fun jarvisReply(alertId: String?, text: String): com.clauderemote.voice.conversation.TalkSendResult =
+        answerJarvisQuestion(alertId, text, "reply")
+
+    /**
+     * One answer to Jarvis' question at a time on this device (rev-f5c-app H2: a double tap, or the phone and the
+     * watch together, would otherwise type a second "ano" between the first one's Enter and its hook — queued as the
+     * next prompt, approving a proposal nobody saw). Inside the lock the question is checked again, so the second one
+     * finds it answered: the id is marked for a Sent and for a Maybe (it may have gone in), persistently (H1).
+     */
+    private suspend fun answerJarvisQuestion(alertId: String?, text: String, what: String): com.clauderemote.voice.conversation.TalkSendResult =
+        jarvisAnswerLock.withLock {
+            com.clauderemote.session.service.JarvisSays.yesRefusal(jarvisAlerts.state.value, alertId, System.currentTimeMillis())?.let {
+                FileLogger.log(TAG, "Jarvis $what to $alertId refused: $it")
+                return@withLock com.clauderemote.voice.conversation.TalkSendResult.Refused(it)
+            }
+            val r = sendJarvisAnswerLocked(text)
+            if (alertId != null && r !is com.clauderemote.voice.conversation.TalkSendResult.Refused) jarvisAlerts.markAnswered(alertId)
+            r
+        }
+
+    private val jarvisAnswerLock = kotlinx.coroutines.sync.Mutex()
+
+    /**
+     * Test seam (desktopTest only): replaces the checked exec into Jarvis' pane — tab, ReplyGuard and the server — so
+     * the lock and the answered marks around it run for real against a fake exec. Null in the app.
+     */
+    internal var jarvisCheckedSendForTest: (suspend (prompt: String) -> com.clauderemote.voice.conversation.TalkSendResult)? = null
+
+    private suspend fun sendJarvisChecked(
+        prompt: String,
+        stillWanted: () -> Boolean,
+        what: String,
     ): com.clauderemote.voice.conversation.TalkSendResult {
+        jarvisCheckedSendForTest?.let { return it(prompt) }
         val id = jarvisTabIdForWatch()
             ?: return com.clauderemote.voice.conversation.TalkSendResult.Refused(com.clauderemote.voice.conversation.TalkWords.NO_TAB)
         val verdict = com.clauderemote.session.service.ReplyGuard.voiceCheck(
@@ -3416,7 +3479,7 @@ class SessionOrchestrator(
         var serverAtMs: Long? = null
         val why = when (verdict) {
             is com.clauderemote.session.service.ReplyGuard.Verdict.Refuse -> {
-                FileLogger.log(TAG, "Jarvis voice prompt refused: ${verdict.detail}")
+                FileLogger.log(TAG, "Jarvis $what refused: ${verdict.detail}")
                 verdict.reason
             }
             is com.clauderemote.session.service.ReplyGuard.Verdict.Send -> {
@@ -3430,7 +3493,7 @@ class SessionOrchestrator(
                 r.why
             }
         }
-        FileLogger.log(TAG, "Jarvis voice prompt (${prompt.length} chars) to $id: ${why ?: "sent at server ms $serverAtMs"}")
+        FileLogger.log(TAG, "Jarvis $what (${prompt.length} chars) to $id: ${why ?: "sent at server ms $serverAtMs"}")
         return if (why == null) com.clauderemote.voice.conversation.TalkSendResult.Sent(serverAtMs)
         else com.clauderemote.voice.conversation.TalkWords.refusal(why)
     }

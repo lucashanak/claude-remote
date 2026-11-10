@@ -67,6 +67,12 @@ class WatchPushUrgencyTest {
         assertTrue(WatchPushUrgency.jarvisAlertUrgent(com.clauderemote.session.service.JarvisAlertKind.DONE, true))
         assertTrue(WatchPushUrgency.jarvisAlertUrgent(com.clauderemote.session.service.JarvisAlertKind.INCIDENT, true))
         assertFalse(WatchPushUrgency.jarvisAlertUrgent(com.clauderemote.session.service.JarvisAlertKind.INFO, true), "info never")
+        // F5c: of Jarvis' own sentences only a jblock vibrates the wrist; jsay and jask only update it
+        assertTrue(WatchPushUrgency.jarvisAlertUrgent(com.clauderemote.session.service.JarvisAlertKind.JBLOCK, true))
+        assertFalse(WatchPushUrgency.jarvisAlertUrgent(com.clauderemote.session.service.JarvisAlertKind.JSAY, true), "jsay")
+        assertFalse(WatchPushUrgency.jarvisAlertUrgent(com.clauderemote.session.service.JarvisAlertKind.JASK, true), "jask")
+        assertFalse(WatchPushUrgency.jarvisAlertUrgent(com.clauderemote.session.service.JarvisAlertKind.JBLOCK, false))
+        assertTrue(WatchPushUrgency.jarvisAlertUrgent(com.clauderemote.session.service.JarvisAlertKind.JBLOCKASK, true), "jblockask like jblock")
     }
 
     @Test fun aDialogAgainIsUrgentStampOrNot() {
