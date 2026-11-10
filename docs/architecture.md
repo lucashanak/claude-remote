@@ -164,7 +164,7 @@ When the SSH read loop detects connection loss:
 ### Server-side scripts and the tmux socket guard
 
 `SessionPersistenceService.INSTALL_RESTORE_COMMAND` installs three scripts in `~/.claude-remote` (on the first
-launch per server and app run, `persistLaunched`) whose marker (`claude-remote-restore-v18`) is missing, each
+launch per server and app run, `persistLaunched`) whose marker (`claude-remote-restore-v19`) is missing, each
 written to a temp file and renamed into place (never `cat >` over a script a running bash may be reading):
 
 - `restore.sh` (boot unit, and drift's self-heal) recreates sessions from the manifest;
@@ -207,6 +207,23 @@ and sockheal.log each get it once per 15 minutes). Heals and `restore.sh`'s serv
 `~/.claude-remote/tmux-server.lock`. Every tmux call of a drift tick has a time limit.
 `~/.claude-remote/drift-heal.off` switches the guard off in all three scripts — the only rollback, because an
 older client never rewrites a v18 script. An install cut short removes its temp files (`trap … EXIT`).
+
+**Session prefixes (`~/.claude-remote/prefixes`, marker v19, dávka D6-S).** The sessions drift adopts into the
+manifest, counts as "a session of ours is live" (which drops `__anchor__`) and so relaunches, are those starting with
+`claude-server-` — always, with or without the file — or with a line of `~/.claude-remote/prefixes`. The restore
+installer adds the box's own prefix (`TmuxNameParser.prefixFor(server name)`, e.g. `claude-box-`) on every install,
+outside the marker check, before its end line: under `flock -w 5` on `sessions.lock`, the file rewritten whole (tmp
++ `mv`, keeping only valid lines) because drift reads it without the lock; the default prefix gets no line, so the
+box `server` keeps no file. A name drift cannot match is logged to install.log (`PREFIX_UNSUPPORTED`), and a prefix
+that cannot be written (`PREFIX_NOT_WRITTEN`) never fails the install. Both the reader and the writer take only lines
+`claude-<name>-` where `<name>` is ASCII letters, digits, `_` and `-` not starting with `-` (the class spelled out,
+no locale): an empty, blank, CRLF or glob line, `claude-` alone or `__anchor__` is skipped without a word — an
+empty line compared as a prefix would match every session, and drift would adopt `__anchor__` and foreign sessions,
+kill the anchor every tick and relaunch them all. The comparison is a fixed string (`case "$s" in "$q"*)`), one pass
+that stops at the first match (overlapping prefixes give one row), and the read is silent: a tick without a change
+adds nothing to drift.log with the file or without it. On the box `server` v19 does byte for byte what v18 did
+(`DriftPrefixesIntegrationTest` runs both over the same world). A client older than v19 writes no prefix, so a box
+with another name has no adoption until a v19 client launched there once.
 
 `tmux-sockheal.sh` exits 0 (nothing to do), 3 (it was unusable and is usable again) or 1 (refused). A heal that
 failed (lock not taken within 2 s, listeners changed meanwhile, socket not back) mostly lost a race with another

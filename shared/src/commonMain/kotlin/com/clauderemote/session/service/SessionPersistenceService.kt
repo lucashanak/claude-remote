@@ -4,6 +4,7 @@ import com.clauderemote.connection.SshManager
 import com.clauderemote.model.ClaudeSession
 import com.clauderemote.model.SessionActivity
 import com.clauderemote.model.SessionStatus
+import com.clauderemote.model.TmuxNameParser
 import com.clauderemote.session.TabManager
 import com.clauderemote.storage.PersistedSession
 import com.clauderemote.storage.ServerStorage
@@ -299,6 +300,24 @@ sg_guard() {
 # ---- end of tmux socket guard ----"""
 
         /**
+         * D6-S (kritika D2 N14): the one check of a line of `~/.claude-remote/prefixes`, pasted VERBATIM into drift.sh
+         * (its reader) and into the installer's prefix write ([prefixWrite]). Must be declared before
+         * [INSTALL_RESTORE_COMMAND]: companion properties initialise in textual order.
+         */
+        private val PREFIX_CHECK_FUNC = """
+# A prefix line is claude-<name>- where <name> holds only ASCII letters, digits, _ and - and does not start with -:
+# never empty, never claude- alone, no space, CR, '.', ':' or glob character. The class is spelled out (no ranges), so
+# no locale can widen it. A line that fails is skipped without a word.
+cr_prefix_ok() {
+    case "${'$'}1" in claude-?*-) ;; *) return 1;; esac
+    case "${'$'}{1#claude-}" in
+        [!abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_]*) return 1;;
+        *[!abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-]*) return 1;;
+    esac
+    return 0
+}"""
+
+        /**
          * Idempotent installer for the user-level systemd service that restores
          * tmux + claude sessions after a server reboot. Writes:
          *   ~/.claude-remote/restore.sh
@@ -319,7 +338,7 @@ sg_guard() {
         DUNIT="${'$'}HOME/.config/systemd/user/claude-remote-drift.service"
         DTIMER="${'$'}HOME/.config/systemd/user/claude-remote-drift.timer"
         LOCK="${'$'}HOME/.claude-remote/sessions.lock"
-        MARKER="claude-remote-restore-v18"
+        MARKER="claude-remote-restore-v19"
         # An install cut short (set -e, a dropped SSH session) must not leave a temp script behind.
         trap 'rm -f "${'$'}SCRIPT.tmp.${'$'}${'$'}" "${'$'}DRIFT.tmp.${'$'}${'$'}" "${'$'}SOCKHEAL.tmp.${'$'}${'$'}"' EXIT
         touch "${'$'}LOCK"
@@ -330,7 +349,7 @@ sg_guard() {
             # block by block, which could execute a mix of the old and the new script.
             cat > "${'$'}SCRIPT.tmp.${'$'}${'$'}" <<'RESTORE_EOF'
 #!/usr/bin/env bash
-# marker-compat (do NOT remove): claude-remote-restore-v6 claude-remote-restore-v7 claude-remote-restore-v8 claude-remote-restore-v9 claude-remote-restore-v10 claude-remote-restore-v11 claude-remote-restore-v12 claude-remote-restore-v13 claude-remote-restore-v14 claude-remote-restore-v15 claude-remote-restore-v16 claude-remote-restore-v17 claude-remote-restore-v18
+# marker-compat (do NOT remove): claude-remote-restore-v6 claude-remote-restore-v7 claude-remote-restore-v8 claude-remote-restore-v9 claude-remote-restore-v10 claude-remote-restore-v11 claude-remote-restore-v12 claude-remote-restore-v13 claude-remote-restore-v14 claude-remote-restore-v15 claude-remote-restore-v16 claude-remote-restore-v17 claude-remote-restore-v18 claude-remote-restore-v19
 # Makes any installed client's `grep -q ${'$'}MARKER` find its marker so it takes the
 # PRESENT no-op path and does NOT rewrite this file (reverting the fixes) nor run
 # the daemon-reload/enable reinstall that correlates with the tmux-server death.
@@ -602,12 +621,12 @@ RESTORE_EOF
             echo "[${'$'}(date -u +%FT%TZ)] install: drift.sh missing ${'$'}MARKER — rewriting; prior marker line: ${'$'}(grep -m1 'claude-remote-restore-v' "${'$'}DRIFT" 2>/dev/null || echo '<none/new file>')" >> "${'$'}HOME/.claude-remote/install.log"
             cat > "${'$'}DRIFT.tmp.${'$'}${'$'}" <<'DRIFT_EOF'
 #!/usr/bin/env bash
-# marker-compat (do NOT remove): claude-remote-restore-v6 claude-remote-restore-v7 claude-remote-restore-v8 claude-remote-restore-v9 claude-remote-restore-v10 claude-remote-restore-v11 claude-remote-restore-v12 claude-remote-restore-v13 claude-remote-restore-v14 claude-remote-restore-v15 claude-remote-restore-v16 claude-remote-restore-v17 claude-remote-restore-v18
+# marker-compat (do NOT remove): claude-remote-restore-v6 claude-remote-restore-v7 claude-remote-restore-v8 claude-remote-restore-v9 claude-remote-restore-v10 claude-remote-restore-v11 claude-remote-restore-v12 claude-remote-restore-v13 claude-remote-restore-v14 claude-remote-restore-v15 claude-remote-restore-v16 claude-remote-restore-v17 claude-remote-restore-v18 claude-remote-restore-v19
 # Makes any installed client's `grep -q ${'$'}MARKER` find its marker so it takes the
 # PRESENT no-op path and does NOT rewrite this file (reverting the fixes) nor run
 # the daemon-reload/enable reinstall that correlates with the tmux-server death.
 # claude-remote-restore-v16 — drift daemon: reconciles sessions.json to mirror
-# the LIVE claude-server-* tmux sessions every minute. Self-healing: re-adds
+# the LIVE tmux sessions of this box (claude-server-* and the prefixes file) every minute. Self-healing: re-adds
 # live sessions a misbehaving/old client truncated away, refreshes
 # claudeSessionId from claude's per-pid state files, preserves client-set
 # metadata (serverId/alias) for known sessions, and drops entries whose tmux
@@ -683,11 +702,32 @@ if tmux list-sessions >/dev/null 2>&1; then
     # branch and never consult clients, for every creator.
     tmux set-option -g default-size 200x50 2>/dev/null || true
 fi
+# ---- prefixes of this box (D6-S) ----
+# The sessions drift adopts, counts and relaunches start with claude-server- (always, with or without the file) or
+# with a line of ~/.claude-remote/prefixes, which the installer writes for a box with another name. A line that fails
+# cr_prefix_ok is skipped: an empty or half-written line would match every session (__anchor__ and foreign ones
+# too), and drift would adopt, kill and relaunch them. Read silently: no file is the normal case, and a tick must
+# not grow drift.log for it.
+$PREFIX_CHECK_FUNC
+PFX="${TmuxNameParser.DEFAULT_PREFIX}"
+if [ -f "${'$'}HOME/.claude-remote/prefixes" ]; then
+    while IFS= read -r _p || [ -n "${'$'}_p" ]; do
+        cr_prefix_ok "${'$'}_p" && PFX="${'$'}PFX ${'$'}_p"
+    done 2>/dev/null < "${'$'}HOME/.claude-remote/prefixes"
+fi
+# 0 when ${'$'}1 starts with one of PFX, compared as fixed strings. One pass, the first match ends it: overlapping
+# prefixes (claude-server- and claude-server-lan-) give one row, not two.
+is_ours() {
+    local q hit=1
+    for q in ${'$'}PFX; do case "${'$'}1" in "${'$'}q"*) hit=0; break;; esac; done
+    return ${'$'}hit
+}
+# ---- end of prefixes ----
 # Drop the internal keepalive __anchor__ if it lingers: with exit-empty=off the
 # server no longer needs it, and leaving it visible makes the app treat it as a
 # real session and churn it (kill/relaunch). Safe — exit-empty=off keeps the
 # server alive at 0 sessions.
-if [ "${'$'}(tmux -u list-sessions -F '#{session_name}' 2>/dev/null | grep -c '^claude-server-')" -gt 0 ]; then
+if tmux -u list-sessions -F '#{session_name}' 2>/dev/null | { while IFS= read -r s; do is_ours "${'$'}s" && exit 0; done; exit 1; }; then
     tmux kill-session -t __anchor__ 2>/dev/null || true
 fi
 
@@ -747,7 +787,7 @@ LIVE_TBL=${'$'}(mktemp "${'$'}HOME/.claude-remote/.drift.live.XXXXXX" 2>/dev/nul
 # genuinely mangled twin (two identical rows in the manifest), and the next
 # client to read it relaunched the "missing" session under the broken name.
 for s in ${'$'}(tmux -u list-sessions -F '#{session_name}' 2>/dev/null); do
-    case "${'$'}s" in claude-server-*) ;; *) continue;; esac
+    is_ours "${'$'}s" || continue
     pane_pid=${'$'}(tmux -u list-panes -t "${'$'}s" -F '#{pane_pid}' 2>/dev/null | head -1)
     [ -n "${'$'}pane_pid" ] || continue
     folder=${'$'}(tmux -u display-message -p -t "${'$'}s" '#{pane_current_path}' 2>/dev/null)
@@ -1029,7 +1069,7 @@ DRIFT_EOF
             echo "[${'$'}(date -u +%FT%TZ)] install: tmux-sockheal.sh missing ${'$'}MARKER — rewriting; prior marker line: ${'$'}(grep -m1 'claude-remote-restore-v' "${'$'}SOCKHEAL" 2>/dev/null || echo '<none/new file>')" >> "${'$'}HOME/.claude-remote/install.log"
             cat > "${'$'}SOCKHEAL.tmp.${'$'}${'$'}" <<'SOCKHEAL_EOF'
 #!/usr/bin/env bash
-# marker-compat (do NOT remove): claude-remote-restore-v6 claude-remote-restore-v7 claude-remote-restore-v8 claude-remote-restore-v9 claude-remote-restore-v10 claude-remote-restore-v11 claude-remote-restore-v12 claude-remote-restore-v13 claude-remote-restore-v14 claude-remote-restore-v15 claude-remote-restore-v16 claude-remote-restore-v17 claude-remote-restore-v18
+# marker-compat (do NOT remove): claude-remote-restore-v6 claude-remote-restore-v7 claude-remote-restore-v8 claude-remote-restore-v9 claude-remote-restore-v10 claude-remote-restore-v11 claude-remote-restore-v12 claude-remote-restore-v13 claude-remote-restore-v14 claude-remote-restore-v15 claude-remote-restore-v16 claude-remote-restore-v17 claude-remote-restore-v18 claude-remote-restore-v19
 # claude-remote-restore-v18 — tmux socket guard for the app's own tmux anchor. The app runs it before any command
 # that may create a tmux server (a second server next to a live one is how 51 sessions got duplicated on 2026-11-02):
 #   exit 0  nothing listens on the default socket path, or the socket answers: the app goes on as before
@@ -1176,9 +1216,47 @@ DTIMER_EOF
         internal const val INSTALL_RESTORE_EXEC =
             "bash -c 's=\$(cat); case \"\$s\" in *\"$INSTALL_RESTORE_END\") eval \"\$s\";; *) echo $INSTALL_RESTORE_TRUNCATED; exit 97;; esac'"
 
-        /** The stdin of [INSTALL_RESTORE_EXEC]: the installer, then [INSTALL_RESTORE_END]. */
-        internal fun installRestoreStdin(): ByteArray =
-            (INSTALL_RESTORE_COMMAND + "\n" + INSTALL_RESTORE_END + "\n").toByteArray(Charsets.UTF_8)
+        /**
+         * The stdin of [INSTALL_RESTORE_EXEC]: the installer, the write of this box's session [prefix] for drift.sh
+         * ([prefixWrite]), then [INSTALL_RESTORE_END].
+         */
+        internal fun installRestoreStdin(prefix: String = TmuxNameParser.DEFAULT_PREFIX): ByteArray =
+            (INSTALL_RESTORE_COMMAND + "\n" + prefixWrite(prefix) + "\n" + INSTALL_RESTORE_END + "\n").toByteArray(Charsets.UTF_8)
+
+        /**
+         * D6-S (kritika D2 N20): adds [prefix] to `~/.claude-remote/prefixes`, which drift.sh reads, on every install
+         * (outside the marker, so a box already on the current scripts gets it too). The same check as drift's reader;
+         * the default prefix needs no line (drift always has it, so the box `server` keeps no file); under the manifest
+         * lock; the file is written whole (tmp + mv, valid lines only), because drift reads it without the lock and
+         * must never see half a line. Never fails the install (it runs under `set -e`): a prefix not written only means
+         * drift does not adopt this box's sessions yet. An unsupported name is logged to install.log.
+         */
+        internal fun prefixWrite(prefix: String): String = """
+# ---- this box's session prefix for drift.sh (D6-S) ----
+CR_PREFIX=${ManifestCommands.sq(prefix)}
+$PREFIX_CHECK_FUNC
+if ! cr_prefix_ok "${'$'}CR_PREFIX"; then
+    echo "[${'$'}(date -u +%FT%TZ)] install: session prefix ${'$'}CR_PREFIX is not claude-<letters, digits, _ or ->- — drift does not adopt this box's sessions" >> "${'$'}HOME/.claude-remote/install.log" || true
+    echo "PREFIX_UNSUPPORTED"
+elif [ "${'$'}CR_PREFIX" != "${TmuxNameParser.DEFAULT_PREFIX}" ]; then
+    (
+        PF="${'$'}HOME/.claude-remote/prefixes"
+        trap 'rm -f "${'$'}PF.tmp.${'$'}${'$'}"' EXIT
+        flock -w 5 9 || exit 1
+        # mv onto a directory would move the file into it
+        [ ! -d "${'$'}PF" ] || exit 1
+        grep -qxF -- "${'$'}CR_PREFIX" "${'$'}PF" 2>/dev/null && exit 0
+        {
+            if [ -f "${'$'}PF" ]; then
+                while IFS= read -r l || [ -n "${'$'}l" ]; do cr_prefix_ok "${'$'}l" && printf '%s\n' "${'$'}l"; done < "${'$'}PF"
+            fi
+            printf '%s\n' "${'$'}CR_PREFIX"
+        } > "${'$'}PF.tmp.${'$'}${'$'}" || exit 1
+        mv -f "${'$'}PF.tmp.${'$'}${'$'}" "${'$'}PF" || exit 1
+        echo "PREFIX_ADDED ${'$'}CR_PREFIX"
+    ) 9>>"${'$'}LOCK" || echo "PREFIX_NOT_WRITTEN"
+fi
+# ---- end of the session prefix ----"""
 
         /**
          * Parse [ManifestCommands.closeState] output. Null means "the probe
@@ -1483,6 +1561,10 @@ DTIMER_EOF
     private fun livePrefixes(serverId: String): Set<String> =
         com.clauderemote.model.TmuxNameParser.livePrefixes(serverStorage.getServer(serverId)?.name)
 
+    /** D6-S: the session prefix the installer writes for drift.sh: the box's own (by its name); the default for an unknown box. */
+    private fun installPrefix(serverId: String?): String =
+        serverId?.let { serverStorage.getServer(it)?.name }?.let(TmuxNameParser::prefixFor) ?: TmuxNameParser.DEFAULT_PREFIX
+
     /** `by` of a close record: a user close is this install's, a prune (not user-initiated) is `prune`. */
     private fun closeRecordBy(userInitiated: Boolean): String = if (userInitiated) closedBy() else "prune"
 
@@ -1573,7 +1655,7 @@ DTIMER_EOF
             val sshSession = sshManager.getSession()
             // the installer on stdin, paced (K-1), as on the exec transport
             val res = if (sshSession == null) null else PooledRemoteExec(UngatedExecChannels { sshSession })
-                .run(serverId.orEmpty(), INSTALL_RESTORE_EXEC, installRestoreStdin(), totalMs = 15_000, paceStdin = Pace())
+                .run(serverId.orEmpty(), INSTALL_RESTORE_EXEC, installRestoreStdin(installPrefix(serverId)), totalMs = 15_000, paceStdin = Pace())
             ok = restoreInstallRan(res) == true
         } catch (e: Exception) {
             FileLogger.error(TAG, "Restore service install failed: ${e.message}", e)
@@ -1593,7 +1675,7 @@ DTIMER_EOF
         var ran: Boolean? = null
         try {
             // the installer on stdin, paced (K-1): never one ~80 KB exec request through the tunnel
-            ran = restoreInstallRan(registry.execRun(serverId, INSTALL_RESTORE_EXEC, stdin = installRestoreStdin(), totalMs = 15_000, paceStdin = Pace()))
+            ran = restoreInstallRan(registry.execRun(serverId, INSTALL_RESTORE_EXEC, stdin = installRestoreStdin(installPrefix(serverId)), totalMs = 15_000, paceStdin = Pace()))
         } catch (e: kotlinx.coroutines.CancellationException) {
             throw e
         } catch (e: Exception) {

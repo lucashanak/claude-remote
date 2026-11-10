@@ -72,7 +72,7 @@ class TmuxPrefixGateTest {
      *  - `QuickAccess.JARVIS_TMUX_NAME` and `WatchJarvis.TMUX_NAME`: Jarvis's own fixed name (Jarvis lives on `server`);
      *  - the `cr-session` bodies (`SessionOpsScript` `valid_new_name` and `cmd_close`, `SessionRestore.RUNNING_SH`):
      *    their bytes are `cr-session`'s SHA (N18), it knows only `server`;
-     *  - the generated drift (`SessionPersistenceService`, D6-S's part): its marker-driven shell.
+     * The generated drift has none since D6-S: it reads `claude-server-` from `TmuxNameParser.DEFAULT_PREFIX`.
      * Nothing under `tools/jarvis` (Python, N19) is scanned.
      */
     @Test fun noLiteralPrefixOutsideThePlaceOfTruth() {
@@ -83,7 +83,7 @@ class TmuxPrefixGateTest {
             "src/commonMain/kotlin/com/clauderemote/session/service/SessionOpsScript.kt" to "valid_new_name() { case \"§1\" in claude-server-*) ;;",
             "src/commonMain/kotlin/com/clauderemote/session/service/SessionOpsScript.kt" to "case \"§N\" in claude-server-*) ;; *) echo REFUSED_NAME; exit 1 ;; esac",
             "src/commonMain/kotlin/com/clauderemote/session/service/SessionRestore.kt" to "if [ -n \"§s\" ]; then case \"§s\" in claude-server-*) printf '%s' \"§s\"; return 0 ;; esac; return 1; fi",
-        ) + DRIFT_LINES.map { "src/commonMain/kotlin/com/clauderemote/session/service/SessionPersistenceService.kt" to it }
+        )
         val roots = listOf("src/commonMain", "src/androidMain", "src/desktopMain", "../androidApp/src/main", "../desktopApp/src/main", "../wearApp/src/main")
         val found = mutableListOf<Pair<String, String>>()
         for (r in roots) {
@@ -120,13 +120,5 @@ class TmuxPrefixGateTest {
         val orch = src("src/commonMain/kotlin/com/clauderemote/session/SessionOrchestrator.kt")
         assertTrue("serverHasOtherLiveSession(sshManager, session.tmuxSessionName, TmuxNameParser.livePrefixes(session.server.name))" in orch,
             "the peer check before a forget")
-    }
-
-    private companion object {
-        /** The generated drift.sh's own lines with the prefix (D6-S's part; marker-driven, unchanged by D6-K). */
-        val DRIFT_LINES = listOf(
-            "if [ \"\${'\$'}(tmux -u list-sessions -F '#{session_name}' 2>/dev/null | grep -c '^claude-server-')\" -gt 0 ]; then",
-            "case \"\${'\$'}s\" in claude-server-*) ;; *) continue;; esac",
-        )
     }
 }

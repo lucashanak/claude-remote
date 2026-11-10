@@ -380,6 +380,16 @@ construction.
   `proj--cashy-2` exists.
 - **drift self-heal**: kill one restored session, run the real `drift.sh`,
   assert only that one is relaunched and the healthy sibling is untouched.
+- **session prefixes** (D6-S, marker v19, `DriftPrefixesIntegrationTest`): the drift of v19 against the drift of
+  v18 (`golden/restore-installer-v18.sh`, the installer cedfd70 generated, checked against `git show cedfd70`
+  when the clone has it, else by its SHA-256) over the same world, one sshd fixture per world: on the box `server`
+  (no `prefixes` file, or one of junk plus the default) the same manifest, mirror, log (times normalized) and
+  tombstones; on `box` the only difference is the adoption of `claude-box-b`; a file of broken lines adopts
+  nothing and leaves `__anchor__` alive; overlapping prefixes give one row; a second tick adds 0 B to drift.log;
+  the step v18 → v19 rewrites the three scripts by rename and a v18 client after it rewrites nothing back.
+  `DriftPrefixesTest` (desktopTest): hradlo A (what the generator sends for `server` differs from cedfd70's
+  only in the marker, the prefix reader, the two comparisons and the prefix write), the reader in bash and dash,
+  and the installer's write (once, normalizing, never for `server`, never failing the install).
 - **the tmux socket guard** (B3, marker v18), in the fixture's private
   `TMUX_TMPDIR` only: the socket file deleted, the whole `tmux-<uid>` directory
   deleted, and a split brain (a second server on the same path holding part of

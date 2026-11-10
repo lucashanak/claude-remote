@@ -822,7 +822,7 @@ class RestoreScriptIntegrationTest {
     }
 
     /**
-     * Upgrade over a box that already runs v17 (the live box today): all three scripts are rewritten to v18 by a
+     * Upgrade over a box that still runs v17: all three scripts are rewritten to the current marker by a
      * rename (new inode — never `cat >` over a file a running bash may be reading), and install.log says so.
      */
     @Test
@@ -840,11 +840,11 @@ class RestoreScriptIntegrationTest {
         }
         assertTrue(inodes[0] != socketKey(restore) && inodes[1] != socketKey(drift), "rewritten in place (same inode)")
         for (f in listOf(restore, drift, File(dir, "tmux-sockheal.sh"))) {
-            assertContains(f.readText(), "claude-remote-restore-v18", message = f.name)
+            assertContains(f.readText(), currentMarker, message = f.name)
             assertContains(f.readText(), "kill -USR1", message = f.name)
             assertTrue(f.canExecute(), "${f.name} must be executable")
         }
-        assertContains(File(dir, "install.log").readText(), "drift.sh missing claude-remote-restore-v18 — rewriting; prior marker line: # marker-compat")
+        assertContains(File(dir, "install.log").readText(), "drift.sh missing $currentMarker — rewriting; prior marker line: # marker-compat")
         assertTrue(dir.list()!!.none { it.contains(".tmp.") }, "temp files left: ${dir.list()!!.toList()}")
     }
 

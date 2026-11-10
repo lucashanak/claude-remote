@@ -118,11 +118,12 @@ class RestoreInstallSendTest {
         val call = exec.calls.single()
         assertEquals(SessionPersistenceService.INSTALL_RESTORE_EXEC, call.cmd, "the exec request is the short launcher")
         assertTrue(call.cmd.toByteArray().size < 512, "exec request of ${call.cmd.toByteArray().size} bytes")
-        assertContentEquals(SessionPersistenceService.installRestoreStdin(), call.stdin, "the installer goes on stdin")
+        assertContentEquals(SessionPersistenceService.installRestoreStdin("claude-box-"), call.stdin, "the installer goes on stdin")
         assertEquals(
-            SessionPersistenceService.INSTALL_RESTORE_COMMAND + "\n" + SessionPersistenceService.INSTALL_RESTORE_END + "\n",
+            SessionPersistenceService.INSTALL_RESTORE_COMMAND + "\n" + SessionPersistenceService.prefixWrite("claude-box-") + "\n" +
+                SessionPersistenceService.INSTALL_RESTORE_END + "\n",
             String(call.stdin!!, Charsets.UTF_8),
-            "stdin = the installer unchanged, then the end line",
+            "stdin = the installer unchanged, the write of the box's own session prefix (D6-S), then the end line",
         )
         assertEquals(Pace(chunkBytes = 4096, delayMs = 20), call.pace, "paced like every upload through the tunnel")
         assertTrue(logLines.any { it.contains("Restore service install: RESTORE_SCRIPT_PRESENT") }, "$logLines")
@@ -133,7 +134,7 @@ class RestoreInstallSendTest {
         val ch = RecordingChannel()
         o.connectionRegistry.remoteExec = PooledRemoteExec(OneChannel(ch))
         assertTrue(o.persistence.ensureRestoreService(server.id))
-        assertPacedInstall(ch)
+        assertPacedInstall(ch, SessionPersistenceService.installRestoreStdin("claude-box-"))
     }
 
     /** The legacy path (exec routing off): the same request and the same paced stdin on the tab's own session. */
@@ -143,13 +144,13 @@ class RestoreInstallSendTest {
         val mgr = SshManager(storage)
         SshManager::class.java.getDeclaredField("session").also { it.isAccessible = true }.set(mgr, FakeSession(channels = { ch }))
         o.persistence.ensureRestoreService(mgr)
-        assertPacedInstall(ch)
+        // a manager of no tab: the box is unknown, so the default prefix (no line is written)
+        assertPacedInstall(ch, SessionPersistenceService.installRestoreStdin())
         assertTrue(logLines.any { it.contains("Restore service install: RESTORE_SCRIPT_PRESENT") }, "$logLines")
     }
 
-    private fun assertPacedInstall(ch: RecordingChannel) {
+    private fun assertPacedInstall(ch: RecordingChannel, stdin: ByteArray) {
         assertEquals(SessionPersistenceService.INSTALL_RESTORE_EXEC, ch.sentCommand)
-        val stdin = SessionPersistenceService.installRestoreStdin()
         assertTrue(stdin.size > 60_000, "precondition: the installer is big (${stdin.size} B)")
         val sizes = ch.writes.map { it.second.size }
         assertTrue(sizes.all { it <= 4096 }, "every write at most 4096 B: ${sizes.filter { it > 4096 }}")

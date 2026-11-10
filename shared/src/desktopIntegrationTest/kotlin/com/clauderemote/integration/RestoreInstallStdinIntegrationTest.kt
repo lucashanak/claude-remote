@@ -2,6 +2,7 @@ package com.clauderemote.integration
 
 import com.clauderemote.connection.SshManager
 import com.clauderemote.connection.SshSessionHelper
+import com.clauderemote.model.TmuxNameParser
 import com.clauderemote.session.SessionOrchestrator
 import com.clauderemote.session.TabManager
 import com.clauderemote.session.service.CommFlags
@@ -111,8 +112,11 @@ class RestoreInstallStdinIntegrationTest {
         val viaExecRequest = requestsDuring { assertTrue(runBlocking { orchestrator.persistence.ensureRestoreService(fixture.server.id) }) }
         assertTrue(launcherRequest.matches(viaExecRequest), "exec path: one request, the short launcher:\n${viaExecRequest.take(300)}")
         val viaExec = installed(loggedInstallOutput())
-        assertEquals(expected.out, viaExec.out, "exec path: output")
-        assertEquals(expected.files, viaExec.files, "exec path: files")
+        // D6-S: the exec path knows the box (named `integration`), so the installer also writes its session prefix for
+        // drift — the one thing the old request did not do; the legacy path below (a manager of no tab) writes none
+        val prefix = TmuxNameParser.prefixFor(fixture.server.name)
+        assertEquals(expected.out + "\nPREFIX_ADDED $prefix", viaExec.out, "exec path: output")
+        assertEquals(expected.files + (".claude-remote/prefixes" to "-x $prefix\n"), viaExec.files, "exec path: files")
         assertEquals(expected.installLog, viaExec.installLog, "exec path: install.log")
 
         // the legacy path (exec routing off: the tab's own session)
