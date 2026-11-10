@@ -607,12 +607,15 @@ AUDIT_MAIL = {
     "cancelled": "zrušeno", "expired": "vypršelo", "reply": "odpověď", "off": "pošta vypnuta", "on": "pošta zapnuta",
     # F3
     "mode": "režim Jarvise", "rule-add": "pravidlo nehlas", "rule-rm": "pravidlo nehlas zrušeno",
-    "wake": "Jarvis probuzen výsledkem úkolu",
+    "wake": "Jarvis probuzen",
+    # F5c
+    "auto": "Jarvis sám (krok bez ano)", "wake-said": "Jarvis ohlásil po probuzení",
+    "wake-fallback": "místo Jarvise šablona",
 }
 AUDIT_TASK = {"add": "úkol založen", "done": "úkol hotovo", "fail": "úkol selhal"}
 AUDIT_WATCH = {"add": "hlídka přidána", "fired": "hlídka splněna", "expired": "hlídka vypršela",
                "cancelled": "hlídka zrušena", "proof": "důkaz k úkolu"}
-WHO = {"jarvis": "Jarvis", "lukas": "Lukáš"}
+WHO = {"jarvis": "Jarvis", "lukas": "Lukáš", "jarvis-auto": "Jarvis sám"}
 
 
 def audit(env, since_ms, task=None):
@@ -639,14 +642,22 @@ def audit(env, since_ms, task=None):
         elif ev == "refused":
             text = M.data_text(e.get("reason"), 200)
             who = None
-        elif ev in ("mode", "rule-add", "rule-rm", "wake"):
-            text = M.data_text(e.get("text") or e.get("result") or "", 160)
+        elif ev in ("mode", "rule-add", "rule-rm", "wake", "wake-said", "wake-fallback"):
+            text = M.data_text(e.get("text") or e.get("result") or e.get("kind") or e.get("why") or "", 160)
+            who = WHO.get(e.get("by"))
+        elif ev == "auto":
+            text = {"resume": "pokračuj po limitu", "nudge": "popohnání k úkolu"}.get(e.get("kind"), e.get("kind") or "")
             who = WHO.get(e.get("by"))
         else:
             who = None  # "Jarvis navrhl", "Lukáš řekl ano": the actor is in the words already
             if ev in ("uncertain", "give-up") and e.get("reason"):
                 text = M.data_text(str(e.get("reason")), 80)
-        rows.append({"at": e["at"], "src": "mail", "ev": ev, "what": AUDIT_MAIL[ev], "id": rid,
+        what = AUDIT_MAIL[ev]
+        if ev == "approved" and e.get("decidedBy") == M.AUTO_BY:
+            what = "Jarvis sám zařadil (bez ano)"  # F5c: never "Lukáš řekl ano" for a step Lukáš did not approve
+        elif ev == "proposed" and e.get("by") == M.AUTO_BY:
+            what = "Jarvis sám připravil zprávu"
+        rows.append({"at": e["at"], "src": "mail", "ev": ev, "what": what, "id": rid,
                      "to": e.get("to") or r.get("to"), "task": r.get("task"), "who": who, "text": text})
     for e in cr_task.read_events(env):
         if J._int(e.get("at") or 0) <= since_ms or (task and e["id"] != task) or e.get("ev") not in AUDIT_TASK:

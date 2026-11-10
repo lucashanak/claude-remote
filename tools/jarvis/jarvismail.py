@@ -50,6 +50,13 @@ import jarvislib as J
 
 ID_RE = re.compile(r"m-\d{8}T\d{6}-[0-9a-f]{4}")
 TASK_RE = re.compile(r"t-\d{8}T\d{6}-[0-9a-f]{4}")
+# F5c: one wake of Jarvis (jarvis-d's batch of events; `<state>/wakes/<id>.json`, the line `[jarvis wake w-…]`)
+WAKE_RE = re.compile(r"w-\d{8}T\d{6}-[0-9a-f]{4}")
+WAKE_LINE_RE = re.compile(r"\[jarvis wake (w-\d{8}T\d{6}-[0-9a-f]{4})\]")
+# rev-f5c L6: the WHOLE fixed wake line (jarvisalert.wake_line), so a prompt that is "our line + what Lukáš typed after
+# it" can be told apart from a machine's prompt
+WAKE_FULL_RE = re.compile(r"\[jarvis wake (w-\d{8}T\d{6}-[0-9a-f]{4})\] \d{1,4} (?:událost|události|událostí) · "
+                          r"cr-digest wake \1")
 PANE_RE = re.compile(r"%\d{1,9}")
 
 TEXT_MAX = 2000
@@ -107,6 +114,19 @@ def strip_voice(prompt):
         return prompt
     m = VOICE_PREFIX.match(prompt)
     return prompt[m.end():] if m else prompt
+
+
+# F5c: steps Jarvis takes WITHOUT Lukáš's yes (Lukáš 2026-11-10). The code composes every text; Jarvis only picks the
+# target, and each step has its own gate (resume: the session stands on its limit, once per limit episode; nudge:
+# Jarvis's own task without its evidence, twice at most). Audited as decidedBy / by = "jarvis-auto".
+AUTO_BY = "jarvis-auto"
+AUTO_RESUME_TEXT = "Limit se obnovil, pokračuj, kde jsi skončil."
+NUDGE_MAX = 2
+# rev-f5c N1: a limit hit this soon after a delivered auto "pokračuj" is a relapse: the "limit se obnovil" was wrong
+# (a model's week, a reset read wrongly). It is never "the same as before" for the alerts, and no second resume goes.
+RESUME_RELAPSE_MS = 30 * 60 * 1000
+# after a wake Jarvis may PROPOSE (never act): at most this many proposals per wake, so "jask" means one question
+WAKE_PROPOSALS = 1
 
 
 # I7: until the voice readback (F5) exists these names get nothing. Case-insensitive on purpose: `*PROD*` typed by a
@@ -425,6 +445,56 @@ class Mail:
         d = J.read_json(self.env.path("last-prompt"))
         return d if isinstance(d, dict) else None
 
+    def wake_prompt(self, now):
+        """F5c: the wake Jarvis is answering, as a stand-in prompt for PROPOSALS only: {"id": "w-…", "at", "wake":
+        True}, or None. It has no `named`, `sendIntent` or intents, so nothing it carries can make a send or an
+        action go at once: whatever Jarvis wants after a wake waits for Lukáš's "ano" (decide_proposals matches its id
+        on his next prompt). `<state>/last-prompt.wake` is written by prompt_seen only for a `[jarvis wake w-…]` line
+        whose batch jarvis-d wrote, and removed by every other prompt, so it never outlives the wake turn."""
+        if self.last_prompt():
+            return None
+        d = J.read_json(self.env.path("last-prompt.wake"))
+        if not isinstance(d, dict) or not WAKE_RE.fullmatch(str(d.get("id"))):
+            return None
+        at = J._int(d.get("at"))
+        if not at or not (-60000 <= now - at <= PROMPT_FRESH_MS):
+            return None
+        return {"id": d["id"], "at": at, "wake": True}
+
+    def wake_proposals(self, wid, now):
+        """Proposals (mail and actions) already made on this wake. Unknown = the quota is used (fail closed)."""
+        n = sum(1 for e in self.ledger(now - 2 * PROMPT_FRESH_MS) if e.get("ev") == "proposed" and e.get("prompt") == wid)
+        try:
+            import jarvisops as JO
+            n += sum(1 for e in JO.Ops(self.env, mail=self).ledger(now - 2 * PROMPT_FRESH_MS)
+                     if e.get("ev") == "proposed" and e.get("prompt") == wid)
+        except Exception:  # noqa: BLE001
+            n += WAKE_PROPOSALS
+        return n
+
+    def claim_wake_proposal(self, wid):
+        """rev-f5c L4: the one proposal of a wake, claimed atomically (O_EXCL) across the mail and the actions, which
+        count under two different locks. True = this caller has it."""
+        d = self.env.path("wakes")
+        try:
+            os.makedirs(d, mode=0o700, exist_ok=True)
+            os.close(os.open(os.path.join(d, wid + ".claimed"), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600))
+            return True
+        except OSError:
+            return False
+
+    def auto_caller(self):
+        """None when the caller is Jarvis's own pane (the only one who takes an automatic step), else why not."""
+        me = J.read_self(self.env)
+        if not me:
+            return "Jarvis nemá zapsané své jméno (<state>/self)"
+        name, why = self.caller_session()
+        if why:
+            return "tenhle krok dělá jen Jarvis: " + why
+        if name != me:
+            return f"tenhle krok dělá jen Jarvis ({me}), ne {name}"
+        return None
+
     # ------------------------------------------------------------------ provenance (I6, I8)
 
     def caller_session(self):
@@ -458,6 +528,8 @@ class Mail:
             return f"send smí jen Jarvis ({me}), ne {name}"
         lp = self.last_prompt()
         if not lp or not lp.get("id"):
+            if self.wake_prompt(now):
+                return None  # F5c: a proposal on a wake (send makes it one: no named, no intent)
             return "chybí čerstvý Lukášův pokyn (poslední zpráva nebyla od Lukáše)"
         age = now - J._int(lp.get("at")) if J._int(lp.get("at")) else None
         if age is None or age < -60000 or age > PROMPT_FRESH_MS:
@@ -477,7 +549,9 @@ class Mail:
            and a short yes or names the message id. Anything else drops it.
         """
         prev = J.read_json(self.env.path("last-prompt.prev"))
-        for p in (self.env.path("last-prompt"), self.env.path("last-prompt.prev")):
+        wake = J.read_json(self.env.path("last-prompt.wake"))
+        # F5c: the wake record goes with the prompts, first and unconditionally: it may stand only for the wake turn
+        for p in (self.env.path("last-prompt"), self.env.path("last-prompt.prev"), self.env.path("last-prompt.wake")):
             try:
                 os.unlink(p)
             except FileNotFoundError:
@@ -488,6 +562,13 @@ class Mail:
             return "not a UserPromptSubmit payload"
         # F5a: decided on what he said, not on the app's `[hlas]` marker (VOICE_PREFIX)
         prompt = strip_voice(payload.get("prompt"))
+        # rev-f5c L6: a wake line whose Enter got lost stays in Jarvis's box, and what Lukáš types goes after it. The
+        # prompt is then our exact line (a batch jarvis-d wrote) + his words: the words are his, the line is not.
+        if isinstance(prompt, str):
+            fm = WAKE_FULL_RE.match(prompt.lstrip())
+            rest = prompt.lstrip()[fm.end():].strip() if fm else ""
+            if fm and rest and os.path.isfile(os.path.join(self.env.path("wakes"), fm.group(1) + ".json")):
+                prompt = strip_voice(rest)
         name, why = self.caller_session()
         me = J.read_self(self.env)
         if not isinstance(prompt, str) or why or not me or name != me:
@@ -500,6 +581,11 @@ class Mail:
             # it never counts as a fresh prompt (I8: last-prompt stays gone, so no send or action can use it).
             if isinstance(prev, dict) and prev.get("id"):
                 J.atomic_write(self.env.path("last-prompt.held"), json.dumps({"id": prev["id"], "at": prev.get("at")}))
+            # F5c: a wake jarvis-d really made (its batch file exists) lets Jarvis PROPOSE in this turn; the id is the
+            # one Lukáš's next prompt approves against. A typed look-alike without the file gets nothing.
+            wm = WAKE_LINE_RE.match(prompt.lstrip())
+            if wm and os.path.isfile(os.path.join(self.env.path("wakes"), wm.group(1) + ".json")):
+                J.atomic_write(self.env.path("last-prompt.wake"), json.dumps({"id": wm.group(1), "at": now}))
             return None
         h = hashlib.sha256(f"{now}\n{prompt}".encode("utf-8", "replace")).hexdigest()[:12]
         # F3: only whether he asked for silence ("nehlas …") or for a quiet mode ("nerušit …"), never the text:
@@ -530,6 +616,10 @@ class Mail:
             pass
         if not isinstance(prev, dict):
             prev = held  # a wake came in between: the proposals still belong to the prompt before it (L7)
+            if isinstance(wake, dict) and WAKE_RE.fullmatch(str(wake.get("id"))):
+                # F5c: the wake turn was the last one, so its proposal is the one this prompt answers (no wake is
+                # pasted while an older proposal waits, so nothing of the held prompt is lost)
+                prev = wake
         prev_id = prev.get("id") if isinstance(prev, dict) else None
         single = self._pending() == 1
         self.decide_proposals(prompt, prev_id, now, single=single)
@@ -610,7 +700,10 @@ class Mail:
 
     def check_send_limits(self, name, now, prompt_id=None):
         """Called again under mail.lock right before the record is written: two parallel sends never both pass."""
-        if prompt_id is not None:
+        if prompt_id is not None and WAKE_RE.fullmatch(prompt_id):
+            if self.wake_proposals(prompt_id, now) >= WAKE_PROPOSALS:
+                return "po probuzení nejvýš jeden návrh; další až po Lukášově odpovědi"
+        elif prompt_id is not None:
             used = sum(1 for e in self.ledger(now - 2 * PROMPT_FRESH_MS) if e.get("ev") == "proposed"
                        and e.get("prompt") == prompt_id)
             if used >= PER_PROMPT:
@@ -644,7 +737,7 @@ class Mail:
             return None, f"„{J.safe_name(q)}“ je nejednoznačné: " + ", ".join(sorted(hits)[:6])
         return hits[0], None
 
-    def send(self, to, text, task=None, sessions=None, not_before=None, after_cz=None):
+    def send(self, to, text, task=None, sessions=None, not_before=None, after_cz=None, after_limit=False):
         """(record, None) or (None, reason). Every refusal is in the ledger (the metric of refused mail).
         F3 `not_before` (ms): approved, it waits in the queue until then (`--after limit|HH:MM`); it expires 24 h
         after that, not after the proposal."""
@@ -655,7 +748,7 @@ class Mail:
                 self.log("refused", to=J.safe_name(to or "", 200), reason=why)
             return None, why
         name, clean = why
-        lp = self.last_prompt() or {}
+        lp = self.last_prompt() or self.wake_prompt(now) or {}
         mid = now_id("m", now)
         base, conflict = self.target_facts(name, now)
         rec = {"v": 1, "id": mid, "from": "jarvis", "to": name, "task": task, "prompt": lp.get("id"),
@@ -663,6 +756,8 @@ class Mail:
                "named": name in (lp.get("named") or []) and bool(lp.get("sendIntent")),
                "expires": max(now, not_before or 0) + EXPIRE_MS, "attempts": 0, "enters": 0, "deliveredAt": None, "pasteAt": None,
                "lastBlock": None, "reply": None, "base": base, "conflict": conflict}
+        if after_limit and not_before:
+            rec["afterLimit"] = True  # F5c: the limit mark must not hold it after the reset (probe)
         body = (f"# Zpráva od Jarvise {mid}\n\n"
                 f"Od: Jarvis (správce Lukášových sessions), na Lukášův pokyn\n"
                 + (f"Úkol: {task}\n" if task else "")
@@ -673,6 +768,8 @@ class Mail:
         with self.lock():
             # limits again under the lock: two sends in parallel must not both pass the count
             why = self.check_send_limits(name, now, rec["prompt"])
+            if not why and lp.get("wake") and not self.claim_wake_proposal(rec["prompt"]):
+                why = "po probuzení nejvýš jeden návrh; další až po Lukášově odpovědi"
             if why:
                 self.log("refused", to=name, reason=why)
                 return None, why
@@ -730,6 +827,98 @@ class Mail:
             self.transition(rec, "queued", ev="approved", decidedBy=by)
         return rec, None
 
+    def send_auto(self, kind, name, text, task=None, not_before=0, extra=None, base=None, guard=None):
+        """F5c: an automatic step (`resume`, `nudge`). The text is the CODE's, never Jarvis's; queued at once, audited
+        as decidedBy "jarvis-auto". Every other check of `send` holds: Jarvis's pane, off, not Jarvis, I7, the
+        allowlist, the limits. `guard()` -> reason or None runs under mail.lock with the limits, so two calls never
+        both pass a once-only rule. (record, None) or (None, reason)."""
+        now = self.env.now_ms()
+        why = self.auto_caller()
+        if not why and self.off():
+            why = "pošta je vypnutá (~/.claude-remote/jarvis/off)"
+        for check in (self.check_not_self, self.check_high_impact):
+            if not why:
+                why = check(name)
+        if not why and not self.allowed(name):
+            why = f"{name} není v ~/.claude-remote/jarvis/mail-allow (seznam píše Lukáš)"
+        clean = None
+        if not why:
+            clean, why = validate_text(text)
+        if why:
+            with self.lock():
+                self.log("refused", to=J.safe_name(name or "", 200), reason=why, by=AUTO_BY, auto=kind)
+            return None, why
+        mid = now_id("m", now)
+        rec = {"v": 1, "id": mid, "from": "jarvis", "to": name, "task": task, "prompt": None,
+               "subject": subject_of(clean), "state": "proposed", "created": now, "notBefore": not_before or 0,
+               "named": False, "auto": kind, "expires": max(now, not_before or 0) + EXPIRE_MS, "attempts": 0,
+               "enters": 0, "deliveredAt": None, "pasteAt": None, "lastBlock": None, "reply": None, "base": base,
+               "conflict": None}
+        rec.update(extra or {})
+        body = (f"# Zpráva od Jarvise {mid}\n\n"
+                f"Od: Jarvis (správce Lukášových sessions), sám podle pravidel, která mu Lukáš dal\n"
+                + (f"Úkol: {task}\n" if task else "")
+                + f"\n{clean}\n\n---\n"
+                  f"Odpověz normálně poslední zprávou svého tahu, Jarvis si ji přečte sám. "
+                  f"Nebo výslovně: cr-mail reply {mid} \"…\"\n")
+        with self.lock():
+            why = self.check_send_limits(name, now) or (guard() if guard else None)
+            if why:
+                self.log("refused", to=name, reason=why, by=AUTO_BY, auto=kind)
+                return None, why
+            J.atomic_write(self.msg_path(mid), body)
+            self.put(rec)
+            self.log("proposed", id=mid, to=name, task=task, by=AUTO_BY)
+            self.transition(rec, "queued", ev="approved", decidedBy=AUTO_BY)
+            self.log("auto", id=mid, to=name, task=task, kind=kind, by=AUTO_BY,
+                     **{k: v for k, v in (extra or {}).items() if k in ("limitMs",)})
+        return rec, None
+
+    def auto_steps(self, since_ms, until_ms=None):
+        """The automatic mail steps (resume, nudge) taken in (since, until]: [{at, kind, to, task}]."""
+        return [e for e in self.ledger(since_ms) if e.get("ev") == "auto"
+                and (until_ms is None or e["at"] <= until_ms)]
+
+    def resume_check(self, name, sessions, now):
+        """(limit_ms, None) or (None, why): `cr-mail resume` may go only to a session that stands on its account's
+        limit by the state (jarvis-d's picture), and once per limit episode (the episode = the limit message's time)."""
+        s = (sessions or {}).get(name) or {}
+        lim = s.get("limit") if isinstance(s.get("limit"), dict) else None
+        if not lim or not J._int(lim.get("ms")):
+            return None, f"{J.short_name(name)} podle stavu nestojí na limitu; pokračovat ji nech jen na Lukášův pokyn"
+        if s.get("state") in ("dead", "missing", "gone"):
+            return None, f"{J.short_name(name)} neběží ({s['state']})"
+        ep = J._int(lim["ms"])
+        if any(e.get("kind") == "resume" and e.get("to") == name and J._int(e.get("limitMs")) == ep
+               for e in self.auto_steps(now - 30 * 86400 * 1000)):
+            return None, f"{J.short_name(name)} už po tomhle limitu pokyn pokračovat dostala (jednou na limit)"
+        if self.resume_relapse(name, ep):
+            return None, (f"{J.short_name(name)} narazila na limit hned po mém minulém „pokračuj“; znovu ji neposílám, "
+                          f"řekni to Lukášovi")
+        return ep, None
+
+    def resume_relapse(self, name, limit_ms):
+        """True when an auto resume to `name` was delivered at most RESUME_RELAPSE_MS before this limit hit."""
+        for r in self.all():
+            d = J._int(r.get("deliveredAt"))
+            if r.get("auto") == "resume" and r.get("to") == name and d and 0 <= limit_ms - d <= RESUME_RELAPSE_MS:
+                return True
+        return False
+
+    def resume(self, name, sessions, now, not_before):
+        """F5c `cr-mail resume`: the fixed "pokračuj" after the target's limit resets (`not_before`, the --after limit
+        time). The episode check runs again under the lock."""
+        ep, why = self.resume_check(name, sessions, now)
+        if why:
+            with self.lock():
+                self.log("refused", to=J.safe_name(name or "", 200), reason=why, by=AUTO_BY, auto="resume")
+            return None, why
+
+        def guard():
+            return self.resume_check(name, sessions, now)[1]
+        return self.send_auto("resume", name, AUTO_RESUME_TEXT, not_before=not_before,
+                              extra={"afterLimit": True, "limitMs": ep}, guard=guard)
+
     def target_facts(self, name, now):
         """F2b, read only: the target's repo at the proposal (`base`, the point the evidence of "done" is measured
         from) and the checkout-conflict warning (E1). Information, never a block: any failure is just no facts."""
@@ -771,7 +960,7 @@ class Mail:
                 return f"úkol {task} neexistuje"
             if t["state"] != "open":
                 return f"úkol {task} už je {t['state']}"
-        why = self.check_send_limits(name, now, (self.last_prompt() or {}).get("id"))
+        why = self.check_send_limits(name, now, (self.last_prompt() or self.wake_prompt(now) or {}).get("id"))
         if why:
             return why
         return name, clean
@@ -964,12 +1153,21 @@ class Mail:
             return "rate-target"
         return None
 
-    def probe(self, name, fold, now, expect=None):
-        """Target, or the first reason not to paste. Order: cheap file checks first, tmux last."""
+    def status_limit(self, name):
+        """The target's limit episode from jarvis-d's picture: {"ms", "text"} or None."""
+        st = J.read_json(self.env.path("status.json"), {}) or {}
+        lim = ((st.get("sessions") or {}).get(name) or {}).get("limit")
+        return lim if isinstance(lim, dict) else None
+
+    def probe(self, name, fold, now, expect=None, after_limit=None):
+        """Target, or the first reason not to paste. Order: cheap file checks first, tmux last.
+        `after_limit` (F5c): the time a `--after limit` message was told to wait for. The limit mark in the transcript
+        stays until the session answers again, which it cannot do before it gets this very message; so once that time
+        has passed and it lies after the limit hit, the mark no longer blocks."""
         if self.off():
             return "off"
-        st = J.read_json(self.env.path("status.json"), {}) or {}
-        if ((st.get("sessions") or {}).get(name) or {}).get("limit"):
+        lim = self.status_limit(name)
+        if lim and not (after_limit and now >= after_limit > J._int(lim.get("ms"))):
             return "limit"  # the account hit its limit: a pasted line would wait in Claude's queue until the reset
         t = self.resolve_target(name)
         if isinstance(t, str):
@@ -1002,8 +1200,19 @@ class Mail:
             cur = self.get(rec["id"])
             if not cur or cur["state"] != "queued":
                 return (cur or {}).get("state", "gone")
+            if cur.get("auto") == "resume":
+                lim = self.status_limit(name)
+                if not lim or J._int(lim.get("ms")) != J._int(cur.get("limitMs")):
+                    # F5c: the session works again (Lukáš went on himself) or hit another limit: this "pokračuj" is
+                    # no longer the right word
+                    with self.lock():
+                        r = self.get(rec["id"])
+                        if r and r["state"] == "queued":
+                            self.transition(r, "cancelled", reason="limit-gone")
+                    return "cancelled"
+            after = J._int(cur.get("notBefore")) if cur.get("afterLimit") else None
             why = self.check_paste_limits(name, now)
-            t = why or self.probe(name, fold, now)
+            t = why or self.probe(name, fold, now, after_limit=after)
             if isinstance(t, str):
                 self._block(rec, t)
                 return t
@@ -1014,7 +1223,7 @@ class Mail:
                 r["attempts"] = J._int(r.get("attempts")) + 1
                 self.transition(r, "delivering", ev="try", attempts=r["attempts"])
             # §3.3 step 1: conditions 2 and 4 again, right before the paste (the file write above took milliseconds)
-            t2 = self.probe(name, fold, self.env.now_ms())
+            t2 = self.probe(name, fold, self.env.now_ms(), after_limit=after)
             if isinstance(t2, str) or t2.pane != t.pane:
                 with self.lock():
                     r = self.get(rec["id"])
@@ -1260,6 +1469,73 @@ def find_reply(path, mid):
     return reply
 
 
+def marker_prompt(path, mid):
+    """rev-f5c N3: the text of the prompt that carries our marker (the last such non-assistant entry), or None."""
+    if not path:
+        return None
+    marker = f"[jarvis {mid}]"
+    for line in reversed(J.read_tail(path, 1024 * 1024)):
+        if marker not in line or '"type":"assistant"' in line.replace(" ", ""):
+            continue
+        try:
+            d = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(d, dict) or d.get("type") != "user":
+            continue
+        c = (d.get("message") or {}).get("content")
+        if isinstance(c, str):
+            return c
+        if isinstance(c, list):
+            return "".join(b.get("text", "") for b in c if isinstance(b, dict) and b.get("type") == "text")
+    return None
+
+
+def final_stop(reason):
+    """The turn ended with this entry: any stop_reason but `tool_use` (live 2026-11-10, 8 transcripts: end_turn,
+    stop_sequence; max_tokens ends a turn as well). A missing one is not an end (fail safe: the fallback)."""
+    return isinstance(reason, str) and bool(reason) and reason != "tool_use"
+
+
+def find_final_reply(path, mid):
+    """rev-f5c H1: the FINAL text of the turn that came in with our marker, or None while the turn is not over in the
+    transcript. Final = the last assistant entry after the marker (up to the next prompt) is text with a stop_reason
+    other than tool_use (`final_stop`) and nothing (a tool result, another assistant entry) follows it. A text in the middle of a turn ("Podívám
+    se.", stop_reason tool_use) is never the answer."""
+    if not path:
+        return None
+    marker = f"[jarvis {mid}]"
+    lines = J.read_tail(path, 4 * 1024 * 1024)
+    start = None
+    for i in range(len(lines) - 1, -1, -1):
+        if marker in lines[i] and '"type":"assistant"' not in lines[i].replace(" ", ""):
+            start = i
+            break
+    if start is None:
+        return None
+    last = None
+    for line in lines[start + 1:]:
+        if not line.startswith("{"):
+            continue
+        try:
+            d = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(d, dict) or d.get("isSidechain"):
+            continue
+        t = d.get("type")
+        if t == "user":
+            if J._is_prompt(d):
+                break
+            last = None  # a tool result: the turn went on after whatever came before
+        elif t == "assistant":
+            last = d
+    if not last or not final_stop((last.get("message") or {}).get("stop_reason")):
+        return None
+    txt = J._assistant_text(last)
+    return txt or None
+
+
 # ---------------------------------------------------------------------------------------------------------- daemon
 
 class MailWorker:
@@ -1328,6 +1604,8 @@ def digest_items(env, since_ms, now):
             continue
         rec = m.get(e.get("id") or "") or {}
         to = rec.get("to") or e.get("to") or ""
+        if ev == "approved" and e.get("decidedBy") == AUTO_BY:
+            ev = "auto"  # F5c: Jarvis's own step, never "Lukáš řekl ano"
         items.append({"kind": "mail-" + ev, "id": e.get("id"), "to": to, "short": J.short_name(to),
                       "text": J.safe_text(rec.get("reply"), 160) if ev == "reply" else "",
                       "reason": e.get("reason"), "task": rec.get("task"), "at": e["at"]})
@@ -1355,6 +1633,7 @@ MAIL_LINE = {
     "mail-expired": "✉ {id} do {short} vypršela bez odpovědi",
     "mail-give-up": "⚠ {id} do {short}: doručení se nepotvrdilo, znovu se neposílá (zrušit: cr-mail cancel)",
     "mail-approved": "✉ {id} pro {short}: Lukáš řekl ano, je ve frontě",
+    "mail-auto": "✉ {id} pro {short}: tvůj krok bez ano (pokračuj po limitu / popohnání k úkolu), je ve frontě",
     "mail-dropped": "✉ {id} pro {short}: bez Lukášova ano, zahozena",
     "mail-draft": "✉ {id} nelze doručit: v {short} je přes 30 min rozepsaný vstup",
     "mail-opened-wait": "✉ {id}: nová session {short} čeká na potvrzení důvěry ke složce (nebo jiný dialog), zadání čeká ve frontě",
@@ -1366,6 +1645,7 @@ MAIL_SAY = {
     "mail-expired": "Zpráva pro {spoken} vypršela bez odpovědi.",
     "mail-give-up": "Zprávu pro {spoken} se nepodařilo doručit.",
     "mail-approved": "Zpráva pro {spoken} je ve frontě.",
+    "mail-auto": "Pokyn pro {spoken} je ve frontě.",
     "mail-dropped": "Zprávu pro {spoken} jsem zahodil.",
     "mail-draft": "Do {spoken} nejde doručit, má rozepsaný vstup.",
     "mail-opened-wait": "{spoken} čeká na potvrzení důvěry ke složce, zadání čeká.",

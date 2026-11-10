@@ -258,11 +258,13 @@ class GateTest(unittest.TestCase):
         # F3: approve/reject are the app's yes/no on a proposal, never Jarvis's
         self.assertEqual(load_gate().ALLOWED, {"cr-sessions": {"list", "show", "tail", "open", "check-close", "close",
                                                                "closed", "reopen", "stale", "pick-account"},
-                                               "cr-digest": {"delta", "brief", "waiting", "usage", "briefing"},
-                                               "cr-mail": {"send", "status", "inbox", "cancel", "off", "audit"},
+                                               "cr-digest": {"delta", "brief", "waiting", "usage", "briefing",
+                                                             "wake"},
+                                               "cr-mail": {"send", "status", "inbox", "cancel", "off", "audit",
+                                                           "resume"},
                                                "cr-task": {"add", "list", "show", "done", "fail", "watch",
                                                            "watches", "unwatch", "log", "remind", "reminders",
-                                                           "unremind"},
+                                                           "unremind", "nudge"},
                                                "cr-rules": {"add", "list", "rm"},
                                                "cr-jarvis": {"mode", "proposals"}})
 

@@ -6,6 +6,9 @@ Shared by `jarvis_d.py` (AlertWorker: the only writer of the alerts file and the
 
 The contract, `~/.cache/claude-remote/jarvis-alerts` (append, one line per alert, read by the app's `tail -F`):
   claude-remote-jarvis <id> <block|done|info|incident> <ms> <b64(text)> <b64(tmux name) | ->
+  claude-remote-jarvis <id> <jsay|jblock|jask|jblockask> <ms> <b64(Jarvis's own text, ≤ 400)> <b64(tmux name) | ->
+      F5c: jsay = news; jblock = the batch blocks Lukáš (high priority); jask = exactly one proposal waits (action
+      Ano); jblockask = both (high priority AND Ano). Old apps ignore these kinds.
   claude-remote-jarvis hb <ms>                                     every ~60 s while jarvis-d runs (the app's lease)
 `text` is one Czech sentence (a batch: "N věcí: …"), no paths, no texts written by a session. The last field is the
 one session the line is about, or a literal `-` (a batch of several, an incident, a reminder). Only jarvis-d writes
@@ -20,21 +23,33 @@ What makes an alert (§3 point 1) and nothing else:
             older than 6 h when first seen, is never told (expiry).
 - done      what Lukáš asked to hear (HNED, §3 point 1): results of tasks given through Jarvis (a reply to a task's
             mail, told with the task's state; a session whose Stop had background tasks still runs, so it waits; a
-            task's evidence `proof`; a task closed or failed by Jarvis; a task's mail that could not be delivered;
-            only these wake Jarvis), a watch fired ("dej vědět, až…"), a reminder he set.
-- info      news that is no reason to disturb him (none emitted yet; kept in the contract).
+            task's evidence `proof`; a task closed or failed by Jarvis; a task's mail that could not be delivered),
+            a watch fired ("dej vědět, až…"), a reminder he set.
+- info      news that is no reason to disturb him: F5c's stuck / crashed / usage, only as the fallback of a wake.
 - incident  more than INCIDENT_N session starts/ends within a minute: one line at once, outside the batching.
 Batching (§3 point 4): at most one line per 5 minutes, all due items in it. Modes (§3 point 7, `<state>/mode`):
 normal; blocking = blocks, task results, reminders and incidents (watches wait); dnd[:<until ms>] = incidents only.
 What a mode holds back stays pending until it expires. Rules "nehlas" (`<state>/rules`, cr-rules) drop matching
 items, never perm/ask/waiting, incidents or reminders.
 
-Waking Jarvis (§3 point 3): a task result that went out is also pasted into Jarvis's pane as ONE line
-`[jarvis wake] <sentences>` through the mail's own checks (I1 live claude, I2 idle + settled + empty box + no
-selector, I3 Enter only over exactly our line, I5 no client input in 20 s / copy-mode / hold), never while a mail
-proposal waits for Lukáš's "ano" (since rev-f4 L7 a `[jarvis` prompt no longer drops it, but a wake between his question
-and his answer would still bury the question), never with mail off or in dnd; at most once
-per 3 min and 30 times a day. The line is fixed: `[jarvis wake] Výsledek úkolu t-… · cr-task show t-…` (no title). Lukáš writing to Jarvis in the meantime makes it moot (the delta told it).
+Waking Jarvis (F5c, Lukáš 2026-11-10 "je hrozně pasivní"): the batch above first wakes Jarvis instead of going out as
+a template, when the wake route is open (Jarvis known, mail on, not the saver, under 60 wakes a day, no `wake-off`
+switch) and the mode lets it (`wake_allowed`: dnd = incidents and perm/ask; blocking = blocks, his tasks, incidents).
+The sources: blocks after their grace (perm/ask/waiting/question/limit/stuck mail), task results, fired watches and
+reminders, incidents, and three new ones: a session busy without any sign of life for 30 min (`stuck`), a session
+that vanished or lost its claude in the middle of work or with Jarvis's task (`crashed`), an account crossing 80/90 %
+of its 5 h or 7 d window (`usage`); plus a round every 30 min when something Jarvis has not seen changed (`round`).
+One wake at a time, ≤ 1 per 5 min, ≤ 60 a day; never while Lukáš talks to Jarvis (his prompt or a client's input on
+Jarvis < 2 min, or Jarvis not idle), never while a proposal waits, never with mail off. The line is FIXED:
+`[jarvis wake w-…] N událostí · cr-digest wake w-…` (the batch is `<state>/wakes/<w-id>.json`), pasted through the
+mail's own checks (I1 live claude, I2 idle + settled + empty box + no selector, I3 Enter only over exactly our line,
+I5 no client input in 20 s / copy-mode / hold). His FINAL text of that turn (stop_reason end_turn, read 1.5 s after
+his Stop) becomes one j-line; an answer starting `[ticho]` says nothing (perm/ask/waiting and his own steps are told
+anyway); a lost Enter gets two more over exactly our line (a deliberate deviation from the mail's I4 "≤ 2 Enters per
+message": a wake may get up to 4 Enters, each only while the box holds exactly our line, see `_recover_enter`); no
+paste within 3 min or no answer within 3 min of the Enter that took
+of the paste = the batch's template lines. Jarvis's own account at ≥ 95 % 7 d or ≥ 85 % 5 h = the saver: no wakes,
+templates only, said once in the delta.
 """
 import base64
 import datetime
@@ -48,7 +63,11 @@ import time
 import jarvislib as J
 
 PREFIX = "claude-remote-jarvis"
-KINDS = ("block", "done", "info", "incident")
+# F5c: Jarvis's own words (jsay|jblock|jask) next to the templates; an old app ignores the kinds it does not know
+# rev-f5c L1: `jblockask` = a blocking batch AND exactly one proposal: high priority like jblock, the Ano action like
+# jask (one kind, so the six fields of the contract stay as they are)
+J_KINDS = ("jsay", "jblock", "jask", "jblockask")
+KINDS = ("block", "done", "info", "incident") + J_KINDS
 SEVERITY = {"incident": 3, "block": 2, "done": 1, "info": 0}
 ALERT_RE = re.compile(r"a-\d{8}T\d{6}-[0-9a-f]{4}")
 RULE_RE = re.compile(r"n-\d{8}T\d{6}-[0-9a-f]{4}")
@@ -71,12 +90,39 @@ EXPIRE_MS = {"task": 2 * 3600 * 1000, "watch": 3600 * 1000, "reminder": 2 * 3600
 INCIDENT_N = 8
 INCIDENT_WINDOW_MS = 60 * 1000
 INCIDENT_COOLDOWN_MS = 10 * 60 * 1000
-WAKE_GAP_MS = 3 * 60 * 1000
-WAKE_DAY_MAX = 30
-WAKE_EXPIRE_MS = 30 * 60 * 1000
+# F5c (Lukáš 2026-11-10: "events + a round"): one wake per 5 minutes at most, 60 a day
+WAKE_GAP_MS = 5 * 60 * 1000
+WAKE_DAY_MAX = 60
 TEXT_MAX = 400
-WAKE_PREFIX = "[jarvis wake] "
+WAKE_PREFIX = "[jarvis wake "
 MIN_TIME_LEFT_S = 25
+# the wake must be in Jarvis's box this long after its batch formed, and his answer must follow this long after the
+# paste; otherwise the batch goes out as today's template lines (the fallback)
+PASTE_WAIT_MS = 3 * 60 * 1000
+REPLY_WAIT_MS = 3 * 60 * 1000
+# "never during Lukáš's conversation": his prompt to Jarvis, or input of a client attached to Jarvis, this fresh
+CONVERSATION_MS = 2 * 60 * 1000
+ROUND_MS = 30 * 60 * 1000
+STUCK_MS = 30 * 60 * 1000
+CRASH_FRESH_MS = 10 * 60 * 1000
+CRASH_CLOSED_MS = 15 * 60 * 1000
+USAGE_LEVELS = (80, 90)
+USAGE_FRESH_S = 900
+USAGE_EVERY_MS = 30 * 1000
+# the saver: Jarvis's own account this spent stops the wakes (templates go on); said once in the delta
+SAVER_7D, SAVER_5H = 95, 85
+WAKES_KEEP_MS = 2 * 86400 * 1000
+WAKES_KEEP_N = 200
+# Lukáš's (and the lead's) instant switch back to the F3 behaviour: no wake at all, templates only
+WAKE_OFF = "wake-off"
+# rev-f5c L2: an answer that STARTS with [ticho] is silence; whatever follows it is dropped
+SILENT_RE = re.compile(r"\s*\[ticho\]", re.IGNORECASE)
+# rev-f5c H1: Claude writes the transcript a moment after the Stop hook: the final text is read this long after it
+REPLY_SETTLE_MS = 1500
+# rev-f5c L6: a wake line left in Jarvis's box by a lost Enter gets this many more Enters (only over exactly it)
+RECOVER_ENTERS = 2
+_ID_WORD = re.compile(r"\b[amnrtwx]-\d{8}T\d{6}-[0-9a-f]{4}\b")
+_MD = re.compile(r"[*`#>|]+|(?<!\w)_+|_+(?!\w)")  # markdown marks; an underscore inside a name stays
 
 MODES = ("normal", "blocking", "dnd")
 MODE_CZ = {"normal": "normální", "blocking": "jen blokující", "dnd": "nerušit"}
@@ -194,12 +240,52 @@ def mode_say(mode, until, now):
     return "Normální režim."
 
 
+# F5c sources that are news, not a reason to break a quiet mode (and none of them had a template before F5c)
+INFO_SRC = ("stuck", "crashed", "usage", "round")
+
+
 def allowed_by_mode(item, mode):
+    """May a TEMPLATE line carry it now (F3, unchanged; the F5c sources only in the normal mode)."""
     if mode == "dnd":
         return item["src"] == "incident"
     if mode == "blocking":
-        return item["src"] != "watch"
+        return item["src"] not in ("watch",) + INFO_SRC
     return True
+
+
+def wake_allowed(item, mode):
+    """May it wake Jarvis now (F5c): dnd = an incident or a permission / question of a session; blocking = blocks
+    (perm/ask/waiting/question/limit/stuck mail), his own tasks' results, incidents; normal = everything."""
+    if mode == "dnd":
+        return item["src"] == "incident" or always_told(item)
+    if mode == "blocking":
+        return item["src"] in ("block", "task", "incident")
+    return True
+
+
+def always_told(item):
+    """rev-f5c M1: what no rule silences (perm, ask, waiting) is told in every mode and after [ticho] too."""
+    return item.get("src") == "block" and item.get("sub") in NEVER_SILENCED
+
+
+def blocking_item(item):
+    """jblock: the batch holds something that blocks Lukáš (perm/ask/waiting, a limit, an incident …)."""
+    return item["src"] in ("block", "incident")
+
+
+def jarvis_text(raw):
+    """Jarvis's answer as one notification / TTS text: no markdown, no ids, no paths, one line, ≤ 400 characters
+    (cut at a sentence end when it can be). It is still DATA for the app (shown and spoken, never executed)."""
+    t = J.safe_text(_MD.sub("", raw or ""), TEXT_MAX * 3) or ""
+    if t == J.HIDDEN:
+        return ""
+    t = _ID_WORD.sub("", t)
+    t = " ".join(w for w in t.split() if "/" not in w and not w.startswith("~") and w not in ("-", "•"))
+    if len(t) > TEXT_MAX:
+        cut = t[:TEXT_MAX]
+        end = max(cut.rfind(". "), cut.rfind("? "), cut.rfind("! "))
+        t = cut[:end + 1] if end > TEXT_MAX // 2 else cut[:TEXT_MAX - 1].rstrip() + "…"
+    return t.strip()
 
 
 # ---------------------------------------------------------------------------------------------------------- stores
@@ -410,6 +496,8 @@ def clean(s, n):
 
 BLOCK_CZ = {"perm": "chce povolení", "ask": "se ptá", "waiting": "čeká na tebe", "question": "se v odpovědi ptá",
             "limit": "narazila na limit účtu a stojí", "mail": "zatím nedostala zprávu od Jarvise"}
+TEMPLATE_KIND = {"task": "done", "watch": "done", "reminder": "done", "incident": "incident", "closed": "done",
+                 "stuck": "info", "crashed": "info", "usage": "info", "round": "info", "auto": "done"}
 # A message approved but stuck in the queue this long is told (2026-11-09: one waited 16 h, nobody knew).
 MAIL_STUCK_MS = 10 * 60 * 1000
 
@@ -442,7 +530,14 @@ def _cap(t):
 class AlertWorker:
     """jarvis-d's half. `state` is JSON-able and lives in d-state.json (a file the live-file canary already
     tolerates), so no new file is rewritten every few seconds. `presence()` -> ms of the latest tmux client input or
-    None; `mail` is a jarvismail.Mail (its checks and its tmux seam are reused for the wake)."""
+    None; `mail` is a jarvismail.Mail (its checks and its tmux seam are reused for the wake).
+
+    F5c (active Jarvis): what used to go straight to the alerts file as a template now first WAKES Jarvis when it may
+    (`wake_route` is None and the mode lets it, `wake_allowed`): the batch becomes `<state>/wakes/<w-id>.json`, one
+    fixed line `[jarvis wake w-…] N událostí · cr-digest wake w-…` goes into his pane through the mail's checks, and
+    his answer to that turn becomes ONE `jsay|jblock|jask` line in his own words. The templates of the batch are the
+    fallback: no paste within 3 min, no answer within 3 min of the paste, an unreadable answer; and after `[ticho]` the
+    permissions and questions (and every step he took by himself) are told anyway."""
 
     def __init__(self, env, state=None, mail=None, log=None, presence=None, persist=None):
         import jarvismail as M
@@ -454,17 +549,28 @@ class AlertWorker:
         self.rules = Rules(env)
         self.reminders = Reminders(env)
         st = state if isinstance(state, dict) else {}
+
+        def d(k):
+            return st.get(k) if isinstance(st.get(k), dict) else {}
+        wb = st.get("wb")
         self.s = {
             "cur": st.get("cur") if isinstance(st.get("cur"), dict) else None,
-            "blocks": st.get("blocks") if isinstance(st.get("blocks"), dict) else {},
-            "recent": st.get("recent") if isinstance(st.get("recent"), dict) else {},
+            "blocks": d("blocks"),
+            "recent": d("recent"),
             "items": [i for i in st.get("items") or [] if isinstance(i, dict) and i.get("src")],
             "lastEmit": _i(st.get("lastEmit")) or 0,
             "inc": [x for x in st.get("inc") or [] if isinstance(x, list) and len(x) == 2],
             "lastIncident": _i(st.get("lastIncident")) or 0,
-            "wake": [w for w in st.get("wake") or [] if isinstance(w, dict)],
             "wakes": [x for x in st.get("wakes") or [] if isinstance(x, int)],
-            "day": st.get("day") if isinstance(st.get("day"), dict) else {},
+            "day": d("day"),
+            # F5c
+            "wb": wb if isinstance(wb, dict) and self.M.WAKE_RE.fullmatch(str(wb.get("id"))) else None,
+            "roundAt": _i(st.get("roundAt")),
+            "stuck": d("stuck"),
+            "crashed": d("crashed"),
+            "usageLvl": d("usageLvl"),
+            "saver": _i(st.get("saver")),
+            "autoAt": _i(st.get("autoAt")),
         }
         self.presence_fn = presence or self._tmux_presence
         # rev-f3 LOW5: jarvis-d's d-state writer. Called BEFORE an alert line or a wake paste goes out, with the
@@ -473,6 +579,11 @@ class AlertWorker:
         self.present_at, self.presence_checked = None, 0
         self.hb_at = 0
         self.summary = {}
+        self.usage, self.usage_at = {}, 0
+        # rollout (lead 2026-11-10): the first run of F5c has no `stuck` in its state yet. Sessions busy past the
+        # threshold at that moment are the baseline, not news: they are told only after a new sign of life and
+        # another 30 min without one. A state from an F5c run (even an empty dict) has no baseline to take.
+        self.stuck_baseline = not isinstance(st.get("stuck"), dict)
 
     @property
     def state(self):
@@ -502,6 +613,10 @@ class AlertWorker:
             self.s["day"] = {"d": day}
         self.s["day"][key] = _i(self.s["day"].get(key)) + 1
 
+    def _today(self, now, key):
+        day = time.strftime("%Y-%m-%d", time.localtime(now / 1000))
+        return _i(self.s["day"].get(key)) if self.s["day"].get("d") == day else 0
+
     def task_sessions(self, tasks, mails):
         """Sessions that work on a task given through Jarvis (3 min grace instead of 15)."""
         names = {t["to"] for t in tasks.values() if t["state"] == "open" and t.get("to")}
@@ -524,15 +639,24 @@ class AlertWorker:
         tasks = self._safe("tasks", lambda: cr_task.fold(cr_task.read_events(self.env))) or {}
         mails = self._safe("mails", self.mail.all) or []
         mode, until = read_mode(self.env, now)
+        sessions = sessions or {}
+        if now - self.usage_at >= USAGE_EVERY_MS:
+            self.usage, self.usage_at = self._safe("usage", J.read_usage, self.env, now) or {}, now
         self._safe("incident", self._incidents, new_events or (), now, self_name)
-        self._safe("blocks", self._blocks, sessions or {}, now, tasks, mails)
-        self._safe("sources", self._sources, now, tasks, mails, sessions or {})
-        self._safe("emit", self._emit, now, mode, sessions or {}, tasks, mails)
-        self._safe("wake", self._wake, now, mode, fold, self_name, time_left)
+        self._safe("blocks", self._blocks, sessions, now, tasks, mails)
+        self._safe("sources", self._sources, now, tasks, mails, sessions)
+        self._safe("sources-f5c", self._sources_f5c, now, tasks, mails, sessions)
+        saver = self._safe("saver", self._saver, now, sessions, self_name)
+        route = self.wake_route(now, self_name, bool(saver))
+        self._safe("emit", self._emit, now, mode, sessions, tasks, mails, route is None)
+        self._safe("round", self._round, now, mode, sessions, route is None)
+        self._safe("wake", self._wake, now, mode, fold, self_name, time_left, sessions, new_events or (), route)
+        self._safe("auto", self._auto_orphans, now)
         self.summary = {"mode": mode, "until": until, "pending": len(self.s["items"]) + sum(
             1 for b in self.s["blocks"].values() if not b.get("told")), "lastEmit": self.s["lastEmit"] or None,
-            "today": {k: v for k, v in self.s["day"].items() if k != "d"}, "wakePending": len(self.s["wake"]),
-            "present": self.present_at is not None and now - self.present_at < PRESENT_MS}
+            "today": {k: v for k, v in self.s["day"].items() if k != "d"}, "wakePending": 1 if self.s["wb"] else 0,
+            "present": self.present_at is not None and now - self.present_at < PRESENT_MS,
+            "wake": route or "on", "saver": self.s["saver"] or None}
         return json.dumps(self.s, sort_keys=True) != before
 
     def _safe(self, what, fn, *a):
@@ -585,8 +709,11 @@ class AlertWorker:
                 continue  # the same thing, re-stamped (the registry moved, still blocked): one item
             r = self.s["recent"].get(name) or {}
             told = False
-            if r.get("sig") == sig and now - _i(r.get("at")) < REPEAT_MS:
-                told = True  # blocked again on the same thing right after it was told: the same item
+            if r.get("sig") == sig and now - _i(r.get("at")) < REPEAT_MS and not (
+                    kind == "limit" and self.mail.resume_relapse(name, since)):
+                # blocked again on the same thing right after it was told: the same item. Never a limit that came
+                # right after Jarvis's own "pokračuj" (rev-f5c N1): Lukáš must hear that it stands again
+                told = True
             if now - since > BLOCK_STALE_MS:
                 told = True  # old news when first seen (a daemon that was down for hours)
             if task_names is None:
@@ -634,7 +761,7 @@ class AlertWorker:
             if not t:
                 continue
             self._add(now, src="task", sub="reply" if ev == "reply" else "mail-fail", task=t["id"],
-                      name=rec.get("to"), at=e["at"], wake=True, mail=rec.get("id"))
+                      name=rec.get("to"), at=e["at"], mail=rec.get("id"))
         cur["mail"] = mx
         # watches: fired, and the evidence of a task
         import jarviswatch as JW
@@ -649,7 +776,7 @@ class AlertWorker:
             if e.get("ev") == "proof":
                 t = tasks.get(e.get("task") or "")
                 if t:
-                    self._add(now, src="task", sub="proof", task=t["id"], name=t.get("to"), at=e["at"], wake=True)
+                    self._add(now, src="task", sub="proof", task=t["id"], name=t.get("to"), at=e["at"])
             elif e.get("ev") == "fired":
                 ws = ws if ws is not None else W.fold(evs)
                 w = ws.get(e.get("id"))
@@ -668,7 +795,7 @@ class AlertWorker:
             tx = max(tx, at)
             if e.get("ev") in ("done", "fail") and e.get("by") == "jarvis":
                 t = tasks.get(e["id"]) or {}
-                self._add(now, src="task", sub=e["ev"], task=e["id"], name=t.get("to"), at=at, wake=False)
+                self._add(now, src="task", sub=e["ev"], task=e["id"], name=t.get("to"), at=at)
         cur["task"] = tx
         # F4: sessions Jarvis closed. One line each, with the tmux name in the last field: the app offers "Vrátit"
         # when closed.jsonl has that name's newest record by "jarvis" younger than 24 h (the contract: no new field)
@@ -696,15 +823,85 @@ class AlertWorker:
             if self.reminders.append({"v": 1, "at": now, "ev": "fired", "id": r["id"]}, guard) is None:
                 self._add(now, src="reminder", sub="reminder", at=r["due"],
                           text="Připomínka: " + (clean(r.get("text"), REMIND_TEXT_MAX) or "bez textu"))
+    # ------------------------------------------------------------------ F5c sources: stuck, crashed, usage
+
+    def _sources_f5c(self, now, tasks, mails, sessions):
+        task_names = None
+        stuck = {}
+        for name, s in sessions.items():
+            if not isinstance(s, dict) or s.get("self"):
+                continue
+            st = s.get("state")
+            short = J.short_name(name)
+            if st == "busy":
+                # busy without any sign of life: no hook event, no registry change, no transcript write for 30 min
+                since = max(_i((s.get("lastEvent") or {}).get("ms")), _i(s.get("stateSince")), _tr_ms(s.get("trKey")))
+                if since and now - since >= STUCK_MS:
+                    stuck[name] = since
+                    if _i(self.s["stuck"].get(name)) != since and not self.stuck_baseline:
+                        # `at` = when it was found (the expiry counts from there; `since` may be hours old)
+                        self._add(now, src="stuck", sub="stuck", name=name, at=now, since=since,
+                                  text=f"{short} pracuje {J.minutes_cz(now - since)} bez známky života")
+            elif st in ("gone", "dead"):
+                ch = _i(s.get("changedAt"))
+                if not ch or now - ch > CRASH_FRESH_MS or _i(self.s["crashed"].get(name)) == ch:
+                    continue
+                if task_names is None:
+                    task_names = self.task_sessions(tasks, mails)
+                work = s.get("prevState") in ("busy", "bg", "waiting")
+                if not (work or name in task_names):
+                    continue
+                self.s["crashed"][name] = ch
+                if self._closed_on_purpose(name, ch):
+                    continue  # Lukáš, Jarvis or the app closed it: no crash
+                self._add(now, src="crashed", sub=st, name=name, at=ch,
+                          text=f"{short} {'zmizela' if st == 'gone' else 'už nemá běžící claude'}"
+                          + (" uprostřed práce" if work else " a měla rozdělaný úkol od Jarvise"))
+        self.s["stuck"] = stuck
+        self.stuck_baseline = False
+        self.s["crashed"] = {k: v for k, v in self.s["crashed"].items() if now - _i(v) < 2 * 3600 * 1000}
+        for acct, u in sorted((self.usage or {}).items()):
+            if not isinstance(u, dict) or (u.get("ageS") or 0) > USAGE_FRESH_S:
+                continue
+            for win, cz in (("fiveHour", "za pět hodin"), ("sevenDay", "za týden")):
+                v = u.get(win)
+                if not isinstance(v, (int, float)):
+                    continue
+                lvl = max([x for x in USAGE_LEVELS if v >= x], default=0)
+                k = f"{acct}|{win}"
+                old = self.s["usageLvl"].get(k)
+                self.s["usageLvl"][k] = lvl
+                if old is not None and lvl > _i(old):  # the first sight is a baseline, not news
+                    self._add(now, src="usage", sub=win, name=None, at=now, acct=acct,
+                              text=f"Účet {J.account_short(u.get('account'))} je na {v:.0f} % {cz}")
+
+    def _closed_on_purpose(self, name, ch):
+        for c in J.read_closed(self.env, 100):
+            if c.get("name") == name and ch - CRASH_CLOSED_MS <= _i(c.get("atMs")) <= ch + 60000:
+                return True
+        return False
+
+    def _saver(self, now, sessions, self_name):
+        """Jarvis's own account at ≥ 95 % a week or ≥ 85 % in 5 h: no wakes (templates only) until it drops."""
+        s = (sessions.get(self_name) if self_name else None) or {}
+        u = (self.usage or {}).get(s.get("account") or "default") or {}
+        on = bool(u) and (u.get("ageS") or 0) <= 3 * 3600 and (
+            (u.get("sevenDay") or 0) >= SAVER_7D or (u.get("fiveHour") or 0) >= SAVER_5H)
+        if on and not self.s["saver"]:
+            self.s["saver"] = now
+            self.log("úsporný režim: Jarvisův účet je vyčerpaný, probouzení stojí, jdou šablony")
+        elif not on:
+            self.s["saver"] = 0
+        return on
 
     def _add(self, now, **it):
         it.setdefault("name", None)
         # §3 point 1: a fired watch and a reminder are things Lukáš asked to hear (HNED), like a task's result; `info`
         # stays for news that is no reason to disturb him (the watch vibrates on block|done|incident)
-        it["kind"] = {"task": "done", "watch": "done", "reminder": "done", "incident": "incident",
-                      "closed": "done"}[it["src"]]
-        key = (it["src"], it.get("sub"), it.get("task"), it.get("name"), it.get("at"))
-        if any((i["src"], i.get("sub"), i.get("task"), i.get("name"), i.get("at")) == key for i in self.s["items"]):
+        it["kind"] = TEMPLATE_KIND[it["src"]]
+        key = (it["src"], it.get("sub"), it.get("task"), it.get("name"), it.get("at"), it.get("acct"))
+        if any((i["src"], i.get("sub"), i.get("task"), i.get("name"), i.get("at"), i.get("acct")) == key
+               for i in self.s["items"]):
             return
         self.s["items"].append(it)
 
@@ -734,25 +931,19 @@ class AlertWorker:
             return f"Úkol «{title}» selhal", False
         return f"Úkol «{title}»: zprávu pro {short} se nepodařilo doručit", False
 
-    def _emit(self, now, mode, sessions, tasks, mails):
+    def _emit(self, now, mode, sessions, tasks, mails, wake_on=False):
         rules = self.rules.all(now)
-        keep, incidents = [], []
+        keep = []
         for it in self.s["items"]:
             if now - _i(it.get("at")) > EXPIRE_MS.get(it["src"], 3600 * 1000):
                 continue  # stale: never told late
             if self.rules.silenced(it, now, sessions, rules):
                 continue
-            if it["src"] == "incident":
-                incidents.append(it)
-                continue
             keep.append(it)
         self.s["items"] = keep
-        if incidents:
-            self._persist()
-            for it in incidents:
-                self._write(now, "incident", it["text"], None)
         # F4: each close on its own line at once (outside the 5-minute batch, which would replace the name with `-`
-        # and so lose the app's "Vrátit"); a mode that holds `done` back holds these too (dnd)
+        # and so lose the app's "Vrátit"); a mode that holds `done` back holds these too (dnd). Never a wake: it is
+        # Jarvis's own act, he knows it.
         closed = [it for it in self.s["items"] if it["src"] == "closed" and allowed_by_mode(it, mode)]
         if closed:
             ids = {id(it) for it in closed}
@@ -762,21 +953,21 @@ class AlertWorker:
             self._persist()
             for it in closed:
                 self._write(now, "done", it["text"], it["name"])
-        if now - self.s["lastEmit"] < BATCH_GAP_MS:
-            return
-        sentences, names, kinds, sent, woke = [], [], [], [], []
-        for name, b in sorted(self.s["blocks"].items(), key=lambda kv: kv[1]["since"]):
-            if b.get("told") or now - b["since"] < self.grace(b, now):
-                continue
-            it = {"src": "block", "sub": b["kind"], "name": name}
-            if not allowed_by_mode(it, mode) or self.rules.silenced(it, now, sessions, rules):
-                continue
-            sentences.append(block_sentence(name, b["kind"]))
-            names.append(name)
-            kinds.append("block")
-            sent.append(("block", name))
+        # an incident never waits for the 5-minute batch (F3); the rest only when the batch is due
+        gap_ok = now - self.s["lastEmit"] >= BATCH_GAP_MS
+        due = []
+        if gap_ok:
+            for name, b in sorted(self.s["blocks"].items(), key=lambda kv: kv[1]["since"]):
+                if b.get("told") or now - b["since"] < self.grace(b, now):
+                    continue
+                it = {"src": "block", "sub": b["kind"], "name": name, "kind": "block",
+                      "text": block_sentence(name, b["kind"]), "since": b["since"],
+                      "data": J.safe_text(((sessions.get(name) or {}).get("attention") or {}).get("text"), 120)}
+                if self.rules.silenced(it, now, sessions, rules):
+                    continue
+                due.append((it, ("block", name)))
         for it in self.s["items"]:
-            if not allowed_by_mode(it, mode):
+            if it["src"] == "closed" or (not gap_ok and it["src"] != "incident"):
                 continue
             if it["src"] == "task":
                 text, hold = self._task_text(it, tasks, mails, sessions)
@@ -784,30 +975,53 @@ class AlertWorker:
                     continue
             else:
                 text = it.get("text") or ""
-            sentences.append(text)
-            names.append(it.get("name"))
-            kinds.append(it["kind"])
-            sent.append(("item", id(it)))
-            if it.get("wake") and mode != "dnd":
-                woke.append(it.get("task"))
-        if not sentences:
+            e = {"src": it["src"], "sub": it.get("sub"), "name": it.get("name"), "kind": it["kind"], "text": text,
+                 "orig": dict(it)}  # the item itself, so a fallback the mode holds back can put it back
+            if it.get("task"):
+                e["task"] = it["task"]
+            due.append((e, ("item", id(it))))
+        busy = self.s["wb"] is not None  # one wake at a time: what may wake waits for the next one
+        to_wake, to_tpl = [], []
+        for e, ref in due:
+            if wake_on and wake_allowed(e, mode):
+                if not busy:
+                    to_wake.append((e, ref))
+                elif e["src"] == "incident":
+                    to_tpl.append((e, ref))  # an incident never waits behind a wake
+            elif allowed_by_mode(e, mode):
+                to_tpl.append((e, ref))
+            # else: held back by the mode; told afterwards while it is still current (F3)
+        chosen = to_wake + to_tpl
+        if not chosen:
             return
-        kind = max(kinds, key=lambda k: SEVERITY[k])
-        one = names[0] if len(names) == 1 else None
-        self.s["lastEmit"] = now
-        done_ids = {x[1] for x in sent if x[0] == "item"}
-        self.s["items"] = [i for i in self.s["items"] if id(i) not in done_ids]
-        for k, name in sent:
-            if k == "block":
-                b = self.s["blocks"][name]
+        for e, ref in chosen:
+            if ref[0] == "block":
+                b = self.s["blocks"][ref[1]]
                 b["told"] = True
-                self.s["recent"][name] = {"sig": b["sig"], "at": now}
-        for tid in woke:
-            if tid and self.M.TASK_RE.fullmatch(tid):
-                self.s["wake"].append({"task": tid, "at": now})
-        self._count(now, "alerts")
+                self.s["recent"][ref[1]] = {"sig": b["sig"], "at": now}
+        done_ids = {ref[1] for e, ref in chosen if ref[0] == "item"}
+        self.s["items"] = [i for i in self.s["items"] if id(i) not in done_ids]
+        if any(e["src"] != "incident" for e, _ in chosen):
+            self.s["lastEmit"] = now
+        if to_wake:
+            self._new_batch(now, [e for e, _ in to_wake], urgent=any(e["src"] == "incident" for e, _ in to_wake))
+        self._template(now, [e for e, _ in to_tpl])
+
+    def _template(self, now, entries):
+        """Today's (F3) lines: every incident on its own, the rest in one batch line. Persisted before the write."""
+        if not entries:
+            return
+        incidents = [e for e in entries if e["src"] == "incident"]
+        rest = [e for e in entries if e["src"] != "incident"]
+        if rest:
+            self._count(now, "alerts")
         self._persist()
-        self._write(now, kind, batch_text(sentences), one)
+        for e in incidents:
+            self._write(now, "incident", e["text"], None)
+        if rest:
+            kind = max((e["kind"] for e in rest), key=lambda k: SEVERITY.get(k, 0))
+            names = [e.get("name") for e in rest]
+            self._write(now, kind, batch_text([e["text"] for e in rest]), names[0] if len(names) == 1 else None)
 
     def _write(self, now, kind, text, name):
         if kind == "incident":
@@ -820,61 +1034,334 @@ class AlertWorker:
         except Exception as e:  # noqa: BLE001  a full disk must not stop the alert itself
             self.log(f"alerts persist: {type(e).__name__}: {e}"[:300])
 
-    # ------------------------------------------------------------------ wake
+    # ------------------------------------------------------------------ F5c: the wake batch
 
-    def wake_line(self):
-        """A FIXED line (rev-f3 LOW6, as mail's I13): task ids and a command, never a title or any other free text,
-        so nothing typed by anyone reaches Jarvis's prompt through a wake."""
-        ids = []
-        for w in self.s["wake"]:
-            t = w.get("task")
-            if isinstance(t, str) and self.M.TASK_RE.fullmatch(t) and t not in ids:
-                ids.append(t)
-        ids = ids[:5]
-        if not ids:
-            return None
-        return (WAKE_PREFIX + "Výsledek úkolu " + ", ".join(ids) + " · "
-                + " · ".join(f"cr-task show {t}" for t in ids))[:self.M.LINE_MAX]
-
-    def wake_hold(self, now, mode, self_name):
-        """None, or why no wake may go now (§3 point 3 and the brief's limits). The screen checks come after."""
+    def wake_route(self, now, self_name, saver=False):
+        """None when news may wake Jarvis at all, else why not; then the templates go out at once, as in F3."""
+        if os.path.exists(self.env.path(WAKE_OFF)):
+            return "wake-off"
         if not self_name:
             return "no-self"
-        if mode == "dnd":
-            return "dnd"
-        if self.s["wakes"] and now - self.s["wakes"][-1] < WAKE_GAP_MS:
-            return "gap"
-        day = time.strftime("%Y-%m-%d", time.localtime(now / 1000))
-        if self.s["day"].get("d") == day and _i(self.s["day"].get("wakes")) >= WAKE_DAY_MAX:
+        if self.mail.off():
+            return "mail-off"
+        if saver:
+            return "saver"
+        if self._today(now, "wakes") >= WAKE_DAY_MAX:
             return "day-cap"
-        if any(r["state"] == "proposed" for r in self.mail.all()):
-            return "proposal"  # a wake would bury the question Lukáš is about to answer (it no longer drops it: L7)
         return None
 
-    def _wake(self, now, mode, fold, self_name, time_left):
-        if not self.s["wake"]:
+    def _new_batch(self, now, entries, urgent=False):
+        wid = new_id("w", now)
+        for e in entries:
+            if e.get("name"):
+                e["short"] = J.short_name(e["name"])
+        self.s["wb"] = {"id": wid, "at": now, "phase": "pending", "urgent": bool(urgent),
+                        "blocking": any(blocking_item(e) for e in entries), "entries": entries}
+        self._write_batch(self.s["wb"])
+
+    def _write_batch(self, wb):
+        """`<state>/wakes/<id>.json`, the data `cr-digest wake` shows; the old ones are pruned here."""
+        d = self.env.path("wakes")
+        os.makedirs(d, mode=0o700, exist_ok=True)
+        J.atomic_write(os.path.join(d, wb["id"] + ".json"), json.dumps(
+            {"v": 1, "id": wb["id"], "at": wb["at"], "blocking": wb["blocking"],
+             "entries": [{k: v for k, v in e.items() if k != "orig"} for e in wb["entries"]]},
+            ensure_ascii=False, separators=(",", ":")))
+        try:
+            listing = os.listdir(d)
+        except OSError:
             return
-        lp = max(_i((J.read_json(self.env.path(p)) or {}).get("at")) for p in ("last-prompt", "last-prompt.prev"))
-        # expiry: Lukáš wrote to Jarvis after the result (his delta has told it), or it is half an hour old
-        self.s["wake"] = [w for w in self.s["wake"] if now - w["at"] < WAKE_EXPIRE_MS and w["at"] > lp]
-        self.s["wakes"] = [x for x in self.s["wakes"] if now - x < 86400 * 1000]
-        if not self.s["wake"] or self.wake_hold(now, mode, self_name) or time_left() < MIN_TIME_LEFT_S:
+        names = sorted(n for n in listing if n.endswith(".json") and self.M.WAKE_RE.fullmatch(n[:-5]))
+        # rev-f5c N2: a wake's proposal claim goes with its batch (or after the same 2 days)
+        for n in listing:
+            if n.endswith(".claimed") and self.M.WAKE_RE.fullmatch(n[:-8]):
+                p = os.path.join(d, n)
+                try:
+                    if n[:-8] + ".json" not in listing or wb["at"] - os.stat(p).st_mtime * 1000 > WAKES_KEEP_MS:
+                        os.unlink(p)
+                except OSError:
+                    pass
+        for i, n in enumerate(names):
+            p = os.path.join(d, n)
+            try:
+                if i < len(names) - WAKES_KEEP_N or wb["at"] - os.stat(p).st_mtime * 1000 > WAKES_KEEP_MS:
+                    os.unlink(p)
+            except OSError:
+                pass
+
+    def wake_line(self, wb):
+        """A FIXED line (rev-f3 LOW6, as mail's I13): the batch id, a count and a command, never any text of a
+        session or of a task, so nothing typed by anyone reaches Jarvis's prompt through a wake."""
+        n = sum(len(e.get("items") or ()) or 1 for e in wb["entries"])
+        return (f"{WAKE_PREFIX}{wb['id']}] {n} {J.plural(n, 'událost', 'události', 'událostí')} · "
+                f"cr-digest wake {wb['id']}")[:self.M.LINE_MAX]
+
+    def wake_hold(self, now, self_name, sessions=None):
+        """None, or why the wake may not go in NOW (it waits; after 3 min the templates go instead). The screen
+        checks (idle, empty box, nobody typing …) come after, in the mail's probe."""
+        if not self_name:
+            return "no-self"
+        if self.s["wakes"] and now - self.s["wakes"][-1] < WAKE_GAP_MS:
+            return "gap"
+        if self._today(now, "wakes") >= WAKE_DAY_MAX:
+            return "day-cap"
+        # never into Lukáš's conversation with Jarvis: his prompt (typed or spoken) or a client's input on Jarvis
+        lp = 0
+        for p in ("last-prompt", "last-prompt.prev", "last-prompt.held"):
+            d = J.read_json(self.env.path(p))
+            lp = max(lp, _i(d.get("at")) if isinstance(d, dict) else 0)
+        if lp and now - lp < CONVERSATION_MS:
+            return "conversation"
+        rc, out = self.mail.tmux(["list-clients", "-t", "=" + self_name, "-F", "#{client_activity}"])
+        if rc != 0:
+            return "clients-unknown"
+        if any(x.isdigit() and now // 1000 - int(x) < CONVERSATION_MS // 1000 for x in out.split()):
+            return "conversation"
+        if self.mail._pending():
+            return "proposal"  # a wake would bury the question Lukáš is about to answer
+        # rev-f5c M3: Jarvis's last answer is a question (no proposal behind it): Lukáš's "ano" belongs to it, and a
+        # proposal made in a wake in between would take that "ano" for itself
+        me = ((sessions or {}).get(self_name) or {})
+        if me.get("endsWithQuestion") and now - _i(me.get("lastAssistantMs")) < self.M.PROMPT_FRESH_MS:
+            return "question"
+        return None
+
+    def _wake(self, now, mode, fold, self_name, time_left, sessions, new_events, route):
+        wb = self.s["wb"]
+        if not wb:
             return
-        line = self.wake_line()
-        if not line or self.M.bad_chars(line) is not None:
-            self.s["wake"] = []
+        if wb["phase"] == "pending":
+            if route is not None:
+                self._fallback(now, mode, wb, route)  # mail off, saver, the switch: the templates, now
+                return
+            deadline = wb["at"] + (0 if wb.get("urgent") else PASTE_WAIT_MS)
+            why = self.wake_hold(now, self_name, sessions) or (None if time_left() >= MIN_TIME_LEFT_S else "time")
+            t = None
+            if not why:
+                t = self.mail.probe(self_name, fold, self.mail.env.now_ms())
+                why = t if isinstance(t, str) else None
+            if why:
+                if now >= deadline:
+                    self._fallback(now, mode, wb, "hold:" + why)
+                return
+            line = self.wake_line(wb)
+            if self.M.bad_chars(line) is not None:
+                self._fallback(now, mode, wb, "line")
+                return
+            wb.update(phase="pasting", pasteAt=now)
+            self.s["wakes"] = [x for x in self.s["wakes"] if now - x < 86400 * 1000] + [now]
+            self._count(now, "wakes")
+            self._persist()  # LOW5: counted before the paste, so a crash inside it never pastes a second wake
+            res = self.paste(t, line)
+            with self.mail.lock():
+                self.mail.log("wake", to=self_name, result=res, wake=wb["id"], n=len(wb["entries"]))
+            if res in ("load-buffer", "paste-failed"):
+                self._fallback(now, mode, wb, res)
+                return
+            wb.update(phase="pasted", paste=res, line=line)
+            if res == "delivered":
+                wb["enterAt"] = self.env.now_ms()  # rev-f5c N4: his 3 minutes run from the Enter that took
             return
-        m = self.mail
-        t = m.probe(self_name, fold, m.env.now_ms())
-        if isinstance(t, str):
-            return  # not now (busy, a draft, someone typing, copy-mode, mail off …): the next tick tries again
-        self.s["wake"] = []
-        self.s["wakes"].append(now)
-        self._count(now, "wakes")
-        self._persist()  # LOW5: counted before the paste, so a crash inside it never pastes a second wake
-        res = self.paste(t, line)
-        with m.lock():
-            m.log("wake", to=self_name, result=res)
+        # pasted (or a crash while pasting): his answer to exactly this turn, or the templates after 3 min
+        for e in new_events:
+            if e.name == self_name and e.ev == "stop" and e.ms >= _i(wb.get("pasteAt")):
+                wb["stopMs"] = e.ms
+        s = (sessions.get(self_name) if self_name else None) or {}
+        if str(wb.get("paste") or "").startswith("uncertain") and time_left() >= MIN_TIME_LEFT_S:
+            self._recover_enter(wb, self_name)
+        # rev-f5c H1: the turn is over (his Stop, or the registry idle since after the paste) for 1.5 s, and the
+        # transcript's last entry after our line is a FINAL text (stop_reason end_turn, nothing after it); a text in
+        # the middle of the turn ("Podívám se.") is never his answer
+        ended = _i(wb.get("stopMs")) or (_i(s.get("stateSince")) if s.get("state") == "idle"
+                                         and _i(s.get("stateSince")) > _i(wb.get("pasteAt")) else 0)
+        if ended and now - ended >= REPLY_SETTLE_MS:
+            # rev-f5c N3: our line stuck in his box and Lukáš typed after it: that turn answered LUKÁŠ (he reads it
+            # in the session), never a j-line; the batch goes out as its templates
+            mp = self.M.marker_prompt(s.get("transcript"), "wake " + wb["id"])
+            if mp is not None and wb.get("line") and mp.strip() != wb["line"]:
+                self._fallback(now, mode, wb, "lukas-took-over")
+                return
+            reply = self.M.find_final_reply(s.get("transcript"), "wake " + wb["id"])
+            if reply is not None:
+                self._relay(now, mode, wb, reply)
+                return
+        if now - (_i(wb.get("enterAt")) or _i(wb.get("pasteAt"))) >= REPLY_WAIT_MS:
+            self._fallback(now, mode, wb, "no-reply")
+
+    def _recover_enter(self, wb, self_name):
+        """rev-f5c L6: a wake whose Enter got lost leaves its line in Jarvis's box: the next wake would wait on the
+        "draft" for ever, and Lukáš's next words would start with `[jarvis`. One Enter per tick, at most
+        RECOVER_ENTERS, only while every Enter condition holds and the box holds EXACTLY our line (I3)."""
+        if _i(wb.get("recovered")) >= RECOVER_ENTERS or not wb.get("line"):
+            return
+        t = self.mail.resolve_target(self_name)
+        if isinstance(t, str) or self.mail.ready_for_enter(t, wb["line"]) is not None:
+            return
+        wb["recovered"] = _i(wb.get("recovered")) + 1
+        self._persist()  # counted before the key, as every Enter
+        since = self.env.now_ms()
+        self.mail.tmux(["send-keys", "-t", t.pane, "Enter"])
+        ok = self.mail.wait_confirm(t, since)
+        if ok:
+            wb["paste"] = "delivered:recovered"
+            wb["enterAt"] = self.env.now_ms()
+        with self.mail.lock():
+            self.mail.log("wake-enter", wake=wb["id"], result="delivered" if ok else "no-confirm")
+
+    def _relay(self, now, mode, wb, reply):
+        """His last text of the wake turn -> one j-line. `[ticho]` -> nothing, except permissions and questions and
+        the steps he took by himself, which are told anyway (as templates)."""
+        self.s["wb"] = None
+        auto = self.auto_entries(max(_i(wb.get("pasteAt")), self.s["autoAt"]), now)
+        if SILENT_RE.match(reply or ""):
+            self.s["autoAt"] = now
+            must = [e for e in wb["entries"] if always_told(e)] + auto
+            with self.mail.lock():
+                self.mail.log("wake-said", wake=wb["id"], kind="silent", told=len(must))
+            self._template(now, must)
+            if not must:
+                self._persist()
+            return
+        text = jarvis_text(reply)
+        if not text:
+            self.s["wb"] = wb
+            self._fallback(now, mode, wb, "unreadable")
+            return
+        ask, block = self._pending_one(), bool(wb.get("blocking"))
+        kind = "jblockask" if ask and block else "jask" if ask else "jblock" if block else "jsay"
+        self.s["autoAt"] = now  # his own words cover the steps of his turn
+        names = {e.get("name") for e in wb["entries"]}
+        one = next(iter(names)) if len(names) == 1 else None
+        self._count(now, "alerts")
+        self._count(now, "said")
+        self._persist()
+        self._write(now, kind, text, one)
+        with self.mail.lock():
+            self.mail.log("wake-said", wake=wb["id"], kind=kind)
+
+    def _pending_one(self):
+        try:
+            return self.mail._pending() == 1
+        except Exception:  # noqa: BLE001
+            return False
+
+    def _fallback(self, now, mode, wb, why):
+        """Today's template lines of the batch (a round has none), plus every step he took by himself. What the mode
+        of THIS moment holds back (Lukáš switched to dnd while the batch waited) is never dropped: it goes back to
+        the pending items and blocks and is told later, as F3 holds things in a mode; perm/ask and incidents go out
+        in every mode."""
+        self.s["wb"] = None
+        entries, held = [], 0
+        for e in wb["entries"]:
+            if e["src"] == "round":
+                continue
+            if allowed_by_mode(e, mode) or always_told(e):
+                entries.append(e)
+            else:
+                held += self._requeue(e)
+        if wb.get("pasteAt"):
+            entries += self.auto_entries(max(_i(wb["pasteAt"]), self.s["autoAt"]), now)
+            self.s["autoAt"] = now
+        self.log(f"wake {wb['id']}: šablona místo Jarvise ({why})")
+        with self.mail.lock():
+            self.mail.log("wake-fallback", wake=wb["id"], why=str(why)[:60], told=len(entries), held=held)
+        self._template(now, entries)
+        if not entries:
+            self._persist()
+
+    def _requeue(self, e):
+        """Put one entry of a batch back to wait (1), or nothing when it is no longer current (0): a block only while
+        the session is still blocked on the same thing, an item with its own expiry (`at` kept)."""
+        if e["src"] == "block":
+            b = self.s["blocks"].get(e.get("name") or "")
+            if b and b.get("kind") == e.get("sub") and _i(b.get("since")) == _i(e.get("since")):
+                b["told"] = False
+                self.s["recent"].pop(e["name"], None)
+                return 1
+            return 0
+        it = e.get("orig")
+        if isinstance(it, dict) and it.get("src"):
+            self.s["items"].append(dict(it))
+            return 1
+        return 0
+
+    def _auto_orphans(self, now):
+        """rev-f5c M5: a step Jarvis took that no answer of his covered (after a fallback his wake turn may go on)
+        goes out as a template. A step in Lukáš's own turn needs nothing: he reads that answer himself. `autoAt` is
+        the cursor: everything up to it is told."""
+        if self.s["wb"] is not None:
+            return
+        if not self.s["autoAt"]:
+            self.s["autoAt"] = now
+            return
+        steps = self.auto_entries(self.s["autoAt"], now)
+        if not steps:
+            return
+        lukas = 0
+        for p in ("last-prompt", "last-prompt.prev", "last-prompt.held"):
+            d = J.read_json(self.env.path(p))
+            lukas = max(lukas, _i(d.get("at")) if isinstance(d, dict) else 0)
+        last_wake = max(self.s["wakes"]) if self.s["wakes"] else 0
+        self.s["autoAt"] = now
+        if last_wake > lukas:
+            self._template(now, steps)
+        else:
+            self._persist()
+
+    def auto_entries(self, since, until):
+        """The steps Jarvis took by himself in (since, until], as template entries: each is told to Lukáš even when
+        Jarvis said nothing about it (Lukáš: "každý takový krok hned oznámí")."""
+        out = []
+        try:
+            for e in self.mail.auto_steps(since, until):
+                short = J.short_name(e.get("to") or "") if e.get("to") else "session"
+                text = (f"Poslal jsem {short} pokyn pokračovat po obnově limitu" if e.get("kind") == "resume"
+                        else f"Popohnal jsem {short} k dokončení úkolu")
+                out.append({"src": "auto", "sub": e.get("kind"), "name": e.get("to"), "kind": "done", "text": text})
+            import jarviswatch as JW
+            ws = JW.Watches(self.env)
+            for e in ws.events():
+                if e.get("ev") == "add" and e.get("by") == self.M.AUTO_BY and since < e["at"] <= until:
+                    out.append({"src": "auto", "sub": "watch", "name": e.get("target"), "kind": "done",
+                                "text": "Založil jsem hlídku: " + JW.describe(dict(e, state="open"))})
+            for e in self.reminders.lines():
+                if e.get("ev") == "add" and e.get("by") == self.M.AUTO_BY and since < _i(e.get("at")) <= until:
+                    out.append({"src": "auto", "sub": "reminder", "name": None, "kind": "done",
+                                "text": f"Nastavil jsem připomínku na {when_cz(_i(e.get('due')), until)}"})
+        except Exception as e:  # noqa: BLE001
+            self.log(f"alerts auto: {type(e).__name__}: {e}"[:300])
+        return out
+
+    def _round(self, now, mode, sessions, wake_on):
+        """F5c: every 30 min a round, only when something Jarvis has not seen yet (since his delta cursor) changed
+        since the last round. Normal mode only; never a template (it is not alert-worthy on its own)."""
+        if not wake_on or mode != "normal" or self.s["wb"] is not None:
+            return
+        if not self.s["roundAt"]:
+            self.s["roundAt"] = now  # the first run starts the clock
+            return
+        if now - self.s["roundAt"] < ROUND_MS:
+            return
+        since, self.s["roundAt"] = self.s["roundAt"], now
+        import cr_digest as CD
+        gen = _i((CD.read_cursor(self.env) or {}).get("gen"))
+        items = []
+        for name, s in sorted(sessions.items()):
+            if not isinstance(s, dict) or s.get("self"):
+                continue
+            if _i(s.get("changedGen")) <= gen or _i(s.get("changedAt")) <= since:
+                continue
+            k = CD.classify(s)
+            if k in ("busy", "cleared", "idle"):
+                continue
+            items.append({"name": name, "short": J.short_name(name), "kind": k})
+        if not items:
+            return
+        n = len(items)
+        self._new_batch(now, [{"src": "round", "sub": "round", "name": None, "kind": "info",
+                               "text": f"Obchůzka: {n} {J.plural(n, 'změna', 'změny', 'změn')} od minula",
+                               "items": items[:20]}])
+        self._persist()
 
     def paste(self, t, line):
         """The mail's sequence without a record: load-buffer, paste-buffer -d, Enter only over exactly our line
@@ -908,3 +1395,11 @@ class AlertWorker:
                 os.unlink(lp)
             except OSError:
                 pass
+
+
+def _tr_ms(key):
+    """The transcript's mtime in ms from jarvislib's cache key `size:mtime_ns` (0 when unknown)."""
+    try:
+        return int(str(key).split(":", 1)[1]) // 1000000
+    except (IndexError, ValueError):
+        return 0

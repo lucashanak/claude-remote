@@ -16,6 +16,10 @@
                                                              resets (limit) or until that time
     cr-mail approve|reject <m-id> --by app:<installId>       F3: Lukáš's yes/no from the app's proposal card; refused
                                                              inside any Claude session (Jarvis's pane above all)
+    cr-mail resume <name>                                    F5c, Jarvis without "ano": the FIXED "Limit se obnovil,
+                                                             pokračuj, kde jsi skončil." to a session that stands on its
+                                                             limit (by jarvis-d's state), once per limit episode, sent
+                                                             --after limit; mail-allow and I7 hold; audited jarvis-auto
 
 Exit codes: 0 done, 2 refused (the reason, in Czech, on stderr), 1 internal error.
 The text goes as ONE argument: Jarvis's gate lets no heredoc, pipe or `$` through. The CLI checks it again (one line,
@@ -63,6 +67,13 @@ class Refused(Exception):
     pass
 
 
+def fresh_prompt(m, now):
+    """A prompt of Lukáš's younger than 10 minutes (the wake's stand-in record does not count)."""
+    lp = m.last_prompt() or {}
+    at = J._int(lp.get("at"))
+    return bool(lp.get("id") and at and -60000 <= now - at <= M.PROMPT_FRESH_MS)
+
+
 def _age(now, ms):
     return J.ago_short(now - ms) if ms else "?"
 
@@ -101,6 +112,11 @@ def after_ms(m, to, after, now):
         raise Refused(f"o limitu účtu {J.account_short(s.get('account'))} nemám čerstvá data, řekni čas: --after HH:MM")
     week = (u.get("sevenDay") or 0) >= WEEK_SPENT
     ms = J._ts_ms(u.get("sevenDayResets") if week else u.get("fiveHourResets"))
+    if (u.get("scoped") or 0) >= WEEK_SPENT:
+        # rev-f5c N1: the model's own week is spent: the later of the two resets is the one that frees the session
+        sm = J._ts_ms(u.get("scopedResets"))
+        if sm and (not ms or sm > ms):
+            ms, week = sm, True
     if not ms or ms <= now:
         raise Refused("nevím, kdy se limit obnoví; řekni čas: --after HH:MM")
     return ms, f"do obnovy {'týdenního' if week else 'pětihodinového'} limitu ({JA.when_cz(ms, now)})"
@@ -110,7 +126,7 @@ def cmd_send(m, a, out):
     nb, after_cz = (None, None)
     if a.after:
         nb, after_cz = after_ms(m, a.to, a.after, m.env.now_ms())
-    rec, why = m.send(a.to, a.text, task=a.task, not_before=nb, after_cz=after_cz)
+    rec, why = m.send(a.to, a.text, task=a.task, not_before=nb, after_cz=after_cz, after_limit=a.after == "limit")
     if why:
         raise Refused(why)
     later = f" {after_cz}" if after_cz else ""
@@ -127,6 +143,89 @@ def cmd_send(m, a, out):
         # E1: only information; Lukáš decides with it in front of him
         out.write(f"Pozor, konflikt checkoutu: {JW.conflict_text(c)}.\n"
                   f"V otázce to zmiň, třeba: „{JW.conflict_say(c)}“\n")
+
+
+def cmd_resume(m, a, out):
+    """F5c: an automatic step. Jarvis chooses only the session; the gate (on its limit, once per episode, allowlist,
+    I7, limits) and the text are the code's."""
+    why = m.auto_caller()
+    if why:
+        raise Refused(why)
+    name, why = m.resolve_name((a.name or "").strip())
+    if why:
+        raise Refused(why)
+    now = m.env.now_ms()
+    sessions = JW.sessions_now(m.env, now)
+    ep, why = m.resume_check(name, sessions, now)
+    if why:
+        raise Refused(why)
+    nb, after_cz = resume_after(m, name, ep, sessions, now)
+    rec, why = m.resume(name, sessions, now, nb)
+    if why:
+        raise Refused(why)
+    out.write(f"{rec['id']}: {J.short_name(name)} dostane „{M.AUTO_RESUME_TEXT}“ {after_cz}. Je to krok bez "
+              f"Lukášova ano: řekni mu ho jednou větou.\n")
+
+
+RESET_RE = re.compile(r"resets\s+(?:([A-Za-z]{3})[a-z]*\.?\s+(\d{1,2}),?\s+(?:at\s+)?)?(\d{1,2})(?::(\d{2}))?\s*"
+                      r"([ap]m)\s*\(([^)]{1,60})\)", re.IGNORECASE)
+MONTHS = {m: i for i, m in enumerate(("jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov",
+                                      "dec"), 1)}
+
+
+def reset_from_text(text, after_ms):
+    """rev-f5c N1: the reset Claude itself wrote into the limit message ("You've hit your weekly limit · resets 4pm
+    (UTC)", "… resets Nov 12, 4pm (Europe/Prague)"): ms of its first occurrence after the hit, or None."""
+    import datetime
+    import zoneinfo
+    mt = RESET_RE.search(text or "")
+    if not mt:
+        return None
+    mon, day, hour, minute, ampm, tzname = mt.groups()
+    try:
+        tz = datetime.timezone.utc if tzname.strip().upper() in ("UTC", "GMT") else zoneinfo.ZoneInfo(tzname.strip())
+    except (zoneinfo.ZoneInfoNotFoundError, ValueError):
+        return None
+    h = int(hour) % 12 + (12 if ampm.lower() == "pm" else 0)
+    base = datetime.datetime.fromtimestamp(after_ms / 1000, tz)
+    try:
+        if mon:
+            t = base.replace(month=MONTHS[mon.lower()[:3]], day=int(day), hour=h, minute=int(minute or 0), second=0,
+                             microsecond=0)
+            if t <= base:
+                t = t.replace(year=t.year + 1)
+        else:
+            t = base.replace(hour=h, minute=int(minute or 0), second=0, microsecond=0)
+            if t <= base:
+                t += datetime.timedelta(days=1)
+    except (KeyError, ValueError):
+        return None
+    return int(t.timestamp() * 1000)
+
+
+def account_free(u):
+    """Every window of the account, the model-scoped week included (N1), is under 100 %."""
+    five = u.get("fiveHour")
+    return isinstance(five, (int, float)) and five < 100 and (u.get("sevenDay") or 0) < 100 \
+        and (u.get("scoped") or 0) < 100
+
+
+def resume_after(m, name, limit_ms, sessions, now):
+    """When the "pokračuj" may go. rev-f5c N1: first the reset Claude wrote into the limit message itself; then M2:
+    usage fetched AFTER the hit with every window (the model's week too) under 100 % = now; else the reset of the
+    window that is spent, as `--after limit` (refused when nothing is known)."""
+    JA = _ja()
+    s = (sessions or {}).get(name) or {}
+    r = reset_from_text(((s.get("limit") or {}) if isinstance(s.get("limit"), dict) else {}).get("text"), limit_ms)
+    if r:
+        return max(r, now), ("hned (limit se už obnovil)" if r <= now
+                             else f"do obnovy limitu ({JA.when_cz(r, now) if JA else r})")
+    u = J.read_usage(m.env, now).get(s.get("account") or "default") or {}
+    age = u.get("ageS")
+    fetched = now - age * 1000 if isinstance(age, (int, float)) else 0
+    if fetched > limit_ms and account_free(u):
+        return now, "hned (limit se už obnovil)"
+    return after_ms(m, name, "limit", now)
 
 
 def cmd_status(m, a, out):
@@ -179,6 +278,14 @@ def cmd_inbox(m, a, out):
 
 
 def cmd_cancel(m, a, out):
+    # rev-f5c M4: after a wake (no fresh prompt of Lukáš's) Jarvis may cancel only his own automatic steps; a text in
+    # a session's permission must not make him cancel Lukáš's queued work
+    me = J.read_self(m.env)
+    name, why = m.caller_session()
+    if not why and me and name == me and not fresh_prompt(m, m.env.now_ms()):
+        rec = m.get(a.id) if M.ID_RE.fullmatch(a.id or "") else None
+        if not rec or rec.get("auto") is None:
+            raise Refused("zrušit cizí zprávu smíš jen na čerstvý Lukášův pokyn (do 10 minut); zeptej se ho")
     why = m.cancel(a.id)
     if why:
         raise Refused(why)
@@ -287,6 +394,8 @@ def main(argv=None, env=None, out=None, err=None, mail=None):
     p.add_argument("--since")
     p.add_argument("--json", action="store_true")
     p.add_argument("--say", action="store_true")
+    p = sub.add_parser("resume")
+    p.add_argument("name")
     sub.add_parser("off")
     sub.add_parser("on")
     sub.add_parser("prompt-seen")
@@ -295,7 +404,7 @@ def main(argv=None, env=None, out=None, err=None, mail=None):
     m = mail or M.Mail(env)
     fn = {"send": cmd_send, "status": cmd_status, "inbox": cmd_inbox, "cancel": cmd_cancel, "reply": cmd_reply,
           "off": cmd_off, "on": cmd_on, "prompt-seen": cmd_prompt_seen, "audit": cmd_audit, "approve": cmd_decide,
-          "reject": cmd_decide}[a.cmd]
+          "reject": cmd_decide, "resume": cmd_resume}[a.cmd]
     old = os.umask(0o077)
     try:
         fn(m, a, out)

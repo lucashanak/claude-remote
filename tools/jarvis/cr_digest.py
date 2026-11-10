@@ -6,6 +6,8 @@
     cr-digest waiting [--say] [--json]                            "co na mě čeká"
     cr-digest usage   [--say] [--json]                            "jak jsme na tom s limity"
     cr-digest briefing morning|evening [--say] [--json] [--summary]  F3: the morning / evening briefing
+    cr-digest wake w-… [--json]                                   F5c: the events of one wake of Jarvis, and the steps
+                                                                  he may take without Lukáš's yes
 
 Reads `<state>/status.json` written by jarvis-d. When it is older than 120 s (the daemon is not running) the state is
 computed directly from the registries, tmux and the events tail, and the output says so; the cursor then stays put,
@@ -193,8 +195,10 @@ def read_cursor(env):
     return None
 
 
-def write_cursor(env, gen, at, mail_at=None, watch_at=None, ops_at=None):
+def write_cursor(env, gen, at, mail_at=None, watch_at=None, ops_at=None, saver_told=None):
     d = {"gen": gen, "at": at}
+    if saver_told:
+        d["saverTold"] = saver_told
     if mail_at is not None:
         d["mailAt"] = mail_at
     if watch_at is not None:
@@ -238,15 +242,20 @@ def cmd_delta(env, a, now):
     ops_since = _i((cur or {}).get("opsAt")) or _i((cur or {}).get("at")) or now - 3600 * 1000
     ops, ops_at = _ops_items(env, ops_since, now)
     _task_status(env, mail, sessions)
+    # F5c: the saver (Jarvis's own account nearly spent: no wakes, templates only) is told once per episode
+    saver = _i(((st or {}).get("alerts") or {}).get("saver"))
+    saver_note = bool(saver) and _i((cur or {}).get("saverTold")) != saver
     if not a.peek and (st or cur):
+        told = saver or None
         if st:
-            write_cursor(env, gen, _i(st.get("at")), mail_at, watch_at, ops_at)
+            write_cursor(env, gen, _i(st.get("at")), mail_at, watch_at, ops_at, told)
         else:
-            write_cursor(env, _i(cur.get("gen")), _i(cur.get("at")), mail_at, watch_at, ops_at)
+            write_cursor(env, _i(cur.get("gen")), _i(cur.get("at")), mail_at, watch_at, ops_at, told)
     busy_n = sum(1 for s in vis.values() if s.get("state") == "busy")
     if a.json:
         return _dump({"gen": gen, "from": (cur or {}).get("gen"), "first": first, "warning": warn, "items": items,
-                      "done": done, "mail": mail, "ops": ops, "unchanged": len(vis) - len(picked), "busy": busy_n})
+                      "done": done, "mail": mail, "ops": ops, "unchanged": len(vis) - len(picked), "busy": busy_n,
+                      "saver": saver_note})
     if a.say:
         notable = [i for i in items if i["kind"] not in ("busy", "cleared", "idle")]
         empty = "Nic nového." + (f" {works_cz(busy_n)}." if busy_n else "")
@@ -260,6 +269,8 @@ def cmd_delta(env, a, now):
         return ("Pozor, Jarvisův démon neběží. " + txt) if warn else txt
     head = f"[jarvis delta {'start' if first else str(cur['gen']) + '→' + str(gen)} · {_hm(now)}] {DATA_NOTE}"
     lines = [head] + ([f"⚠ {warn}"] if warn else [])
+    if saver_note:
+        lines.append(SAVER_NOTE)
     main = [i for i in items if i["kind"] != "busy"]
     busy = [i for i in items if i["kind"] == "busy"]
     body = [JW.notice_line(i) for i in done] + [_ops_line(i) for i in ops] + [_mail_line(i) for i in mail] \
@@ -270,6 +281,10 @@ def cmd_delta(env, a, now):
         body = ["nic nového"]
     tail = f"+{len(vis) - len(picked)} beze změny"
     return fit(lines + body, a.max_chars or 1500, tail)
+
+
+SAVER_NOTE = ("⚠ Úsporný režim: tvůj účet je skoro vyčerpaný (≥ 95 % týden nebo ≥ 85 % za 5 h). jarvis-d tě nebudí, "
+              "upozornění jdou šablonou. Řekni to Lukášovi jednou a odpovídej úsporně.")
 
 
 def _ops_items(env, since, now):
@@ -465,6 +480,85 @@ def cmd_usage(env, a, now):
     return "Limity: " + (usage_line(usage) or "žádná data")
 
 
+# ---------------------------------------------------------------------------------------------------------- wake
+
+WAKE_MARK = {"block": "!", "incident": "‼", "task": "✓", "watch": "✓", "reminder": "⏰", "stuck": "~", "crashed": "×",
+             "usage": "%", "round": "·", "auto": "⚙"}
+WAKE_HEAD = ("Probudil tě jarvis-d (ne Lukáš). Posuď, co je důležité, udělej povolené kroky a napiš Lukášovi 1–3 věty: co se "
+             "děje a co jsi udělal nebo navrhuješ. Jde to do notifikace a nahlas: bez markdownu, cest a ID. Když nic "
+             "nestojí za řeč, začni odpověď [ticho] (zbytek se zahodí). Jde jen poslední text tahu. Co jsi už řekl, "
+             "neopakuj.")
+
+
+def wake_steps(env, entries, now):
+    """For each entry the step Jarvis may take by himself right now (the same gates the CLIs run), or None."""
+    import cr_task
+    m = M.Mail(env)
+    sessions = JW.sessions_now(env, now)
+    out = []
+    for e in entries:
+        step = None
+        try:
+            if e.get("src") == "block" and e.get("sub") == "limit" and e.get("name"):
+                if m.resume_check(e["name"], sessions, now)[1] is None:
+                    step = f"cr-mail resume {e.get('short') or J.short_name(e['name'])}"
+            elif e.get("src") == "task" and M.TASK_RE.fullmatch(str(e.get("task") or "")):
+                cr_task.nudge_check(env, m, e["task"], now, sessions=sessions)
+                step = f"cr-task nudge {e['task']}"
+        except Exception:  # noqa: BLE001  Refused (the gate says no) or anything else: no step offered
+            step = None
+        out.append(step)
+    return out
+
+
+def _wake_line(e, step, now):
+    mark = WAKE_MARK.get(e.get("src"), "·")
+    short = e.get("short") or (J.short_name(e["name"]) if e.get("name") else "")
+    if e.get("src") == "block":
+        body = f"{short}: {JA.BLOCK_CZ.get(e.get('sub'), 'čeká na tebe')}"
+        if e.get("data") and e.get("sub") in ("perm", "ask", "waiting"):
+            body += f" «{J.safe_text(e['data'], 120)}»"
+        if e.get("since"):
+            body += f" · {J.ago_short(now - _i(e['since']))}"
+    elif e.get("src") == "round":
+        body = (e.get("text") or "obchůzka") + ": " + "; ".join(
+            line_of({"short": J.safe_name(i.get("short") or "?", 60), "kind": i.get("kind"), "text": "", "title": None,
+                     "ageMs": None, "bg": False}) for i in e.get("items") or [] if isinstance(i, dict))
+    else:
+        body = (e.get("text") or "").rstrip(".")
+    if e.get("task"):
+        body += f" · {e['task']}"
+    return f"{mark} {body}" + (f" · smíš sám: {step}" if step else "")
+
+
+def cmd_wake(env, a, now):
+    wid = a.which or ""
+    if not M.WAKE_RE.fullmatch(wid):
+        return None
+    d = J.read_json(os.path.join(env.path("wakes"), wid + ".json"))
+    if not isinstance(d, dict) or not isinstance(d.get("entries"), list):
+        return None
+    entries = [e for e in d["entries"] if isinstance(e, dict)]
+    steps = wake_steps(env, entries, now)
+    try:
+        import cr_task
+        left = max(0, cr_task.AUTO_DAY_MAX - cr_task.auto_today(env, now))
+    except Exception:  # noqa: BLE001
+        left = 0
+    if a.json:
+        return _dump({"id": wid, "at": d.get("at"), "blocking": bool(d.get("blocking")), "entries": entries,
+                      "steps": steps, "autoLeft": left})
+    n = len(entries)
+    lines = [f"[jarvis wake {wid} · {_hm(_i(d.get('at')) or now)} · {n} "
+             f"{J.plural(n, 'položka', 'položky', 'položek')}] {DATA_NOTE}", WAKE_HEAD]
+    lines += [_wake_line(e, s, now) for e, s in zip(entries, steps)]
+    lines.append("Bez Lukášova ano smíš jen: cr-mail resume <jméno> (session stojí na limitu, jednou na limit), "
+                 "cr-task nudge t-… (tvůj úkol bez důkazu, nejvýš 2×), cr-task watch / remind "
+                 f"(dnes ještě {left}). Každý takový krok řekni. Ostatní (nová práce, zavření, otevření, jiný účet) "
+                 "jen jako jeden návrh, který končí „Ano?“.")
+    return fit(lines, a.max_chars or 3000)
+
+
 # ---------------------------------------------------------------------------------------------------------- briefing
 
 BRIEF_NIGHT_MS = 12 * 3600 * 1000
@@ -523,7 +617,7 @@ def briefing_data(env, which, now):
     return {"which": which, "at": now, "since": since, "warning": warn, "counts": counts, "total": len(vis),
             "stale": stale,
             "inbox": wait, "tasks": tasks, "happened": happened, "alerts": len(alerts),
-            "alertsBlock": sum(1 for a in alerts if a["kind"] in ("block", "incident")),
+            "alertsBlock": sum(1 for a in alerts if a["kind"] in ("block", "incident", "jblock")),
             "closed": [{"short": J.short_name(c["name"]), "title": c.get("title")} for c in closed],
             "usage": (st or {}).get("usage") or J.read_usage(env, now),
             "reminders": [{"id": r["id"], "due": r["due"], "text": M.data_text(r.get("text"), 160)} for r in reminders],
@@ -716,10 +810,10 @@ def _dump(d):
     return json.dumps(d, ensure_ascii=False, indent=1)
 
 
-def main(argv=None, env=None, out=None):
+def main(argv=None, env=None, out=None, err=None):
     ap = argparse.ArgumentParser(prog="cr-digest", description="Jarvis digest without a model.")
-    ap.add_argument("cmd", choices=["delta", "brief", "waiting", "usage", "briefing"])
-    ap.add_argument("which", nargs="?", default=None, help="briefing: morning | evening")
+    ap.add_argument("cmd", choices=["delta", "brief", "waiting", "usage", "briefing", "wake"])
+    ap.add_argument("which", nargs="?", default=None, help="briefing: morning | evening; wake: w-…")
     ap.add_argument("--summary", action="store_true", help="briefing: 1-2 sentences from the local model (8 s max)")
     ap.add_argument("--say", action="store_true", help="Czech sentences for TTS")
     ap.add_argument("--json", action="store_true")
@@ -731,11 +825,17 @@ def main(argv=None, env=None, out=None):
     if a.cmd == "briefing":
         if a.which not in ("morning", "evening"):
             ap.error("briefing needs morning or evening")
+    elif a.cmd == "wake":
+        if not M.WAKE_RE.fullmatch(a.which or ""):
+            ap.error("wake needs the id w-… from the [jarvis wake …] line")
     elif a.which is not None:
         ap.error(f"{a.cmd} takes no positional argument")
     fn = {"delta": cmd_delta, "brief": cmd_brief, "waiting": cmd_waiting, "usage": cmd_usage,
-          "briefing": cmd_briefing}[a.cmd]
+          "briefing": cmd_briefing, "wake": cmd_wake}[a.cmd]
     text = fn(env, a, now)
+    if text is None and a.cmd == "wake":
+        (err or sys.stderr).write(f"cr-digest: probuzení {a.which} neznám (nebo už je pryč)\n")
+        return 2
     (out or sys.stdout).write(text + "\n")
     return 0
 

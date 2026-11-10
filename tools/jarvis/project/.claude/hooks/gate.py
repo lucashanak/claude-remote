@@ -41,6 +41,10 @@ itself is not on the list at all).
 rev-f4 L5: FORBIDDEN looks at unquoted words only, so a quoted "--force" (bash passes it as --force) or a prefix like
 `--forc` gets past this layer. The guarantee is the CLI: `cr-sessions close` has no such option and argparse refuses
 the call before any action (test_jarvisops ReviewFixTest.test_l5_…); this gate stays a second, cheaper layer.
+
+F5c adds `cr-digest wake w-…` (read only: the events of one wake), `cr-mail resume <name>` and `cr-task nudge t-…`,
+the two steps Jarvis takes without Lukáš's yes. Their gates and their texts are in the CLIs (jarvismail.resume_check,
+cr_task.nudge_check); Jarvis passes a name or an id, never a text.
 """
 import json
 import re
@@ -56,10 +60,10 @@ MODE = "dontAsk"
 ALLOWED = {
     "cr-sessions": frozenset({"list", "show", "tail", "open", "check-close", "close", "closed", "reopen", "stale",
                               "pick-account"}),
-    "cr-digest": frozenset({"delta", "brief", "waiting", "usage", "briefing"}),
-    "cr-mail": frozenset({"send", "status", "inbox", "cancel", "off", "audit"}),
+    "cr-digest": frozenset({"delta", "brief", "waiting", "usage", "briefing", "wake"}),
+    "cr-mail": frozenset({"send", "status", "inbox", "cancel", "off", "audit", "resume"}),
     "cr-task": frozenset({"add", "list", "show", "done", "fail", "watch", "watches", "unwatch", "log", "remind",
-                          "reminders", "unremind"}),
+                          "reminders", "unremind", "nudge"}),
     "cr-rules": frozenset({"add", "list", "rm"}),
     "cr-jarvis": frozenset({"mode", "proposals"}),
 }

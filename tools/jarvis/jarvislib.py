@@ -742,13 +742,33 @@ def read_usage(env, now_ms):
         acct = None if acct in (".claude", "default") else acct
         fh_, sd = d.get("five_hour"), d.get("seven_day")
         fh_, sd = (fh_ if isinstance(fh_, dict) else {}), (sd if isinstance(sd, dict) else {})
+        scoped, scoped_reset = _scoped(d)
         out[acct or "default"] = {
             "account": acct,
             "fiveHour": _num(fh_.get("utilization")), "fiveHourResets": _str(fh_.get("resets_at")),
             "sevenDay": _num(sd.get("utilization")), "sevenDayResets": _str(sd.get("resets_at")),
+            "scoped": scoped, "scopedResets": scoped_reset,
             "ageS": (now_ms // 1000 - fetched) if fetched else None,
         }
     return out
+
+
+def _scoped(d):
+    """rev-f5c N1: the highest MODEL-scoped weekly window (seven_day_opus / seven_day_sonnet, and the `limits` list's
+    weekly_scoped rows), with its reset: a session on Opus can stand on its model's week while the account's own
+    5 h and 7 d windows are far from 100 %. (None, None) when the account has none."""
+    best, reset = None, None
+    for k in ("seven_day_opus", "seven_day_sonnet"):
+        w = d.get(k)
+        v = _num(w.get("utilization")) if isinstance(w, dict) else None
+        if v is not None and (best is None or v > best):
+            best, reset = v, _str(w.get("resets_at"))
+    for w in d.get("limits") if isinstance(d.get("limits"), list) else ():
+        if isinstance(w, dict) and w.get("kind") == "weekly_scoped":
+            v = _num(w.get("percent"))
+            if v is not None and (best is None or v > best):
+                best, reset = v, _str(w.get("resets_at"))
+    return best, reset
 
 
 def _num(v):

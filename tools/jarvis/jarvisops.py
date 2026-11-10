@@ -659,7 +659,10 @@ class Ops:
             lp = self.mail.last_prompt() or {}
             at = J._int(lp.get("at"))
             if not lp.get("id") or not at or not (-60000 <= now - at <= PROMPT_FRESH_MS):
-                raise Refused("chybí čerstvý Lukášův pokyn (do 10 minut); zeptej se ho")
+                # F5c: after a wake Jarvis may PROPOSE (the wake record has no named project or session and no intent,
+                # so cr-sessions turns everything into a proposal that waits for Lukáš's "ano")
+                if not self.mail.wake_prompt(now):
+                    raise Refused("chybí čerstvý Lukášův pokyn (do 10 minut); zeptej se ho")
             return "jarvis"
         if not self.env.environ.get("CLAUDECODE"):
             return "lukas"
@@ -677,6 +680,10 @@ class Ops:
 
     def per_prompt(self, prompt_id, now):
         if not prompt_id:
+            return
+        if self.M.WAKE_RE.fullmatch(prompt_id):
+            if self.mail.wake_proposals(prompt_id, now) >= self.M.WAKE_PROPOSALS:
+                raise Refused("po probuzení nejvýš jeden návrh; další až po Lukášově odpovědi")
             return
         n = len({e.get("id") for e in self.ledger(now - 2 * PROMPT_FRESH_MS) if e.get("prompt") == prompt_id
                  and e.get("ev") in ("proposed", "approved")})
@@ -756,6 +763,8 @@ class Ops:
         rec = {"v": 1, "id": new_id(now), "kind": kind, "target": target, "targets": targets or [target],
                "title": title, "detail": detail, "created": now, "expires": now + PROPOSAL_MS, "state": "proposed",
                "prompt": prompt_id, "args": args, "updatedAt": now, "result": None}
+        if prompt_id and self.M.WAKE_RE.fullmatch(prompt_id) and not self.mail.claim_wake_proposal(prompt_id):
+            raise Refused("po probuzení nejvýš jeden návrh; další až po Lukášově odpovědi")  # rev-f5c L4
         with self.lock():
             self.put(rec)
             self.log("proposed", id=rec["id"], kind=kind, target=target, prompt=prompt_id)

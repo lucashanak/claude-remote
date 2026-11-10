@@ -33,6 +33,14 @@ F3: it is the only writer of `~/.cache/claude-remote/jarvis-alerts` (jarvisalert
 grace, task results, fired watches, reminders, incidents, batched to one line per 5 min, modes and "nehlas" rules,
 a heartbeat line every ~60 s) and the only one that wakes Jarvis (`[jarvis wake] …`, the mail's checks, ≤ 1 per
 3 min, ≤ 30 a day). status.json carries `alerts` {mode, pending, today's counts} for the brief and the app.
+
+F5c (active Jarvis): the alert batch wakes Jarvis first (`[jarvis wake w-…] N událostí · cr-digest wake w-…`, ≤ 1 per
+5 min, ≤ 60 a day, never during Lukáš's conversation or a pending proposal), and his answer to that turn (his last
+text after the Stop, the body the Stop notification shows) is written as ONE `jsay|jblock|jask` line in his words;
+`[ticho]` = nothing, no paste or no answer within 3 min = the batch's F3 templates. New sources: stuck (busy without
+a sign of life for 30 min), crashed (gone/dead mid-work or with Jarvis's task), usage crossing 80/90 %, and a round
+every 30 min. `<state>/wake-off` switches the wakes off (templates only), the saver does the same while Jarvis's own
+account is spent (≥ 95 % 7 d / ≥ 85 % 5 h). `alerts` in status.json adds {wake: on|<why off>, saver}.
 """
 import argparse
 import fcntl

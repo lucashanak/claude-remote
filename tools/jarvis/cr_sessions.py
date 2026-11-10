@@ -197,7 +197,8 @@ def _ops(env, ops):
 
 
 def _prompt(ops, by):
-    lp = (ops.mail.last_prompt() or {}) if by == "jarvis" else {}
+    # F5c: after a wake the stand-in record (proposals only: it names nothing and asks for nothing)
+    lp = (ops.mail.last_prompt() or ops.mail.wake_prompt(ops.env.now_ms()) or {}) if by == "jarvis" else {}
     return lp, lp.get("id")
 
 

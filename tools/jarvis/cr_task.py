@@ -15,6 +15,13 @@
     cr-task remind "<text>" --at HH:MM | --in 2h                          F3: a reminder, told by jarvis-d (app alert)
     cr-task reminders [--all] [--json]                                    open reminders (--all: also fired/cancelled)
     cr-task unremind <r-id>
+    cr-task nudge <t-id>                                                  F5c, Jarvis without "ano": a code-written
+                                                                          "dokonči to" for his own task without evidence
+
+F5c (Lukáš 2026-11-10: Jarvis acts by himself on safe steps): `nudge` goes only for a task Jarvis created, delegated
+with criteria, whose session replied, is idle, and whose evidence misses something the session can do (a commit, a
+push, a red CI); at most twice per task; the text is composed here from what is missing. A watch or a reminder from
+Jarvis without a fresh prompt of Lukáš's (after a wake) is his own step: `by` = jarvis-auto, at most 10 a day together.
 
 F2b: a task delegated through cr-mail with --ac is not "hotovo" when the session merely replies. It is "ke kontrole"
 and `done` needs the evidence (jarviswatch.evidence): a new commit in the target's repo since the mail, pushed, and
@@ -27,10 +34,12 @@ Jarvis (its own pane) and to Lukáš (a shell outside Claude); a working session
 Exit codes: 0, 2 refused (reason on stderr), 1 internal error.
 """
 import argparse
+import contextlib
 import fcntl
 import json
 import os
 import sys
+import time
 
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
 import jarvislib as J  # noqa: E402
@@ -159,6 +168,110 @@ def check_done(env, t, recs, sessions, repo, force, by):
     return None
 
 
+AUTO_DAY_MAX = 10
+# what the session itself can still do about its task (a pending CI or an unreadable repo is nothing to nudge about)
+NUDGE_FIXABLE = ("nový commit", "push", "zelené CI (je červené")
+
+
+def midnight(now):
+    lt = time.localtime(now / 1000)
+    return int(time.mktime((lt.tm_year, lt.tm_mon, lt.tm_mday, 0, 0, 0, 0, 0, -1)) * 1000)
+
+
+def auto_today(env, now):
+    """Watches and reminders Jarvis created by himself (by = jarvis-auto) since local midnight."""
+    since = midnight(now)
+    n = sum(1 for e in JW.Watches(env).events() if e.get("ev") == "add" and e.get("by") == M.AUTO_BY and e["at"] >= since)
+    n += sum(1 for e in JA.Reminders(env).lines() if e.get("ev") == "add" and e.get("by") == M.AUTO_BY
+             and J._int(e.get("at")) >= since)
+    return n
+
+
+def fresh(m, now):
+    lp = m.last_prompt() or {}
+    at = J._int(lp.get("at"))
+    return bool(lp.get("id") and at and -60000 <= now - at <= M.PROMPT_FRESH_MS)
+
+
+def require_word(m, now, by, own=False):
+    """rev-f5c M4: Jarvis without a fresh prompt of Lukáš's (after a wake) changes nothing in the ledger, except his
+    own automatic items (`own`: a watch or a reminder by jarvis-auto). A text in a session's permission must never
+    make him close, fail or cancel Lukáš's things unannounced."""
+    if by == "jarvis" and not own and not fresh(m, now):
+        raise Refused("bez čerstvého Lukášova pokynu (do 10 minut) tohle nesmíš; navrhni to Lukášovi a počkej na ano")
+
+
+@contextlib.contextmanager
+def auto_lock(env):
+    """rev-f5c L3: the daily cap of automatic watches and reminders is counted and written under ONE lock (two stores
+    with two locks of their own), so two calls in parallel never both take the 10th place."""
+    os.makedirs(env.state_dir, mode=0o700, exist_ok=True)
+    with open(env.path("auto.lock"), "a+") as lk:
+        fcntl.flock(lk.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(lk.fileno(), fcntl.LOCK_UN)
+
+
+def nudge_count(m, tid, now):
+    """None or the refusal: at most NUDGE_MAX nudges per task (the part that must be re-checked under mail.lock)."""
+    n = sum(1 for e in m.auto_steps(now - 30 * 86400 * 1000) if e.get("kind") == "nudge" and e.get("task") == tid)
+    return f"úkol {tid} už jsem popohnal {n}×; dál jen na Lukášův pokyn" if n >= M.NUDGE_MAX else None
+
+
+def jarvis_by(env, m, now, by):
+    """F5c: Jarvis with a fresh prompt of Lukáš's acts on it ('jarvis'); without one (a wake) a watch or a reminder is
+    his own step ('jarvis-auto', at most AUTO_DAY_MAX a day). Lukáš stays 'lukas'."""
+    if by != "jarvis":
+        return by
+    lp = m.last_prompt() or {}
+    at = J._int(lp.get("at"))
+    if lp.get("id") and at and -60000 <= now - at <= M.PROMPT_FRESH_MS:
+        return "jarvis"
+    if auto_today(env, now) >= AUTO_DAY_MAX:
+        raise Refused(f"bez Lukášova pokynu nejvýš {AUTO_DAY_MAX} hlídek a připomínek za den; zeptej se ho")
+    return M.AUTO_BY
+
+
+def nudge_check(env, m, tid, now, sessions=None, recs=None):
+    """(target, text, base) or Refused: may Jarvis send his own task's session a "dokonči to" without Lukáš's yes?"""
+    if not M.TASK_RE.fullmatch(tid or ""):
+        raise Refused("id úkolu je t-…")
+    t = fold(read_events(env)).get(tid)
+    if not t:
+        raise Refused(f"úkol {tid} neexistuje")
+    if t["state"] != "open":
+        raise Refused(f"úkol {tid} už je {STATE_CZ[t['state']]}")
+    if t.get("by") != "jarvis":
+        raise Refused(f"úkol {tid} nezaložil Jarvis; popohnat sám smíš jen svůj")
+    if not t.get("ac"):
+        raise Refused(f"úkol {tid} nemá kritéria, takže mu žádný důkaz nechybí; řekni Lukášovi, co odpověděla")
+    recs = m.all() if recs is None else recs
+    last = JW.proof_base(t, recs)
+    if not last or last["state"] != "replied":
+        raise Refused(f"session k úkolu {tid} ještě neodpověděla; počkej na ni")
+    sessions = JW.sessions_now(env, now) if sessions is None else sessions
+    s = sessions.get(last["to"]) or {}
+    short = J.short_name(last["to"])
+    if s.get("state") != "idle" or s.get("stopBg") or s.get("attention"):
+        raise Refused(f"{short} není nečinná ({s.get('state') or '?'}), popohnání jen nečinné session")
+    why = nudge_count(m, tid, now)
+    if why:
+        raise Refused(why)
+    ev = JW.evidence(last.get("base"), repo_for(env))
+    missing = [str(x) for x in ev["missing"]]
+    if not missing:
+        raise Refused(f"úkol {tid} má důkaz; uzavři ho cr-task done")
+    fixable = [x for x in missing if x.startswith(NUDGE_FIXABLE)]
+    if not fixable:
+        raise Refused(f"úkolu {tid} chybí jen {', '.join(missing)}; to session neurychlí, založ hlídku (cr-task watch ci)")
+    title = M.data_text(t.get("title"), 120)
+    text = (f"Úkol «{title}» ještě není hotový: podle repa chybí {', '.join(missing)}. Dokonči ho prosím "
+            f"(commit, push, zelené CI) a odpověz, co jsi udělal.")
+    return last["to"], text, last.get("base")
+
+
 def cmd_watch(env, m, a, now, by):
     if a.what not in JW.KINDS:
         raise Refused("hlídat jde: " + ", ".join(JW.KINDS))
@@ -255,7 +368,7 @@ def cmd_remind(env, a, now, by, m=None):
     (≤ 10 min) and at most 3 per prompt; Lukáš himself is not limited that way."""
     text = _text(a.text, JA.REMIND_TEXT_MAX, "připomínka")
     lp = None
-    if by == "jarvis":
+    if by == "jarvis":  # (F5c: without a fresh prompt the caller passes jarvis-auto, counted per day)
         lp = (m.last_prompt() if m else None) or {}
         at = J._int(lp.get("at"))
         if not lp.get("id") or not at or not (-60000 <= now - at <= M.PROMPT_FRESH_MS):
@@ -338,6 +451,8 @@ def main(argv=None, env=None, out=None, err=None, mail=None):
     p.add_argument("--json", action="store_true")
     p = sub.add_parser("unremind")
     p.add_argument("id")
+    p = sub.add_parser("nudge")
+    p.add_argument("id")
     a = ap.parse_args(argv)
     env = env or J.Env()
     m = mail or M.Mail(env)
@@ -346,6 +461,7 @@ def main(argv=None, env=None, out=None, err=None, mail=None):
     try:
         if a.cmd == "add":
             by = writer(env, m)
+            require_word(m, now, by)
             title = _text(a.title, TITLE_MAX, "název")
             ac = _text(a.ac, AC_MAX, "kritéria", required=False)
             to = None
@@ -358,6 +474,7 @@ def main(argv=None, env=None, out=None, err=None, mail=None):
             out.write(f"{tid} založen\n")
         elif a.cmd in ("done", "fail"):
             by = writer(env, m)
+            require_word(m, now, by)
             if not M.TASK_RE.fullmatch(a.id):
                 raise Refused("id úkolu je t-…")
             note = _text(a.note, NOTE_MAX, "poznámka", required=False)
@@ -369,8 +486,9 @@ def main(argv=None, env=None, out=None, err=None, mail=None):
             append(env, {"v": 1, "at": now, "ev": a.cmd, "id": a.id, "note": note, "by": by})
             out.write(f"{a.id} {STATE_CZ['done' if a.cmd == 'done' else 'failed']}\n")
         elif a.cmd == "watch":
-            by = writer(env, m)
-            wid, note = cmd_watch(env, m, a, now, by)
+            with auto_lock(env):
+                by = jarvis_by(env, m, now, writer(env, m))
+                wid, note = cmd_watch(env, m, a, now, by)
             w = JW.Watches(env).all().get(wid) or {}
             out.write(note + "\n" if note else f"{wid} hlídám: {JW.describe(w)}. Splnění ukáže delta nahoře "
                                                 f"(„✓ Splněno: …“), do 24 h, pak hlídka vyprší.\n")
@@ -378,18 +496,39 @@ def main(argv=None, env=None, out=None, err=None, mail=None):
             by = writer(env, m)
             if not JW.WATCH_RE.fullmatch(a.id):
                 raise Refused("id hlídky je w-…")
+            w = JW.Watches(env).all().get(a.id) or {}
+            if w.get("state") == "open":  # a closed or unknown one is refused below with its own reason
+                require_word(m, now, by, own=w.get("by") == M.AUTO_BY)
             why = JW.Watches(env).close(a.id, "cancelled", now, by=by)
             if why:
                 raise Refused(why)
             out.write(f"{a.id} zrušena\n")
         elif a.cmd == "remind":
-            by = writer(env, m)
-            rid, due = cmd_remind(env, a, now, by, m)
+            with auto_lock(env):
+                by = jarvis_by(env, m, now, writer(env, m))
+                rid, due = cmd_remind(env, a, now, by, m)
             out.write(f"{rid}: připomenu {JA.when_cz(due, now)} (upozornění v aplikaci). Zrušit: cr-task unremind {rid}\n")
+        elif a.cmd == "nudge":
+            why = m.auto_caller()
+            if why:
+                raise Refused(why)
+            to, text, base = nudge_check(env, m, a.id, now)
+
+            def guard():
+                # again under mail.lock, only the count (rev-f5c L5: no git or CI under the mail's lock)
+                return nudge_count(m, a.id, now)
+            rec, why = m.send_auto("nudge", to, text, task=a.id, base=base, guard=guard)
+            if why:
+                raise Refused(why)
+            out.write(f"{rec['id']}: {J.short_name(to)} dostane připomínku, co k úkolu chybí. Je to krok bez Lukášova "
+                      f"ano: řekni mu ho jednou větou.\n")
         elif a.cmd == "unremind":
             by = writer(env, m)
             if not JA.REMIND_RE.fullmatch(a.id):
                 raise Refused("id připomínky je r-…")
+            r0 = JA.Reminders(env).fold().get(a.id) or {}
+            if r0.get("state") == "open":
+                require_word(m, now, by, own=r0.get("by") == M.AUTO_BY)
 
             def guard(rs):
                 r = rs.get(a.id)
