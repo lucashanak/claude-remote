@@ -615,10 +615,13 @@ RESTORE_EOF
             # ---- rollback copy of restore.sh (D6-S) ----
             # Kept once when the script replaced here is v18 (kritika D2 N17): moving it back is the way back to v18, by
             # hand and only with Lukáš's consent that day (any v19 client's next install rewrites it to v19 again).
+            # v19's compat line names v18 too, so the copy itself must not be v19 (a second installer may have replaced
+            # the script in between), and `ln` publishes it only where no copy is yet (K2): never one over another.
             if grep -qE 'claude-remote-restore-v18( |${'$'})' "${'$'}SCRIPT" 2>/dev/null && [ ! -e "${'$'}SCRIPT.v18" ]; then
-                { cp -p "${'$'}SCRIPT" "${'$'}SCRIPT.v18.tmp.${'$'}${'$'}" && mv -f "${'$'}SCRIPT.v18.tmp.${'$'}${'$'}" "${'$'}SCRIPT.v18" \
-                    && echo "[${'$'}(date -u +%FT%TZ)] install: the v18 restore.sh kept as restore.sh.v18 (rollback)" >> "${'$'}HOME/.claude-remote/install.log"; } 2>/dev/null \
-                    || rm -f "${'$'}SCRIPT.v18.tmp.${'$'}${'$'}"
+                { cp -p "${'$'}SCRIPT" "${'$'}SCRIPT.v18.tmp.${'$'}${'$'}" && ! grep -q 'claude-remote-restore-v19' "${'$'}SCRIPT.v18.tmp.${'$'}${'$'}" \
+                    && ln "${'$'}SCRIPT.v18.tmp.${'$'}${'$'}" "${'$'}SCRIPT.v18" \
+                    && echo "[${'$'}(date -u +%FT%TZ)] install: the v18 restore.sh kept as restore.sh.v18 (rollback)" >> "${'$'}HOME/.claude-remote/install.log"; } 2>/dev/null || :
+                rm -f "${'$'}SCRIPT.v18.tmp.${'$'}${'$'}"
             fi
             # ---- end of the rollback copy of restore.sh ----
             mv -f "${'$'}SCRIPT.tmp.${'$'}${'$'}" "${'$'}SCRIPT"
@@ -736,7 +739,7 @@ is_ours() {
 # server no longer needs it, and leaving it visible makes the app treat it as a
 # real session and churn it (kill/relaunch). Safe — exit-empty=off keeps the
 # server alive at 0 sessions.
-if tmux -u list-sessions -F '#{session_name}' 2>/dev/null | { while IFS= read -r s; do is_ours "${'$'}s" && exit 0; done; exit 1; }; then
+if tmux -u list-sessions -F '#{session_name}' 2>/dev/null | { while IFS= read -r s; do case "${'$'}s" in "${TmuxNameParser.DEFAULT_PREFIX}"*) exit 0;; esac; done; exit 1; }; then
     tmux kill-session -t __anchor__ 2>/dev/null || true
 fi
 
@@ -784,6 +787,21 @@ find_claude_descendant() {
     done
 }
 
+# ---- sessions only a line of prefixes names (B1) ----
+# A session whose name starts with ${TmuxNameParser.DEFAULT_PREFIX} is ours by its name alone, as in v18 (and only such a session
+# makes the __anchor__ check above). One that only a line of ~/.claude-remote/prefixes names may as well be somebody
+# else's tmux session of that name, so drift adopts it only with proof: claude runs in its pane (its metadata come
+# from claude's cmdline and environ as for any session, a missing serverId from the app's entry of that name), or the
+# app's sessions.json has an entry of that name, which is then kept as the app wrote it (never the YOLO default of a
+# pane without claude). Neither: not adopted, not written, not counted as a live session of ours, never relaunched.
+APP_JSON="[]"; OWN_META=""
+if [ "${'$'}PFX" != "${TmuxNameParser.DEFAULT_PREFIX}" ] && [ -f "${'$'}SF_APP" ]; then
+    APP_JSON=${'$'}(jq -c 'if type == "array" then map(select(type == "object" and (.tmuxSessionName | type) == "string")) else [] end' "${'$'}SF_APP" 2>/dev/null)
+    [ -n "${'$'}APP_JSON" ] || APP_JSON="[]"
+fi
+app_has() { printf '%s' "${'$'}APP_JSON" | jq -e --arg n "${'$'}1" 'any(.[]; .tmuxSessionName == ${'$'}n)' >/dev/null 2>&1; }
+# ---- end of sessions only a line of prefixes names ----
+
 # Ground-truth entry list from the live tmux sessions. Collect one tab-separated
 # row per session into a temp table, then build the whole LIVE JSON array in a
 # SINGLE jq pass (was one jq fork per session).
@@ -801,6 +819,15 @@ for s in ${'$'}(tmux -u list-sessions -F '#{session_name}' 2>/dev/null); do
     [ -n "${'$'}pane_pid" ] || continue
     folder=${'$'}(tmux -u display-message -p -t "${'$'}s" '#{pane_current_path}' 2>/dev/null)
     pid=${'$'}(find_claude_descendant "${'$'}pane_pid")
+    # ---- a session only a line of prefixes names (B1) ----
+    case "${'$'}s" in
+        "${TmuxNameParser.DEFAULT_PREFIX}"*) ;;
+        *)  if [ -n "${'$'}pid" ]; then OWN_META="${'$'}OWN_META c:${'$'}s"
+            elif app_has "${'$'}s"; then OWN_META="${'$'}OWN_META a:${'$'}s"
+            else continue
+            fi;;
+    esac
+    # ---- end of a session only a line of prefixes names ----
     sid=""; model="DEFAULT"; mode="YOLO"; acct=""
     if [ -n "${'$'}pid" ]; then
         args=${'$'}(tr '\0' ' ' < "/proc/${'$'}pid/cmdline" 2>/dev/null)
@@ -868,6 +895,23 @@ if [ -n "${'$'}LIVE_TBL" ]; then
     rm -f "${'$'}LIVE_TBL"
     [ -n "${'$'}LIVE" ] || LIVE="[]"
 fi
+# ---- the app's entry of a session only a line of prefixes names (B1) ----
+# a:<name> (no claude in the pane) is the app's entry as it stands; c:<name> (claude runs) gets the entry's serverId.
+# If this jq fails nothing is appended this tick (an entry already in the manifest stays as it is).
+if [ -n "${'$'}OWN_META" ]; then
+    LIVE=${'$'}(printf '%s' "${'$'}LIVE" | jq -c --argjson app "${'$'}APP_JSON" --arg own "${'$'}OWN_META" '
+        (${'$'}app | map({key: .tmuxSessionName, value: .}) | from_entries) as ${'$'}am
+        | (${'$'}own | split(" ") | map(select(length > 0) | {key: .[2:], value: .[0:1]}) | from_entries) as ${'$'}om
+        | map(.tmuxSessionName as ${'$'}n
+            | if ${'$'}om[${'$'}n] == "a" then ${'$'}am[${'$'}n]
+              elif ${'$'}om[${'$'}n] == "c" then . + {serverId: ((${'$'}am[${'$'}n].serverId // "") | if type == "string" then . else "" end)}
+              else . end)
+        | map(select(type == "object"))' 2>/dev/null) || LIVE=""
+    [ -n "${'$'}LIVE" ] || LIVE="[]"
+    # an adopted session of ours lives: the anchor goes, as above for ${TmuxNameParser.DEFAULT_PREFIX}*
+    tmux kill-session -t __anchor__ 2>/dev/null || true
+fi
+# ---- end of the app's entry ----
 HDR="${'$'}HDR
 LIVE=${'$'}(echo "${'$'}LIVE" | jq -c 'map(.tmuxSessionName)')"
 (
@@ -1073,10 +1117,13 @@ DRIFT_EOF
             # ---- rollback copy of drift.sh (D6-S) ----
             # Kept once when the script replaced here is v18 (kritika D2 N17): moving it back is the way back to v18, by
             # hand and only with Lukáš's consent that day (any v19 client's next install rewrites it to v19 again).
+            # v19's compat line names v18 too, so the copy itself must not be v19 (a second installer may have replaced
+            # the script in between), and `ln` publishes it only where no copy is yet (K2): never one over another.
             if grep -qE 'claude-remote-restore-v18( |${'$'})' "${'$'}DRIFT" 2>/dev/null && [ ! -e "${'$'}DRIFT.v18" ]; then
-                { cp -p "${'$'}DRIFT" "${'$'}DRIFT.v18.tmp.${'$'}${'$'}" && mv -f "${'$'}DRIFT.v18.tmp.${'$'}${'$'}" "${'$'}DRIFT.v18" \
-                    && echo "[${'$'}(date -u +%FT%TZ)] install: the v18 drift.sh kept as drift.sh.v18 (rollback)" >> "${'$'}HOME/.claude-remote/install.log"; } 2>/dev/null \
-                    || rm -f "${'$'}DRIFT.v18.tmp.${'$'}${'$'}"
+                { cp -p "${'$'}DRIFT" "${'$'}DRIFT.v18.tmp.${'$'}${'$'}" && ! grep -q 'claude-remote-restore-v19' "${'$'}DRIFT.v18.tmp.${'$'}${'$'}" \
+                    && ln "${'$'}DRIFT.v18.tmp.${'$'}${'$'}" "${'$'}DRIFT.v18" \
+                    && echo "[${'$'}(date -u +%FT%TZ)] install: the v18 drift.sh kept as drift.sh.v18 (rollback)" >> "${'$'}HOME/.claude-remote/install.log"; } 2>/dev/null || :
+                rm -f "${'$'}DRIFT.v18.tmp.${'$'}${'$'}"
             fi
             # ---- end of the rollback copy of drift.sh ----
             mv -f "${'$'}DRIFT.tmp.${'$'}${'$'}" "${'$'}DRIFT"
@@ -1222,6 +1269,8 @@ DTIMER_EOF
         internal const val INSTALL_RESTORE_END = "# claude-remote-install-end"
         /** What [INSTALL_RESTORE_EXEC] prints (exit 97) when the installer did not arrive whole: nothing of it ran. */
         internal const val INSTALL_RESTORE_TRUNCATED = "INSTALL_TRUNCATED"
+        /** What [prefixWrite] prints when the box's session prefix could not be written (the install still exits 0). */
+        internal const val PREFIX_NOT_WRITTEN = "PREFIX_NOT_WRITTEN"
 
         /**
          * The exec request of the install; [INSTALL_RESTORE_COMMAND] itself (~80 KB) goes on the channel's stdin, paced
@@ -1272,7 +1321,7 @@ elif [ "${'$'}CR_PREFIX" != "${TmuxNameParser.DEFAULT_PREFIX}" ]; then
         } > "${'$'}PF.tmp.${'$'}${'$'}" || exit 1
         mv -f "${'$'}PF.tmp.${'$'}${'$'}" "${'$'}PF" || exit 1
         echo "PREFIX_ADDED ${'$'}CR_PREFIX"
-    ) 9>>"${'$'}LOCK" || echo "PREFIX_NOT_WRITTEN"
+    ) 9>>"${'$'}LOCK" || echo "$PREFIX_NOT_WRITTEN"
 fi
 # ---- end of the session prefix ----"""
 
@@ -1708,13 +1757,18 @@ fi
     /**
      * Logs one install and judges it: true = it ran to its end (exit status 0: remembered), false = it ran and failed
      * (not remembered), null = it never ran (no transport, or the installer did not arrive whole: [INSTALL_RESTORE_TRUNCATED]
-     * as the last line, whatever a login banner printed before it).
+     * as the last line, whatever a login banner printed before it). An install that could not write the box's session
+     * prefix (`PREFIX_NOT_WRITTEN`, adv N5) still exits 0 but is not remembered either: the next launch writes it again.
      */
     private fun restoreInstallRan(res: ExecResult?): Boolean? {
         val out = res?.stdout?.trim() ?: "NO_SESSION"
         logRestoreInstall(out)
         if (res == null || out.lineSequence().last().trim() == INSTALL_RESTORE_TRUNCATED) return null
         if (res.exitStatus != 0) FileLogger.error(TAG, "Restore service install exited with ${res.exitStatus} — not remembered, the next launch installs again", null)
+        else if (out.lineSequence().any { it.trim() == PREFIX_NOT_WRITTEN }) {
+            FileLogger.error(TAG, "Restore service install could not write the box's session prefix — not remembered, the next launch writes it again", null)
+            return false
+        }
         return res.exitStatus == 0
     }
 

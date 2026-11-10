@@ -1,7 +1,7 @@
 package com.clauderemote.session.service
 
 /**
- * D3: a script that goes on the exec channel's stdin behind a short exec request ([EXEC], ~240 B) instead of being the
+ * D3: a script that goes on the exec channel's stdin behind a short exec request ([EXEC], 170 B) instead of being the
  * request itself — the repo's rule "nothing over 4 KB as an exec argument" (`ExecArgumentSizeTest`). It is the shape
  * of the restore installer's C0 launcher ([SessionPersistenceService.INSTALL_RESTORE_EXEC], dávka C) for any body,
  * with the body's exit status added as a marker line, and it is sent the C0 way: paced stdin

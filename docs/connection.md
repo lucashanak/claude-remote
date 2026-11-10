@@ -178,9 +178,10 @@ backstop: every entry calls it with `isNewTmuxSession = false`, `launchSession` 
 soon after the line of a reconnect that ended ACTIVE counts as a failed attempt (kolo 7, adv N1: on a slow link the
 failed attach's exit comes after ACTIVE, and every round began at attempt 1 with no wait, ~1.6 s apart for ever). The
 brake counts from the line, stamped before `sendTmuxCommand` sends it, not from ACTIVE, and its window depends on the
-line: 5 s after an attach (`EARLY_DEATH_MS`), 11 s after a Rebuild or FreshLaunch line (`LAUNCH_EARLY_DEATH_MS`, R1: the
-guard's longest refusal — two heal tries of `flock -w 2` or the 2 s socket deadline 0.5 s apart, or one hung probe of
-`timeout -k 1 5`: 6 s — plus the attach's 5 s; with 5 s from ACTIVE a 4.5–4.7 s refusal that came back over a link
+line: 5 s after an attach (`EARLY_DEATH_MS`), 13.5 s after a Rebuild or FreshLaunch line (`LAUNCH_EARLY_DEATH_MS`, R1:
+the guard's longest refusal — two heal tries 0.5 s apart, each up to `flock -w 2` for the lock plus the 2 s socket deadline
+once it has it (the two waits add up when the lock comes late, as with every tab of a server at once), 8.5 s; one hung
+probe of `timeout -k 1 5` is 6 s — plus the attach's 5 s; with 5 s from ACTIVE a 4.5–4.7 s refusal that came back over a link
 slower than ~0.5 s read as a connection that held, and every tab of the server reconnected every 6–10 s). A reconnect
 that typed no line (mosh, ET) counts 5 s from ACTIVE as before. Such losses in a row wait 4 s, 8 s, 16 s … (cap 60 s); a
 connection that held longer starts the count over. A sockheal that keeps refusing thus reconnects every 4 … 60 s for as
@@ -1056,8 +1057,9 @@ server through the server's exec transport instead of borrowing a tab's shell:
   `StdinScript.EXEC` (dávka D3: the close and its fallback, the close facts, the restore, the `cr-session`
   install), paced like every upload; `execRead` takes the `stdin` too, and its fallbacks then run on
   `PooledRemoteExec` (`execReadWithWatchdog` has no stdin). These sends are never `transfer = true`, and never wrap a
-  command that reads its own stdin (`pushMerge`). Bootstrap, hooks v2, streamd and reconcile stay arguments
-  (`ExecArgumentSizeTest` caps them, 12 KB after deflate for every request).
+  command that reads its own stdin (`pushMerge`). Bootstrap, hooks v2, streamd, reconcile and the ET server install
+  stay arguments (`ExecArgumentSizeTest` caps them, and every request it renders at 12 KB after deflate; a request
+  it does not render is not covered).
 - With routing off the behavior is the one from before, except for these exact items:
   keepalive also reaches the pooled and exec transports; the log shipper trims with
   `tail -n +2`; the stream daemon forgets its bootstrap memo when it ends without a
@@ -1096,7 +1098,8 @@ Per tab the result decides:
   `claude-server-` (`TmuxNameParser.livePrefixes`, compared as fixed strings; dávka D6-K, the same set for the
   remote scan's prune and the manifest push's guard) — a dead tmux server never counts as proof. Before D6-K
   only `claude-server-*` counted, so on a box named otherwise forget and prune never ran. drift.sh (marker v19,
-  D6-S) adopts, counts and relaunches the sessions of `claude-server-` and of each valid line of
+  D6-S) adopts, counts and relaunches the sessions of `claude-server-` and, with proof that they are the app's
+  (claude runs in the pane, or the app's `sessions.json` has the name — kolo 3, B1), those of each valid line of
   `~/.claude-remote/prefixes`, which the restore installer writes for a box with another name (see
   `docs/architecture.md`, "Server-side scripts"); `cr-session` and Jarvis still know only `claude-server-`;
 - **adopt the real session id**: the shallowest process of the pane's subtree that has a

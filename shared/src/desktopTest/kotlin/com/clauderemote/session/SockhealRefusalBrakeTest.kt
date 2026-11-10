@@ -34,7 +34,7 @@ import kotlin.test.assertTrue
 
 /**
  * R1 (review D1 adv N1, kt N4): a Rebuild whose `tmux-sockheal.sh` keeps refusing must back off 4 s, 8 s … and not
- * spin. The refusal takes 4.5–6 s on the server; the brake used to count from ACTIVE (~0.3 s after the line) with a 5 s
+ * spin. The refusal takes 4.5–8.5 s on the server; the brake used to count from ACTIVE (~0.3 s after the line) with a 5 s
  * window, so a loss that came back over a link slower than ~0.5 s read as "the connection held" and every round began
  * at attempt 1 with no wait — every tab of the server reconnecting every 6–10 s for as long as the guard refused.
  *
@@ -198,11 +198,48 @@ class SockhealRefusalBrakeTest {
             "or 2 s for the recreated socket")
         assertTrue("then sleep 0.5; sg_run; fi" in sockheal, "one more try 0.5 s later")
         assertTrue("timeout -k 1 5 tmux -S" in installer, "a hung server's one probe: 5 s + 1 s kill")
-        assertEquals(2_000L, SessionOrchestrator.SOCKHEAL_HEAL_TRY_MS)
+        // the lock wait and the socket deadline are one after the other in the same try (review D2 kód K1): they add up
+        val heal = installer.substring(installer.indexOf("sg_heal() {"), installer.indexOf(") 8>>\"\$SG_LOCK\"", installer.indexOf("sg_heal() {")))
+        assertTrue(heal.indexOf("flock -w 2 8") in 0 until heal.indexOf("+ 2000 ))"), "sg_heal takes its lock first, then waits for the socket")
+        assertEquals(2_000L, SessionOrchestrator.SOCKHEAL_LOCK_WAIT_MS)
+        assertEquals(2_000L, SessionOrchestrator.SOCKHEAL_SOCKET_WAIT_MS)
+        assertEquals(4_000L, SessionOrchestrator.SOCKHEAL_HEAL_TRY_MS)
         assertEquals(500L, SessionOrchestrator.SOCKHEAL_RETRY_PAUSE_MS)
         assertEquals(6_000L, SessionOrchestrator.SOCKHEAL_HUNG_PROBE_MS)
-        assertEquals(6_000L, SessionOrchestrator.SOCKHEAL_LONGEST_REFUSAL_MS)
-        assertEquals(11_000L, SessionOrchestrator.LAUNCH_EARLY_DEATH_MS)
-        assertTrue(SessionOrchestrator.LAUNCH_EARLY_DEATH_MS > 4_700 + 5_000, "covers the measured 4.7 s refusal plus a 5 s round trip")
+        assertEquals(8_500L, SessionOrchestrator.SOCKHEAL_LONGEST_REFUSAL_MS)
+        assertEquals(13_500L, SessionOrchestrator.LAUNCH_EARLY_DEATH_MS)
+        assertTrue(SessionOrchestrator.LAUNCH_EARLY_DEATH_MS >= SessionOrchestrator.SOCKHEAL_LONGEST_REFUSAL_MS + 4_000,
+            "at least 4 s for the round trip above the guard's longest refusal")
+    }
+
+    /**
+     * Review D2 test N-T4: the brake takes only the line of the reconnect that just ended ACTIVE (`at >= attemptStart`).
+     * A line an earlier attempt typed (a mosh tab whose earlier attempt fell back to SSH) must not stand in for a reconnect
+     * that typed none: that one counts 5 s from ACTIVE. Through the orchestrator's own private brake (reflection: no
+     * reconnect path types a line and then ends ACTIVE without one in a unit test).
+     */
+    @Test fun aLineOfAnEarlierAttemptIsNotTheBrakesStamp() {
+        val o = orchestrator(tmuxAlive = false)
+        val cls = SessionOrchestrator::class.java
+        val stampCls = cls.declaredClasses.single { it.simpleName == "EarlyDeathStamp" }
+        val stamp = stampCls.getDeclaredConstructor(Long::class.javaPrimitiveType, Long::class.javaPrimitiveType).also { it.isAccessible = true }
+        @Suppress("UNCHECKED_CAST")
+        val lineSentAt = cls.getDeclaredField("lineSentAt").also { it.isAccessible = true }.get(o) as MutableMap<String, Any>
+        val stampReconnected = cls.getDeclaredMethod("stampReconnected", String::class.java, Long::class.javaPrimitiveType).also { it.isAccessible = true }
+        val floor = cls.getDeclaredMethod("earlyDeathFloorMs", String::class.java).also { it.isAccessible = true }
+
+        // an earlier attempt typed a Rebuild line 20 s ago (its 13.5 s window long over); this attempt began 1 s ago and typed none
+        val now = clock()
+        lineSentAt["t1"] = stamp.newInstance(now - 20_000, SessionOrchestrator.LAUNCH_EARLY_DEATH_MS)
+        stampReconnected.invoke(o, "t1", now - 1_000)
+        offset.addAndGet(3_000)   // lost 3 s after ACTIVE
+        assertEquals(4_000L, floor.invoke(o, "t1"), "an early death counted from ACTIVE, not from the earlier attempt's line")
+
+        // the line this attempt typed is taken: lost 6 s after it, inside its 13.5 s window
+        val again = clock()
+        lineSentAt["t1"] = stamp.newInstance(again, SessionOrchestrator.LAUNCH_EARLY_DEATH_MS)
+        stampReconnected.invoke(o, "t1", again - 500)
+        offset.addAndGet(6_000)
+        assertEquals(8_000L, floor.invoke(o, "t1"), "the second early death in a row, from this attempt's line")
     }
 }

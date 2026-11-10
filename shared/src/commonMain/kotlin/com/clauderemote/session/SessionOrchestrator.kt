@@ -1943,7 +1943,7 @@ class SessionOrchestrator(
 
     /**
      * R1: a reconnect of [sessionId] that began at [attemptStart] ended ACTIVE. The brake counts from the line that
-     * reconnect typed (stamped before it was sent: a refusing sockheal's 4.5–6 s run from there, not from ACTIVE some
+     * reconnect typed (stamped before it was sent: a refusing sockheal's 4.5–8.5 s run from there, not from ACTIVE some
      * 0.3 s + a round trip later), with that line's window; a reconnect that typed none (mosh, ET, a test seam) counts
      * from now with [EARLY_DEATH_MS], as before.
      */
@@ -4318,22 +4318,31 @@ class SessionOrchestrator(
         internal const val VIEW_SIZE_WAIT_MS = 2_000L
         /** Kolo 7 (adv N1): a loss this soon after a reconnect's attach line (R1: stamped before it was sent) counts as an early death. */
         internal const val EARLY_DEATH_MS = 5_000L
-        /** R1: one heal try of `tmux-sockheal.sh` (`sg_heal`): its `flock -w 2`, or once locked the 2 s deadline for the recreated socket. */
-        internal const val SOCKHEAL_HEAL_TRY_MS = 2_000L
+        /** R1: the wait of one heal try of `tmux-sockheal.sh` (`sg_heal`) for its lock (`flock -w 2`). */
+        internal const val SOCKHEAL_LOCK_WAIT_MS = 2_000L
+        /** R1: once locked, its deadline for the recreated socket (`+ 2000` ms). */
+        internal const val SOCKHEAL_SOCKET_WAIT_MS = 2_000L
+        /**
+         * R1 (review D2 kód K1): one heal try at its longest — the lock comes late and then the socket deadline runs out
+         * in full; the two waits add up (4 s), they are not alternatives.
+         */
+        internal const val SOCKHEAL_HEAL_TRY_MS = SOCKHEAL_LOCK_WAIT_MS + SOCKHEAL_SOCKET_WAIT_MS
         /** R1: the pause before its second heal try (`sleep 0.5`). */
         internal const val SOCKHEAL_RETRY_PAUSE_MS = 500L
         /** R1: its one probe of a socket that does not answer (`timeout -k 1 5`): refused as hung after it, no second try. */
         internal const val SOCKHEAL_HUNG_PROBE_MS = 6_000L
         /**
-         * R1: the longest a refusing `tmux-sockheal.sh` takes to its `exit 1` (measured 4.54–4.70 s for the lock case,
-         * review D1 adv P5): two heal tries 0.5 s apart, or one hung probe. Not counted: its `timeout 5 ss`/`timeout 10
-         * find` look-ups of the listener, instant when the box is not wedged. `SockhealRefusalBrakeTest` pins these
-         * numbers to the generated script.
+         * R1: the longest a refusing `tmux-sockheal.sh` takes to its `exit 1`: two heal tries of 4 s 0.5 s apart (8.5 s,
+         * the case of every tab of a server at once, where the lock comes late), or one hung probe (6 s). Measured
+         * 4.54–4.70 s for a try refused at its lock (review D1 adv P5). Not counted: its `timeout 5 ss`/`timeout 10 find`
+         * look-ups of the listener, instant when the box is not wedged. `SockhealRefusalBrakeTest` pins these numbers to
+         * the generated script.
          */
         internal val SOCKHEAL_LONGEST_REFUSAL_MS: Long = maxOf(2 * SOCKHEAL_HEAL_TRY_MS + SOCKHEAL_RETRY_PAUSE_MS, SOCKHEAL_HUNG_PROBE_MS)
         /**
          * R1: a loss this soon after a Rebuild or FreshLaunch line went out counts as an early death: the guard's longest
-         * refusal plus the attach line's own [EARLY_DEATH_MS] for the round trip and a loaded box (11 s). With 5 s a
+         * refusal plus the attach line's own [EARLY_DEATH_MS] for the round trip and a loaded box (13.5 s: 5 s above the
+         * 8.5 s, more than the 4 s review D2 asks for). With 5 s a
          * refusal that came back over a link slower than ~0.5 s looked like a connection that held, and every tab of the
          * server reconnected every 6–10 s for as long as the guard refused (review D1 adv N1).
          */

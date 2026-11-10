@@ -199,6 +199,10 @@ class ExecArgumentSizeTest {
         out["bootstrap, hooks v2 install"] = BootstrapScript.build(installV2 = true)
         out["bootstrap, hooks v2 status"] = BootstrapScript.build(installV2 = false)
         out["streamd install"] = TranscriptService.ENSURE_STREAMD_COMMAND
+        // review D2 test N-T5: the ET bootstrap's one exec (ensureEtServer), missing from this list until kolo 3
+        out["ET server install (etServerInstallCommand)"] = SessionOrchestrator(storage, tabs, null).let { e ->
+            try { e.etServerInstallCommand } finally { e.shutdownForTest() }
+        }
         sentOnStdin().forEach { (what, s) -> out[what] = s.cmd }
         // Jarvis' conversation mode (F5a): the longest spoken prompt in its worst forms — 3-byte typography, and
         // apostrophes, which the shell quoting turns into 4 bytes each
@@ -282,6 +286,9 @@ class ExecArgumentSizeTest {
             "bootstrap, hooks v2 install" to 39 * 1024, // 38 886; F0 (Jarvis) CHECK_COMMAND: 39 527
             "bootstrap, hooks v2 status" to 21 * 1024, // 20 777
             "streamd install" to 5 * 1024, // 5 025
+            // review D2 test N-T5: over the limit since before D (4 725 B at cedfd70, 4 683 B after R2); capped like the
+            // rest, its move to stdin is in the hand-over
+            "ET server install (etServerInstallCommand)" to 5 * 1024, // 4 683
             // D3: the F0 (Jarvis) requests close, close facts, restore and the cr-session install go on stdin
             // (StdinScript): no longer exceptions, LIMIT applies to them
         )

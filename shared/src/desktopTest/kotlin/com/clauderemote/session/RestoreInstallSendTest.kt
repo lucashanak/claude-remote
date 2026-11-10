@@ -185,6 +185,16 @@ class RestoreInstallSendTest {
         assertTrue(logLines.any { it.contains("Restore service install exited with 127") }, "$logLines")
     }
 
+    /**
+     * Review D2 adv N5: an install that could not write the box's session prefix (`PREFIX_NOT_WRITTEN`: the manifest
+     * lock held past 5 s, a directory in the way) still exits 0, but is not remembered: the next launch writes it again.
+     * Asking again at once is not the answer (the same lock is likely still held), so the caller hears "it ran".
+     */
+    @Test fun anInstallThatCouldNotWriteThePrefixIsNotRememberedAsDone() {
+        assertNotRemembered("RESTORE_SCRIPT_PRESENT\n${SessionPersistenceService.PREFIX_NOT_WRITTEN}\nLINGER=yes", 0, returns = true)
+        assertTrue(logLines.any { it.contains("could not write the box's session prefix") }, "$logLines")
+    }
+
     @Test fun anInstallThatExitedZeroIsRemembered() = bounded {
         val o = orchestrator()
         val exec = CapturingExec("RESTORE_SCRIPT_PRESENT\nLINGER=yes", 0).also { o.connectionRegistry.remoteExec = it }
@@ -199,6 +209,7 @@ class RestoreInstallSendTest {
             Triple(SessionPersistenceService.INSTALL_RESTORE_TRUNCATED + "\n", 97, 2),
             Triple("RESTORE_SCRIPT_INSTALLED\n", 1, 2),
             Triple("RESTORE_SCRIPT_PRESENT\nLINGER=yes\n", 0, 1),
+            Triple("RESTORE_SCRIPT_PRESENT\n${SessionPersistenceService.PREFIX_NOT_WRITTEN}\nLINGER=yes\n", 0, 2),   // adv N5
         )) {
             val o = orchestrator()
             val ch = RecordingChannel(stdout, exit)

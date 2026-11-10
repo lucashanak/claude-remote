@@ -14,6 +14,8 @@ import com.clauderemote.storage.SessionStorage
 import com.jcraft.jsch.JSch
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.test.advanceTimeBy
+import kotlinx.coroutines.test.currentTime
+import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import kotlin.test.AfterTest
 import kotlin.test.BeforeTest
@@ -83,9 +85,9 @@ class TmuxPrefixTest {
         tmuxSessionName = "claude-box-a", connectionType = ConnectionType.SSH,
     )
 
-    /** [ManifestCommands.reconcileAll] output: [tomb]stones, an empty manifest, the [tmux] listing, empty rest. */
-    private fun reconcileOut(tomb: List<String>, tmux: List<String>) =
-        (tomb + "---" + "[]").joinToString("\n") + "\n__END_snap__ rc=0\n" +
+    /** [ManifestCommands.reconcileAll] output: [tomb]stones, the [manifest], the [tmux] listing, empty rest. */
+    private fun reconcileOut(tomb: List<String>, tmux: List<String>, manifest: String = "[]") =
+        (tomb + "---" + manifest).joinToString("\n") + "\n__END_snap__ rc=0\n" +
             tmux.joinToString("\n") + "\n__END_tmux__ rc=0\n" +
             "\n__END_panes__ rc=0\n\n__END_ps__ rc=0\n\n__END_claude__ rc=0\n"
 
@@ -95,12 +97,25 @@ class TmuxPrefixTest {
     }
 
     /** The reconciler SessionPersistenceService builds, over [boxTab] (tombstoned): the names it forgot after one round of [listing]. */
-    private fun forgets(vararg listing: String): List<String> {
+    private fun forgets(vararg listing: String): List<String> = reconciled(listing.toList(), viaCheckClosed = false).first
+
+    /**
+     * The same reconciler over [boxTab] (tombstoned), the tab's own close check ([ServerReconciler.checkClosed], the
+     * path after a lost tab, review D2 test N-T2) run before the first round of the loop: the names it forgot and the
+     * tab's claude session id after it. [manifestUuid] = the manifest's record of `claude-box-a` carries this id.
+     */
+    private fun checkClosedForgets(vararg listing: String, manifestUuid: String? = null): Pair<List<String>, String?> =
+        reconciled(listing.toList(), viaCheckClosed = true, manifestUuid = manifestUuid)
+
+    private fun reconciled(listing: List<String>, viaCheckClosed: Boolean, manifestUuid: String? = null): Pair<List<String>, String?> {
         var lastForgotten: List<String> = emptyList()
+        var uuid: String? = null
         runTest {
             val tabs = TabManager().also { it.addTab(boxTab) }
             val registry = ConnectionRegistry(ServerStorage(FakeKeyValueStore()), tabs)
-            registry.remoteExec = Exec(reconcileOut(tomb = listOf("claude-box-a"), tmux = listing.toList()))
+            val manifest = if (manifestUuid == null) "[]"
+                else """[{"id":"t1","serverId":"s-box","folder":"/work","tmuxSessionName":"claude-box-a","claudeSessionId":"$manifestUuid"}]"""
+            registry.remoteExec = Exec(reconcileOut(tomb = listOf("claude-box-a"), tmux = listing, manifest = manifest))
             registry.execSessions = object : ExecSessionProvider {
                 override fun session(serverId: String) = JSch().getSession("u", "localhost", 22)
                 override suspend fun await(serverId: String, ms: Long) = session(serverId)
@@ -120,11 +135,19 @@ class TmuxPrefixTest {
             )
             val rec = sps.newExecReconciler()
             rec.register("t1")
-            advanceTimeBy(1_001)
-            rec.unregister("t1")
+            if (viaCheckClosed) {
+                rec.checkClosed("t1", delayMs = 0)
+                runCurrent()
+                // decided by checkClosed alone: the loop's first round (1 s after register) has not run
+                assertTrue(currentTime < 1_000 || "claude-box-a" in listing, "the loop ran first: ${currentTime} ms")
+            } else {
+                advanceTimeBy(1_001)
+            }
             lastForgotten = forgotten.toList()
+            uuid = tabs.getTab("t1")?.claudeSessionId
+            rec.unregister("t1")
         }
-        return lastForgotten
+        return lastForgotten to uuid
     }
 
     @Test fun onABoxNamedBoxAClosedSessionIsForgottenOnlyWhenAnotherSessionOfOursLives() {
@@ -133,5 +156,20 @@ class TmuxPrefixTest {
         assertEquals(emptyList(), forgets(), "an empty listing (tmux dead) never forgets")
         assertEquals(emptyList(), forgets("__anchor__", "other", "claude-test"), "the anchor and strangers prove nothing")
         assertEquals(emptyList(), forgets("claude-box-a", "claude-box-b"), "still there: kept")
+    }
+
+    /**
+     * Review D2 test N-T2: the same rule through the tab's own close check (`ExecServerReconciler.doCheckClosed`), not
+     * only through the loop's round. With only strangers alive it does nothing at all — no forget, and no action on the
+     * tab either (it does not hand the closed session's manifest record to the tab as if the session were still ours).
+     */
+    @Test fun onABoxNamedBoxTheTabsOwnCloseCheckCountsOnlyTheBoxsPrefixAndTheDefault() {
+        assertEquals(listOf("claude-box-a"), checkClosedForgets("claude-box-b", "__anchor__").first, "another session of the box")
+        assertEquals(listOf("claude-box-a"), checkClosedForgets("claude-server-x").first, "a session of the default prefix")
+        assertEquals(emptyList<String>() to null, checkClosedForgets(), "an empty listing never forgets")
+        val stale = "0f6c2a4e-1b2c-4d5e-8f90-123456789abc"
+        assertEquals(emptyList<String>() to null, checkClosedForgets("__anchor__", "other", "claude-test", "claude-boxer-1", manifestUuid = stale),
+            "the anchor and strangers prove nothing, and the check touches nothing")
+        assertEquals(emptyList(), checkClosedForgets("claude-box-a", "claude-box-b").first, "still there: kept")
     }
 }

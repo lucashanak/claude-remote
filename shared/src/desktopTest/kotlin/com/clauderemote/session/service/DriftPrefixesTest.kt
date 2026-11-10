@@ -45,8 +45,10 @@ class DriftPrefixesTest {
     /**
      * Hradlo A: what the app sends for the box `server` differs from cedfd70's only in the marker (MARKER, the three
      * compat lines), drift's prefix reader (one block), drift's two comparisons that knew only `claude-server-` (and
-     * the header comment that said so), the prefix write before the end line, and (D6S-zaloha) the rollback copies of
-     * a v18 restore.sh and drift.sh with their temp files in the installer's trap.
+     * the header comment that said so), the prefix write before the end line, (D6S-zaloha) the rollback copies of
+     * a v18 restore.sh and drift.sh with their temp files in the installer's trap, and (kolo 3, B1) the three blocks
+     * by which drift adopts a session only a line of `prefixes` names only with proof — without such a line (the box
+     * `server`) none of them changes what drift does (hradlo B, `DriftPrefixesIntegrationTest`).
      */
     @Test fun forServerTheInstallerChangedOnlyTheMarkerThePrefixesAndTheTwoComparisons() {
         val old = (golden() + "\n" + SessionPersistenceService.INSTALL_RESTORE_END + "\n").lines()
@@ -75,21 +77,60 @@ class DriftPrefixesTest {
         // the rollback copies of the v18 restore.sh and drift.sh (D6S-zaloha) and their temp files in the trap
         fun rollback(name: String) = block(SessionPersistenceService.INSTALL_RESTORE_COMMAND,
             "            # ---- rollback copy of $name (D6-S) ----", "            # ---- end of the rollback copy of $name ----")
+        // kolo 3 (B1): drift adopts a session only a line of `prefixes` names only with proof (claude, or the app's entry)
+        val adoptHelpers = block(SessionPersistenceService.INSTALL_RESTORE_COMMAND,
+            "# ---- sessions only a line of prefixes names (B1) ----", "# ---- end of sessions only a line of prefixes names ----")
+        val adoptCase = block(SessionPersistenceService.INSTALL_RESTORE_COMMAND,
+            "    # ---- a session only a line of prefixes names (B1) ----", "    # ---- end of a session only a line of prefixes names ----")
+        val adoptEntry = block(SessionPersistenceService.INSTALL_RESTORE_COMMAND,
+            "# ---- the app's entry of a session only a line of prefixes names (B1) ----", "# ---- end of the app's entry ----")
         assertEquals(
             listOf("        MARKER=\"claude-remote-restore-v19\"", trap19,
                 compat19) + rollback("restore.sh") + listOf(compat19,
                 "# the LIVE tmux sessions of this box (claude-server-* and the prefixes file) every minute. Self-healing: re-adds") +
                 reader +
-                listOf(
-                    "if tmux -u list-sessions -F '#{session_name}' 2>/dev/null | { while IFS= read -r s; do is_ours \"\$s\" && exit 0; done; exit 1; }; then",
-                    "    is_ours \"\$s\" || continue",
-                ) + rollback("drift.sh") + listOf(compat19) + write,
+                listOf("if tmux -u list-sessions -F '#{session_name}' 2>/dev/null | { while IFS= read -r s; do case \"\$s\" in \"claude-server-\"*) exit 0;; esac; done; exit 1; }; then") +
+                adoptHelpers + listOf("", "    is_ours \"\$s\" || continue") + adoptCase + adoptEntry +
+                rollback("drift.sh") + listOf(compat19) + write,
             added,
             "added lines",
         )
         assertTrue(reader.size in 20..40 && write.size in 20..45, "the reader (${reader.size}) and the write (${write.size}) are small blocks")
-        assertEquals(9, rollback("drift.sh").size)
+        assertEquals(12, rollback("drift.sh").size)
+        assertTrue(adoptHelpers.size + adoptCase.size + adoptEntry.size < 50, "B1 is three small blocks")
     }
+
+    /**
+     * Review D2 kód K2 / adv N4: v19's compat line names v18 too, so "the replaced script is v18" also holds for a v19
+     * script (one a second installer put there in between). The copy itself must then not be v19: no `.v18` from it and
+     * no temp file left. A v18 script is copied byte for byte, published by `ln` (which never replaces a copy).
+     * The installer's own rollback block for drift.sh, run alone in bash.
+     */
+    @Test fun theRollbackCopyIsNeverAV19Script() {
+        val rollback = block(SessionPersistenceService.INSTALL_RESTORE_COMMAND,
+            "            # ---- rollback copy of drift.sh (D6-S) ----", "            # ---- end of the rollback copy of drift.sh ----")
+        assertTrue(rollback.any { "ln \"\$DRIFT.v18.tmp.\$\$\" \"\$DRIFT.v18\"" in it } && rollback.none { "mv -f" in it }, "published by ln, never mv -f")
+        val compat = "# marker-compat (do NOT remove): " + (6..18).joinToString(" ") { "claude-remote-restore-v$it" }
+        for ((what, script, copied) in listOf(
+            Triple("v19", "#!/usr/bin/env bash\n$compat claude-remote-restore-v19\nexit 0\n", false),
+            Triple("v18", "#!/usr/bin/env bash\n$compat\nexit 0\n", true),
+        )) {
+            val home = freshHome()
+            val drift = File(home, ".claude-remote/drift.sh").apply { writeText(script) }
+            val r = run(listOf("bash", "-c", "set -e\nDRIFT=\"\$HOME/.claude-remote/drift.sh\"\n" + rollback.joinToString("\n") + "\necho DONE\n"), home, dir = home)
+            assertEquals(0, r.exit, "$what: ${r.err}")
+            assertEquals("DONE", r.out.trim(), what)
+            val copy = File(home, ".claude-remote/drift.sh.v18")
+            assertEquals(copied, copy.exists(), "$what: a copy ${if (copied) "is" else "is not"} made")
+            if (copied) assertEquals(script, copy.readText(), "$what: byte for byte")
+            assertEquals(copied, File(home, ".claude-remote/install.log").readTextOrNull()?.contains("kept as drift.sh.v18") == true, what)
+            assertEquals(listOf("drift.sh") + (if (copied) listOf("drift.sh.v18", "install.log") else emptyList()),
+                File(home, ".claude-remote").list()!!.sorted(), "$what: no temp file left")
+            assertEquals(script, drift.readText(), "$what: the script itself untouched")
+        }
+    }
+
+    private fun File.readTextOrNull(): String? = if (isFile) readText() else null
 
     // ---- the reader (drift.sh) --------------------------------------------------------------------
 

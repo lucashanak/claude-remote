@@ -384,13 +384,19 @@ construction.
   v18 (`golden/restore-installer-v18.sh`, the installer cedfd70 generated, checked against `git show cedfd70`
   when the clone has it, else by its SHA-256) over the same world, one sshd fixture per world: on the box `server`
   (no `prefixes` file, or one of junk plus the default) the same manifest, mirror, log (times normalized) and
-  tombstones; on `box` the only difference is the adoption of `claude-box-b`; a file of broken lines adopts
-  nothing and leaves `__anchor__` alive; overlapping prefixes give one row; a second tick adds 0 B to drift.log;
+  tombstones; on `box` the only difference is the adoption of `claude-box-b` (claude runs in it); a file of broken
+  lines adopts nothing and leaves `__anchor__` alive; overlapping prefixes give one row; a second tick adds 0 B to
+  drift.log; kolo 3 (B1): a session of the box's prefix with neither claude nor an entry of the app (a `sleep`) is not
+  adopted, leaves `__anchor__` alive and is not relaunched after its `kill-session` (= v18), and the app's entry of
+  a session whose pane runs no claude stays as the app wrote it (MOSH, DEFAULT, OPUS, serverId, createdAt) in the
+  manifest and the mirror, and self-heal relaunches it in DEFAULT;
   the step v18 → v19 rewrites the three scripts by rename and a v18 client after it rewrites nothing back; the
   replaced v18 `restore.sh` and `drift.sh` are kept as `.v18` byte for byte, only from v18 and only once.
   `DriftPrefixesTest` (desktopTest): hradlo A (what the generator sends for `server` differs from cedfd70's
-  only in the marker, the prefix reader, the two comparisons and the prefix write), the reader in bash and dash,
-  and the installer's write (once, normalizing, never for `server`, never failing the install).
+  only in the marker (MARKER, three compat lines), the installer's trap, the header comment of drift, the prefix
+  reader, the two comparisons, the three B1 blocks of the adoption with proof, the two rollback copies and the
+  prefix write), the reader in bash and dash, the rollback block alone (a v19 script is never kept as `.v18`), and
+  the installer's write (once, normalizing, never for `server`, never failing the install).
 - **the tmux socket guard** (B3, marker v18), in the fixture's private
   `TMUX_TMPDIR` only: the socket file deleted, the whole `tmux-<uid>` directory
   deleted, and a split brain (a second server on the same path holding part of

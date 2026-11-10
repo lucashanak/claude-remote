@@ -185,10 +185,11 @@ the whole stdin and runs it (`eval`, in a subshell with `</dev/null`) only when 
 arrived, then prints `__CR_END__<status>` and exits with that status; a stdin cut anywhere runs nothing
 (`__CR_TRUNCATED__`, exit 97). An answer without the marker is never a success: the close falls back (safe to repeat),
 the close check reads it as unknown, the restore as Unknown, the install as failed. The script bytes are the builders'
-unchanged (`cr-session`'s SHA-256 too). `ExecArgumentSizeTest` holds every exec request at 4 KB or under, rendering
-the four through their production callers, with named exceptions (bootstrap, hooks v2, streamd, the reconcile of many
-sessions) that may not grow, and every request at 12 KB or under after deflate (K-1 lost a packet of more than 16 KB
-compressed; the biggest today, the bootstrap with the hooks v2 install, is 9.4 KB).
+unchanged (`cr-session`'s SHA-256 too). `ExecArgumentSizeTest` holds every exec request it renders (a hand-written
+list; the four through their production callers) at 4 KB or under, with named exceptions (bootstrap, hooks v2,
+streamd, the reconcile of many sessions, the ET server install) that may not grow, and each of them at 12 KB or under
+after deflate (K-1 lost a packet of more than 16 KB compressed; the biggest today, the bootstrap with the hooks v2
+install, is 9.4 KB).
 
 All three carry the same **socket guard**. A tmux server whose socket file (or whole `/tmp/tmux-<uid>`
 directory) was deleted keeps running but answers nobody; on 2026-11-02 drift then saw no sessions,
@@ -205,17 +206,25 @@ directory is not private → `chmod 700`; one that does not answer (a single 5 s
 brain) → no signal, no relaunch, no new server, a log line rate-limited per caller and kind (drift.log, restore.log
 and sockheal.log each get it once per 15 minutes). Heals and `restore.sh`'s server creation share
 `~/.claude-remote/tmux-server.lock`. Every tmux call of a drift tick has a time limit.
-`~/.claude-remote/drift-heal.off` switches the guard off in all three scripts — the only rollback, because an
-older client never rewrites a v18 script. An install cut short removes its temp files (`trap … EXIT`).
+`~/.claude-remote/drift-heal.off` switches the guard off in all three scripts (an older client never rewrites a
+script of a newer marker; the way back to v18 as a whole is below). An install cut short removes its temp files
+(`trap … EXIT`).
 
 **Session prefixes (`~/.claude-remote/prefixes`, marker v19, dávka D6-S).** The sessions drift adopts into the
 manifest, counts as "a session of ours is live" (which drops `__anchor__`) and so relaunches, are those starting with
-`claude-server-` — always, with or without the file — or with a line of `~/.claude-remote/prefixes`. The restore
+`claude-server-` — always, with or without the file, by their name alone as in v18 — and those starting with a line of
+`~/.claude-remote/prefixes` that prove they are the app's (kolo 3, B1: a stranger's tmux session of that name must not
+become a YOLO relaunch): claude runs in the pane (metadata from claude's command line and environ like any session,
+a missing `serverId` from the app's entry of the same name in `sessions.json`), or `sessions.json` has an entry of that
+name, which is then taken as the app wrote it (mode, model, connection type, serverId, createdAt, account — never the
+YOLO default drift gives a pane without claude). Neither: not adopted, not written, not counted (`__anchor__` stays),
+never relaunched. The restore
 installer adds the box's own prefix (`TmuxNameParser.prefixFor(server name)`, e.g. `claude-box-`) on every install,
 outside the marker check, before its end line: under `flock -w 5` on `sessions.lock`, the file rewritten whole (tmp
 + `mv`, keeping only valid lines) because drift reads it without the lock; the default prefix gets no line, so the
 box `server` keeps no file. A name drift cannot match is logged to install.log (`PREFIX_UNSUPPORTED`), and a prefix
-that cannot be written (`PREFIX_NOT_WRITTEN`) never fails the install. Both the reader and the writer take only lines
+that cannot be written (`PREFIX_NOT_WRITTEN`) never fails the install — the client then does not remember the install
+as done, so its next launch writes the prefix again (review D2 adv N5). Both the reader and the writer take only lines
 `claude-<name>-` where `<name>` is ASCII letters, digits, `_` and `-` not starting with `-` (the class spelled out,
 no locale): an empty, blank, CRLF or glob line, `claude-` alone or `__anchor__` is skipped without a word — an
 empty line compared as a prefix would match every session, and drift would adopt `__anchor__` and foreign sessions,
@@ -226,11 +235,15 @@ adds nothing to drift.log with the file or without it. On the box `server` v19 d
 with another name has no adoption until a v19 client launched there once.
 
 **The way back to v18.** When the installer replaces a v18 `restore.sh` or `drift.sh` it first keeps it next to
-it as `restore.sh.v18` / `drift.sh.v18` (copied, then renamed into place; logged to install.log; only from a v18
-script, never overwriting a copy that is there; `tmux-sockheal.sh` gets none, its v19 differs only in the compat line).
-Moving the two copies back is the rollback to v18 — an exception to "never edit drift/restore by hand" that only
-the lead may use, and only with Lukáš's explicit consent that day. It holds only while no v19 client launches a
-session on that box (its next install rewrites both to v19 again); otherwise the way back is a hotfix v20.
+it as `restore.sh.v18` / `drift.sh.v18` (copied to a temp file, which must not carry the v19 marker — v19's compat
+line names v18 too, so a script a second installer has just replaced also "is v18" — then published with `ln`, which
+never replaces a copy that is there; logged to install.log; `tmux-sockheal.sh` gets none, its v19 differs only in the
+compat line). Moving the two copies back is the rollback to v18 — an exception to "never edit drift/restore by hand"
+that only the lead may use, and only with Lukáš's explicit consent that day. It holds only while no v19 client launches
+a session on that box (its next install rewrites both to v19 again); otherwise the way back is a hotfix v20. Going back
+does not undo v19's adoptions: the sessions of another prefix v19 wrote into `sessions.restore.json` (and
+`manifests/highwater.json`) stay there, and v18's union reconcile and self-heal keep relaunching them (review D2 adv
+N3). On the box `server` this cannot happen — it has no `prefixes` file, so v19 adopts nothing v18 would not.
 
 `tmux-sockheal.sh` exits 0 (nothing to do), 3 (it was unusable and is usable again) or 1 (refused). A heal that
 failed (lock not taken within 2 s, listeners changed meanwhile, socket not back) mostly lost a race with another
