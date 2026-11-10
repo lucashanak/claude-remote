@@ -24,8 +24,11 @@ import kotlin.test.fail
 class SessionOpsParseTest {
 
     private val json = kotlinx.serialization.json.Json { ignoreUnknownKeys = true; coerceInputValues = true }
-    private val sid = "11111111-2222-3333-4444-555555555555"
-    private val sid2 = "22222222-2222-3333-4444-555555555555"
+    // N-T7 (dávka E, H4): fresh per test. `running_where` reads /proc/*/cmdline of the WHOLE machine, and other sessions
+    // and worktrees run these tests at the same time: a fixed id in a fake claude's argv there made a restore here
+    // RunningElsewhere (`restoreRefusesBeforeCreatingAnything`, 1× in D).
+    internal val sid = java.util.UUID.randomUUID().toString()
+    internal val sid2 = java.util.UUID.randomUUID().toString()
 
     private fun home(): File = java.nio.file.Files.createTempDirectory("crops-home").toFile()
 
@@ -83,6 +86,16 @@ class SessionOpsParseTest {
         val pb = ProcessBuilder(listOf(copy.absolutePath, "-c", "sleep 300; :", "x") + args).directory(home)
         pb.environment().putAll(env)
         return pb.start()
+    }
+
+    /** [p] and its children (the fake claude's `sleep 300`) gone, reaped: no /proc entry of them is left behind. */
+    private fun kill(p: Process?) {
+        if (p == null) return
+        val kids = p.descendants().toList()
+        kids.forEach { it.destroyForcibly() }
+        p.destroyForcibly()
+        p.waitFor()
+        kids.forEach { runCatching { it.onExit().get(10, TimeUnit.SECONDS) } }
     }
 
     // ---- closed.jsonl -----------------------------------------------------------------------
@@ -269,7 +282,7 @@ class SessionOpsParseTest {
             assertEquals("claude-server-m", m.tmuxName)
             assertEquals("acc", m.account); assertEquals(sid2, m.launchSessionId); assertEquals("OPUS", m.model); assertEquals("PLAN", m.mode)
         } finally {
-            claude?.destroyForcibly(); shell.destroyForcibly()
+            kill(claude); kill(shell)
             safeDeleteTree(h)
         }
     }
@@ -439,7 +452,7 @@ class SessionOpsParseTest {
                 assertEquals(RestoreResult.RunningElsewhere(null), restore())
                 assertEquals(RestoreResult.RunningElsewhere(null), restore(record(folder = h.absolutePath, s = sid2, l = null)))
             } finally {
-                c.destroyForcibly(); c.waitFor()
+                kill(c)
             }
             assertEquals(RestoreResult.LoggedOut("default"), restore(), "gone with its process")
             // the candidate is searched in the record's account too
@@ -456,9 +469,41 @@ class SessionOpsParseTest {
             File(d, "forgotten.d").mkdirs(); File(d, "forgotten.d/claude-server-p--a").writeText("")
             assertEquals(RestoreResult.LoggedOut("default"), restore(), "tombstoned: drift will drop it, not heal it")
         } finally {
-            sleeper.destroyForcibly()
+            kill(sleeper)
             safeDeleteTree(h)
         }
+    }
+
+    /**
+     * N-T7 (dávka E, H4): what made the test above flaky is the product's rule, and the rule is right: a claude that
+     * runs the conversation ANYWHERE on the machine (here: a process of another home) is a conversation running
+     * elsewhere, and the restore must not start a second one.
+     */
+    @Test fun aConversationRunInAProcessOfAnotherHomeIsRunningElsewhere() {
+        val h = home()
+        val other = home()
+        var c: Process? = null
+        try {
+            File(h, ".claude-remote").mkdirs()
+            val proj = File(h, ".claude/projects/" + h.absolutePath.replace(Regex("[^A-Za-z0-9]"), "-")).apply { mkdirs() }
+            File(proj, "$sid2.jsonl").writeText("{}\n")
+            fun restore() = SessionRestore.parse(bash(SessionRestore.restoreCommand(record(folder = h.absolutePath), waitS = 1), h).second)
+            assertEquals(RestoreResult.LoggedOut("default"), restore(), "control: nothing runs it")
+            c = fakeClaude(other, "--dangerously-skip-permissions", "--resume", sid2)
+            assertEquals(RestoreResult.RunningElsewhere(null), restore())
+            kill(c)
+            assertEquals(RestoreResult.LoggedOut("default"), restore(), "gone with its process")
+        } finally {
+            kill(c)
+            safeDeleteTree(h); safeDeleteTree(other)
+        }
+    }
+
+    /** N-T7: the ids that reach an argv or `running_where` are fresh for every test instance, never a shared constant. */
+    @Test fun theIdsInTheArgvOfTheFakeProcessesAreFreshForEveryTest() {
+        val other = SessionOpsParseTest()
+        assertTrue(sid != other.sid && sid2 != other.sid2 && sid != sid2, "fixed ids: $sid $sid2 / ${other.sid} ${other.sid2}")
+        listOf(sid, sid2).forEach { assertTrue(Regex("[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}").matches(it), it) }
     }
 
     // ---- opened markers in reconcileAll ------------------------------------------------------

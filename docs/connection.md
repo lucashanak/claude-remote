@@ -721,6 +721,90 @@ interval x 3 (~30 s at 10 s). Limits: a pending open on a SHELL transport (a fal
 pool's count (bounded by its 10 s / 20 s); and the half-dead detection exists for the exec transport only (a tab's
 shell transport relies on the keepalive).
 
+**When a counted slot comes back (dávka E, H1).** sshd counts a channel's session against `MaxSessions` until it has
+REAPED the command (`session_close_by_channel`: "has child … delay detach"), not until our CLOSE arrives; JSch forgets
+the channel at our `disconnect()`. A slot given back at our CLOSE could therefore be handed to the next open while sshd
+still held the old session: on a loaded box (slow reaping) the open was refused. Reproduced with the fixture's
+`SshdFixture.start(reapDelayMs = 400)` (each exec closes its output when the command ends and exits 400 ms later): on
+1bdcbd5 `ChannelBudgetIntegrationTest.n3r` (exec transport down, 12 tabs on 8 + 4) was refused 4-16 channels (9 runs of
+the author, the critic and the test review, every one red), and `n6` (exec transport up, five waves of six one-offs
+through `withSession`) 2-10 — the refusal rule took those for orphans (JSch had forgotten the channels, so "room
+left") and replaced the exec transport. The same race explains the GHA failure of `n3` without the delay (sshd held 2
+sessions whose slots the client had freed). Now:
+- `ChannelOpen.disconnect` leaves an exec whose output ended (`isEOF`) and that sshd has not closed yet to sshd's own
+  CLOSE, which sshd sends after the exit status, i.e. after the reap (our own CLOSE first would make sshd answer at once,
+  child alive or not, so JSch's `isClosed()` alone proves nothing). A closer on IO waits for it (polled every 10 ms;
+  JSch answers sshd's CLOSE itself and forgets the channel) at most `Tuning.closeWaitMs` (3 s), then closes the channel
+  itself (`exec channel closed by us after Nms without sshd's CLOSE`, at most one line a minute). No write on the
+  caller's thread. Any other channel (its command still runs: a watchdog, a reader that stopped early, an SFTP channel)
+  is closed at once as before. A channel sshd never answered lingers not at all; one sshd REFUSED lingers the grace
+  (JSch marks a refused open closed, so it looks like a channel that was open; harmless).
+- Every channel of a transport lingers from that `disconnect` until it settled (sshd's CLOSE, or ours) plus
+  `Tuning.settleGraceMs` (200 ms: sshd frees the session in its next loop, and over Cloudflare our CLOSE and the next
+  OPEN can arrive in one read). A linger that never settles (its closer stuck in a write to a full socket) counts as
+  settled `closeWaitMs` after it began, with one log line, so it cannot slow its transport down for good. The late
+  confirmation of an open its caller gave up on (it ran the no-op `true`) is left to sshd's own CLOSE like an exec whose
+  output ended (N2-4), and the slot the gate held for it comes back after it — also when the open ended in the instant
+  between the gate's hold and the hand-over of the slot (`Open.abandon`). The map of lingering channels holds a channel only weakly and drops a transport's
+  entry once nothing lingers there, so no transport is kept alive by it; the channel budget the gate registers for an
+  exec transport (`ChannelOpen.slots`) holds its transport weakly too (both kept every transport ever used alive
+  before, review A-EK1).
+- A counted slot comes back through `ChannelOpen.afterSettled(session)`: at once when nothing lingers on the transport,
+  else once every channel lingering THERE AT THAT MOMENT (its siblings too) has settled and the grace passed — on IO,
+  never waited for by the caller, at the latest `settleBoundMs()` = closeWait + grace + 1 s after. A failure inside the
+  closer is logged (`closer failed: …`) and ends nothing else; the release runs in a `finally`. Two places give a slot
+  back and both go through it: `ServerTransportPool.releaseChannel` (every counted channel of a tab transport: the
+  `TabChannel` tokens of the pollers, `withTabChannel`/`withTransferChannel`, `onServerTabChannel`, the fallbacks of
+  `execRun`/`execRead`/`useChannel`/`withSession`, the bootstrap, the LONG fallback stream) and the exec-transport
+  permits of `GatedExecChannels` (`release`; a fallback permit's local count comes back at once, the pool waits for
+  its own).
+- **Who waits for a settling slot, who skips (N-EK1, round 2; N2-1..N2-3, round 3).** The pool counts the slots given
+  back whose release still waits (`settling`). A one-off of the user or the app that falls back to a tab transport while
+  the exec transport is down or switched off and finds no room ONLY because of such slots waits for them: `execRun`,
+  `execRead`, `useChannel` (the SFTP stat, a transfer: upload, SFTP download), the bootstrap's `execOnTab`,
+  `onServerTabChannel` (the notify watcher, the accounts screen) — e.g. close facts, restore, launch, a reply, the usage
+  page's refresh, the tmux probes that decide launch/attach (`probeTmuxSession`, `probeTranscriptExists`: one per
+  reconnect, never in an interval, and fail-open, so not a turn that may be skipped). The wait
+  (`ServerTransportPool.awaitSettlingRoomAndClaim`) suspends, never blocks a thread, and TAKES the slot under the same
+  lock that sees it free, so a poll cannot take it in between; when a poll or another one-off was first it waits again,
+  for any slot given back, until its deadline. The deadline is the caller's own budget: what is left of `totalMs` minus
+  the floor of an open on the route of the transport it waits on (Cloudflare 1.5 s, LAN 0.3 s: N3-1, round 4; the
+  command then runs with the rest) for `execRun`/`execRead`/`execOnTab`, the
+  acquire timeout for `useChannel`, and `settleBoundMs()` (4.2 s) only for `onServerTabChannel`, which has none. It
+  starts only when the settling slots would make room: with nothing settling (the slot held by a channel still running,
+  8 shells and a LONG channel, a transfer that never fits) "no room" comes at once, as on 1bdcbd5. A periodic caller
+  skips its turn and never waits: `ExecKind.POLL` (transcript tick, status, refresh-client), `periodic = true` on
+  `execRead`/`execRun` (`ServerHealthService` ping, `UsageService` ccusage and rate-limit polls, `GitStatusService`),
+  the tab pollers' `reserveTabChannel`/`withTabChannel`, and `withSession`'s pooled fallback (`ConnectionRegistry.run`).
+  Not changed (a forbidden file in this batch): the reconcile loop of `SessionPersistenceService.newExecReconciler`
+  reads with the default and so waits within its budget. On the exec transport a SHORT caller of the gate waits for a
+  permit (up to its acquire timeout) as it always did, a POLL skips. (Without the wait, two `ExecWiringIntegrationTest`
+  cases failed: a second one-off right after a first on a packed transport got "no room"; `ChannelBudgetIntegrationTest.n7`:
+  six one-offs at once behind a settling slot on 8 packed shells with the polls running all ran, one after another,
+  0.6-3.7 s, refused 0.)
+- The price, measured on the loopback fixture: a counted slot is held ~the grace longer than its channel (plus the
+  reap when it lags). With 8 packed shells and the one reserve slot the transcript polls of `n3` in 12 s were 38-48
+  with the fix, without the delay and with it (≈ 10 runs of the author and the test review); one run of 1bdcbd5 polled
+  67 times, then with the refusals above.
+- Limits: a channel closed while its command still runs (a watchdog firing on a stuck tmux, a `tail -f`) gets only the
+  grace — sshd keeps its session until the command dies, and nothing tells us when; the test review's probe (`sleep 40`,
+  watchdog 1.5 s) saw 4 refusals and an exec-transport swap. Signalling the command (`sendSignal("KILL")`) and waiting
+  for sshd's CLOSE would close that, but it changes what a watchdog does: handed over. A reap slower than `closeWaitMs`
+  (probe: 3.8 s) brings the refusals back, on the exec transport with a swap (shell transports degrade to fewer polls).
+  The grace itself is not observable on the loopback fixture (sshd's next loop always comes before our next OPEN there;
+  only `ChannelSettleTest` holds it), and it was not measured over Cloudflare. A slot given back by `afterSettled` waits
+  for every channel lingering on the transport at that moment, never less than its own (bounded as above).
+  Channels closed with a bare `disconnect()` instead of `ChannelOpen.disconnect` linger not at all. Counted ones (their
+  slot comes back too early under slow reaping): `SessionPersistenceService:1586,1628,1689,1824` (session-id tick,
+  install, push), `RemoteOpsService:70,119,266,281,384,395` (scroll, the session/folder check, SFTP download and stat),
+  `NotificationService:688,778` (Stop hook, the watcher's tail). Streams ended on purpose, whose `use` then lingers
+  them the grace: `NotificationService:897,1268`, `TranscriptService:597` (watchdogs and teardown). Not counted
+  (the reserve covers them): `TmuxManager:118,231`, `SessionOrchestrator:1052`, `FolderBrowser:31`,
+  `CommandFetcher:35`, `ClaudeHistoryScanner:68`, `LogShipper:132`, `SshKeyManager:153`, `SshManager:325,385` (the
+  shell and its probe), `MoshManager:47`, `App.kt:1478,1666,1780,1800`; on purpose:
+  `RemoteExec.kt` `endWhenExecIsUp` (ends a stream). An open that runs detached on a SHELL transport still holds no
+  slot (see the limits of the health rule above).
+
 `PooledRemoteExec.run` runs one command on a gated channel, bounded by a wall-clock watchdog that
 is independent of the caller. The bound `totalMs` is an absolute deadline: waiting for a permit
 and for the transport spends it (`acquireTimeoutMs = min(5 s, what is left)`). It never returns a partial result: if the transport died before the
@@ -1008,7 +1092,8 @@ open logs `channel open failed src=<who> exitStatus=<n|n/a> route=… usable=…
 `ChannelBudget`; -1 = the server never answered, a dying transport; 1/2 = refused by sshd). Short
 fallbacks, `useChannel` fallbacks and the bootstrap's hold ONE counted channel for the whole call
 (`reserveFallbackChannel`, decided under the pool mutex so two callers cannot take the last slot) and give
-it back in `finally`; the LONG fallback of `GatedExecChannels` counts its channel the same way through the
+it back in `finally` (the slot itself is free again only once sshd freed the channel's session: see "When a counted
+slot comes back" under the exec channel budget); the LONG fallback of `GatedExecChannels` counts its channel the same way through the
 gate's `reserveFallback` hooks. Chosen over "back to cap 3 after exec has been down for X s" because it
 needs no migration of live shells and costs nothing while the exec transport is up. `SshSessionHelper.withSession`'s
 pooled step runs through `ConnectionRegistry` as its `FallbackRunner`: with a room check the block holds one counted

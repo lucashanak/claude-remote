@@ -78,9 +78,9 @@ class ChannelBudgetIntegrationTest {
     private val registry get() = orchestrator.connectionRegistry
     private val pool get() = registry.transportPool(serverId)
 
-    private fun boot(): SshdFixture {
+    private fun boot(reapDelayMs: Long = 0): SshdFixture {
         SshdFixture.unsupportedReason?.let { error("integration environment incomplete — $it") }
-        val f = SshdFixture.start().also { fixture = it }
+        val f = SshdFixture.start(reapDelayMs = reapDelayMs).also { fixture = it }
         storage.addServer(f.server)
         orchestrator = SessionOrchestrator(storage, tabs, SessionStorage(InMemoryKeyValueStore()))
         return f
@@ -263,8 +263,17 @@ class ChannelBudgetIntegrationTest {
 
     // ---- n3: exec transport down, 12 tabs on transports of 8 + 4 ------------------------------------------------------
 
-    @Test fun n3_withTheExecTransportDownTwelveTabsOnEightPlusFourAreNotRefused() {
-        val f = boot()
+    @Test fun n3_withTheExecTransportDownTwelveTabsOnEightPlusFourAreNotRefused() = n3(reapDelayMs = 0)
+
+    /**
+     * n3 with sshd reaping every command 400 ms after its output ended (dávka E, H1): the client saw EOF, closed the
+     * channel and gave its slot back while sshd still held the session, so the next open was refused (refused=9 on
+     * 1bdcbd5, first try). A counted slot now comes back only after sshd closed the channel and the grace passed.
+     */
+    @Test fun n3r_withTheExecTransportDownAndSlowReapingTwelveTabsOnEightPlusFourAreNotRefused() = n3(reapDelayMs = 400)
+
+    private fun n3(reapDelayMs: Long) {
+        val f = boot(reapDelayMs)
         val t = addTabs(f, 12)
         orchestrator.ensureExecTransport(serverId)
         execUp()
@@ -275,8 +284,93 @@ class ChannelBudgetIntegrationTest {
         startTabLoops(t)
         Thread.sleep(12_000)
         val refused = f.refusedChannelOpens() - r0
-        println("MEASURED n3 shellTransports=${pool.liveCount(TransportRole.SHELL)} refused=$refused skippedLines=${skippedLines()}")
+        val polls = pollsSince(f, t, 0).values
+        println("MEASURED n3 reapDelayMs=$reapDelayMs shellTransports=${pool.liveCount(TransportRole.SHELL)} refused=$refused " +
+            "skippedLines=${skippedLines()} transcriptPolls=${polls.sum()} minPerTab=${polls.min()}")
         assertEquals(0, refused, "sshd refused channels")
+    }
+
+    // ---- n6 (dávka E, H1 bod 6): the exec transport's gate against slow reaping -----------------------------------------
+
+    /**
+     * The exec transport is up and sshd reaps every command 400 ms after its output ended. Five waves of six one-offs at
+     * once through `withSession` (SHORT permits of the gate; each block reads its own exec to EOF the production way,
+     * `execReadWithWatchdog`): on 1bdcbd5 a wave opened its six while sshd still held the previous six (6 + 6 > 10), the
+     * refusals then looked like orphans to the refusal rule (JSch had forgotten the channels) and the transport was
+     * replaced. A permit of the gate now comes back only after sshd closed the channel and the grace passed.
+     */
+    @Test fun n6_withTheExecTransportUpAndSlowReapingBackToBackOneOffsAreNotRefused() {
+        val f = boot(reapDelayMs = 400)
+        addTabs(f, 1)
+        orchestrator.ensureExecTransport(serverId)
+        execUp()
+        val exec0 = orchestrator.execManager.session(serverId)
+        val r0 = f.refusedChannelOpens()
+        val res = (1..5).flatMap {
+            runBlocking {
+                (1..6).map {
+                    async(Dispatchers.IO) {
+                        runCatching {
+                            SshSessionHelper.withSession(f.server, timeout = 10_000, allowFresh = false) { sess ->
+                                com.clauderemote.session.service.execReadWithWatchdog(sess, "echo x", totalMs = 10_000).trim()
+                            }
+                        }
+                    }
+                }.awaitAll()
+            }
+        }
+        val refused = f.refusedChannelOpens() - r0
+        val ran = res.count { it.getOrNull() == "x" }
+        val sameTransport = orchestrator.execManager.session(serverId) === exec0
+        println("MEASURED n6 refused=$refused ran=$ran of ${res.size} sameExecTransport=$sameTransport " +
+            "failures=${res.mapNotNull { it.exceptionOrNull()?.message?.take(80) }.groupingBy { it }.eachCount()}")
+        assertEquals(0, refused, "sshd refused channels of the exec transport")
+        assertEquals(res.size, ran, "every one-off ran (the gate waits, it does not fail)")
+        assertTrue(sameTransport, "the exec transport was not replaced (refusals taken for orphans)")
+    }
+
+    // ---- n7 (dávka E, N2-1): concurrent one-offs and the tabs' polls on a packed transport with slow reaping ------------
+
+    /**
+     * 8 shells on ONE transport (one short slot), the exec transport down, sshd reaping each command 400 ms late, the
+     * tabs' own polls running — and six one-offs at once (`execRun`, 8 s each) the moment a first one-off's slot starts
+     * settling (so each of them finds no room only because of it, the condition for waiting; a one-off that finds the slot
+     * held by a channel still running gets "no room" at once, as on 1bdcbd5). A waiting one-off takes the slot under the
+     * lock that saw it free and waits again when a poll or a sibling was first: each one runs, or says "no room" only
+     * once its wait is over (its budget minus the 1.5 s floor). sshd refuses nothing.
+     */
+    @Test fun n7_concurrentOneOffsAndPollsOnAPackedTransportWithSlowReapingRunOrFailOnlyAtTheirDeadline() {
+        val f = boot(reapDelayMs = 400)
+        val t = addTabs(f, 8)
+        orchestrator.ensureExecTransport(serverId)
+        execUp()
+        connectShells(f, t.map { it.id })
+        assertEquals(1, pool.liveCount(TransportRole.SHELL), "8 shells ride ONE transport (cap 8)")
+        orchestrator.execManager.close(serverId)
+        Thread.sleep(800)
+        val r0 = f.refusedChannelOpens()
+        startTabLoops(t)
+        Thread.sleep(1_000)
+        val budgetMs = 8_000L
+        val res = runBlocking {
+            assertEquals("p", registry.execRun(serverId, "echo p", totalMs = budgetMs)?.stdout?.trim(), "the first one-off ran")
+            (1..6).map { i ->
+                async(Dispatchers.IO) {
+                    val t0 = System.nanoTime()
+                    val r = runCatching { registry.execRun(serverId, "echo x$i", totalMs = budgetMs)?.stdout?.trim() }
+                    Triple(i, r, (System.nanoTime() - t0) / 1_000_000)
+                }
+            }.awaitAll()
+        }
+        val refused = f.refusedChannelOpens() - r0
+        val ok = res.count { (i, r, _) -> r.getOrNull() == "x$i" }
+        val early = res.filter { (i, r, ms) -> r.getOrNull() != "x$i" && ms < budgetMs - 1_500 - 200 }
+        println("MEASURED n7 ok=$ok of ${res.size} refused=$refused tookMs=${res.map { it.third }.sorted()} " +
+            "notOk=${res.filter { (i, r, _) -> r.getOrNull() != "x$i" }.map { "${it.first}:${it.second.exceptionOrNull()?.message ?: it.second.getOrNull()}" }} " +
+            "transcriptPolls=${pollsSince(f, t, 0).values.sum()}")
+        assertEquals(0, refused, "sshd refused channels")
+        assertEquals(emptyList(), early.map { it.first }, "a one-off said no room before its wait was over: $early")
+        assertTrue(ok >= 1, "control: the one-offs ran")
     }
 
     // ---- K09: the forwards ride the exec transport, the shells carry none ---------------------------------------------

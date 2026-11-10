@@ -30,7 +30,7 @@ import java.util.concurrent.TimeUnit
  *                      can never touch the developer's real ones)
  *   - `TMUX_TMPDIR`  -> [tmuxTmpDir] (private tmux server)
  *   - `TMUX`/`TMUX_PANE` -> UNSET (see the safety note below)
- *   - `PATH`         -> [shims] first (see [writeShims])
+ *   - `PATH`         -> [shims] first (see [writeShims]); the private tmux server too ([tmux], [sandboxPath])
  *
  * Because it is enforced server-side, unmodified production code is sandboxed by
  * construction. The cost: the sftp subsystem is also force-commanded and so
@@ -130,7 +130,7 @@ internal class SshdFixture private constructor(
      * Run a local command with `TMUX`/`TMUX_PANE` stripped (see the safety note
      * on the class) and the sandbox `HOME`/`TMUX_TMPDIR` exported.
      */
-    fun run(vararg command: String, timeoutMs: Long = 30_000): ProcResult {
+    fun run(vararg command: String, timeoutMs: Long = 30_000, path: String? = null): ProcResult {
         // Output goes to a FILE, never a pipe. `tmux new-session -d` daemonizes a
         // server that inherits stdout, so a pipe never reaches EOF and reading it
         // to completion hangs forever even though the client already exited.
@@ -152,6 +152,7 @@ internal class SshdFixture private constructor(
                 remove("CLAUDE_CONFIG_DIR")
                 put("HOME", home.absolutePath)
                 put("TMUX_TMPDIR", tmuxTmpDir.absolutePath)
+                if (path != null) put("PATH", path)
             }
             val p = pb.start()
             if (!p.waitFor(timeoutMs, TimeUnit.MILLISECONDS)) {
@@ -170,7 +171,17 @@ internal class SshdFixture private constructor(
      * addressing the user's real server.
      */
     fun tmux(vararg args: String, timeoutMs: Long = 30_000): ProcResult =
-        run("tmux", "-S", tmuxSocket.absolutePath, *args, timeoutMs = timeoutMs)
+        run("tmux", "-S", tmuxSocket.absolutePath, *args, timeoutMs = timeoutMs, path = sandboxPath)
+
+    /**
+     * The PATH of every local tmux client, and so of the private server one of them starts (its global environment, which
+     * every pane inherits): the [shims] first, then the test shims and the system dirs — the same as wrap.sh gives a
+     * remote command. Never the JVM's PATH: on the dev box it holds `~/.local/bin`, where the REAL claude lives, and a
+     * pane that restore.sh or a launch created there would have run it (dávka E, review ED-test bod 6).
+     */
+    val sandboxPath: String get() =
+        listOfNotNull(shims.absolutePath, System.getProperty("clauderemote.test.shimDir"), "/usr/local/bin", "/usr/bin", "/bin", "/usr/sbin", "/sbin")
+            .joinToString(File.pathSeparator)
 
     /** Session names currently live on the private tmux server (empty if no server). */
     fun tmuxSessions(): List<String> {
@@ -454,15 +465,19 @@ internal class SshdFixture private constructor(
         /**
          * Start a fresh sandboxed sshd. Retries port selection: `ServerSocket(0)`
          * has an unavoidable bind race, so losing it once must not fail the suite.
+         *
+         * [reapDelayMs] > 0: every exec closes its output when the command ends and its process exits only that long
+         * after, so sshd keeps the channel's session (`MaxSessions`) after the client saw EOF, as on a loaded box where
+         * reaping lags (dávka E, H1). 0 (the default): the command is exec'd, as always.
          */
-        fun start(extraSshdConfig: String = ""): SshdFixture {
+        fun start(extraSshdConfig: String = "", reapDelayMs: Long = 0): SshdFixture {
             check(isSupported) { "SshdFixture.start() on an unsupported box — $unsupportedReason" }
             runCatching { sweepStaleRoots() }
             var lastError: Throwable? = null
             repeat(3) {
                 val root = mktempShortDir()
                 try {
-                    return build(root, extraSshdConfig)
+                    return build(root, extraSshdConfig, reapDelayMs)
                 } catch (e: Throwable) {
                     lastError = e
                     runCatching {
@@ -493,7 +508,7 @@ internal class SshdFixture private constructor(
             return File(out).also { it.setReadable(true, true); it.setExecutable(true, true) }
         }
 
-        private fun build(root: File, extraSshdConfig: String): SshdFixture {
+        private fun build(root: File, extraSshdConfig: String, reapDelayMs: Long): SshdFixture {
             val user = System.getProperty("user.name")
             root.chmod("700")
 
@@ -548,7 +563,12 @@ internal class SshdFixture private constructor(
                     exec '$sftpServer'
                 fi""" else "# no sftp-server binary found on this box: SFTP is not served"}
                 if [ -n "${'$'}{SSH_ORIGINAL_COMMAND:-}" ]; then
-                    exec bash -c "${'$'}SSH_ORIGINAL_COMMAND"
+                    ${if (reapDelayMs <= 0) """exec bash -c "${'$'}SSH_ORIGINAL_COMMAND"""" else """# reapDelayMs: the command's output ends (EOF to the client), its session in sshd only
+                    # ${reapDelayMs} ms later, as a slowly reaped command on a loaded box (dávka E, H1)
+                    bash -c "${'$'}SSH_ORIGINAL_COMMAND"; rc=${'$'}?
+                    exec >&- 2>&- </dev/null
+                    sleep ${"%.3f".format(java.util.Locale.ROOT, reapDelayMs / 1000.0)}
+                    exit ${'$'}rc"""}
                 fi
                 exec bash --noprofile --norc -i
 

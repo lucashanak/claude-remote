@@ -84,7 +84,7 @@ internal class GitStatusService(
             val output = if (ownSession != null) {
                 registry.withTabChannel(serverId, ownSession, "git") { execReadWithWatchdog(it, cmd, totalMs = 20_000) }?.value ?: return
             } else {
-                registry.execRead(serverId, cmd, totalMs = 20_000) ?: return
+                registry.execRead(serverId, cmd, totalMs = 20_000, periodic = true) ?: return
             }
             parseGitStatus(sessionId, output)
         } catch (_: Exception) {

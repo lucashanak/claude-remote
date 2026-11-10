@@ -123,7 +123,7 @@ internal class ServerHealthService(
                             // Missing connection (mid-reconnect) skips the round;
                             // the old `?: break` killed the loop permanently.
                             val start = System.currentTimeMillis()
-                            if (registry.execRead(serverId, "echo pong", totalMs = 10_000) == null) {
+                            if (registry.execRead(serverId, "echo pong", totalMs = 10_000, periodic = true) == null) {
                                 kotlinx.coroutines.delay(15_000)
                                 continue
                             }

@@ -206,27 +206,73 @@ internal class ConnectionRegistry(
      * unless it is a [transfer] (V12: an upload or SFTP download would hold that one slot for the whole transfer and
      * starve the polls of every tab on the transport).
      */
-    private suspend fun <T> onFallbackTab(serverId: String, kind: ExecKind, transfer: Boolean = false, block: suspend (Session) -> T): Fallback<T>? {
+    private suspend fun <T> onFallbackTab(
+        serverId: String,
+        kind: ExecKind,
+        transfer: Boolean = false,
+        /**
+         * N-EK1/N2-2/N2-3 (dávka E, rounds 2-3): how long this caller may wait for a slot that still settles in sshd. A
+         * one-off of the user or the app (close, restore, bootstrap, watcher, transfer) waits at most what is left of its
+         * own budget, and [com.clauderemote.connection.ChannelOpen.settleBoundMs] when it has none; 0 = never wait (a
+         * periodic caller: no room = skip the turn). A POLL never waits whatever this says. Asked for the session whose
+         * slot settles (N3-1, round 4): a budget leaves the floor of THAT session's route for the command (Cloudflare 1.5 s,
+         * LAN 0.3 s).
+         */
+        maxWaitMs: (Session) -> Long = { com.clauderemote.connection.ChannelOpen.settleBoundMs() },
+        block: suspend (Session) -> T,
+    ): Fallback<T>? {
+        val pool = transportPools[serverId]
+        val short = kind != ExecKind.LONG && !transfer
+        onFallbackTabOnce(serverId, kind, transfer, block)?.let { return it }
+        // a one-off that found no room only because slots given back on a tab transport still settle waits for them —
+        // suspending, until its deadline — and takes the slot under the same lock that saw it free (N2-1: a poll must not
+        // take it in between). Nothing settling there: no room at once, as before the deferral.
+        if (pool == null || kind == ExecKind.POLL) return null
+        val s = tabSessionsOf(serverId).firstOrNull { pool.roomOnceSettled(it, short) } ?: return null
+        val waitMs = maxWaitMs(s)
+        if (waitMs <= 0) return null
+        val deadline = System.nanoTime() + minOf(waitMs, com.clauderemote.connection.ChannelOpen.settleBoundMs()) * 1_000_000
+        if (!pool.awaitSettlingRoomAndClaim(s, short, deadline)) return null
+        return runClaimed(serverId, kind, transfer, pool, s, block)
+    }
+
+    /** The connected tab sessions of [serverId] (each transport once per tab riding it). */
+    private fun tabSessionsOf(serverId: String): List<Session> =
+        connections.entries.filter { (sid, m) -> tabManager.getTab(sid)?.server?.id == serverId && m.isConnected }.mapNotNull { it.value.getSession() }
+
+    private suspend fun <T> onFallbackTabOnce(serverId: String, kind: ExecKind, transfer: Boolean, block: suspend (Session) -> T): Fallback<T>? {
         val pool = transportPools[serverId]
         val short = kind != ExecKind.LONG && !transfer
         for ((sid, mgr) in connections) {
             if (tabManager.getTab(sid)?.server?.id != serverId || !mgr.isConnected) continue
             val s = mgr.getSession() ?: continue
             if (pool != null && !pool.reserveFallbackChannel(s, short = short)) continue
-            // K4-3: a LONG channel (the notify watcher's tail) holds its slot for good; transferMayFindRoom counts it
-            val held = if (pool != null && kind == ExecKind.LONG && !transfer) longChannels.computeIfAbsent(s) { java.util.concurrent.atomic.AtomicInteger() } else null
-            held?.incrementAndGet()
-            try {
-                return Fallback(block(s))
-            } catch (e: Exception) {
-                if (isChannelOpenFailure(e)) logChannelOpenFailed("fallback", serverId, s, null, e)
-                throw e
-            } finally {
-                held?.decrementAndGet()
-                if (pool != null) withContext(NonCancellable) { pool.releaseChannel(s) }
-            }
+            return runClaimed(serverId, kind, transfer, pool, s, block)
         }
         return null
+    }
+
+    /** [block] on [s], whose counted slot (when [pool] counts) is already taken; given back in `finally`. */
+    private suspend fun <T> runClaimed(
+        serverId: String,
+        kind: ExecKind,
+        transfer: Boolean,
+        pool: ServerTransportPool?,
+        s: Session,
+        block: suspend (Session) -> T,
+    ): Fallback<T> {
+        // K4-3: a LONG channel (the notify watcher's tail) holds its slot for good; transferMayFindRoom counts it
+        val held = if (pool != null && kind == ExecKind.LONG && !transfer) longChannels.computeIfAbsent(s) { java.util.concurrent.atomic.AtomicInteger() } else null
+        held?.incrementAndGet()
+        try {
+            return Fallback(block(s))
+        } catch (e: Exception) {
+            if (isChannelOpenFailure(e)) logChannelOpenFailed("fallback", serverId, s, null, e)
+            throw e
+        } finally {
+            held?.decrementAndGet()
+            if (pool != null) withContext(NonCancellable) { pool.releaseChannel(s) }
+        }
     }
 
     /**
@@ -422,7 +468,9 @@ internal class ConnectionRegistry(
      * transport has room. With routing off it is the legacy tab session, as before.
      */
     internal suspend fun execOnTab(serverId: String, cmd: String, totalMs: Long): String? =
-        if (needsRoom(serverId)) onFallbackTab(serverId, ExecKind.SHORT) { execReadWithWatchdog(it, cmd, totalMs = totalMs) }?.value
+        if (needsRoom(serverId)) Budget(totalMs).let { b ->
+            onFallbackTab(serverId, ExecKind.SHORT, maxWaitMs = b::waitMs) { execReadWithWatchdog(it, cmd, totalMs = b.leftMs()) }?.value
+        }
         else tabServerSession(serverId)?.let { execReadWithWatchdog(it, cmd, totalMs = totalMs) }
 
     /** Reconcile execs issued so far, over every server (the load figure of `data/60s exec=`). */
@@ -458,6 +506,8 @@ internal class ConnectionRegistry(
         paceStdin: Pace = Pace(),
         /** An upload: its fallback keeps off the reserve slot of a packed tab transport (V12), null = no room. */
         transfer: Boolean = false,
+        /** A periodic caller (its turn may be skipped): its fallback never waits for a settling slot (N2-2). */
+        periodic: Boolean = false,
     ): ExecResult? {
         val routed = remoteExec
         if (routed != null && execActive(serverId)) {
@@ -466,15 +516,18 @@ internal class ConnectionRegistry(
             } catch (e: ExecUnavailable) {
                 if (e.reason != ExecUnavailableReason.NOT_UP) throw e
             }
-            // exec transport not up: only a tab transport that has room for one more channel
-            return onFallbackTab(serverId, kind, transfer) { tab ->
-                PooledRemoteExec(UngatedExecChannels { tab }).run(serverId, cmd, stdin, totalMs, kind, paceStdin)
+            // exec transport not up: only a tab transport that has room for one more channel. A settling slot is waited
+            // for within the command's budget, and the command gets what is left of it (N2-3)
+            val b = Budget(totalMs)
+            return onFallbackTab(serverId, kind, transfer, maxWaitMs = if (periodic) NO_WAIT else b::waitMs) { tab ->
+                PooledRemoteExec(UngatedExecChannels { tab }).run(serverId, cmd, stdin, b.leftMs(), kind, paceStdin)
             }?.value
         }
         if (needsRoom(serverId)) {
             // routing switched off while shells are still packed 8 to a transport: the same counted fallback
-            return onFallbackTab(serverId, kind, transfer) { tab ->
-                PooledRemoteExec(UngatedExecChannels { tab }).run(serverId, cmd, stdin, totalMs, kind, paceStdin)
+            val b = Budget(totalMs)
+            return onFallbackTab(serverId, kind, transfer, maxWaitMs = if (periodic) NO_WAIT else b::waitMs) { tab ->
+                PooledRemoteExec(UngatedExecChannels { tab }).run(serverId, cmd, stdin, b.leftMs(), kind, paceStdin)
             }?.value
         }
         val tab = tabServerSession(serverId) ?: return null
@@ -494,10 +547,14 @@ internal class ConnectionRegistry(
         totalMs: Long = 15_000,
         kind: ExecKind = ExecKind.SHORT,
         stdin: ByteArray? = null,
+        /** A periodic caller (health ping, usage, git status): its fallback never waits for a settling slot (N2-2). */
+        periodic: Boolean = false,
     ): String? {
+        // started where the fallback starts (N2-3): a settling slot is waited for within the budget, the read gets the rest
+        var b = Budget(totalMs)
         val onTab: suspend (com.jcraft.jsch.Session) -> String = { tab ->
-            if (stdin == null) execReadWithWatchdog(tab, cmd, totalMs = totalMs)
-            else PooledRemoteExec(UngatedExecChannels { tab }).run(serverId, cmd, stdin, totalMs, kind, Pace()).stdout
+            if (stdin == null) execReadWithWatchdog(tab, cmd, totalMs = b.leftMs())
+            else PooledRemoteExec(UngatedExecChannels { tab }).run(serverId, cmd, stdin, b.leftMs(), kind, Pace()).stdout
         }
         val routed = remoteExec
         if (routed != null && execActive(serverId)) {
@@ -506,9 +563,10 @@ internal class ConnectionRegistry(
             } catch (e: ExecUnavailable) {
                 if (e.reason != ExecUnavailableReason.NOT_UP) throw e
             }
-            return onFallbackTab(serverId, kind) { tab -> onTab(tab) }?.value
+            b = Budget(totalMs)
+            return onFallbackTab(serverId, kind, maxWaitMs = if (periodic) NO_WAIT else b::waitMs) { tab -> onTab(tab) }?.value
         }
-        if (needsRoom(serverId)) return onFallbackTab(serverId, kind) { tab -> onTab(tab) }?.value
+        if (needsRoom(serverId)) return onFallbackTab(serverId, kind, maxWaitMs = if (periodic) NO_WAIT else b::waitMs) { tab -> onTab(tab) }?.value
         val tab = tabServerSession(serverId) ?: return null
         return onTab(tab)
     }
@@ -535,14 +593,34 @@ internal class ConnectionRegistry(
             } catch (e: ExecUnavailable) {
                 if (entered || e.reason != ExecUnavailableReason.NOT_UP) throw e
             }
-            return onFallbackTab(serverId, kind, transfer) { tab -> UngatedExecChannels { tab }.use(serverId, kind, acquireTimeoutMs, block) }
+            // the channel's budget is its acquire timeout: a settling slot is waited for within it (N2-3)
+            return onFallbackTab(serverId, kind, transfer, maxWaitMs = { acquireTimeoutMs }) { tab -> UngatedExecChannels { tab }.use(serverId, kind, acquireTimeoutMs, block) }
                 ?.value ?: throw ExecUnavailable(ExecUnavailableReason.NOT_UP)
         }
         if (needsRoom(serverId)) {
-            return onFallbackTab(serverId, kind, transfer) { tab -> UngatedExecChannels { tab }.use(serverId, kind, acquireTimeoutMs, block) }
+            // the channel's budget is its acquire timeout: a settling slot is waited for within it (N2-3)
+            return onFallbackTab(serverId, kind, transfer, maxWaitMs = { acquireTimeoutMs }) { tab -> UngatedExecChannels { tab }.use(serverId, kind, acquireTimeoutMs, block) }
                 ?.value ?: throw ExecUnavailable(ExecUnavailableReason.NOT_UP)
         }
         val tab = tabServerSession(serverId) ?: throw ExecUnavailable(ExecUnavailableReason.NOT_UP)
         return UngatedExecChannels { tab }.use(serverId, kind, acquireTimeoutMs, block)
     }
 }
+
+/**
+ * The time budget of one call ([totalMs], counted from now): what is left of it, and how long its fallback may wait for a
+ * settling slot on [session] (N2-3) — what is left minus the floor of a channel open on that session's route (N3-1:
+ * Cloudflare's 1.5 s, else LAN's 0.3 s), so the command still gets to run.
+ */
+private class Budget(private val totalMs: Long) {
+    private val t0 = System.nanoTime()
+    fun leftMs(): Long = (totalMs - (System.nanoTime() - t0) / 1_000_000).coerceAtLeast(1)
+    fun waitMs(session: Session): Long {
+        val t = com.clauderemote.connection.ChannelOpen.tuning
+        val floor = if (com.clauderemote.connection.ChannelOpen.isCloudflare(session)) t.minOpenCfMs else t.minOpenLanMs
+        return (leftMs() - floor).coerceAtLeast(0)
+    }
+}
+
+/** The fallback of a periodic caller never waits for a settling slot (N2-2). */
+private val NO_WAIT: (Session) -> Long = { 0L }

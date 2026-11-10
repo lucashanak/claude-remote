@@ -143,8 +143,10 @@ class SessionOpsIntegrationTest {
     private fun token(name: String): String =
         assertNotNull(CloseFactsCommands.token(cr("facts", name).out), "facts of $name gave no token")
 
-    private val sidA = "11111111-2222-3333-4444-555555555555"
-    private val sidB = "22222222-2222-3333-4444-555555555555"
+    // N-T7 (dávka E, H4): fresh per test — the stand-in claudes carry them in their argv, and `running_where` and the
+    // restore read /proc/*/cmdline of the whole machine, where other sessions run these tests at the same time
+    private val sidA = java.util.UUID.randomUUID().toString()
+    private val sidB = java.util.UUID.randomUUID().toString()
     private val nameA = "claude-server-projA-yolo--pdf"
     private val nameB = "claude-server-projB-yolo--peer"
 

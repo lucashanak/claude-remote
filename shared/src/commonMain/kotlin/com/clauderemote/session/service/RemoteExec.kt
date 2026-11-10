@@ -455,24 +455,31 @@ internal class GatedExecChannels(
     /** Slots still held for opens their callers gave up on (tests and diagnostics). */
     fun pendingOpens(serverId: String): Int = gates[serverId]?.let { g -> synchronized(g) { g.pending } } ?: 0
 
-    /** The budget of the exec transport [gen] of [gate], as [com.clauderemote.connection.ChannelOpen] sees it. */
-    private fun slotsOf(gate: Gate, gen: Long, session: com.jcraft.jsch.Session) = object : com.clauderemote.connection.ChannelOpen.Slots {
-        override fun hold(): () -> Unit {
-            val took = synchronized(gate) { if (gate.gen == gen) { gate.pending++; true } else false }
-            if (!took) return {}
-            val once = AtomicBoolean(false)
-            return {
-                if (once.compareAndSet(false, true)) {
-                    synchronized(gate) { if (gate.gen == gen && gate.pending > 0) gate.pending-- }
-                    gate.version.update { it + 1 }
+    /**
+     * The budget of the exec transport [gen] of [gate], as [com.clauderemote.connection.ChannelOpen] sees it. It holds its
+     * transport only weakly (A-EK1): `ChannelOpen` keeps it in a WeakHashMap keyed by that very session, and a strong
+     * reference from the value kept every exec transport ever used alive.
+     */
+    private fun slotsOf(gate: Gate, gen: Long, session: com.jcraft.jsch.Session): com.clauderemote.connection.ChannelOpen.Slots {
+        val ref = java.lang.ref.WeakReference(session)
+        return object : com.clauderemote.connection.ChannelOpen.Slots {
+            override fun hold(): () -> Unit {
+                val took = synchronized(gate) { if (gate.gen == gen) { gate.pending++; true } else false }
+                if (!took) return {}
+                val once = AtomicBoolean(false)
+                return {
+                    if (once.compareAndSet(false, true)) {
+                        synchronized(gate) { if (gate.gen == gen && gate.pending > 0) gate.pending-- }
+                        gate.version.update { it + 1 }
+                    }
                 }
             }
+            // review C1-1: the gate's own count (<= 8) is always below 10; what counts is what JSch really has open on the
+            // transport, pending opens included, against sshd's MaxSessions. Unreadable = no claim of room (the rule stays off).
+            override fun headroom(): Boolean = synchronized(gate) { gate.gen == gen } &&
+                (ref.get()?.let { com.clauderemote.connection.ChannelOpen.sessionChannels(it) }
+                    ?.let { it < com.clauderemote.connection.ChannelOpen.tuning.maxSessions } ?: false)
         }
-        // review C1-1: the gate's own count (<= 8) is always below 10; what counts is what JSch really has open on the
-        // transport, pending opens included, against sshd's MaxSessions. Unreadable = no claim of room (the rule stays off).
-        override fun headroom(): Boolean = synchronized(gate) { gate.gen == gen } &&
-            (com.clauderemote.connection.ChannelOpen.sessionChannels(session)
-                ?.let { it < com.clauderemote.connection.ChannelOpen.tuning.maxSessions } ?: false)
     }
 
     override suspend fun <T> use(
@@ -619,10 +626,22 @@ internal class GatedExecChannels(
         }
     }
 
+    /**
+     * Give [p] back. An exec-transport permit stands for a session of sshd, which sshd frees only after it reaped the
+     * command (dávka E, H1): it comes back once the channels lingering on the transport now have settled
+     * ([com.clauderemote.connection.ChannelOpen.afterSettled]); at once when none lingers, never waited for by the caller.
+     * A fallback permit: the shell transport's pool does the same for its own count ([releaseFallback]).
+     */
     private suspend fun release(p: Permit) {
         if (p.where == Where.FALLBACK) {
             kotlinx.coroutines.withContext(kotlinx.coroutines.NonCancellable) { releaseFallback(p.serverId, p.session) }
+            giveBack(p)
+            return
         }
+        com.clauderemote.connection.ChannelOpen.afterSettled(p.session) { giveBack(p) }
+    }
+
+    private fun giveBack(p: Permit) {
         synchronized(p.gate) {
             when (p.where) {
                 Where.FALLBACK -> if (p.gate.fallback > 0) p.gate.fallback--

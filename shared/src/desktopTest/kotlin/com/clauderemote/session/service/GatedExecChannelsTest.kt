@@ -413,4 +413,66 @@ class GatedExecChannelsTest {
             com.clauderemote.connection.ChannelOpen.resetForTest()
         }
     }
+    /**
+     * Dávka E, H1 (exec transport): a permit stands for a session of sshd, which sshd frees only after it reaped the
+     * command. An exec whose output ended but that sshd has not closed keeps its permit taken after the block, so a
+     * wave of one-offs cannot open 6 + 6 against `MaxSessions` 10 (`ChannelBudgetIntegrationTest.n6`: 20 refused on
+     * 1bdcbd5). The caller does not wait for it.
+     */
+    @Test fun aPermitComesBackOnlyOnceSshdClosedTheChannelOfIt() = bounded {
+        com.clauderemote.connection.ChannelOpen.resetForTest()
+        try {
+            class Ended(private val sess: Session) : ChannelExec() {
+                @Volatile var serverClosed = false
+                override fun getSession(): Session = sess
+                override fun isConnected(): Boolean = !serverClosed
+                override fun isClosed(): Boolean = serverClosed
+                override fun isEOF(): Boolean = true
+                override fun disconnect() { serverClosed = true }
+            }
+            lateinit var sess: FakeSession
+            val opened = mutableListOf<Ended>()
+            sess = FakeSession(channels = { Ended(sess).also { synchronized(opened) { opened += it } } })
+            val g = channels(Manager(sess), limits = GatedExecChannels.Limits(short = 1, long = 1, fallbackLong = 1))
+            val t0 = System.nanoTime()
+            g.use("s", ExecKind.SHORT) { "done" }
+            assertTrue((System.nanoTime() - t0) / 1_000_000 < 500, "the block's caller does not wait for sshd")
+            assertEquals(1, g.held("s").first, "the permit stays taken while sshd still holds the session")
+            val second = async { g.use("s", ExecKind.SHORT, acquireTimeoutMs = 5_000) { "second" } }
+            delay(300)
+            assertTrue(!second.isCompleted, "the next one waits for it")
+            opened.first().serverClosed = true
+            assertEquals("second", second.await())
+            opened.forEach { it.serverClosed = true }
+            withTimeout(3_000) { while (g.held("s") != Triple(0, 0, 0)) delay(10) }
+        } finally {
+            com.clauderemote.connection.ChannelOpen.resetForTest()
+        }
+    }
+    /**
+     * A-EK1 (dávka E, round 2): the channel budget the gate hands `ChannelOpen` for an exec transport holds that
+     * transport only weakly — before, the value of `ChannelOpen`'s WeakHashMap kept its own key (the session) alive, so
+     * every exec transport ever used stayed in memory.
+     */
+    @Test fun theExecGateKeepsNoTransportAliveOnceItIsGone() = bounded {
+        com.clauderemote.connection.ChannelOpen.resetForTest()
+        try {
+            val m = Manager(null)
+            val g = channels(m)
+            val ref = useOnce(m, g)
+            repeat(40) { if (ref.get() != null) { System.gc(); delay(50) } }
+            kotlin.test.assertNull(ref.get(), "the exec transport is collected once nobody uses it")
+        } finally {
+            com.clauderemote.connection.ChannelOpen.resetForTest()
+        }
+    }
+
+    /** One SHORT use on a fresh transport, which then goes away; only a weak reference to it comes back. */
+    private suspend fun useOnce(m: Manager, g: GatedExecChannels): java.lang.ref.WeakReference<Session> {
+        val s = sessionWith()
+        m.up = s
+        g.use("s", ExecKind.SHORT) { "ran" }
+        m.up = null
+        return java.lang.ref.WeakReference(s)
+    }
 }

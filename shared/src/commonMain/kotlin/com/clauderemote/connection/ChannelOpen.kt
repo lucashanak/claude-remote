@@ -7,6 +7,15 @@ import com.jcraft.jsch.Channel
 import com.jcraft.jsch.ChannelExec
 import com.jcraft.jsch.JSchException
 import com.jcraft.jsch.Session
+import kotlinx.coroutines.CoroutineExceptionHandler
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 
@@ -36,6 +45,15 @@ import java.util.concurrent.TimeUnit
  *    while the session channels JSch has on the transport stay below sshd's `MaxSessions` ([Tuning.maxSessions],
  *    [Slots.headroom]) is evidence of orphans: [Tuning.refusedAfter] of them (over the transport's life) make
  *    [Watch.dead] too.
+ *
+ * And the END of a channel as sshd counts it (dávka E, H1): sshd frees the session behind a channel (what `MaxSessions`
+ * counts) only once it has reaped the command, not when our CLOSE arrives. An exec whose output ended ([Channel.isEOF])
+ * but that sshd has not closed yet is therefore not closed by [disconnect] at once: sshd closes it itself once the command
+ * is reaped (exit status, then CLOSE), and a closer on IO waits for that CLOSE ([Tuning.closeWaitMs] at most, then it
+ * closes it itself). Until then, and [Tuning.settleGraceMs] after it (sshd frees the session in its next loop), the
+ * channel lingers on its transport; a counted slot of the transport is given back only after the channels lingering at
+ * that moment settled ([afterSettled]). Without that the client gave a slot back while sshd still held the session, and
+ * the next open was refused (`ChannelBudgetIntegrationTest.n3`, refused 9 with a 400 ms reap delay).
  */
 internal object ChannelOpen {
     data class Tuning(
@@ -49,6 +67,10 @@ internal object ChannelOpen {
         val refusedAfter: Int = 2,
         /** sshd's `MaxSessions` as the refusal rule assumes it (OpenSSH's default). */
         val maxSessions: Int = 10,
+        /** How long an exec whose output ended may wait for sshd's own CLOSE before we close it ourselves. */
+        val closeWaitMs: Long = 3_000,
+        /** After the CLOSE: sshd frees the session in its next loop. A counted slot comes back this long after it. */
+        val settleGraceMs: Long = 200,
     )
 
     /** The limits; a seam for tests (reset with [resetForTest]). */
@@ -85,6 +107,31 @@ internal object ChannelOpen {
     private val watches = java.util.Collections.synchronizedMap(java.util.WeakHashMap<Session, Watch>())
     private val slots = java.util.Collections.synchronizedMap(java.util.WeakHashMap<Session, Slots>())
     private val health = java.util.WeakHashMap<Session, Health>()
+
+    /**
+     * A channel we are done with, until sshd has surely freed its session; [settledNanos] 0 = its closer still waits.
+     * Only a weak reference to the channel (A-EK1): `Channel.session` is the map's key, and a strong one kept every
+     * transport that ever had a lingering channel alive for good (the WeakHashMap never let go of it).
+     */
+    private class Linger(ch: Channel) {
+        val ref = java.lang.ref.WeakReference(ch)
+        val createdNanos = System.nanoTime()
+        @Volatile var settledNanos = 0L
+    }
+
+    /** Per transport, the channels that linger (guarded by itself). */
+    private val lingering = java.util.WeakHashMap<Session, MutableList<Linger>>()
+    private var closedByUs = 0
+    private var closedByUsLogNanos = Long.MIN_VALUE
+
+    /**
+     * Closers and delayed slot releases: never on the caller's thread, never waited for. A failure in one is logged and
+     * ends only that one (A-EK6: on Android an uncaught exception there would end the app); the slot it was to give back
+     * is given back in its `finally` all the same.
+     */
+    private val closer = CoroutineScope(SupervisorJob() + Dispatchers.IO + CoroutineExceptionHandler { _, e ->
+        runCatching { FileLogger.log(TAG, "closer failed: ${e.javaClass.simpleName}: ${e.message}") }
+    })
 
     /** Channels whose open runs detached right now: the open owns them, not the caller (identity). */
     private val pending = java.util.Collections.newSetFromMap(java.util.IdentityHashMap<Channel, Boolean>())
@@ -136,11 +183,147 @@ internal object ChannelOpen {
     /** Whether the open of [ch] still runs detached (tests). */
     fun isPending(ch: Channel): Boolean = synchronized(pending) { ch in pending }
 
-    /** Disconnect [ch] unless its open still runs detached — that open closes it once it resolves. */
+    /**
+     * Disconnect [ch] unless its open still runs detached — that open closes it once it resolves. An exec whose output
+     * ended and that sshd has not closed yet is left to sshd's own CLOSE (see the class doc): never a write here, the
+     * closer on IO does it. Either way the channel lingers on its transport until it settled ([afterSettled]).
+     */
     fun disconnect(ch: Channel) {
         if (synchronized(pending) { ch in pending }) return
+        val session = try { ch.session } catch (_: Exception) { null }
+        if (session != null && ch is ChannelExec && outputEnded(ch)) {
+            val l = linger(session, ch) ?: return   // its closer already runs
+            closer.launch { closeWhenSshdDid(ch, l) }
+            return
+        }
+        // a channel sshd never confirmed has no session there: nothing lingers (JSch's own CLOSE flag says whether it
+        // was ever open — set when sshd closed it, or by our own disconnect of an open channel)
+        val wasOpen = try { ch.isConnected || ch.isClosed } catch (_: Exception) { false }
         try { ch.disconnect() } catch (_: Exception) {}
+        // closed without waiting (its command may still run, or sshd closed it already): only the grace protects it
+        if (session != null && wasOpen) linger(session, ch)?.let { it.settledNanos = System.nanoTime() }
     }
+
+    /**
+     * The late confirmation of an open its caller gave up on (N2-4): it runs [NOOP_COMMAND], which ends at once, so sshd
+     * closes the channel itself once it reaped it — left to that CLOSE like an exec whose output ended. Anything else (never
+     * confirmed, not an exec, already closed) goes through [disconnect].
+     */
+    private fun closeLate(ch: Channel) {
+        val session = try { ch.session } catch (_: Exception) { null }
+        val open = try { ch is ChannelExec && ch.isConnected && !ch.isClosed } catch (_: Exception) { false }
+        if (session == null || !open) return disconnect(ch)
+        val l = linger(session, ch) ?: return
+        closer.launch { closeWhenSshdDid(ch, l) }
+    }
+
+    /** The command's output ended and sshd has not closed the channel yet (it will once it reaped the command). */
+    private fun outputEnded(ch: ChannelExec): Boolean =
+        try { ch.isConnected && !ch.isClosed && ch.isEOF } catch (_: Exception) { false }
+
+    private suspend fun closeWhenSshdDid(ch: Channel, l: Linger) {
+        val t0 = System.nanoTime()
+        val deadline = t0 + tuning.closeWaitMs * 1_000_000
+        try {
+            // JSch answers sshd's CLOSE on its own thread and forgets the channel: isConnected turns false
+            while (ch.isConnected && !ch.isClosed && System.nanoTime() < deadline) delay(CLOSE_POLL_MS)
+        } finally {
+            val byUs = try { ch.isConnected } catch (_: Exception) { false }
+            try { ch.disconnect() } catch (_: Exception) {}
+            l.settledNanos = System.nanoTime()
+            if (byUs) noteClosedByUs((l.settledNanos - t0) / 1_000_000)
+        }
+    }
+
+    /** sshd did not close an exec whose output ended within [Tuning.closeWaitMs]: we did (one line a minute, with the count). */
+    private fun noteClosedByUs(waitedMs: Long) {
+        val now = System.nanoTime()
+        val n = synchronized(lingering) {
+            closedByUs++
+            if (closedByUsLogNanos != Long.MIN_VALUE && now - closedByUsLogNanos < REFUSED_LOG_EVERY_NS) return
+            closedByUsLogNanos = now
+            closedByUs.also { closedByUs = 0 }
+        }
+        FileLogger.log(TAG, "exec channel closed by us after ${waitedMs}ms without sshd's CLOSE ($n since the last line): " +
+            "its slot came back on the grace alone")
+    }
+
+    /**
+     * Run [release] (giving back a counted slot of [session]'s transport) once every channel lingering on [session]
+     * NOW has settled and [Tuning.settleGraceMs] passed after the last of them: at once when none lingers, else later on
+     * IO; the caller never waits for it. Bounded: a closer ends within [Tuning.closeWaitMs].
+     */
+    suspend fun afterSettled(session: Session?, onDeferred: suspend () -> Unit = {}, release: suspend () -> Unit) {
+        val wait = session?.let { lingeringOn(it) }
+        if (wait == null) {
+            release()
+            return
+        }
+        // the caller learns it is deferred before the release can possibly run (its count of settling slots)
+        onDeferred()
+        closer.launch {
+            try {
+                withTimeoutOrNull(tuning.closeWaitMs + tuning.settleGraceMs + SETTLE_SLACK_MS) {
+                    // every one of them, the siblings too: sshd counts all of them against the same MaxSessions
+                    for (l in wait) while (settledAt(l) == 0L) delay(CLOSE_POLL_MS)
+                    val left = wait.maxOf { settledAt(it) } + tuning.settleGraceMs * 1_000_000 - System.nanoTime()
+                    if (left > 0) delay((left + 999_999) / 1_000_000)
+                }
+            } finally {
+                withContext(NonCancellable) { release() }
+            }
+        }
+    }
+
+    /**
+     * When [l] settled; a linger that never settles (its closer stuck in a write to a full socket) counts as settled
+     * [Tuning.closeWaitMs] after it began, with one line in the log (A-EK5): it must not slow every later release of
+     * its transport down for the transport's whole life.
+     */
+    private fun settledAt(l: Linger): Long {
+        val s = l.settledNanos
+        if (s != 0L) return s
+        val cap = l.createdNanos + tuning.closeWaitMs * 1_000_000
+        if (System.nanoTime() < cap) return 0L
+        synchronized(l) {
+            if (l.settledNanos == 0L) {
+                l.settledNanos = cap
+                runCatching { FileLogger.log(TAG, "a lingering channel did not settle within ${tuning.closeWaitMs}ms: counted as settled") }
+            }
+        }
+        return l.settledNanos
+    }
+
+    /** Channels of [session] that have not settled yet, or settled less than the grace ago; null = none. */
+    private fun lingeringOn(session: Session): List<Linger>? = synchronized(lingering) {
+        val list = lingering[session] ?: return null
+        prune(session, list)
+        list.toList().takeIf { it.isNotEmpty() }
+    }
+
+    /** The longest a release deferred by [afterSettled] can take: a caller waiting for it never waits longer. */
+    fun settleBoundMs(): Long = tuning.closeWaitMs + tuning.settleGraceMs + SETTLE_SLACK_MS
+
+    /** Channels lingering on [session] now (tests, diagnostics). */
+    fun lingeringCount(session: Session): Int = lingeringOn(session)?.size ?: 0
+
+    /** A new [Linger] of [ch] on [session], or null when [ch] lingers already. */
+    private fun linger(session: Session, ch: Channel): Linger? = synchronized(lingering) {
+        lingering[session]?.let { prune(session, it) }
+        val list = lingering.getOrPut(session) { mutableListOf() }
+        if (list.any { it.ref.get() === ch }) null else Linger(ch).also { list += it }
+    }
+
+    /** Drop what settled more than the grace ago; an emptied list leaves the map (the session's entry with it). */
+    private fun prune(session: Session, list: MutableList<Linger>) {
+        val now = System.nanoTime()
+        val graceNs = tuning.settleGraceMs * 1_000_000
+        list.removeAll { settledAt(it).let { s -> s != 0L && now - s >= graceNs } }
+        if (list.isEmpty()) lingering.remove(session)
+    }
+
+    /** Sessions with a lingering entry right now (tests: no entry may outlive its grace). */
+    fun lingeringSessions(): Int = synchronized(lingering) { lingering.size }
 
     /**
      * Open [ch] (an exec's command already set) within [budgetMs], from a blocking context. Throws what `ch.connect` threw
@@ -227,10 +410,15 @@ internal object ChannelOpen {
                 done.countDown()
                 if (gaveUp) {
                     // confirmed late: connected, so the disconnect sends CLOSE and sshd frees the session (no orphan);
-                    // never confirmed: there is nothing on the wire to close
-                    try { ch.disconnect() } catch (_: Throwable) {}
+                    // never confirmed: there is nothing on the wire to close. The late one ran the no-op in sshd, whose
+                    // session sshd frees after reaping it: it lingers like any other channel, and the slot held for it
+                    // comes back once it settled (A-EK4)
                     synchronized(pending) { pending.remove(ch) }
-                    synchronized(this) { finished = true; giveBack }?.invoke()
+                    // N2-4: a confirmed one runs only the no-op, so sshd closes it itself as soon as it reaped it — wait for
+                    // that CLOSE like for an exec whose output ended, instead of closing at once on the grace alone
+                    try { closeLate(ch) } catch (_: Throwable) {}
+                    val back = synchronized(this) { finished = true; giveBack }
+                    if (back != null) closer.launch { afterSettled(session) { back() } }
                     FileLogger.log(TAG, "detached channel open on ${route(onCf)} resolved after ${tookMs}ms " +
                         (if (err == null) "(answered late: closed)" else "(${err.message})"))
                 }
@@ -249,7 +437,9 @@ internal object ChannelOpen {
             // outside the lock: the gate takes its own. The open may end meanwhile: then the slot goes back right here
             val back = keep?.hold() ?: return true
             val now = synchronized(this) { if (finished) true else { giveBack = back; false } }
-            if (now) back()
+            // the open ended between the hold and here: its channel may still linger, so the slot comes back the same
+            // settled way as when the open ends later (N2-4), never directly
+            if (now) closer.launch { afterSettled(session) { back() } }
             return true
         }
     }
@@ -316,8 +506,12 @@ internal object ChannelOpen {
         slots.clear()
         cloudflare.clear()
         synchronized(health) { health.clear() }
+        synchronized(lingering) { lingering.clear(); closedByUs = 0; closedByUsLogNanos = Long.MIN_VALUE }
     }
 
     private const val TAG = "ChannelOpen"
     private const val REFUSED_LOG_EVERY_NS = 60_000_000_000L
+    private const val CLOSE_POLL_MS = 10L
+    /** A delayed release is given back at the latest this long after its bound, whatever its closers do. */
+    private const val SETTLE_SLACK_MS = 1_000L
 }

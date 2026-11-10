@@ -13,6 +13,8 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.selects.select
 import kotlinx.coroutines.sync.Mutex
@@ -157,6 +159,8 @@ class ServerTransportPool(
         var extraChannels = 0
         /** Slots promised to waiters of the handshake that created it, not yet claimed. Under the mutex. */
         var reserved = 0
+        /** Of [extraChannels], the ones already given back whose channel still lingers in sshd (dávka E, H1). Under the mutex. */
+        var settling = 0
         /** The server refused a channel here (MaxSessions) — see [reportFull]. */
         @Volatile var full = false
         /** Write-timeout zombie flag — see [reportDead]. */
@@ -219,9 +223,68 @@ class ServerTransportPool(
         true
     }
 
-    /** Give back a channel taken with [reserveChannel]. */
-    internal suspend fun releaseChannel(session: Session) = mutex.withLock {
-        transports.firstOrNull { it.session === session }?.let { if (it.extraChannels > 0) it.extraChannels-- }
+    /**
+     * Give back a channel taken with [reserveChannel] or [reserveFallbackChannel] — once sshd has freed it too (dávka E,
+     * H1): sshd frees a session only after it reaped the command, so the slot comes back when the channels lingering on
+     * [session] now have settled ([ChannelOpen.afterSettled]); at once when none lingers. The caller never waits for it.
+     */
+    internal suspend fun releaseChannel(session: Session) {
+        var deferred = false
+        ChannelOpen.afterSettled(session, onDeferred = {
+            deferred = true
+            mutex.withLock { transports.firstOrNull { it.session === session }?.let { it.settling++ } }
+        }) {
+            mutex.withLock {
+                transports.firstOrNull { it.session === session }?.let {
+                    if (it.extraChannels > 0) it.extraChannels--
+                    if (deferred && it.settling > 0) it.settling--
+                }
+            }
+            // every slot given back wakes the one-offs waiting for room, deferred or not (N2-1)
+            settled.update { it + 1 }
+        }
+    }
+
+    /** Bumped whenever a counted slot came back, deferred or not ([awaitSettlingRoomAndClaim] wakes on it). */
+    private val settled = kotlinx.coroutines.flow.MutableStateFlow(0L)
+
+    /**
+     * N-EK1/N2-1 (dávka E, rounds 2-3): a one-off (not a poll) that found no room on [session]'s transport only because
+     * slots given back there still settle ([releaseChannel]) waits for them — suspending, never blocking a thread — until
+     * [deadlineNanos], and TAKES the slot (counted like [reserveFallbackChannel]) under the same lock that sees it free,
+     * so a poll cannot take it in between. It starts only when the settling slots would make room; once waiting, a
+     * wake-up that brought no room (a poll or another one-off took the slot) makes it wait again, for any slot given back,
+     * until the deadline. True = the slot is taken (pair with [releaseChannel]); false = no room: at once when nothing
+     * settles there (as before the deferral), else at the deadline, or when the transport is gone, dead or full.
+     */
+    internal suspend fun awaitSettlingRoomAndClaim(session: Session, short: Boolean, deadlineNanos: Long): Boolean {
+        var first = true
+        while (true) {
+            val seen = settled.value
+            val wait = mutex.withLock {
+                val t = transports.firstOrNull { it.session === session && it.role == TransportRole.SHELL } ?: return false
+                if (!t.usable || t.full) return false
+                if (t.hasFallbackHeadroom(short)) {
+                    t.extraChannels++
+                    return true
+                }
+                !first || (t.settling > 0 && t.hasFallbackHeadroom(short, settledToo = true))
+            }
+            first = false
+            if (!wait) return false
+            val left = (deadlineNanos - System.nanoTime()) / 1_000_000
+            if (left <= 0) return false
+            withTimeoutOrNull(left) { settled.first { it != seen } }
+        }
+    }
+
+    /** Slots of [session]'s transport given back whose release still waits for sshd (tests: never left behind). */
+    internal suspend fun settlingOf(session: Session): Int = mutex.withLock { transports.firstOrNull { it.session === session }?.settling ?: 0 }
+
+    /** Whether [session]'s transport has no room now but would once its settling slots came back (look-only). */
+    internal fun roomOnceSettled(session: Session, short: Boolean): Boolean {
+        val t = transports.firstOrNull { it.session === session && it.role == TransportRole.SHELL } ?: return false
+        return t.usable && !t.full && t.settling > 0 && !t.hasFallbackHeadroom(short) && t.hasFallbackHeadroom(short, settledToo = true)
     }
 
     /** Some usable shell transport carries more shells than the legacy cap: only then does a transient channel risk `MaxSessions`. */
@@ -265,8 +328,9 @@ class ServerTransportPool(
      * be in use afterwards, so two short channels can never both sit in the reserve (they serialize), and a long one
      * never fits once a short one sits there.
      */
-    private fun Transport.hasFallbackHeadroom(short: Boolean): Boolean =
-        lessees.size + reserved + extraChannels + 1 + FALLBACK_RESERVE - (if (short) SHORT_RESERVE_SLOTS else 0) <= SSHD_MAX_SESSIONS
+    private fun Transport.hasFallbackHeadroom(short: Boolean, settledToo: Boolean = false): Boolean =
+        lessees.size + reserved + extraChannels - (if (settledToo) settling else 0) + 1 + FALLBACK_RESERVE -
+            (if (short) SHORT_RESERVE_SLOTS else 0) <= SSHD_MAX_SESSIONS
 
     /** The route (`lan|tunnel|cf|unknown`) the pooled [session] took; `unknown` if it is not ours. */
     internal fun routeOf(session: Session): String = transports.firstOrNull { it.session === session }?.route ?: "unknown"

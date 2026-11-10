@@ -551,6 +551,8 @@ class PoolV2IntegrationTest {
         val results = hammer(PooledRemoteExec(gate), f.server.id, 20)
         assertEquals(0, results.count { it.isFailure }, "gated: every run succeeds: ${results.mapNotNull { it.exceptionOrNull()?.message }}")
         assertEquals(0, f.refusedChannelOpens(), "the gate kept the server from ever refusing a channel")
+        // dávka E, H1: a permit comes back once sshd freed its channel's session (plus 200 ms), not at the block's end
+        waitUntil(5_000, "every permit back") { gate.held(f.server.id) == Triple(0, 0, 0) }
         assertEquals(Triple(0, 0, 0), gate.held(f.server.id))
     }
 

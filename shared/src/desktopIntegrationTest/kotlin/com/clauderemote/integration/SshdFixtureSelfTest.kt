@@ -111,4 +111,22 @@ class SshdFixtureSelfTest {
         /** SSH open-failure reason codes jsch exposes via exitStatus: 1 = administratively prohibited, 2 = connect failed. */
         val REFUSAL_EXIT_STATUSES = setOf(1, 2)
     }
+    /**
+     * Dávka E (review ED-test bod 6): the private tmux server gets the shims first on its PATH, so a pane that restore.sh
+     * or a launch creates there finds the claude stand-in, never the real `~/.local/bin/claude` of the dev box. Only
+     * `command -v` here: nothing named claude is ever run by this test.
+     */
+    @Test fun thePrivateTmuxServerHasTheShimsFirstOnItsPathAndAPaneFindsTheClaudeShim() {
+        val f = start()
+        f.startTmuxServer()
+        val env = f.tmux("show-environment", "-g", "PATH").out.trim()
+        assertTrue(env.startsWith("PATH="), "the server's global PATH: $env")
+        val path = env.removePrefix("PATH=").split(File.pathSeparator)
+        assertEquals(f.shims.absolutePath, path.first(), "the shims come first: $path")
+        assertTrue(path.none { it.contains("/.local/") }, "no user bin dir on the server's PATH: $path")
+        val out = File(f.home, "which-claude")
+        f.tmux("new-session", "-d", "-s", "which-claude", "bash --noprofile --norc -c 'command -v claude > \"${out.absolutePath}\"; sleep 30'")
+        waitUntil(10_000, "the pane resolved claude") { out.isFile && out.length() > 0 }
+        assertEquals(File(f.shims, "claude").absolutePath, out.readText().trim(), "a pane finds the stand-in")
+    }
 }

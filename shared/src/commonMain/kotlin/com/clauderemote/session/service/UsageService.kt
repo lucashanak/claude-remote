@@ -199,6 +199,7 @@ internal class UsageService(
                                 "which ccusage >/dev/null 2>&1 || npm install -g ccusage >/dev/null 2>&1; ccusage blocks --active --json --offline --no-color 2>/dev/null || echo '{}'",
                                 totalMs = 60_000,
                                 kind = ExecKind.SHORT,
+                                periodic = true,
                             )
                             if (output != null) parseUsageJson(output)
                         } catch (_: Exception) {}
@@ -242,7 +243,7 @@ internal class UsageService(
                             // command names the account's credentials path
                             // explicitly, so it does not matter which session's
                             // transport carries it.
-                            val output = registry.execRead(serverId, cmd, totalMs = 10_000)
+                            val output = registry.execRead(serverId, cmd, totalMs = 10_000, periodic = true)
                             if (output != null) {
                                 if (isRateLimited(output)) {
                                     // Back off instead of retrying into the wall.
