@@ -24,16 +24,26 @@ import kotlin.test.assertTrue
  */
 class ServerBootstrapTest {
 
-    private class FakeExec(val handler: suspend (serverId: String, cmd: String) -> String) : RemoteExec {
+    /**
+     * [calls] and [handler] see what runs on the server: the script on stdin behind [StdinScript.EXEC] (D3, the
+     * `cr-session` install), else the command; a launched script's answer gets the launcher's end marker unless
+     * [marked] says otherwise. [requests] are the exec requests themselves.
+     */
+    private class FakeExec(val marked: Boolean = true, val handler: suspend (serverId: String, cmd: String) -> String) : RemoteExec {
         val calls = mutableListOf<Pair<String, String>>()
+        val requests = mutableListOf<Pair<String, Pace>>()
         val callTimes = mutableListOf<Long>()
         var now: () -> Long = { 0 }
         override suspend fun run(
             serverId: String, cmd: String, stdin: ByteArray?, totalMs: Long, kind: ExecKind, paceStdin: Pace,
         ): ExecResult {
-            calls += serverId to cmd
+            val launched = cmd == StdinScript.EXEC
+            val script = if (launched) stdin!!.decodeToString().removeSuffix("\n" + StdinScript.END + "\n") else cmd
+            calls += serverId to script
+            requests += cmd to paceStdin
             callTimes += now()
-            return ExecResult(handler(serverId, cmd), 0)
+            val out = handler(serverId, script)
+            return ExecResult(if (launched && marked) out + "\n" + StdinScript.MARK + "0\n" else out, 0)
         }
     }
 
@@ -366,9 +376,36 @@ class ServerBootstrapTest {
         s.bootstrap.ensure("a")
         assertEquals(2, exec.calls.size)
         assertEquals(SessionOpsScript.INSTALL_COMMAND, exec.calls[1].second)
+        // D3: the installer goes on stdin behind the short launcher, paced like every upload
+        assertEquals(StdinScript.EXEC to Pace(), exec.requests[1])
         assertTrue(logs.single { it.startsWith("Server bootstrap srv-a:") }.contains("sessionOps=SESSIONOPS_INSTALLED"))
         s.bootstrap.ensure("a")
         assertEquals(2, exec.calls.size, "memoized like any good bootstrap")
+    }
+
+    /** D3: an install whose answer has no end marker did not run (or its end went unseen): failed, never "installed". */
+    @Test fun anInstallWithoutTheEndMarkerIsAFailedInstall() = runTest {
+        val exec = FakeExec(marked = false) { _, cmd ->
+            if (cmd == SessionOpsScript.INSTALL_COMMAND) "SESSIONOPS_INSTALLED\n" else withSessionOps(SessionOpsScript.CHECK_NEEDED)
+        }
+        val s = newBootstrap(exec)
+        s.bootstrap.ensure("a")
+        assertEquals(2, exec.calls.size)
+        val line = logs.single { it.startsWith("Server bootstrap srv-a:") }
+        assertTrue(line.contains("sessionOps=SESSIONOPS_FAILED (incomplete"), line)
+    }
+
+    /** D3 (a recorded limit): with the exec transport down the install's fallback still sends the installer as the argument. */
+    @Test fun theInstallsFallbackSendsTheInstallerAsBefore() = runTest {
+        val exec = FakeExec { _, cmd ->
+            if (cmd == SessionOpsScript.INSTALL_COMMAND) throw ExecUnavailable(ExecUnavailableReason.NOT_UP)
+            withSessionOps(SessionOpsScript.CHECK_NEEDED)
+        }
+        val viaFallback = mutableListOf<String>()
+        val s = newBootstrap(exec) { _, cmd, _ -> viaFallback += cmd; "SESSIONOPS_INSTALLED\n" }
+        s.bootstrap.ensure("a")
+        assertEquals(listOf(SessionOpsScript.INSTALL_COMMAND), viaFallback)
+        assertTrue(logs.single { it.startsWith("Server bootstrap srv-a:") }.contains("sessionOps=SESSIONOPS_INSTALLED"))
     }
 
     /** A failed install is no failed bootstrap: memoized, no backoff; the next bootstrap's check tries again. */

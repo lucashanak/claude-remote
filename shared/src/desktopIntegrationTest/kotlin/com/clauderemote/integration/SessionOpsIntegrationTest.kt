@@ -10,6 +10,7 @@ import com.clauderemote.session.service.RestoreResult
 import com.clauderemote.session.service.SessionOpsScript
 import com.clauderemote.session.service.SessionPersistenceService
 import com.clauderemote.session.service.SessionRestore
+import com.clauderemote.session.service.StdinScript
 import com.clauderemote.storage.ServerStorage
 import com.jcraft.jsch.Session
 import kotlinx.coroutines.runBlocking
@@ -96,6 +97,21 @@ class SessionOpsIntegrationTest {
         sh("\"\$HOME/.claude-remote/bin/cr-session\" " + args.joinToString(" ") { ManifestCommands.sq(it) }, timeoutMs)
 
     private fun drift(): ExecResult = sh("bash \"\$HOME/.claude-remote/drift.sh\"")
+
+    /**
+     * D3: [cmd] sent the app's way now — [StdinScript.EXEC] as the request, the script on stdin, paced, through the
+     * production [com.clauderemote.session.service.PooledRemoteExec] — and read the app's way: the body's output and
+     * status, asserted complete (the end marker), its status also the exec's.
+     */
+    private fun viaStdin(cmd: String, timeoutMs: Long = 60_000): ExecResult {
+        val r = runBlocking {
+            com.clauderemote.session.service.PooledRemoteExec(com.clauderemote.session.service.UngatedExecChannels { session })
+                .run("", StdinScript.EXEC, StdinScript.stdin(cmd), totalMs = timeoutMs, paceStdin = com.clauderemote.session.service.Pace())
+        }
+        val done = StdinScript.parse(r.stdout) as? StdinScript.Outcome.Completed ?: kotlin.test.fail("no end marker: ${r.stdout.takeLast(300)}")
+        assertEquals(done.status, r.exitStatus, "the exec's exit status is the body's")
+        return ExecResult(done.out, done.status)
+    }
 
     private fun manifestNames(): List<String> {
         val f = File(fixture.home, ".claude-remote/sessions.restore.json")
@@ -309,6 +325,41 @@ class SessionOpsIntegrationTest {
         assertEquals(RestoreResult.RunningElsewhere(nameA), SessionRestore.parse(sh(SessionRestore.restoreCommand(rec)).out))
         assertEquals(RestoreResult.RunningElsewhere(nameA), SessionRestore.parse(sh(SessionRestore.restoreCommand(rec, tmuxName = "$nameA-2")).out))
         assertFalse("$nameA-2" in fixture.tmuxSessions(), "never a second claude over one transcript")
+    }
+
+    /**
+     * D3: the same round trip with every app script on stdin behind [StdinScript.EXEC] (close, close facts, restore) —
+     * the behaviour of the old argument, now through the launcher: one exec kills the pane and drops its marker, the
+     * record is there once, the restore restores and lifts the tombstone, a second restore is refused.
+     */
+    @Test
+    fun theAppsCloseAndRestoreBehaveTheSameThroughTheStdinLauncher() {
+        val dir = folder("projA")
+        transcript(dir, sidA)
+        open(nameA, dir, sidA)
+        open(nameB, folder("projB"), sidB)
+        assertEquals(0, drift().exit)
+        val facts = CloseFactsCommands.parse(viaStdin(CloseFactsCommands.closeFactsCommand(nameA, null)).out)
+        assertEquals(true, facts.alive, "the facts see the live pane: $facts")
+        File(fixture.home, ".claude-remote/opened.d").mkdirs(); File(fixture.home, ".claude-remote/opened.d/$nameA").writeText("{}")
+        val t = viaStdin(ManifestCommands.closeCommand(nameA, durable = true, by = "app:android-test"))
+        assertEquals(0, t.exit, t.out)
+        assertEquals(0, ManifestCommands.closeKillStatus(t.out), t.out)
+        assertFalse(nameA in fixture.tmuxSessions(), "the one exec killed the pane")
+        assertFalse(File(fixture.home, ".claude-remote/opened.d/$nameA").exists(), "and dropped its marker")
+        assertEquals(0, viaStdin(ManifestCommands.closeCommand(nameA, durable = true, by = "app:android-test")).exit)
+        assertEquals(1, assertNotNull(ClosedRecords.parseRead(sh(ManifestCommands.readClosed()).out)).count { it.tmuxName == nameA })
+        val rec = assertNotNull(ClosedRecords.parseRead(sh(ManifestCommands.readClosed()).out)).first()
+        assertEquals("app:android-test", rec.by); assertNotNull(rec.pid); assertEquals(sidA, rec.sessionId)
+        assertEquals(0, drift().exit)
+        assertFalse(nameA in manifestNames())
+
+        val res = SessionRestore.parse(viaStdin(SessionRestore.restoreCommand(rec), timeoutMs = 30_000).out)
+        assertTrue(res is RestoreResult.Restored && res.registry, "restore: $res")
+        assertFalse(File(fixture.home, ".claude-remote/forgotten.d/$nameA").exists(), "the tombstone is lifted")
+        repeat(2) { assertEquals(0, drift().exit) }
+        assertTrue(nameA in manifestNames() && nameA in fixture.tmuxSessions(), "restored session in the manifest. log:\n${fixture.driftLog()}")
+        assertEquals(RestoreResult.RunningElsewhere(nameA), SessionRestore.parse(viaStdin(SessionRestore.restoreCommand(rec)).out))
     }
 
     /**

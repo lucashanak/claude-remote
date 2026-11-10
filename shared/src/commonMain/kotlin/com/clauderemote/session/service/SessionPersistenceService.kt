@@ -1737,14 +1737,24 @@ DTIMER_EOF
             // Tombstone, the close record (it reads the live pane, §15.12) and the kill in ONE exec, in that order: a
             // second exec for the kill may never start (the desktop exit waits only so long), and a close cut there
             // left the session running under a tombstone, with no tab and no manifest entry.
+            // D3: the ~6 KB script on stdin (StdinScript), run only when it arrived whole.
             val res = registry.execRun(
                 serverId,
-                ManifestCommands.closeCommand(name, durable = userInitiated, by = closeRecordBy(userInitiated)),
+                StdinScript.EXEC,
+                stdin = StdinScript.stdin(ManifestCommands.closeCommand(name, durable = userInitiated, by = closeRecordBy(userInitiated))),
                 totalMs = CLOSE_EXEC_MS,
+                paceStdin = Pace(),
             )
                 ?: return false
-            if (res.exitStatus != 0) FileLogger.error(TAG, "tombstone($name) exited with ${res.exitStatus}", null)
-            if (ManifestCommands.closeKillStatus(res.stdout) != 0) {
+            val done = StdinScript.parse(res.stdout) as? StdinScript.Outcome.Completed
+            if (done == null) {
+                // no end marker: cut short (nothing ran) or its end unseen — the fallback runs it again, which is safe:
+                // the tombstone and the kill are idempotent and a gone pane writes no second record
+                FileLogger.log(TAG, "Exec close of ${session.id} ($name) did not complete (exit ${res.exitStatus}) — using a fresh connection")
+                return false
+            }
+            if (done.status != 0) FileLogger.error(TAG, "tombstone($name) exited with ${done.status}", null)
+            if (ManifestCommands.closeKillStatus(done.out) != 0) {
                 FileLogger.error(TAG, "Tmux kill returned failure for ${session.id} ($name) — pane may still be alive", null)
             }
             pushSessionsToServer(serverId)
@@ -1754,6 +1764,38 @@ DTIMER_EOF
         } catch (e: ExecUnavailable) {
             FileLogger.log(TAG, "Exec cleanup for ${session.id} unavailable (${e.reason}) — using a fresh connection")
             return false
+        }
+    }
+
+    /**
+     * [forgetSession]'s fallback close on [conn], a connection of its own: [ManifestCommands.closeCommand] on stdin
+     * ([StdinScript], D3). Its output, or null when it did not complete (no session, cut short, no end marker) — a
+     * failure the caller logs. A tombstone that failed is logged here, as [cleanupViaExec] logs it.
+     */
+    private suspend fun closeOnSession(conn: SshManager, name: String, userInitiated: Boolean): String? {
+        val label = "close($name, durable=$userInitiated)"
+        return try {
+            val sess = conn.getSession() ?: return null
+            val res = PooledRemoteExec(UngatedExecChannels { sess }).run(
+                "", StdinScript.EXEC,
+                StdinScript.stdin(ManifestCommands.closeCommand(name, userInitiated, closeRecordBy(userInitiated))),
+                totalMs = CLOSE_EXEC_MS, paceStdin = Pace(),
+            )
+            when (val done = StdinScript.parse(res.stdout)) {
+                is StdinScript.Outcome.Completed -> {
+                    if (done.status != 0) FileLogger.error(TAG, "$label exited with ${done.status}", null)
+                    done.out
+                }
+                StdinScript.Outcome.Incomplete -> {
+                    FileLogger.error(TAG, "$label did not complete (exit ${res.exitStatus}): ${res.stdout.trim().takeLast(200)}", null)
+                    null
+                }
+            }
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            FileLogger.error(TAG, "$label failed: ${e.message}", e)
+            null
         }
     }
 
@@ -1820,13 +1862,9 @@ DTIMER_EOF
                         // session came back moments later. Writing it first
                         // makes the close visible to peers before the death
                         // they react to.
-                        // Tombstone, record and kill in one exec, as on the exec path above.
-                        val out = runShellCommand(
-                            cleanupConn,
-                            ManifestCommands.closeCommand(session.tmuxSessionName, userInitiated, closeRecordBy(userInitiated)),
-                            "close(${session.tmuxSessionName}, durable=$userInitiated)",
-                            waitMs = CLOSE_EXEC_MS,
-                        )
+                        // Tombstone, record and kill in one exec, as on the exec path above — and on stdin the same
+                        // way (D3), as the restore installer goes on a session of its own (C0)
+                        val out = closeOnSession(cleanupConn, session.tmuxSessionName, userInitiated)
                         if (out == null || ManifestCommands.closeKillStatus(out) != 0) {
                             FileLogger.error(TAG, "Tmux kill returned failure for $sessionId (${session.tmuxSessionName}) — pane may still be alive", null)
                         }

@@ -13,6 +13,7 @@ import com.clauderemote.session.service.ExecResult
 import com.clauderemote.session.service.ManifestCommands
 import com.clauderemote.session.service.Pace
 import com.clauderemote.session.service.RemoteExec
+import com.clauderemote.session.service.StdinScript
 import com.clauderemote.storage.FakeKeyValueStore
 import com.clauderemote.storage.ServerStorage
 import com.clauderemote.storage.SessionStorage
@@ -54,20 +55,27 @@ class PendingCloseWiringTest {
         CommFlags.resetForTest()
     }
 
+    /** Records what runs on the server: the script on stdin behind [StdinScript.EXEC] (D3), answered with its end marker. */
     private class FakeExec : RemoteExec {
         val commands = CopyOnWriteArrayList<String>()
+        /** The exec requests themselves. */
+        val requests = CopyOnWriteArrayList<String>()
         val closeGate = CompletableDeferred<Unit>()
         override suspend fun run(serverId: String, cmd: String, stdin: ByteArray?, totalMs: Long, kind: ExecKind, paceStdin: Pace): ExecResult {
-            commands += cmd
-            if (CloseFactsCommands.END in cmd) {
+            requests += cmd
+            val launched = cmd == StdinScript.EXEC
+            val script = if (launched) stdin!!.decodeToString() else cmd
+            commands += script
+            fun answer(out: String) = ExecResult(if (launched) out + "\n" + StdinScript.MARK + "0\n" else out, 0)
+            if (CloseFactsCommands.END in script) {
                 // an idle session: nothing blocks the close
-                return ExecResult("FACT alive 1\nFACT status idle -\nTOKEN 1.x\n${CloseFactsCommands.END}\n", 0)
+                return answer("FACT alive 1\nFACT status idle -\nTOKEN 1.x\n${CloseFactsCommands.END}\n")
             }
-            if (ManifestCommands.CLOSE_KILL_PREFIX in cmd) {
+            if (ManifestCommands.CLOSE_KILL_PREFIX in script) {
                 closeGate.await()
-                return ExecResult("${ManifestCommands.CLOSE_KILL_PREFIX}0\n", 0)
+                return answer("${ManifestCommands.CLOSE_KILL_PREFIX}0\n")
             }
-            return ExecResult("", 0)
+            return answer("")
         }
     }
 
@@ -142,6 +150,17 @@ class PendingCloseWiringTest {
         val marker = w.o.ownClientMarker(name)
         assertContains(w.exec.commands.first { CloseFactsCommands.END in it }, "SELF=${ManifestCommands.sq(marker)}")
         assertContains(w.o.buildAttachCommand(name), "/$marker\"")
+        // D3: the facts and the close went out as the short launcher, their scripts on stdin
+        closeNowAfterFacts(w)
+        assertEquals(listOf(StdinScript.EXEC, StdinScript.EXEC), w.exec.requests.filterIndexed { i, _ ->
+            val c = w.exec.commands[i]; CloseFactsCommands.END in c || ManifestCommands.CLOSE_KILL_PREFIX in c
+        })
+    }
+
+    private fun closeNowAfterFacts(w: Wired) {
+        w.exec.closeGate.complete(Unit)
+        val flush = w.o.pendingCloses.flush()
+        runBlocking { withTimeout(10_000) { flush.join() } }
     }
 
     /** rev-tests 31: the record says THIS device closed it (what "zavřeno tady" and Ctrl+Shift+T go by). */

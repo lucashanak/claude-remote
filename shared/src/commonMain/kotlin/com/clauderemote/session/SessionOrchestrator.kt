@@ -3285,7 +3285,7 @@ class SessionOrchestrator(
         // The server's close facts (R6 = 6d), read the way every read-only command is: exec transport first, a
         // live tab of the server otherwise, null (= close) when neither is there.
         closeCheck = com.clauderemote.session.service.CloseFactsCheck(
-            read = { serverId, cmd, totalMs -> connectionRegistry.execRead(serverId, cmd, totalMs) },
+            read = { serverId, cmd, stdin, totalMs -> connectionRegistry.execRead(serverId, cmd, totalMs, stdin = stdin) },
             selfMarker = ::ownClientMarker,
         )::check,
     )
@@ -3563,10 +3563,15 @@ class SessionOrchestrator(
                 return@withContext com.clauderemote.session.service.RestoreResult.Refused(e.message ?: "invalid record") to null
             }
             var sent = false
-            val out = try {
+            val res = try {
                 SshSessionHelper.withSession(server, 10_000) { sess ->
                     sent = true
-                    execReadWithWatchdog(sess, cmd, totalMs = RecentlyClosed.RESTORE_EXEC_MS)
+                    // D3: the ~10 KB script on stdin (StdinScript), run only when it arrived whole — the C0 way on a
+                    // session of its own, as the restore installer goes
+                    com.clauderemote.session.service.PooledRemoteExec(com.clauderemote.session.service.UngatedExecChannels { sess }).run(
+                        server.id, com.clauderemote.session.service.StdinScript.EXEC, com.clauderemote.session.service.StdinScript.stdin(cmd),
+                        totalMs = RecentlyClosed.RESTORE_EXEC_MS, paceStdin = com.clauderemote.session.service.Pace(),
+                    )
                 }
             } catch (e: CancellationException) {
                 throw e
@@ -3576,7 +3581,13 @@ class SessionOrchestrator(
                 return@withContext (if (sent) com.clauderemote.session.service.RestoreResult.Unknown
                     else com.clauderemote.session.service.RestoreResult.Failed("server nedostupný")) to null
             }
-            val result = com.clauderemote.session.service.SessionRestore.parse(out)
+            // no end marker: it may have run or not — Unknown, never retried (nor a result read from a cut-off answer)
+            val result = when (val done = com.clauderemote.session.service.StdinScript.parse(res.stdout)) {
+                is com.clauderemote.session.service.StdinScript.Outcome.Completed -> com.clauderemote.session.service.SessionRestore.parse(done.out)
+                com.clauderemote.session.service.StdinScript.Outcome.Incomplete -> com.clauderemote.session.service.RestoreResult.Unknown.also {
+                    FileLogger.log(TAG, "Restore of $tmuxName on ${server.name}: no end marker (exit ${res.exitStatus}): ${res.stdout.trim().takeLast(200)}")
+                }
+            }
             FileLogger.log(TAG, "Restore of ${record.tmuxName} as $tmuxName on ${server.name}: $result")
             val running = result is com.clauderemote.session.service.RestoreResult.Restored ||
                 result == com.clauderemote.session.service.RestoreResult.LoginRequired

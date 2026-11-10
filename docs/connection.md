@@ -1052,7 +1052,12 @@ server through the server's exec transport instead of borrowing a tab's shell:
   connected tab session only (with routing on, `liveServerSession` only one with channel headroom). A permanent stream (notify watcher, stream daemon) takes
   its channel from `useChannel` with the long kind; a one-off operation (usage poll,
   upload, log shipping) uses the short kind with a total time limit, so the two long
-  permits are never used up by work that ends.
+  permits are never used up by work that ends. A script over 4 KB goes on stdin behind the short
+  `StdinScript.EXEC` (dávka D3: the close and its fallback, the close facts, the restore, the `cr-session`
+  install), paced like every upload; `execRead` takes the `stdin` too, and its fallbacks then run on
+  `PooledRemoteExec` (`execReadWithWatchdog` has no stdin). These sends are never `transfer = true`, and never wrap a
+  command that reads its own stdin (`pushMerge`). Bootstrap, hooks v2, streamd and reconcile stay arguments
+  (`ExecArgumentSizeTest` caps them, 12 KB after deflate for every request).
 - With routing off the behavior is the one from before, except for these exact items:
   keepalive also reaches the pooled and exec transports; the log shipper trims with
   `tail -n +2`; the stream daemon forgets its bootstrap memo when it ends without a

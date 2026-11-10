@@ -484,26 +484,33 @@ internal class ConnectionRegistry(
     /**
      * Read-only form of [execRun] for the polling services. With exec routing off the
      * behaviour is today's: [execReadWithWatchdog] on a live tab session. Null = no
-     * usable transport (callers skip the round).
+     * usable transport (callers skip the round). With [stdin] (a [StdinScript], D3) every path
+     * feeds it paced, as [execRun] does: the fallbacks then run on [PooledRemoteExec], since
+     * [execReadWithWatchdog] has no stdin.
      */
     suspend fun execRead(
         serverId: String,
         cmd: String,
         totalMs: Long = 15_000,
         kind: ExecKind = ExecKind.SHORT,
+        stdin: ByteArray? = null,
     ): String? {
+        val onTab: suspend (com.jcraft.jsch.Session) -> String = { tab ->
+            if (stdin == null) execReadWithWatchdog(tab, cmd, totalMs = totalMs)
+            else PooledRemoteExec(UngatedExecChannels { tab }).run(serverId, cmd, stdin, totalMs, kind, Pace()).stdout
+        }
         val routed = remoteExec
         if (routed != null && execActive(serverId)) {
             try {
-                return routed.run(serverId, cmd, null, totalMs, kind).stdout
+                return routed.run(serverId, cmd, stdin, totalMs, kind).stdout
             } catch (e: ExecUnavailable) {
                 if (e.reason != ExecUnavailableReason.NOT_UP) throw e
             }
-            return onFallbackTab(serverId, kind) { tab -> execReadWithWatchdog(tab, cmd, totalMs = totalMs) }?.value
+            return onFallbackTab(serverId, kind) { tab -> onTab(tab) }?.value
         }
-        if (needsRoom(serverId)) return onFallbackTab(serverId, kind) { tab -> execReadWithWatchdog(tab, cmd, totalMs = totalMs) }?.value
+        if (needsRoom(serverId)) return onFallbackTab(serverId, kind) { tab -> onTab(tab) }?.value
         val tab = tabServerSession(serverId) ?: return null
-        return execReadWithWatchdog(tab, cmd, totalMs = totalMs)
+        return onTab(tab)
     }
 
     /**

@@ -447,8 +447,22 @@ internal class DefaultServerBootstrap(
      * this one. The installer checks again before writing (another device may have installed meanwhile).
      */
     private suspend fun installSessionOps(serverId: String): String = try {
-        execText(serverId, SessionOpsScript.INSTALL_COMMAND, INSTALL_TIMEOUT_MS).lines().lastOrNull { it.isNotBlank() }?.trim()
-            ?: "SESSIONOPS_FAILED (no output)"
+        // D3: the ~40 KB installer on stdin behind StdinScript.EXEC, paced, run only when it arrived whole. Without the
+        // end marker it did not run (or its end went unseen): failed, the next bootstrap's check decides again. The
+        // fallback (no exec transport) still sends it as the argument, as the bootstrap's own fallback does.
+        val out = try {
+            val res = exec.run(serverId, StdinScript.EXEC, StdinScript.stdin(SessionOpsScript.INSTALL_COMMAND),
+                totalMs = INSTALL_TIMEOUT_MS, kind = ExecKind.SHORT, paceStdin = Pace())
+            when (val done = StdinScript.parse(res.stdout)) {
+                is StdinScript.Outcome.Completed -> done.out
+                StdinScript.Outcome.Incomplete -> return "SESSIONOPS_FAILED (incomplete, exit ${res.exitStatus})"
+            }
+        } catch (e: ExecUnavailable) {
+            val fb = fallback
+            if (fb == null || e.reason == ExecUnavailableReason.TIMEOUT) throw e
+            fb(serverId, SessionOpsScript.INSTALL_COMMAND, INSTALL_TIMEOUT_MS)
+        }
+        out.lines().lastOrNull { it.isNotBlank() }?.trim() ?: "SESSIONOPS_FAILED (no output)"
     } catch (e: CancellationException) {
         throw e
     } catch (e: Exception) {

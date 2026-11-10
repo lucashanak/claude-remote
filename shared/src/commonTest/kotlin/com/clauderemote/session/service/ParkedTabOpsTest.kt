@@ -38,13 +38,21 @@ class ParkedTabOpsTest {
     @BeforeTest fun reset() = CommFlags.resetForTest()
     @AfterTest fun cleanup() = CommFlags.resetForTest()
 
-    private class Call(val cmd: String, val stdin: String?, val kind: ExecKind)
+    private class Call(val cmd: String, val stdin: String?, val kind: ExecKind) {
+        /** What runs on the server: the script on stdin behind [StdinScript.EXEC] (D3), else the command itself. */
+        val script: String get() = if (cmd == StdinScript.EXEC) stdin!!.removeSuffix("\n" + StdinScript.END + "\n") else cmd
+    }
 
-    private class FakeExec(var exit: Int = 0, var out: String = "") : RemoteExec {
+    /**
+     * Answers [out] with [exit]; behind [StdinScript.EXEC] the way the launcher does, with its end marker carrying
+     * [marked] (the body's status; null = no marker: the script was cut short or its end never seen).
+     */
+    private class FakeExec(var exit: Int = 0, var out: String = "", var marked: () -> Int? = { exit }) : RemoteExec {
         val calls = mutableListOf<Call>()
         override suspend fun run(serverId: String, cmd: String, stdin: ByteArray?, totalMs: Long, kind: ExecKind, paceStdin: Pace): ExecResult {
             calls += Call(cmd, stdin?.toString(Charsets.UTF_8), kind)
-            return ExecResult(out, exit)
+            val status = if (cmd == StdinScript.EXEC) marked() else null
+            return ExecResult(if (status != null) out + "\n" + StdinScript.MARK + status + "\n" else out, exit)
         }
     }
 
@@ -167,10 +175,13 @@ class ParkedTabOpsTest {
         assertEquals(false, p.recentlyClosedLocally("s1", "claude-server-other", 60_000))
         assertEquals(false, p.recentlyClosedLocally("s1", "claude-server-old", -1))
         // server side went over the exec transport: tombstone, record and kill in ONE exec, then the manifest
-        val cmds = exec.calls.map { it.cmd }
+        val cmds = exec.calls.map { it.script }
         assertTrue("forgotten" in cmds[0], cmds[0])
         assertEquals(ManifestCommands.closeCommand("claude-server-old", durable = true, by = "app"), cmds[0])
         assertTrue(cmds.drop(1).none { "kill-session" in it }, "no second exec for the kill: $cmds")
+        // D3: that one exec is the short launcher with the close script on its stdin, paced like every upload
+        assertEquals(StdinScript.EXEC, exec.calls[0].cmd)
+        assertTrue(exec.calls[0].cmd.length < 512)
         assertTrue(cmds.size >= 2)
     }
 
@@ -191,7 +202,7 @@ class ParkedTabOpsTest {
             val exec = FakeExec(exit = 1, out = "${ManifestCommands.CLOSE_KILL_PREFIX}0\n")
             val w = wire(exec)
             persistence(w, transcript(w)).forgetSession("t1", userInitiated = true)!!.join()
-            val cmds = exec.calls.map { it.cmd }
+            val cmds = exec.calls.map { it.script }
             assertEquals(ManifestCommands.closeCommand("claude-server-old", durable = true, by = "app"), cmds[0])
             assertTrue("tmux kill-session -t '=claude-server-old'" in cmds[0], cmds[0])
             assertTrue(cmds.drop(1).any { "sessions.json" in it }, "the manifest push still went out: $cmds")
@@ -209,11 +220,39 @@ class ParkedTabOpsTest {
             val exec = FakeExec(exit = 0, out = "${ManifestCommands.CLOSE_KILL_PREFIX}1\n")
             val w = wire(exec)
             persistence(w, transcript(w)).forgetSession("t1", userInitiated = true)!!.join()
-            val cmds = exec.calls.map { it.cmd }
+            val cmds = exec.calls.map { it.script }
             assertEquals(1, cmds.count { ManifestCommands.CLOSE_KILL_PREFIX in it }, "one close exec: $cmds")
             assertTrue(logged.any { "Tmux kill returned failure" in it }, "$logged")
             assertTrue(logged.none { "Cleanup SSH connect" in it || "using a fresh connection" in it }, "no fallback close: $logged")
             assertTrue(cmds.drop(1).any { "sessions.json" in it }, "push: $cmds")
+        }
+    }
+
+    /**
+     * D3: the close's answer without the launcher's end marker (the script was cut short and never ran, or its end went
+     * unseen) is no close: the fresh-connection fallback takes it (repeating it is safe: tombstone and kill are
+     * idempotent, a gone pane writes no second record), and no manifest push follows the exec that did not complete.
+     */
+    @Test fun aCloseWithoutTheEndMarkerFallsBackToAFreshConnection() = runTest {
+        logging { logged ->
+            val exec = FakeExec(out = "${ManifestCommands.CLOSE_KILL_PREFIX}0\n", marked = { null })
+            val w = wire(exec)
+            persistence(w, transcript(w)).forgetSession("t1", userInitiated = true)!!.join()
+            assertEquals(1, exec.calls.size, "only the close went over exec: ${exec.calls.map { it.script }}")
+            assertTrue(logged.any { "did not complete" in it && "using a fresh connection" in it }, "$logged")
+            assertTrue(logged.any { "Cleanup SSH connect failed" in it }, "the fallback was tried: $logged")
+            assertTrue(logged.none { "Tmux kill returned failure" in it }, "an output without its marker is not read: $logged")
+        }
+    }
+
+    /** D3 (N8): the tombstone's status is the one the end marker carries, whatever the exec's own exit says. */
+    @Test fun theTombstonesStatusComesFromTheEndMarker() = runTest {
+        logging { logged ->
+            val exec = FakeExec(exit = 0, out = "${ManifestCommands.CLOSE_KILL_PREFIX}0\n", marked = { 1 })
+            val w = wire(exec)
+            persistence(w, transcript(w)).forgetSession("t1", userInitiated = true)!!.join()
+            assertTrue(logged.any { "tombstone(claude-server-old) exited with 1" in it }, "$logged")
+            assertTrue(exec.calls.drop(1).any { "sessions.json" in it.script }, "the push still went")
         }
     }
 
@@ -223,7 +262,7 @@ class ParkedTabOpsTest {
         val p = persistence(w, transcript(w))
         p.forgetSession("t1", userInitiated = false)
         testScheduler.runCurrent()
-        assertEquals(ManifestCommands.closeCommand("claude-server-old", durable = false, by = "prune"), exec.calls.first().cmd)
+        assertEquals(ManifestCommands.closeCommand("claude-server-old", durable = false, by = "prune"), exec.calls.first().script)
     }
 
     @Test fun forgetHandsBackTheServerSideSoAnExitCanWaitForIt() = runTest {
@@ -233,7 +272,7 @@ class ParkedTabOpsTest {
         assertTrue(cleanup != null && !cleanup.isCompleted, "the server side runs after forgetSession returns")
         cleanup!!.join()
         // the kill is part of the first (and only) close exec: an exit that waits for this job waits for the kill
-        assertTrue("tmux kill-session -t '=claude-server-old'" in exec.calls[0].cmd, exec.calls[0].cmd)
+        assertTrue("tmux kill-session -t '=claude-server-old'" in exec.calls[0].script, exec.calls[0].script)
     }
 
     @Test fun aDelayedCloseTouchesNothingUntilItsWindowEndsThenTombstonesDurably() = runTest {
@@ -248,12 +287,12 @@ class ParkedTabOpsTest {
         advanceTimeBy(9_999)
         testScheduler.runCurrent()
         // a process killed now loses nothing: the server was not told, the tab is still stored and listed
-        assertTrue(exec.calls.isEmpty(), exec.calls.map { it.cmd }.toString())
+        assertTrue(exec.calls.isEmpty(), exec.calls.map { it.script }.toString())
         assertEquals(listOf("t1"), w.storage.load().map { it.id })
         assertEquals(listOf("t1"), w.tabs.tabs.value.map { it.id })
         advanceTimeBy(2)
         testScheduler.runCurrent()
-        val cmds = exec.calls.map { it.cmd }
+        val cmds = exec.calls.map { it.script }
         assertTrue("durable=1" in cmds[0], "durable tombstone first: ${cmds[0]}")
         assertTrue(cmds[0].indexOf("durable=1") < cmds[0].indexOf("kill-session"), "then the kill, in the same exec")
         assertTrue(w.storage.load().isEmpty())

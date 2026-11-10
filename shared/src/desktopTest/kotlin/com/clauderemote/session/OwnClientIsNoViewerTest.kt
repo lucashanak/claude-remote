@@ -68,12 +68,13 @@ class OwnClientIsNoViewerTest {
         return Box(home, bin)
     }
 
-    private fun bash(b: Box, cmd: String): String {
+    private fun bash(b: Box, cmd: String, stdin: ByteArray? = null): String {
         val p = ProcessBuilder("bash", "-c", cmd).directory(b.home).redirectErrorStream(true).also {
             val env = it.environment()
             env["HOME"] = b.home.absolutePath
             env["PATH"] = b.bin.absolutePath + File.pathSeparator + env["PATH"].orEmpty()
         }.start()
+        p.outputStream.use { o -> if (stdin != null) o.write(stdin) }
         val out = p.inputStream.bufferedReader().readText()
         if (!p.waitFor(30, TimeUnit.SECONDS)) { p.destroyForcibly(); fail("timeout") }
         return out
@@ -91,7 +92,7 @@ class OwnClientIsNoViewerTest {
     /** What closing the tab on [device] gets back from the server, through the same check the app wires in. */
     private fun closeCheck(b: Box, device: SessionOrchestrator): Pair<CloseCheck?, String> {
         var raw = ""
-        val check = CloseFactsCheck(read = { _, cmd, _ -> bash(b, cmd).also { raw = it } }, selfMarker = device::ownClientMarker)
+        val check = CloseFactsCheck(read = { _, cmd, stdin, _ -> bash(b, cmd, stdin).also { raw = it } }, selfMarker = device::ownClientMarker)
         return runBlocking { check.check(tab) } to raw
     }
 

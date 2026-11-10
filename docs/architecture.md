@@ -177,9 +177,18 @@ paced 4 KB / 20 ms like every upload, and runs only once its end line arrived, s
 none of it; it counts as installed only when it exits 0. The restore unit counts as present when it runs our
 `restore.sh` (an earlier check looked for a text the unit never had, so every install rewrote it and ran
 `daemon-reload`). As one ~80 KB request (23 KB compressed) through the Cloudflare tunnel it was followed by an exec
-transport that opened no more channels until it died (dávka C, K-1). `ExecArgumentSizeTest` holds every exec
-request at 4 KB or under, with named exceptions (bootstrap, hooks v2, streamd, the reconcile of many sessions)
-that may not grow.
+transport that opened no more channels until it died (dávka C, K-1). The app's other big scripts go the same way
+through one helper, `StdinScript` (dávka D3): the close (~6 KB, with its fallback on a connection of its own), the
+close facts (~6.5 KB), the restore of a closed session (~10 KB) and the `cr-session` install (~40 KB; its fallback
+without an exec transport still sends it as the argument). The request is `StdinScript.EXEC` (170 B), which reads
+the whole stdin and runs it (`eval`, in a subshell with `</dev/null`) only when its end line `# claude-remote-stdin-end`
+arrived, then prints `__CR_END__<status>` and exits with that status; a stdin cut anywhere runs nothing
+(`__CR_TRUNCATED__`, exit 97). An answer without the marker is never a success: the close falls back (safe to repeat),
+the close check reads it as unknown, the restore as Unknown, the install as failed. The script bytes are the builders'
+unchanged (`cr-session`'s SHA-256 too). `ExecArgumentSizeTest` holds every exec request at 4 KB or under, rendering
+the four through their production callers, with named exceptions (bootstrap, hooks v2, streamd, the reconcile of many
+sessions) that may not grow, and every request at 12 KB or under after deflate (K-1 lost a packet of more than 16 KB
+compressed; the biggest today, the bootstrap with the hooks v2 install, is 9.4 KB).
 
 All three carry the same **socket guard**. A tmux server whose socket file (or whole `/tmp/tmux-<uid>`
 directory) was deleted keeps running but answers nobody; on 2026-11-02 drift then saw no sessions,

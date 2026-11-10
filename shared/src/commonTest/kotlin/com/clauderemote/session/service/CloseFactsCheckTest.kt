@@ -54,11 +54,15 @@ class CloseFactsCheckTest {
         assertEquals(CloseCheck.Clear, map(out("FACT alive 0")), "the session is gone already: nothing to protect")
     }
 
-    private class Reads(val answer: suspend (String) -> String?) {
-        val calls = mutableListOf<Triple<String, String, Long>>()
-        suspend fun read(serverId: String, cmd: String, totalMs: Long): String? {
-            calls += Triple(serverId, cmd, totalMs)
-            return answer(cmd)
+    /** One read: what the check sent ([cmd] and the script on [stdin]). */
+    private data class Read(val serverId: String, val cmd: String, val stdin: ByteArray, val totalMs: Long)
+
+    /** Answers with [answer]'s text as the body's output, behind the end marker [StdinScript.EXEC] prints when [marked]. */
+    private class Reads(val marked: Boolean = true, val answer: suspend (String) -> String?) {
+        val calls = mutableListOf<Read>()
+        suspend fun read(serverId: String, cmd: String, stdin: ByteArray, totalMs: Long): String? {
+            calls += Read(serverId, cmd, stdin, totalMs)
+            return answer(cmd)?.let { if (marked) it + "\n" + StdinScript.MARK + "0\n" else it }
         }
     }
 
@@ -67,10 +71,20 @@ class CloseFactsCheckTest {
     @Test fun sendsTheReadOnlyFactsOfTheTabsSessionWithThisDevicesMarker() = runTest {
         val r = Reads { out("FACT status busy -") }
         assertEquals(CloseCheck.Block("běží tah"), subject(r).check(tab))
-        val (serverId, cmd, totalMs) = r.calls.single()
-        assertEquals("srv", serverId)
-        assertEquals(CloseFactsCommands.closeFactsCommand("claude-server-work", "dev-1-claude-server-work"), cmd)
-        assertEquals(CloseFactsCheck.BUDGET_MS, totalMs)
+        val call = r.calls.single()
+        assertEquals("srv", call.serverId)
+        // D3: the request is the short launcher, the facts script goes on its stdin
+        assertEquals(StdinScript.EXEC, call.cmd)
+        assertEquals(CloseFactsCommands.closeFactsCommand("claude-server-work", "dev-1-claude-server-work") + "\n" + StdinScript.END + "\n",
+            call.stdin.decodeToString())
+        assertEquals(CloseFactsCheck.BUDGET_MS, call.totalMs)
+    }
+
+    /** D3: an answer without the launcher's end marker (the script was cut short and never ran) is unknown, never a verdict. */
+    @Test fun anAnswerWithoutTheEndMarkerMeansClose() = runTest {
+        assertNull(subject(Reads(marked = false) { out("FACT status busy -") }).check(tab), "a BLOCK without the marker counts for nothing")
+        assertNull(subject(Reads(marked = false) { StdinScript.TRUNCATED }).check(tab), "the script did not arrive whole")
+        assertEquals(CloseCheck.Block("běží tah"), subject(Reads { out("FACT status busy -") }).check(tab), "with it, the verdict stands")
     }
 
     @Test fun noTransportAFailureOrNoAnswerInTimeAllMeanClose() = runTest {
