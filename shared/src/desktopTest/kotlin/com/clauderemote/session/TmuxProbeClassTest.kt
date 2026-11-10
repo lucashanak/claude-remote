@@ -185,6 +185,9 @@ class TmuxProbeClassTest {
     /** 1.2 s: the bound must be Cloudflare's floor plus the wait on any route (Lan's 0.3 s floor + 2 s would not do). */
     @Test fun theDecisionProbeOverCloudflareStillOpensAfterAPermitWaitOf1200ms() = probeAfterAPermitWait(1_200)
 
+    /** R5 (review D1 kt N3): KDoc and docs promise a permit wait of up to 2 s; 1.8 s still leaves the open its floor. */
+    @Test fun theDecisionProbeOverCloudflareStillOpensAfterAPermitWaitOf1800ms() = probeAfterAPermitWait(1_800)
+
     /** The bound follows the floor (ChannelOpen.tuning), not a constant: a 3 s floor still leaves the open its floor. */
     @Test fun theDecisionProbeBoundFollowsTheCloudflareFloor() {
         ChannelOpen.tuning = ChannelOpen.Tuning(minOpenCfMs = 3_000)

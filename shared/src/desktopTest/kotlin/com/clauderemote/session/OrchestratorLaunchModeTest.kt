@@ -269,6 +269,13 @@ class OrchestratorLaunchModeTest {
         assertTrue("\"\${buildAttachCommand(session.tmuxSessionName)} 2>/dev/null || { \$relaunch ; }\"" in mosh, "mosh unchanged")
     }
 
+    /** R6 (review D1 adv N7): ET's fresh-launch branch is wrapped like the SSH FreshLaunch, though no caller reaches it today. */
+    @Test fun etsFreshLaunchBranchEndsItsLoginShellWhenRefusedToo() {
+        val (new, _) = branches("connectEt", "attachCmd")
+        assertTrue("\"{ \" + ClaudeConfig.buildTmuxLaunchCommand(" in new && ") + \"; } || exit 1\"" in new,
+            "ET, isNewTmuxSession: {{ launch; }} || exit 1: $new")
+    }
+
     /**
      * D2, the sent line itself in a shell (bash and dash): when the socket guard refuses (exit 1), the line ends the shell
      * — nothing after it runs. Scratch HOME with a guard stub; no tmux is reached (the guard's branch comes first).

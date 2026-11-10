@@ -172,13 +172,20 @@ FreshLaunch (`{ <launch>; } || exit 1`, dávka D2) — so a failed attach, or a 
 brain, its lock held: the line's `false`), goes the usual reconnect way instead of a bare bash under an ACTIVE tab. The
 wrapper is added in the orchestrator, never in `ClaudeConfig.buildTmuxLaunchCommand` (which `cr-session` and the
 detached create share; `TmuxRunGoldenTest` pins its bytes). ET types its line into a login shell too: `<attach>
-2>/dev/null || { <relaunch> ; } || exit 1` (D2); mosh runs its command as the session's own process, which ends with
-it. FreshLaunch in a tab is a dead backstop: every entry calls it with `isNewTmuxSession = false`, `launchSession`
-creates new sessions over exec. A loss within
-5 s of a reconnect that ended ACTIVE counts as a failed attempt (kolo 7, adv N1: on a slow link the failed attach's
-exit comes after ACTIVE, and every round began at attempt 1 with no wait, ~1.6 s apart for ever): such losses in a row
-wait 4 s, 8 s, 16 s … (cap 60 s); a connection that held longer starts the count over. A sockheal that keeps refusing
-thus reconnects every 4 … 60 s for as long as it refuses; each refusal is on the tab's terminal and in
+2>/dev/null || { <relaunch> ; } || exit 1` (D2), and its fresh-launch line `{ <launch>; } || exit 1` (R6, as dead as
+the SSH one); mosh runs its command as the session's own process, which ends with it. FreshLaunch in a tab is a dead
+backstop: every entry calls it with `isNewTmuxSession = false`, `launchSession` creates new sessions over exec. A loss
+soon after the line of a reconnect that ended ACTIVE counts as a failed attempt (kolo 7, adv N1: on a slow link the
+failed attach's exit comes after ACTIVE, and every round began at attempt 1 with no wait, ~1.6 s apart for ever). The
+brake counts from the line, stamped before `sendTmuxCommand` sends it, not from ACTIVE, and its window depends on the
+line: 5 s after an attach (`EARLY_DEATH_MS`), 11 s after a Rebuild or FreshLaunch line (`LAUNCH_EARLY_DEATH_MS`, R1: the
+guard's longest refusal — two heal tries of `flock -w 2` or the 2 s socket deadline 0.5 s apart, or one hung probe of
+`timeout -k 1 5`: 6 s — plus the attach's 5 s; with 5 s from ACTIVE a 4.5–4.7 s refusal that came back over a link
+slower than ~0.5 s read as a connection that held, and every tab of the server reconnected every 6–10 s). A reconnect
+that typed no line (mosh, ET) counts 5 s from ACTIVE as before. Such losses in a row wait 4 s, 8 s, 16 s … (cap 60 s); a
+connection that held longer starts the count over. A sockheal that keeps refusing thus reconnects every 4 … 60 s for as
+long as it refuses (unless its `ss`/`find` look-ups of the listener themselves hang past the window); each refusal is on
+the tab's terminal and in
 `~/.claude-remote/sockheal.log` (one line per cause per 15 min). Not covered (older, in the hand-over): a tmux client
 that ENDS with status 0 — another client detached ours, `prefix d` — still leaves the login shell under the ACTIVE tab
 (an unconditional `; exit` would make two tabs of one device on one session detach each other for ever through the

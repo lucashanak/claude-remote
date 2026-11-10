@@ -100,6 +100,7 @@ from touching any of it.
 | `TMUX_TMPDIR=<root>/build/t/tmux` | without it the default socket is `/tmp/tmux-<uid>/default`, the LIVE server. The socket path `<dir>/tmux-<uid>/default` must fit `sun_path` (107 bytes); in a checkout too deep for that the directory falls back to `$java.io.tmpdir/crit-tmux-<hash>` |
 | `PATH` starts with `scripts/test-shims` | its `tmux` refuses the live socket (below) |
 | `HOME` and the system property `user.home` = `<root>/build/t/home/<project>-<task>` | Java ignores `$HOME`; code that falls back to the home directory (`PlatformPreferences`, `EtManager`) writes into the sandbox. Every Test task has its own directory, emptied (links removed as links) before the task runs, so state of an earlier run or of a parallel task cannot leak in |
+| `LC_ALL=C.UTF-8` | under `LANG=C` the JVM's `sun.jnu.encoding` is ASCII and `ProcessBuilder` turns every non-ASCII byte of an argument into `?` (the `❯` of `cr-session`: two `SessionOpsScriptTest` cases failed only there, dávka D R7). `C.UTF-8` is built into glibc |
 | `clauderemote.live.home` = the REAL home | `LiveFileCanary` keeps watching the real one |
 | `TRANSCRIPT_HARNESS_ROOT` = real `~/.claude/projects` (unless set) | `RealTranscriptHarnessTest` only READS it and would otherwise skip silently under the redirected home |
 

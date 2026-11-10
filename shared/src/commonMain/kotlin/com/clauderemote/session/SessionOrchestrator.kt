@@ -1928,26 +1928,48 @@ class SessionOrchestrator(
         onSessionDisconnect?.invoke(sessionId)
     }
 
-    /** Kolo 7 (adv N1): when a reconnect of the tab last ended ACTIVE, and how many losses in a row came soon after one. */
-    private val reconnectedAt = java.util.concurrent.ConcurrentHashMap<String, Long>()
+    /** When a line went into a tab's shell (or a reconnect ended ACTIVE without one), and how long a loss after it is early. */
+    private class EarlyDeathStamp(val at: Long, val windowMs: Long)
+
+    /** Kolo 7 (adv N1): the stamp of the tab's last reconnect that ended ACTIVE, and how many losses in a row came soon after one. */
+    private val reconnectedAt = java.util.concurrent.ConcurrentHashMap<String, EarlyDeathStamp>()
     private val earlyDeaths = java.util.concurrent.ConcurrentHashMap<String, Int>()
+    /** R1: the stamp of the last launch/attach line [sendTmuxCommand] typed into the tab's shell — taken BEFORE it is sent. */
+    private val lineSentAt = java.util.concurrent.ConcurrentHashMap<String, EarlyDeathStamp>()
+
+    /** Test seam (R1): the clock of the early-death brake only. Null in production. */
+    @Volatile internal var earlyDeathClockSeam: (() -> Long)? = null
+    private fun earlyDeathNow(): Long = earlyDeathClockSeam?.invoke() ?: System.currentTimeMillis()
 
     /**
-     * Kolo 7 (adv N1): the floor of the attempts of an autoReconnect that a loss started. A loss within
-     * [EARLY_DEATH_MS] of a reconnect that ended ACTIVE is a failed attempt, not a fresh start — e.g. an attach that
-     * fails for good behind `|| exit 1` on a slow link (the loss comes after ACTIVE): without this every round began at
-     * attempt 1 with no wait, ~1.6 s apart for ever. Such losses in a row wait 4 s, 8 s, 16 s … (cap 60 s); a connection
-     * that held longer starts the count over.
+     * R1: a reconnect of [sessionId] that began at [attemptStart] ended ACTIVE. The brake counts from the line that
+     * reconnect typed (stamped before it was sent: a refusing sockheal's 4.5–6 s run from there, not from ACTIVE some
+     * 0.3 s + a round trip later), with that line's window; a reconnect that typed none (mosh, ET, a test seam) counts
+     * from now with [EARLY_DEATH_MS], as before.
+     */
+    private fun stampReconnected(sessionId: String, attemptStart: Long) {
+        val line = lineSentAt.remove(sessionId)?.takeIf { it.at >= attemptStart }
+        reconnectedAt[sessionId] = line ?: EarlyDeathStamp(earlyDeathNow(), EARLY_DEATH_MS)
+    }
+
+    /**
+     * Kolo 7 (adv N1): the floor of the attempts of an autoReconnect that a loss started. A loss within the window of
+     * the line a reconnect that ended ACTIVE typed ([EARLY_DEATH_MS] for an attach, [LAUNCH_EARLY_DEATH_MS] for a launch
+     * line, R1) is a failed attempt, not a fresh start — e.g. an attach that fails for good behind `|| exit 1` on a slow
+     * link (the loss comes after ACTIVE), or a Rebuild whose `tmux-sockheal.sh` keeps refusing: without this every round
+     * began at attempt 1 with no wait, for ever. Such losses in a row wait 4 s, 8 s, 16 s … (cap 60 s); a connection that
+     * held longer starts the count over.
      */
     private fun earlyDeathFloorMs(sessionId: String): Long {
-        val at = reconnectedAt.remove(sessionId)
-        if (at == null || System.currentTimeMillis() - at >= EARLY_DEATH_MS) {
+        val stamp = reconnectedAt.remove(sessionId)
+        val since = stamp?.let { earlyDeathNow() - it.at }
+        if (stamp == null || since!! >= stamp.windowMs) {
             earlyDeaths.remove(sessionId)
             return 0
         }
         val n = earlyDeaths.merge(sessionId, 1, Int::plus) ?: 1
         val floor = ReconnectPolicy.backgroundBaseDelayMs(n + 1)
-        FileLogger.log(TAG, "Connection of $sessionId lost ${System.currentTimeMillis() - at}ms after its reconnect (early death $n in a row) — waiting ${floor}ms")
+        FileLogger.log(TAG, "Connection of $sessionId lost ${since}ms after its reconnect's line (early death $n in a row, window ${stamp.windowMs}ms) — waiting ${floor}ms")
         return floor
     }
 
@@ -2178,6 +2200,11 @@ class SessionOrchestrator(
             FileLogger.log(TAG, "Attaching to tmux: $command")
         }
         trace?.phase("decide")
+        // R1: stamped BEFORE the line goes out — a launch line's sockheal may refuse for up to SOCKHEAL_LONGEST_REFUSAL_MS
+        lineSentAt[session.id] = EarlyDeathStamp(
+            earlyDeathNow(),
+            if (decision is TmuxLaunchDecision.Attach) EARLY_DEATH_MS else LAUNCH_EARLY_DEATH_MS,
+        )
         sshManager.sendInput(command + "\n")
         trace?.attachSent(command)
     }
@@ -2291,6 +2318,7 @@ class SessionOrchestrator(
                 // Tab closed during the backoff — stop reconnecting it.
                 if (tabManager.getTab(session.id) == null) { _reconnectStatus.update { it - session.id }; return }
 
+                val attemptStart = earlyDeathNow()   // R1
                 try {
                     // Clean up old connection
                     connectionRegistry.ssh(session.id)?.disconnect()
@@ -2376,7 +2404,7 @@ class SessionOrchestrator(
                     // Restart ALL per-session loops, not just watcher+refresh —
                     // usage/git/latency pollers may have died during the outage.
                     attachSessionRuntime(session.id, session.tmuxSessionName)
-                    reconnectedAt[session.id] = System.currentTimeMillis()   // kolo 7 (adv N1)
+                    stampReconnected(session.id, attemptStart)   // kolo 7 (adv N1), R1
                     say("\r\n\u001B[32mReconnected!\u001B[0m\r\n")
                     FileLogger.log(TAG, "Auto-reconnect succeeded for ${session.id}")
                     _reconnectStatus.update { it - session.id }
@@ -2618,14 +2646,16 @@ class SessionOrchestrator(
         //    (before tmux's network round-trip), wiping the echoed command so
         //    it isn't left on screen.
         val attachCmd = if (isNewTmuxSession) {
-            ClaudeConfig.buildTmuxLaunchCommand(
+            // R6: wrapped like the SSH FreshLaunch (D2), though no caller reaches it today (launchSession creates new
+            // sessions over exec and connects with isNewTmuxSession = false): a refused launch never leaves a bare shell
+            "{ " + ClaudeConfig.buildTmuxLaunchCommand(
                 tmuxSessionName = session.tmuxSessionName,
                 folder = session.folder,
                 mode = session.mode,
                 model = session.model,
                 accountSlug = session.accountSlug,
                 onExisting = ClaudeConfig.OnExisting.Refuse,
-            )
+            ) + "; } || exit 1"
         } else {
             // On a MISS do NOT `tmux new-session -A` (bare shell + tmux server
             // parented under this ephemeral ET-carrier login scope → dies on
@@ -2882,13 +2912,13 @@ class SessionOrchestrator(
           done
           echo "${'$'}VER" > "${'$'}CR/etserver.ver"
         fi
-        # Reap stray etterminals: a healthy bootstrap helper lives <1s, so any
-        # older than 30s is one that wedged on the fifo (bad/absent etserver) —
-        # kill it so they don't accumulate.
-        for p in ${'$'}(pgrep -f "${'$'}CR/etterminal" 2>/dev/null); do
-          AGE=${'$'}(ps -o etimes= -p "${'$'}p" 2>/dev/null | tr -d ' ')
-          [ "${'$'}{AGE:-0}" -gt 30 ] 2>/dev/null && kill "${'$'}p" 2>/dev/null
-        done
+        # No etterminal reaper here (R2). One used to kill every etterminal older
+        # than 30 s as a bootstrap helper wedged on the fifo — but after a
+        # bootstrap etterminal daemonizes with the SAME cmdline and lives on as
+        # the host of that ET session's shell, so each new ET connect killed the
+        # other tabs' ET sessions. A wedged helper cannot outlive its bootstrap:
+        # that runs under `timeout 8` with a read deadline (connectEt), the fix
+        # the reaper was added next to (c063024).
         # No flock reaper here (D1). One used to kill EVERY flock process of the
         # user older than 30 s, meant for the waiters of the old etserver.lock
         # deadlock — and with them other sessions' `( flock -x 9; … ) 9<>LOCK`
@@ -3180,6 +3210,7 @@ class SessionOrchestrator(
 
             tabManager.updateTabStatus(sessionId, SessionStatus.CONNECTING)
 
+            val attemptStart = earlyDeathNow()   // R1
             try {
                 // Keep the session's chosen connection type. reconnectSession used
                 // to hardcode SSH, so a MOSH session silently degraded to plain
@@ -3205,7 +3236,7 @@ class SessionOrchestrator(
                 // — they may have died during the outage), not just watcher+refresh.
                 attachSessionRuntime(sessionId, session.tmuxSessionName)
                 FileLogger.log(TAG, "Reconnected: $sessionId")
-                reconnectedAt[sessionId] = System.currentTimeMillis()   // kolo 7 (adv N1)
+                stampReconnected(sessionId, attemptStart)   // kolo 7 (adv N1), R1
                 succeeded = true
             } catch (e: SessionClosedElsewhereException) {
                 FileLogger.log(TAG, "reconnectSession($sessionId) aborted — closed on another device")
@@ -3748,7 +3779,7 @@ class SessionOrchestrator(
         connectionRegistry.et(sessionId)?.disconnect()
         connectionRegistry.removeEt(sessionId)
         etLocalPorts.remove(sessionId)
-        reconnectedAt.remove(sessionId); earlyDeaths.remove(sessionId)   // kolo 7
+        reconnectedAt.remove(sessionId); earlyDeaths.remove(sessionId); lineSentAt.remove(sessionId)   // kolo 7, R1
         connectionRegistry.ssh(sessionId)?.disconnect()
         connectionRegistry.removeSsh(sessionId)
         connectionRegistry.mosh(sessionId)?.disconnect()
@@ -4270,8 +4301,28 @@ class SessionOrchestrator(
         internal const val EXEC_WAVE_WAIT_MS = 3_000L
         /** C4: how long a cold start's reconnects wait for the first size of the terminal view (shared, once per orchestrator). */
         internal const val VIEW_SIZE_WAIT_MS = 2_000L
-        /** Kolo 7 (adv N1): a loss this soon after a reconnect ended ACTIVE counts as an early death. */
+        /** Kolo 7 (adv N1): a loss this soon after a reconnect's attach line (R1: stamped before it was sent) counts as an early death. */
         internal const val EARLY_DEATH_MS = 5_000L
+        /** R1: one heal try of `tmux-sockheal.sh` (`sg_heal`): its `flock -w 2`, or once locked the 2 s deadline for the recreated socket. */
+        internal const val SOCKHEAL_HEAL_TRY_MS = 2_000L
+        /** R1: the pause before its second heal try (`sleep 0.5`). */
+        internal const val SOCKHEAL_RETRY_PAUSE_MS = 500L
+        /** R1: its one probe of a socket that does not answer (`timeout -k 1 5`): refused as hung after it, no second try. */
+        internal const val SOCKHEAL_HUNG_PROBE_MS = 6_000L
+        /**
+         * R1: the longest a refusing `tmux-sockheal.sh` takes to its `exit 1` (measured 4.54–4.70 s for the lock case,
+         * review D1 adv P5): two heal tries 0.5 s apart, or one hung probe. Not counted: its `timeout 5 ss`/`timeout 10
+         * find` look-ups of the listener, instant when the box is not wedged. `SockhealRefusalBrakeTest` pins these
+         * numbers to the generated script.
+         */
+        internal val SOCKHEAL_LONGEST_REFUSAL_MS: Long = maxOf(2 * SOCKHEAL_HEAL_TRY_MS + SOCKHEAL_RETRY_PAUSE_MS, SOCKHEAL_HUNG_PROBE_MS)
+        /**
+         * R1: a loss this soon after a Rebuild or FreshLaunch line went out counts as an early death: the guard's longest
+         * refusal plus the attach line's own [EARLY_DEATH_MS] for the round trip and a loaded box (11 s). With 5 s a
+         * refusal that came back over a link slower than ~0.5 s looked like a connection that held, and every tab of the
+         * server reconnected every 6–10 s for as long as the guard refused (review D1 adv N1).
+         */
+        internal val LAUNCH_EARLY_DEATH_MS: Long = SOCKHEAL_LONGEST_REFUSAL_MS + EARLY_DEATH_MS
         /** Kolo 4: how long a launch's legacy server bookkeeping waits for the tab's shell (an autoReconnect after a loss). */
         internal const val PERSIST_SHELL_WAIT_MS = 30_000L
         /** A one-off operation (restore install, tombstone, manifest push) that found no transport waits this long for the exec transport. */

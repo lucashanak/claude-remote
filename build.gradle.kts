@@ -37,6 +37,7 @@ val tmuxTmpDirPath: String = run {
     }
 }
 val shimDirPath: String = File(rootDir, "scripts/test-shims").absolutePath
+val testLocale = "C.UTF-8"
 
 subprojects {
     tasks.withType<Test>().configureEach {
@@ -51,6 +52,10 @@ subprojects {
         environment("TMUX_TMPDIR", tmuxTmpDirPath)
         environment("HOME", homePath)
         environment("PATH", shimDirPath + File.pathSeparator + (System.getenv("PATH") ?: "/usr/local/bin:/usr/bin:/bin"))
+        // R7: a UTF-8 locale whatever the shell that started Gradle had. Under LANG=C the JVM's sun.jnu.encoding is
+        // ASCII and ProcessBuilder turns every non-ASCII byte of an argument into '?' (the `❯` of cr-session:
+        // SessionOpsScriptTest failed under LANG=C only). C.UTF-8 is built into glibc, no locale package needed.
+        environment("LC_ALL", testLocale)
         // RealTranscriptHarnessTest reads (never writes) the developer's real transcripts and skips
         // without them; with `user.home` redirected it would skip silently, so hand it the real root.
         if (System.getenv("TRANSCRIPT_HARNESS_ROOT") == null) {
@@ -64,7 +69,7 @@ subprojects {
         // shim) would leave an UP-TO-DATE/FROM-CACHE desktopTest that never ran under it.
         // Root-relative paths: an absolute path would keep two checkouts from sharing build-cache entries.
         val relativeToRoot = { path: String -> File(path).relativeToOrSelf(rootDir).path }
-        inputs.property("testIsolation", listOf(tmuxTmpDirPath, shimDirPath, homePath).joinToString("|", transform = relativeToRoot))
+        inputs.property("testIsolation", listOf(tmuxTmpDirPath, shimDirPath, homePath).joinToString("|", transform = relativeToRoot) + "|LC_ALL=" + testLocale)
         inputs.files(File(shimDirPath, "tmux")).withPropertyName("tmuxShim").withPathSensitivity(PathSensitivity.NONE)
         doFirst {
             File(tmuxPath).mkdirs()

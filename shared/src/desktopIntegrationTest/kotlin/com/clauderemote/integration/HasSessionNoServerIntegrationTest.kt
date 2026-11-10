@@ -128,7 +128,8 @@ class HasSessionNoServerIntegrationTest {
         assertTrue(dir.setExecutable(false, false) && dir.setReadable(false, false), "the private socket directory is closed")
         try {
             runBlocking { withTimeout(120_000) { orchestrator.reconnectSession("t1") } }
-            assertTrue(logLines.any { "Attaching to tmux:" in it && "|| exit 1" in it }, "a plain attach was tried: ${logLines.takeLast(20)}")
+            // R3: a Rebuild's line ends with `|| exit 1` too (D2) — no `new-session` tells the plain attach from it
+            assertTrue(logLines.any { "Attaching to tmux:" in it && "|| exit 1" in it && "new-session" !in it }, "a plain attach was tried: ${logLines.takeLast(20)}")
             // the attach line's `|| exit 1` ends the login shell a moment after the reconnect sent it: the loss follows
             val end = System.currentTimeMillis() + 10_000
             while (logLines.none { "Connection lost" in it } && System.currentTimeMillis() < end) Thread.sleep(50)

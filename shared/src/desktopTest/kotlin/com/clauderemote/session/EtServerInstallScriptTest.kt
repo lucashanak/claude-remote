@@ -12,9 +12,10 @@ import kotlin.test.assertEquals
 import kotlin.test.assertTrue
 
 /**
- * D1: the ET bootstrap's install script (`SessionOrchestrator.ETSERVER_INSTALL`, sent as [SessionOrchestrator.etServerInstallCommand])
+ * D1 + R2: the ET bootstrap's install script (`SessionOrchestrator.ETSERVER_INSTALL`, sent as [SessionOrchestrator.etServerInstallCommand])
  * no longer kills every `flock` process of the user older than 30 s — other sessions' `( flock -x 9; … ) 9<>LOCK`
- * waiters (whose body then ran without the lock) and `flock ~/.cache/crit-integration.lock` died with it.
+ * waiters (whose body then ran without the lock) and `flock ~/.cache/crit-integration.lock` died with it — nor every
+ * `etterminal` older than 30 s, which killed the live ET sessions of the other tabs (R2).
  *
  * SAFETY (kritika D, Hrozba 1): `pgrep` sees every process of the user, and no private HOME or TMUX_TMPDIR narrows
  * it, so the script (old, new or a mutant) runs ONLY in its own PID namespace: `unshare -Urpf --mount-proc`, where it
@@ -36,25 +37,32 @@ class EtServerInstallScriptTest {
 
     // ---- static: what the script holds ----
 
-    @Test fun theInstallScriptHasNoFlockReaperButKeepsTheEtterminalReaperAndItsBoundedLock() {
+    @Test fun theInstallScriptHasNoFlockOrEtterminalReaperButKeepsItsBoundedLock() {
         val o = orchestrator()
         val script = o.ETSERVER_INSTALL
-        assertTrue("pgrep -x flock" !in script, "no reaper of every flock process: $script")
-        assertTrue("for p in \$(pgrep -f \"\$CR/etterminal\" 2>/dev/null); do" in script, "the etterminal reaper stays")
-        assertTrue("[ \"\${AGE:-0}\" -gt 30 ] 2>/dev/null && kill \"\$p\" 2>/dev/null" in script, "it kills etterminals older than 30 s")
+        val code = script.lines().filterNot { it.trim().startsWith("#") }.joinToString("\n")
+        assertTrue("pgrep -x flock" !in code, "no reaper of every flock process: $script")
+        // R2: no reaper of etterminal either — after its bootstrap it daemonizes as the host of an ET session's shell
+        assertTrue(Regex("""pgrep[^\n]*etterminal""").find(code) == null && "etimes" !in code, "no reaper of etterminal (or of anything by age): $script")
         assertTrue("exec 9>\"\$CR/etserver.start.lock\"" in script && "flock -w 5 9 || { echo ET_LOCK_TIMEOUT; exit 0; }" in script,
             "the start lock is etserver.start.lock with a bounded wait")
-        // nothing else is killed: the etterminal reaper and the etserver restarts only
-        val kills = script.lines().filter { Regex("""\b(p?kill)\b""").containsMatchIn(it) && !it.trim().startsWith("#") }.map { it.trim() }
-        assertEquals(
-            listOf(
-                "[ \"\${AGE:-0}\" -gt 30 ] 2>/dev/null && kill \"\$p\" 2>/dev/null",
-                "pkill -f \"\$CR/etserver\" 2>/dev/null; rm -f \"\$CR/et.sock\"",
-                "pkill -f \"\$CR/etserver\" 2>/dev/null; rm -f \"\$CR/et.sock\"",
-            ),
-            kills, "the only kills of the script",
-        )
+        // nothing else is killed: the etserver restarts only
+        val kills = code.lines().filter { Regex("""\b(p?kill)\b""").containsMatchIn(it) }.map { it.trim() }
+        assertEquals(listOf("pkill -f \"\$CR/etserver\" 2>/dev/null; rm -f \"\$CR/et.sock\"", "pkill -f \"\$CR/etserver\" 2>/dev/null; rm -f \"\$CR/et.sock\""), kills, "the only kills of the script")
         assertEquals("timeout 12 sh -c '" + script.replace("'", "'\\''") + "'", o.etServerInstallCommand, "the command sends this script")
+    }
+
+    /** R4 (review D1 kt N2): ensureEtServer sends exactly [SessionOrchestrator.etServerInstallCommand] — what the namespace tests run. */
+    @Test fun ensureEtServerSendsTheTestedCommand() {
+        val src = File("src/commonMain/kotlin/com/clauderemote/session/SessionOrchestrator.kt").readText()
+        val start = src.indexOf("private suspend fun ensureEtServer(").also { assertTrue(it >= 0, "ensureEtServer not found") }
+        val end = Regex("""\n    (?:(?:private|internal|public|override|protected) )*(?:suspend )?(?:fun|val|var) """).find(src, start + 1)!!.range.first
+        val code = src.substring(start, end).lines().filterNot { it.trim().startsWith("//") }.joinToString("\n")
+        val sends = Regex("""execCapture\(([^)]*)\)""").findAll(code).map { it.groupValues[1].trim() }.toList()
+        assertEquals(listOf("jsch, etServerInstallCommand"), sends, "its one exec is the tested command:\n$code")
+        // the bootstrap's other exec (connectEt) stays bounded by its own timeout, the one that makes a reaper needless (R2)
+        assertTrue("execCapture(jsch, \"timeout 8 sh -c 'echo \$id/\${passkey}_xterm-256color | ~/.claude-remote/etterminal" in src,
+            "the etterminal bootstrap runs under timeout 8")
     }
 
     /** D1 (kritika V-D1): the ET bootstrap's exec opens through ChannelOpen — a bare `ch.connect(t)` that times out leaks an sshd slot. */
@@ -144,12 +152,17 @@ class EtServerInstallScriptTest {
         assertEquals(setOf("HOLDER", "WAITER"), run.alive, "foreign flock processes are left alone: ${run.out}")
     }
 
-    @Test fun theEtterminalReaperKillsOnlyAnEtterminalOlderThan30s() {
+    /**
+     * R2 (review D1 adv N2): after a bootstrap etterminal daemonizes with the bootstrap's own cmdline and hosts that ET
+     * session's shell. Another tab's ET connect (this script) must leave such a daemon alone, however old it is.
+     */
+    @Test fun anEtSessionsEtterminalOlderThan30sSurvivesAnotherTabsEtBootstrap() {
         val run = runInNamespace(
             listOf("OLD", "YOUNG"),
-            "\"\$CR/etterminal\" & OLD=\$!; echo 100 > \"\$R/age.\$OLD\"; \"\$CR/etterminal\" & YOUNG=\$!; echo 5 > \"\$R/age.\$YOUNG\"",
+            "\"\$CR/etterminal\" --serverfifo \"\$CR/et.sock\" --verbose=0 & OLD=\$!; echo 100 > \"\$R/age.\$OLD\"; " +
+                "\"\$CR/etterminal\" --serverfifo \"\$CR/et.sock\" --verbose=0 & YOUNG=\$!; echo 5 > \"\$R/age.\$YOUNG\"",
         )
         assertTrue("ET_READY port=" in run.out, run.out)
-        assertEquals(setOf("YOUNG"), run.alive, "a wedged etterminal (> 30 s) is reaped, a young one lives: ${run.out}")
+        assertEquals(setOf("OLD", "YOUNG"), run.alive, "no ET session's etterminal is killed, old or young: ${run.out}")
     }
 }
