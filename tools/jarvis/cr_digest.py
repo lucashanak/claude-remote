@@ -490,17 +490,21 @@ WAKE_HEAD = ("Probudil tě jarvis-d (ne Lukáš). Posuď, co je důležité, ud�
              "neopakuj.")
 
 
-def wake_steps(env, entries, now):
-    """For each entry the step Jarvis may take by himself right now (the same gates the CLIs run), or None."""
+def wake_steps(env, entries, now, notes=None):
+    """For each entry the step Jarvis may take by himself right now (the same gates the CLIs run), or None.
+    `notes` (a list) gets, per entry, a fact that replaces the step (a session that continues by itself) or None."""
     import cr_task
     m = M.Mail(env)
     sessions = JW.sessions_now(env, now)
     out = []
     for e in entries:
-        step = None
+        step = note = None
         try:
             if e.get("src") == "block" and e.get("sub") == "limit" and e.get("name"):
-                if m.resume_check(e["name"], sessions, now)[1] is None:
+                lim = m.limit_now(e["name"], sessions) or {}
+                if J.auto_continue_live(lim, now):
+                    note = f"pokračuje po obnově limitu sama (v {lim['autoContinue']}), resume nezkoušej"
+                elif m.resume_check(e["name"], sessions, now)[1] is None:
                     step = f"cr-mail resume {e.get('short') or J.short_name(e['name'])}"
             elif e.get("src") == "task" and M.TASK_RE.fullmatch(str(e.get("task") or "")):
                 cr_task.nudge_check(env, m, e["task"], now, sessions=sessions)
@@ -508,10 +512,12 @@ def wake_steps(env, entries, now):
         except Exception:  # noqa: BLE001  Refused (the gate says no) or anything else: no step offered
             step = None
         out.append(step)
+        if notes is not None:
+            notes.append(note)
     return out
 
 
-def _wake_line(e, step, now):
+def _wake_line(e, step, now, note=None):
     mark = WAKE_MARK.get(e.get("src"), "·")
     short = e.get("short") or (J.short_name(e["name"]) if e.get("name") else "")
     if e.get("src") == "block":
@@ -528,7 +534,7 @@ def _wake_line(e, step, now):
         body = (e.get("text") or "").rstrip(".")
     if e.get("task"):
         body += f" · {e['task']}"
-    return f"{mark} {body}" + (f" · smíš sám: {step}" if step else "")
+    return f"{mark} {body}" + (f" · smíš sám: {step}" if step else "") + (f" · {note}" if note else "")
 
 
 def cmd_wake(env, a, now):
@@ -539,7 +545,8 @@ def cmd_wake(env, a, now):
     if not isinstance(d, dict) or not isinstance(d.get("entries"), list):
         return None
     entries = [e for e in d["entries"] if isinstance(e, dict)]
-    steps = wake_steps(env, entries, now)
+    notes = []
+    steps = wake_steps(env, entries, now, notes)
     try:
         import cr_task
         left = max(0, cr_task.AUTO_DAY_MAX - cr_task.auto_today(env, now))
@@ -547,11 +554,11 @@ def cmd_wake(env, a, now):
         left = 0
     if a.json:
         return _dump({"id": wid, "at": d.get("at"), "blocking": bool(d.get("blocking")), "entries": entries,
-                      "steps": steps, "autoLeft": left})
+                      "steps": steps, "notes": notes, "autoLeft": left})
     n = len(entries)
     lines = [f"[jarvis wake {wid} · {_hm(_i(d.get('at')) or now)} · {n} "
              f"{J.plural(n, 'položka', 'položky', 'položek')}] {DATA_NOTE}", WAKE_HEAD]
-    lines += [_wake_line(e, s, now) for e, s in zip(entries, steps)]
+    lines += [_wake_line(e, s, now, n) for e, s, n in zip(entries, steps, notes)]
     lines.append("Bez Lukášova ano smíš jen: cr-mail resume <jméno> (session stojí na limitu, jednou na limit), "
                  "cr-task nudge t-… (tvůj úkol bez důkazu, nejvýš 2×), cr-task watch / remind "
                  f"(dnes ještě {left}). Každý takový krok řekni. Ostatní (nová práce, zavření, otevření, jiný účet) "

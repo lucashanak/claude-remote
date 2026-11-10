@@ -89,7 +89,10 @@ class Daemon:
                 self.tr_cache[s["transcript"]] = (s["trKey"], {
                     "_key": s["trKey"], "title": s.get("title"), "lastPrompt": s.get("lastPrompt"),
                     "lastPromptMs": s.get("lastPromptMs"), "lastAssistantMs": s.get("lastAssistantMs"),
-                    "endsWithQuestion": s.get("endsWithQuestion")})
+                    "endsWithQuestion": s.get("endsWithQuestion"),
+                    # live 2026-11-10: without it every new cron run dropped `limit` of a session that stands on
+                    # its limit (its transcript does not change, so the seeded entry is used as it is)
+                    "limitHit": s.get("limit") if isinstance(s.get("limit"), dict) else None})
         self.fetched, self.panes_at, self.live_key = None, 0, None
         self.good_panes, self.good_at = None, 0
         self.usage, self.usage_at = {}, 0

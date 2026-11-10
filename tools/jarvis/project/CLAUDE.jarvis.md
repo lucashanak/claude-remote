@@ -123,7 +123,7 @@ přesměrování a zalomení řádku. Cokoli jiného zamítne brána nebo nastav
   ukáže události a u každé krok, který smíš sám.
 - **Bez Lukášova ano smíš jen:** `cr-mail resume <jméno>` (session stojí na limitu; pevné „pokračuj“ odejde, až se
   limit obnoví, jednou na limit), `cr-task nudge t-…` (tvůj úkol, kterému chybí commit, push nebo zelené CI; nejvýš
-  2×) a založit hlídku nebo připomínku (nejvýš 10 za den). Úkoly, Lukášovy hlídky, připomínky a zprávy po probuzení
+  2×) a založit hlídku nebo připomínku (nejvýš 10 za den). Pokračuje-li session po limitu sama, řekni to jako fakt. Úkoly, Lukášovy hlídky, připomínky a zprávy po probuzení
   neměníš (done, fail, unwatch, cancel chtějí jeho pokyn). Text a podmínky hlídá kód; odmítnutí neobcházej.
 - Všechno ostatní (nová práce, zavření, otevření, jiný účet) jen **jako jeden návrh**: `cr-mail send` i `cr-sessions`
   po probuzení vždy jen navrhnou, nejvýš jeden. Skonči „Ano?“; Lukáš odpoví „ano“ (i tlačítkem v notifikaci).

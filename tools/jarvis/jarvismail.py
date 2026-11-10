@@ -883,27 +883,50 @@ class Mail:
         """(limit_ms, None) or (None, why): `cr-mail resume` may go only to a session that stands on its account's
         limit by the state (jarvis-d's picture), and once per limit episode (the episode = the limit message's time)."""
         s = (sessions or {}).get(name) or {}
-        lim = s.get("limit") if isinstance(s.get("limit"), dict) else None
+        lim = self.limit_now(name, sessions)
         if not lim or not J._int(lim.get("ms")):
             return None, f"{J.short_name(name)} podle stavu nestojí na limitu; pokračovat ji nech jen na Lukášův pokyn"
         if s.get("state") in ("dead", "missing", "gone"):
             return None, f"{J.short_name(name)} neběží ({s['state']})"
+        if J.auto_continue_live(lim, now):
+            # live 2026-11-10: Claude 2.1.32x goes on by itself after the reset; a "pokračuj" would land in running work
+            return None, (f"{J.short_name(name)} pokračuje po obnově limitu sama (v {lim['autoContinue']}); nic "
+                          f"neposílej, řekni to Lukášovi jako fakt")
         ep = J._int(lim["ms"])
         if any(e.get("kind") == "resume" and e.get("to") == name and J._int(e.get("limitMs")) == ep
                for e in self.auto_steps(now - 30 * 86400 * 1000)):
             return None, f"{J.short_name(name)} už po tomhle limitu pokyn pokračovat dostala (jednou na limit)"
-        if self.resume_relapse(name, ep):
+        if self.resume_relapse(name, J._int(lim.get("lastHitMs")) or ep):
             return None, (f"{J.short_name(name)} narazila na limit hned po mém minulém „pokračuj“; znovu ji neposílám, "
                           f"řekni to Lukášovi")
         return ep, None
 
+    def limit_now(self, name, sessions=None):
+        """The target's limit episode {ms, text, autoContinue?} read DIRECTLY from its transcript (live 2026-11-10:
+        jarvis-d's picture lost it on every new cron run), or from the picture when the transcript is unknown."""
+        s = (sessions or {}).get(name) or {}
+        path = s.get("transcript")
+        if isinstance(path, str) and path:
+            lh = J.transcript_info(path).get("limitHit")
+            if not isinstance(lh, dict):
+                return None
+            out = {"ms": lh.get("ms"), "text": J.safe_text(lh.get("text"), 80)}
+            if isinstance(lh.get("autoContinue"), str):
+                out.update({k: lh.get(k) for k in ("autoContinue", "autoContinueMs") if lh.get(k) is not None})
+            if lh.get("lastHitMs"):
+                out["lastHitMs"] = lh["lastHitMs"]
+            return out
+        return s.get("limit") if isinstance(s.get("limit"), dict) else None
+
     def resume_relapse(self, name, limit_ms):
-        """True when an auto resume to `name` was delivered at most RESUME_RELAPSE_MS before this limit hit."""
+        """True when an auto resume to `name` was delivered at most RESUME_RELAPSE_MS before this limit hit
+        (rev-dbg2: callers pass the LAST hit, `lastHitMs`; the episode's first hit can be hours before the resume).
+        Returns the id of that resume (truthy), so the alerts can tell one relapse once (rev-dbg3), or None."""
         for r in self.all():
             d = J._int(r.get("deliveredAt"))
             if r.get("auto") == "resume" and r.get("to") == name and d and 0 <= limit_ms - d <= RESUME_RELAPSE_MS:
-                return True
-        return False
+                return r["id"]
+        return None
 
     def resume(self, name, sessions, now, not_before):
         """F5c `cr-mail resume`: the fixed "pokračuj" after the target's limit resets (`not_before`, the --after limit
@@ -1436,20 +1459,59 @@ def transcript_has(path, mid):
     return any(marker in line for line in J.read_tail(path, 4 * 1024 * 1024))
 
 
+def _prompt_text(d):
+    c = (d.get("message") or {}).get("content")
+    if isinstance(c, str):
+        return c
+    if isinstance(c, list):
+        return "".join(b.get("text", "") for b in c if isinstance(b, dict) and b.get("type") == "text")
+    return ""
+
+
+def _entry_prompt(d):
+    """The text by which a line of ours came INTO the session, or None: a prompt (`user`, J._is_prompt), the queue
+    entry of a line Enter submitted while a turn was still running (`queue-operation` enqueue, as the old find_reply
+    took it), or that queued line handed to the running turn (`attachment` queued_command). Never the metadata."""
+    if not isinstance(d, dict) or d.get("isSidechain"):
+        return None
+    t = d.get("type")
+    if t == "user" and J._is_prompt(d):
+        return _prompt_text(d)
+    if t == "queue-operation" and d.get("operation") == "enqueue" and isinstance(d.get("content"), str):
+        return d["content"]
+    a = d.get("attachment")
+    if t == "attachment" and isinstance(a, dict) and a.get("type") == "queued_command" and isinstance(a.get("prompt"), str):
+        return a["prompt"]
+    return None
+
+
+def marker_start(lines, mid):
+    """(index, prompt text) of the last entry by which our marker `[jarvis <mid>]` came in, or (None, None).
+
+    Only a real way in counts (`_entry_prompt`, live 2026-11-10): Claude writes metadata after the turn that repeats
+    the prompt's text (`last-prompt`, `api-request-blob`; an assistant reply may quote the id), and taking one of those
+    as the start left nothing after it, so Jarvis's answers went out as templates."""
+    marker = f"[jarvis {mid}]"
+    for i in range(len(lines) - 1, -1, -1):
+        if marker not in lines[i] or not lines[i].startswith("{"):
+            continue
+        try:
+            d = json.loads(lines[i])
+        except ValueError:
+            continue
+        text = _entry_prompt(d)
+        if text is not None and marker in text:
+            return i, text
+    return None, None
+
+
 def find_reply(path, mid):
-    """The last assistant text after the last transcript line that carries our marker, up to the next prompt.
-    None when there is no such text yet (the transcript is flushed after the Stop hook)."""
+    """The last assistant text after the prompt that carries our marker, up to the next prompt. None when there is
+    no such text yet (the transcript is flushed after the Stop hook)."""
     if not path:
         return None
-    marker = f"[jarvis {mid}]"
     lines = J.read_tail(path, 4 * 1024 * 1024)
-    start = None
-    for i in range(len(lines) - 1, -1, -1):
-        # the reply itself may quote our id ("Hotovo: [jarvis m-…]"): only a non-assistant line is where it came in
-        # (the user prompt, or the queue entry of a message queued mid-turn)
-        if marker in lines[i] and '"type":"assistant"' not in lines[i].replace(" ", ""):
-            start = i
-            break
+    start, _ = marker_start(lines, mid)
     if start is None:
         return None
     reply = None
@@ -1472,25 +1534,10 @@ def find_reply(path, mid):
 
 
 def marker_prompt(path, mid):
-    """rev-f5c N3: the text of the prompt that carries our marker (the last such non-assistant entry), or None."""
+    """rev-f5c N3: the text of the prompt that carries our marker, or None."""
     if not path:
         return None
-    marker = f"[jarvis {mid}]"
-    for line in reversed(J.read_tail(path, 1024 * 1024)):
-        if marker not in line or '"type":"assistant"' in line.replace(" ", ""):
-            continue
-        try:
-            d = json.loads(line)
-        except ValueError:
-            continue
-        if not isinstance(d, dict) or d.get("type") != "user":
-            continue
-        c = (d.get("message") or {}).get("content")
-        if isinstance(c, str):
-            return c
-        if isinstance(c, list):
-            return "".join(b.get("text", "") for b in c if isinstance(b, dict) and b.get("type") == "text")
-    return None
+    return marker_start(J.read_tail(path, 4 * 1024 * 1024), mid)[1]
 
 
 def final_stop(reason):
@@ -1506,13 +1553,8 @@ def find_final_reply(path, mid):
     se.", stop_reason tool_use) is never the answer."""
     if not path:
         return None
-    marker = f"[jarvis {mid}]"
     lines = J.read_tail(path, 4 * 1024 * 1024)
-    start = None
-    for i in range(len(lines) - 1, -1, -1):
-        if marker in lines[i] and '"type":"assistant"' not in lines[i].replace(" ", ""):
-            start = i
-            break
+    start, _ = marker_start(lines, mid)
     if start is None:
         return None
     last = None

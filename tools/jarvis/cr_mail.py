@@ -216,7 +216,7 @@ def resume_after(m, name, limit_ms, sessions, now):
     window that is spent, as `--after limit` (refused when nothing is known)."""
     JA = _ja()
     s = (sessions or {}).get(name) or {}
-    r = reset_from_text(((s.get("limit") or {}) if isinstance(s.get("limit"), dict) else {}).get("text"), limit_ms)
+    r = reset_from_text((m.limit_now(name, sessions) or {}).get("text"), limit_ms)
     if r:
         return max(r, now), ("hned (limit se už obnovil)" if r <= now
                              else f"do obnovy limitu ({JA.when_cz(r, now) if JA else r})")

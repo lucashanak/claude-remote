@@ -1142,6 +1142,329 @@ class Review2Test(CliBase):
 
 # ------------------------------------------------------------------------------------------------- the daemon
 
+class LiveDebugTest(CliBase):
+    """Live debugging 2026-11-10 (26 wakes since 15:20): lost answers, templates after the gap, resume, idle rounds."""
+
+    WID = "w-20261110T215216-5fd0"
+
+    def live_turn(self, line, answer):
+        """A Jarvis turn with the record types Claude 2.1.32x really writes around it (live transcript c5da31f2)."""
+        blob = {"type": "api-request-blob", "message": {"role": "user", "content": [{"type": "text", "text": line}]}}
+        return [
+            blob, {"type": "api-request", "timestamp": "2026-11-10T21:52:17Z"}, user(line),
+            {"type": "attachment", "attachment": {"type": "queued_command", "prompt": line}},
+            mid("Podívám se."),
+            {"type": "api-request-blob", "message": {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "tu1", "content": "ok"}]}},
+            {"type": "api-request"}, tool_result(),
+            dict(assistant(""), message={"role": "assistant", "stop_reason": "end_turn",
+                                         "content": [{"type": "thinking", "thinking": "…"}]}),
+            final(answer),
+            {"type": "system", "subtype": "stop_hook_summary", "level": "suggestion"},
+            {"type": "system", "subtype": "turn_duration", "isMeta": False},
+            {"type": "last-prompt", "lastPrompt": line}, {"type": "ai-title", "aiTitle": "Jarvis"},
+            {"type": "mode"}, {"type": "file-history-snapshot"}, blob]
+
+    def test_1_metadata_after_the_turn_is_never_the_start(self):
+        line = f"[jarvis wake {self.WID}] 2 události · cr-digest wake {self.WID}"
+        p = self.fx.transcript("/home/u/j", self.jarvis_sid, self.live_turn(line, "Dávka B1 má otevřený dialog."))
+        self.assertEqual(M.find_final_reply(p, "wake " + self.WID), "Dávka B1 má otevřený dialog.")
+        self.assertEqual(M.marker_prompt(p, "wake " + self.WID), line)
+        mline = "[jarvis m-20261110T215216-abcd] Zpráva od Jarvise · Celé znění: cat x"
+        p2 = self.fx.transcript("/home/u/t", f"{200:08x}-0000-4000-8000-000000000000",
+                                self.live_turn(mline, "Hotovo, testy prošly."))
+        self.assertEqual(M.find_reply(p2, "m-20261110T215216-abcd"), "Hotovo, testy prošly.")
+
+    def test_1_a_live_answer_is_relayed_not_templated(self):
+        self.perm()
+        self.tick()
+        self.answer(None, entries=self.live_turn(self.submitted(), "Pane, jarvis-test chce povolení.")[2:])
+        self.assertEqual([a["kind"] for a in self.alerts()], ["jblock"])
+
+    def test_2_a_batch_inside_the_gap_gets_its_3_min_after_the_gap(self):
+        self.w.state["wakes"] = [self.fx.clock.ms - MIN]  # the last wake 1 min ago: the gap ends in 4 min
+        self.perm()
+        self.tick()
+        self.assertEqual(self.tm.writes(), [])
+        self.advance(3.1)
+        self.tick()
+        self.assertEqual(self.alerts(), [])  # still in the gap: its 3 minutes have not even started
+        self.advance(1)
+        self.tick()
+        self.assertIsNotNone(self.submitted())  # pasted, not the template
+        self.assertEqual(self.alerts(), [])
+        self.advance(3.1)
+        self.tick()
+        self.assertEqual(self.kinds(), [("block", "jarvis-test chce povolení.")])  # no answer: the template
+
+    def limited_transcript(self, auto=False, answered=False):
+        entries = [user("pracuj")]
+        if auto:
+            entries.append({"type": "system", "subtype": "informational", "level": "notice",
+                            "timestamp": "2026-11-06T21:10:00Z",
+                            "content": "Usage limit reached · continuing automatically at 10:30pm · esc to cancel"})
+        entries.append(assistant("You've hit your 5-hour limit · resets 10:30pm (UTC)", isApiErrorMessage=True,
+                                 error="rate_limit", timestamp="2026-11-06T21:10:01Z"))
+        if answered:
+            entries += [user("Your claude.ai usage limit has reset. Continue the task…"), final("Pokračuji.")]
+        return self.fx.transcript("/home/u/proj", f"{200:08x}-0000-4000-8000-000000000000", entries)
+
+    def test_3a_jarvis_d_keeps_the_limit_across_cron_runs(self):
+        import jarvis_d
+        self.limited_transcript()
+        st = jarvis_d.Daemon(self.env).tick()
+        self.assertIsNotNone(st["sessions"][TARGET]["limit"])
+        self.fx.clock.advance(60)
+        st2 = jarvis_d.Daemon(self.env).tick()  # the next cron run: the transcript did not change
+        self.assertIsNotNone(st2["sessions"][TARGET]["limit"])
+
+    def test_3a_resume_decides_by_the_target_transcript_not_the_cache(self):
+        tp = self.limited_transcript()
+        self.write_status({TARGET: sess(TARGET, state="idle", account="work", transcript=tp), OTHER: sess(OTHER)})
+        self.fx.usage("work", 100, 50)
+        rc, _, err = self.run_cli(cr_mail, "resume", TARGET)
+        self.assertEqual(rc, 0, err)
+
+    def test_3b_a_session_that_continues_by_itself_gets_no_resume(self):
+        tp = self.limited_transcript(auto=True)
+        self.assertEqual((J.transcript_info(tp)["limitHit"] or {}).get("autoContinue"), "22:30")
+        self.write_status({TARGET: sess(TARGET, state="idle", account="work", transcript=tp), OTHER: sess(OTHER)})
+        self.fx.usage("work", 100, 50)
+        rc, _, err = self.run_cli(cr_mail, "resume", TARGET)
+        self.assertEqual(rc, 2)
+        self.assertIn("pokračuje po obnově limitu sama (v 22:30)", err)
+        self.assertIsNone(J.transcript_info(self.limited_transcript(auto=True, answered=True))["limitHit"])
+
+    def test_3b_cr_digest_wake_says_it_instead_of_offering_resume(self):
+        tp = self.limited_transcript(auto=True)
+        ms = J.transcript_info(tp)["limitHit"]["ms"]
+        self.write_status({TARGET: sess(TARGET, "limit", ms, state="idle", account="work", transcript=tp,
+                                        limit={"ms": ms, "text": "limit", "autoContinue": "22:30"}),
+                           OTHER: sess(OTHER)})
+        self.sessions[TARGET] = sess(TARGET, "limit", self.fx.clock.ms - 20 * MIN, state="idle")
+        self.tick()
+        out = io.StringIO()
+        self.assertEqual(cr_digest.main(["wake", self.wb()["id"]], env=self.env, out=out, err=io.StringIO()), 0)
+        self.assertIn("pokračuje po obnově limitu sama (v 22:30), resume nezkoušej", out.getvalue())
+        self.assertNotIn("cr-mail resume", out.getvalue().split("Bez Lukášova")[0])
+
+    def esc_case(self, after=()):
+        """A limit with an auto-continue promised 10 min from now (box local time, 12 h like Claude prints it)."""
+        iso = lambda ms: time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(ms / 1000))  # noqa: E731
+        promised = self.fx.clock.ms + 10 * MIN
+        lt = time.localtime(promised / 1000)
+        hm = f"{lt.tm_hour % 12 or 12}:{lt.tm_min:02d}{'pm' if lt.tm_hour >= 12 else 'am'}"
+        entries = [user("pracuj", ts=iso(self.fx.clock.ms - 2 * MIN)),
+                   {"type": "system", "subtype": "informational", "timestamp": iso(self.fx.clock.ms - MIN),
+                    "content": f"Usage limit reached · continuing automatically at {hm} · esc to cancel"},
+                   assistant("You've hit your 5-hour limit · resets 10:30pm (UTC)", isApiErrorMessage=True,
+                             error="rate_limit", timestamp=iso(self.fx.clock.ms - MIN + 1000))]
+        entries += [e(iso(promised + 30000)) for e in after]
+        tp = self.fx.transcript("/home/u/proj", f"{200:08x}-0000-4000-8000-000000000000", entries)
+        self.write_status({TARGET: sess(TARGET, state="idle", account="work", transcript=tp), OTHER: sess(OTHER)})
+        self.fx.usage("work", 100, 50)
+        return promised
+
+    def test_3b_esc_the_promise_expires_5_min_after_its_time(self):
+        promised = self.esc_case()
+        self.fx.clock.ms = promised + 4 * MIN
+        self.fx.usage("work", 100, 50)
+        rc, _, err = self.run_cli(cr_mail, "resume", TARGET)
+        self.assertEqual(rc, 2)
+        self.assertIn("pokračuje po obnově limitu sama", err)
+        self.fx.clock.ms = promised + 6 * MIN  # nothing happened: esc, a crash or an unknown format
+        self.fx.usage("work", 100, 50)
+        rc, _, err = self.run_cli(cr_mail, "resume", TARGET)
+        self.assertEqual(rc, 0, err)
+
+    RESET = staticmethod(lambda ts: {"type": "system", "subtype": "informational", "timestamp": ts,
+                         "content": "Usage limit reset · Continuing automatically"})
+    REPROMPT = staticmethod(lambda ts: user("Your claude.ai usage limit has reset. Continue the task…", ts=ts))
+    WEEKLY = staticmethod(lambda ts: assistant("You've hit your weekly limit · resets Nov 14, 4pm (UTC)", isApiErrorMessage=True,
+                                   error="rate_limit", timestamp=ts))
+
+    def test_3b_once_it_went_on_the_session_is_off_its_limit(self):
+        for after in ([self.RESET], [self.REPROMPT]):
+            self.fx.clock.ms = T0
+            promised = self.esc_case(after)
+            self.fx.clock.ms = promised + 20 * MIN
+            self.fx.usage("work", 100, 50)
+            rc, _, err = self.run_cli(cr_mail, "resume", TARGET)
+            self.assertEqual(rc, 2, after)
+            self.assertIn("nestojí na limitu", err)  # it works again by itself
+
+    def test_6_med_the_next_limit_gets_no_old_promise(self):
+        # rev-dbg MED: the auto-continue ran straight into the weekly limit; no new "continuing automatically"
+        for after in ([self.RESET, self.WEEKLY], [self.REPROMPT, self.WEEKLY]):
+            self.fx.clock.ms = T0
+            promised = self.esc_case(after)
+            tp = self.write_status_tp()
+            lh = J.transcript_info(tp)["limitHit"]
+            self.assertIn("weekly", lh["text"])
+            self.assertNotIn("autoContinue", lh)
+            self.fx.clock.ms = promised + MIN
+            self.fx.usage("work", 100, 50)
+            self.assertNotIn("sama", self.run_cli(cr_mail, "resume", TARGET)[2])
+
+    def write_status_tp(self):
+        with open(self.env.path("status.json")) as f:
+            return json.load(f)["sessions"][TARGET]["transcript"]
+
+    def test_6_one_episode_from_the_first_hit_until_an_answer(self):
+        iso = lambda ms: time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(ms / 1000))  # noqa: E731
+        t = self.fx.clock.ms
+        hit = lambda ms: assistant("You've hit your limit", isApiErrorMessage=True, error="rate_limit",  # noqa: E731
+                                   timestamp=iso(ms))
+        tp = self.fx.transcript("/home/u/p", f"{9:08x}-0000-4000-8000-000000000000", [
+            user("pracuj", ts=iso(t - 30 * MIN)), hit(t - 20 * MIN), user("zpráva od kolegy", ts=iso(t - 10 * MIN)),
+            hit(t - 10 * MIN + 1000)])
+        self.assertEqual(J.transcript_info(tp)["limitHit"]["ms"], (t - 20 * MIN) // 1000 * 1000)
+        tp = self.fx.transcript("/home/u/p", f"{9:08x}-0000-4000-8000-000000000000", [
+            hit(t - 20 * MIN), final("Hotovo."), hit(t - 5 * MIN)])
+        self.assertEqual(J.transcript_info(tp)["limitHit"]["ms"], (t - 5 * MIN) // 1000 * 1000)
+
+    def test_6_a_promise_without_a_time_stands_at_most_6_h(self):
+        lim = {"ms": T0, "autoContinue": "22:30", "autoContinueMs": None}
+        self.assertTrue(J.auto_continue_live(lim, T0 + 5 * 3600 * 1000))
+        self.assertFalse(J.auto_continue_live(lim, T0 + 7 * 3600 * 1000))
+
+    def test_6_mail_that_came_in_through_the_queue_finds_its_reply(self):
+        mline = "[jarvis m-20261110T215216-abcd] Zpráva od Jarvise · Celé znění: cat x"
+        for entry in ({"type": "queue-operation", "operation": "enqueue", "content": mline},
+                      {"type": "attachment", "attachment": {"type": "queued_command", "prompt": mline}}):
+            p = self.fx.transcript("/home/u/t", f"{200:08x}-0000-4000-8000-000000000000", [
+                user("dřívější práce"), mid("Pracuji."), entry, tool_result(), final("Hotovo, pushnuto."),
+                {"type": "last-prompt", "lastPrompt": "jiné"}])
+            self.assertEqual(M.find_reply(p, "m-20261110T215216-abcd"), "Hotovo, pushnuto.", entry["type"])
+            self.assertEqual(M.marker_prompt(p, "m-20261110T215216-abcd"), mline)
+
+    # --------------------------------------------------------- rev-dbg2: the relapse after our resume is told again
+
+    def hits(self, *entries):
+        return self.fx.transcript("/home/u/p", f"{9:08x}-0000-4000-8000-000000000000", list(entries))
+
+    def iso(self, ms):
+        return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(ms / 1000))
+
+    def hit(self, ms, text="You've hit your limit"):
+        return assistant(text, isApiErrorMessage=True, error="rate_limit", timestamp=self.iso(ms))
+
+    def test_7_our_mail_then_a_hit_is_a_new_episode_a_teammate_is_not(self):
+        t = self.fx.clock.ms
+        mline = "[jarvis m-20261110T224005-abcd] Zpráva od Jarvise · Celé znění: cat x"
+        lh = J.transcript_info(self.hits(user("pracuj", ts=self.iso(t - 70 * MIN)), self.hit(t - 60 * MIN),
+                                         user(mline, ts=self.iso(t - 2 * MIN)), self.hit(t - 2 * MIN + 1000)))["limitHit"]
+        self.assertEqual(lh["ms"], (t - 2 * MIN + 1000) // 1000 * 1000)
+        lh = J.transcript_info(self.hits(user("pracuj", ts=self.iso(t - 70 * MIN)), self.hit(t - 60 * MIN),
+                                         user("zpráva od kolegy", ts=self.iso(t - 2 * MIN)),
+                                         self.hit(t - 2 * MIN + 1000)))["limitHit"]
+        self.assertEqual(lh["ms"], (t - 60 * MIN) // 1000 * 1000)
+
+    def test_7_text_and_last_hit_follow_the_last_hit(self):
+        t = self.fx.clock.ms
+        lh = J.transcript_info(self.hits(
+            self.hit(t - 60 * MIN, "You've hit your 5-hour limit · resets 10:30pm (UTC)"),
+            user("zpráva od kolegy", ts=self.iso(t - 5 * MIN)),
+            self.hit(t - 5 * MIN, "You've hit your weekly limit · resets Nov 14, 4pm (UTC)")))["limitHit"]
+        self.assertEqual(lh["ms"], (t - 60 * MIN) // 1000 * 1000)
+        self.assertIn("weekly", lh["text"])
+        self.assertEqual(lh["lastHitMs"], (t - 5 * MIN) // 1000 * 1000)
+
+    def delivered_resume(self):
+        ep = self.on_limit()
+        self.assertEqual(self.run_cli(cr_mail, "resume", TARGET)[0], 0)
+        rec = [r for r in self.m.all() if r.get("auto") == "resume"][0]
+        self.fx.clock.ms = rec["notBefore"] + 1000
+        self.on_limit(ms=ep)
+        self.assertEqual(self.deliver(rec), "delivered")
+        return ep, self.m.get(rec["id"])["deliveredAt"]
+
+    def test_7_resume_relapse_looks_at_the_last_hit(self):
+        ep, d = self.delivered_resume()
+        lim = {"ms": ep - 5 * MIN, "text": "You've hit your limit", "lastHitMs": d + MIN}
+        self.write_status({TARGET: sess(TARGET, "limit", ep - 5 * MIN, state="idle", account="work", limit=lim),
+                           OTHER: sess(OTHER)})
+        self.fx.clock.ms = d + 2 * MIN
+        rc, _, err = self.run_cli(cr_mail, "resume", TARGET)
+        self.assertEqual(rc, 2)
+        self.assertIn("hned po mém minulém", err)
+
+    def test_7_the_relapse_block_is_told_though_its_since_is_old(self):
+        ep, d = self.delivered_resume()
+        text = "You've hit your limit"
+        self.w.state["recent"][TARGET] = {"sig": f"limit|{text}", "at": self.fx.clock.ms - MIN}
+        self.sessions[TARGET] = sess(TARGET, "limit", ep - 5 * MIN, state="idle", text=text,
+                                     limit={"ms": ep - 5 * MIN, "text": text, "lastHitMs": d + 1000})
+        self.tick()
+        # not "the same as before" (recent): it goes out at once (its grace has long passed), here as a wake
+        self.assertIsNotNone(self.wb())
+        self.assertEqual([(e["src"], e.get("sub"), e.get("name")) for e in self.wb()["entries"]],
+                         [("block", "limit", TARGET)])
+
+    def test_7_a_block_told_before_the_resume_is_told_again_on_relapse(self):
+        ep, d = self.delivered_resume()
+        text = "You've hit your limit"
+        old = {"ms": ep - 5 * MIN, "text": text, "lastHitMs": d - 3600 * 1000}
+        self.sessions[TARGET] = sess(TARGET, "limit", ep - 5 * MIN, state="idle", text=text, limit=old)
+        self.tick()
+        self.w.state["blocks"][TARGET]["told"] = True  # told long ago, the episode never ended
+        self.sessions[TARGET] = sess(TARGET, "limit", ep - 5 * MIN, state="idle", text=text,
+                                     limit=dict(old, lastHitMs=d + 1000))
+        self.advance(0.1)
+        self.tick()
+        self.assertFalse(self.w.state["blocks"][TARGET]["told"])
+
+    def test_8_one_relapse_is_told_once_whatever_hits_after_it(self):
+        ep, d = self.delivered_resume()
+        text = "You've hit your limit"
+        lim = {"ms": ep - 5 * MIN, "text": text, "lastHitMs": d + 1000}
+        self.sessions[TARGET] = sess(TARGET, "limit", ep - 5 * MIN, state="idle", text=text, limit=lim)
+        self.tick()
+        self.assertIsNotNone(self.wb())
+        self.assertEqual([e.get("sub") for e in self.wb()["entries"]], ["limit"])  # the relapse, told
+        self.answer("Pane, jarvis-test po mém pokračuj zase stojí na limitu.")
+        n = len(self.alerts())
+        for k in range(1, 4):  # teammates' messages hit the limit again every 6 min, within the 30 min
+            self.advance(6)
+            self.sessions[TARGET] = sess(TARGET, "limit", ep - 5 * MIN, state="idle", text=text,
+                                         limit=dict(lim, lastHitMs=self.fx.clock.ms - 1000))
+            self.tick()
+            self.assertIsNone(self.wb(), k)
+        self.assertEqual(len(self.alerts()), n)
+
+    def test_7_a_prompt_just_before_the_promised_time_does_not_end_the_episode(self):
+        t = self.fx.clock.ms
+        promised = t + 10 * MIN
+        lt = time.localtime(promised / 1000)
+        hm = f"{lt.tm_hour % 12 or 12}:{lt.tm_min:02d}{'pm' if lt.tm_hour >= 12 else 'am'}"
+        lh = J.transcript_info(self.hits(
+            {"type": "system", "subtype": "informational", "timestamp": self.iso(t - MIN),
+             "content": f"Usage limit reached · continuing automatically at {hm} · esc to cancel"},
+            self.hit(t - MIN + 1000), user("zpráva od kolegy", ts=self.iso(promised - 30000))))["limitHit"]
+        self.assertIsNotNone(lh)
+        self.assertEqual(lh.get("autoContinue"), J.auto_continue_hm(f"continuing automatically at {hm}"))
+
+    def round_with(self, **kw):
+        self.tick()
+        self.advance(31)
+        self.sessions[TARGET] = sess(TARGET, changedAt=self.fx.clock.ms - MIN, changedGen=3, **kw)
+        self.tick()
+        return self.wb()
+
+    def test_4_a_plain_finish_of_a_foreign_session_wakes_no_round(self):
+        self.assertIsNone(self.round_with(state="idle", prevState="busy"))
+        self.assertEqual(cr_digest.classify(self.sessions[TARGET]), "done")
+
+    def test_4_a_finish_of_his_task_or_anything_else_does(self):
+        self.prompt()
+        tid = self.task()
+        self.task_mail(tid)
+        self.prompt(age_s=900)
+        self.advance(3)
+        wb = self.round_with(state="idle", prevState="busy")
+        self.assertEqual(wb["entries"][0]["items"][0]["kind"], "done")
+
+
 class DaemonFlowTest(Base):
     """jarvis-d end to end on the fake box: the picture, the wake into Jarvis's pane, his Stop, the j-line."""
 
@@ -1234,6 +1557,37 @@ class MutationTest(unittest.TestCase):
         "N1-relapse": (lambda: mock.patch.object(M, "RESUME_RELAPSE_MS", -1), Review2Test),
         "N2-claim-prune": (lambda: _mut(JA, "AlertWorker", 'if n.endswith(".claimed")', 'if False'), Review2Test),
         "N3-took-over": (lambda: mock.patch.object(M, "marker_prompt", lambda p, mid: None), Review2Test),
+        "dbg1-marker-start": (lambda: mock.patch.object(M, "marker_start", _old_marker_start), LiveDebugTest),
+        "dbg2-gap-deadline": (lambda: _mut(JA, "AlertWorker", 'max(wb["at"], gap_end) + PASTE_WAIT_MS',
+                                           'wb["at"] + PASTE_WAIT_MS'), LiveDebugTest),
+        "dbg3a-seed": (lambda: _mut(__import__("jarvis_d"), "Daemon", '"limitHit": s.get("limit") if isinstance('
+                                    's.get("limit"), dict) else None', '"limitHit": None'), LiveDebugTest),
+        "dbg3a-direct": (lambda: mock.patch.object(M.Mail, "limit_now", lambda self, n, s=None: (
+            (s or {}).get(n) or {}).get("limit")), LiveDebugTest),
+        "dbg3b-auto": (lambda: mock.patch.object(J, "auto_continue_hm", lambda t: None), LiveDebugTest),
+        "dbg4-round": (lambda: _mut(JA, "AlertWorker", 'if k == "done":', "if False:"), LiveDebugTest),
+        "dbg5-esc-expiry": (lambda: mock.patch.object(J, "AUTO_CONTINUE_GRACE_MS", 10 ** 12), LiveDebugTest),
+        "dbg6-reset-ends": (lambda: _mut(J, "transcript_info", 'info["limitHit"], auto_cont = None, None  # "Usage',
+                                         'pass  # "Usage'), LiveDebugTest),
+        "dbg6-prompt-ends": (lambda: _mut(J, "transcript_info", 'info["limitHit"], auto_cont = None, None\n',
+                                          'pass\n'), LiveDebugTest),
+        "dbg6-first-hit": (lambda: _mut(J, "transcript_info", 'if not info["limitHit"]:', "if True:"), LiveDebugTest),
+        "dbg6-unknown-cap": (lambda: mock.patch.object(J, "AUTO_CONTINUE_UNKNOWN_MS", 10 ** 12), LiveDebugTest),
+        "dbg7-mail-episode": (lambda: _mut(J, "transcript_info", "mail_after_hit = True", "mail_after_hit = False"),
+                              LiveDebugTest),
+        "dbg7-last-text": (lambda: _mut(J, "transcript_info", 'info["limitHit"].update(text=hit_text, lastHitMs=hit_ms)',
+                                        'info["limitHit"].update(lastHitMs=hit_ms)'), LiveDebugTest),
+        "dbg7-relapse-last": (lambda: _mut(M, "Mail", 'self.resume_relapse(name, J._int(lim.get("lastHitMs")) or ep)',
+                                           "self.resume_relapse(name, ep)"), LiveDebugTest),
+        "dbg7-block-last": (lambda: _mut(JA, "AlertWorker", 'last = max(since, _i((s.get("limit") or {}).get('
+                                         '"lastHitMs"))) if kind == "limit" else since', "last = since"),
+                            LiveDebugTest),
+        "dbg8-relapse-once": (lambda: _mut(JA, "AlertWorker", 'relapse and b.get("relapse") != relapse):',
+                                           'relapse and _i(b.get("last")) != last):'), LiveDebugTest),
+        "dbg7-no-early-window": (lambda: _mut(J, "transcript_info", '>= auto_cont["autoContinueMs"]:',
+                                              '>= auto_cont["autoContinueMs"] - 60000:'), LiveDebugTest),
+        "dbg6-queue": (lambda: mock.patch.object(M, "_entry_prompt", lambda d: M._prompt_text(d) if isinstance(
+            d, dict) and d.get("type") == "user" and J._is_prompt(d) else None), LiveDebugTest),
         "N4-enter-at": (lambda: _mut(JA, "AlertWorker", '(_i(wb.get("enterAt")) or _i(wb.get("pasteAt")))',
                                      '_i(wb.get("pasteAt"))'), Review2Test),
         "L6-his-words": (lambda: mock.patch.object(M, "WAKE_FULL_RE", __import__("re").compile("(?!)")), WakeTest),
@@ -1280,6 +1634,15 @@ def _mut(mod, attr, old, new):
     if hasattr(mod, "Refused"):
         m.Refused = mod.Refused
     return mock.patch.object(mod, attr, getattr(m, attr))
+
+
+def _old_marker_start(lines, mid):
+    """The marker search before the live fix: the last NON-assistant line with the marker (metadata included)."""
+    marker = f"[jarvis {mid}]"
+    for i in range(len(lines) - 1, -1, -1):
+        if marker in lines[i] and '"type":"assistant"' not in lines[i].replace(" ", ""):
+            return i, marker
+    return None, None
 
 
 class _both:

@@ -656,6 +656,69 @@ def _ts_ms(s):
         return None
 
 
+# Claude 2.1.32x continues by itself after a limit: `system` / `informational` "Usage limit reached · continuing
+# automatically at 10:30pm · esc to cancel" next to the limit hit, then "Usage limit reset · Continuing automatically"
+# and a user "Your claude.ai usage limit has reset. Continue the task…" (live 2026-11-10, davka-E and B1)
+AUTO_CONTINUE_RE = re.compile(r"continuing automatically at\s+(\d{1,2})(?::(\d{2}))?\s*([ap]m)", re.IGNORECASE)
+
+
+def auto_continue_hm(text):
+    """'22:30' from "… continuing automatically at 10:30pm …", else None (the box's local time, as Claude prints it)."""
+    m = AUTO_CONTINUE_RE.search(text or "")
+    if not m:
+        return None
+    h = int(m.group(1)) % 12 + (12 if m.group(3).lower() == "pm" else 0)
+    return f"{h}:{int(m.group(2) or 0):02d}"
+
+
+AUTO_RESET_RE = re.compile(r"usage limit reset\s*·\s*continuing automatically", re.IGNORECASE)
+# the promised time + this, and still no sign that it went on: the auto-continue did not happen (esc, a crash, an
+# unknown format), so `cr-mail resume` is allowed again
+AUTO_CONTINUE_GRACE_MS = 5 * 60 * 1000
+# rev-dbg LOW: a promise whose time we could not compute stands at most this long after the limit hit
+AUTO_CONTINUE_UNKNOWN_MS = 6 * 3600 * 1000
+# a line of Jarvis's mail delivered into the session (the auto "pokračuj" among them): a limit right after it is a NEW
+# episode, the relapse that must be told (rev-dbg2 MED); other prompts (teammates) never start one
+JARVIS_MAIL_RE = re.compile(r"\[jarvis m-\d{8}T\d{6}-[0-9a-f]{4}\]")
+
+
+def _prompt_plain(d):
+    c = (d.get("message") or {}).get("content")
+    if isinstance(c, str):
+        return c
+    if isinstance(c, list):
+        return "".join(b.get("text", "") for b in c if isinstance(b, dict) and b.get("type") == "text")
+    return ""
+
+
+def auto_continue_ms(hm, notice_ms):
+    """ms of the first `hm` (box local time, as Claude prints it) after the notice, or None."""
+    import datetime
+    if not hm or not notice_ms:
+        return None
+    try:
+        h, m = (int(x) for x in hm.split(":"))
+        base = datetime.datetime.fromtimestamp(notice_ms / 1000)
+        t = base.replace(hour=h, minute=m, second=0, microsecond=0)
+    except ValueError:
+        return None
+    if t.timestamp() * 1000 < notice_ms - 60000:
+        t += datetime.timedelta(days=1)
+    return int(t.timestamp() * 1000)
+
+
+def auto_continue_live(lim, now_ms):
+    """Does the limit episode's auto-continue still stand? Until the promised time + 5 min; after that the session is
+    still on THIS limit (an auto-continue that happened ends the episode in transcript_info), so it did not happen:
+    esc, a crash, an unknown format. A time we cannot compute stands at most 6 h after the limit hit (rev-dbg)."""
+    if not isinstance(lim, dict) or not lim.get("autoContinue"):
+        return False
+    at = _int(lim.get("autoContinueMs"))
+    if not at:
+        return now_ms <= _int(lim.get("ms")) + AUTO_CONTINUE_UNKNOWN_MS
+    return now_ms <= at + AUTO_CONTINUE_GRACE_MS
+
+
 def transcript_info(path, max_bytes=TRANSCRIPT_TAIL_BYTES, keep_texts=0):
     """{title, lastPrompt, lastAssistantMs, endsWithQuestion, texts?} from the transcript's tail. Raw values: the
     caller escapes them before they go anywhere."""
@@ -664,6 +727,8 @@ def transcript_info(path, max_bytes=TRANSCRIPT_TAIL_BYTES, keep_texts=0):
     texts = collections.deque(maxlen=keep_texts or 1)
     custom = None
     last_text = None
+    auto_cont = None
+    mail_after_hit = False
     for line in read_tail(path, max_bytes):
         if not line.startswith("{"):
             continue
@@ -683,14 +748,40 @@ def transcript_info(path, max_bytes=TRANSCRIPT_TAIL_BYTES, keep_texts=0):
         elif t == "user" and _is_prompt(d):
             info["lastPromptMs"] = _ts_ms(d.get("timestamp"))
             last_text = None
+            if info["limitHit"] and JARVIS_MAIL_RE.search(_prompt_plain(d)):
+                mail_after_hit = True
+            if auto_cont and auto_cont.get("autoContinueMs") and \
+                    (info["lastPromptMs"] or 0) >= auto_cont["autoContinueMs"]:
+                # "Your claude.ai usage limit has reset. Continue the task…": the auto-continue happened, the session
+                # works again; that limit and its promise are over (rev-dbg MED: neither may cover the next limit)
+                info["limitHit"], auto_cont = None, None
         elif t == "assistant" and d.get("isApiErrorMessage") and d.get("error") == "rate_limit":
             # "You've hit your weekly limit · resets 4pm (UTC)": the session holds Lukáš's input until the reset
-            # (2026-11-09: nobody knew, neither Lukáš nor Jarvis)
-            info["limitHit"] = {"ms": _ts_ms(d.get("timestamp")), "text": _assistant_text(d) or ""}
+            # (2026-11-09: nobody knew, neither Lukáš nor Jarvis). One episode = from the FIRST hit until a real
+            # answer (rev-dbg): messages delivered meanwhile hit it again and must not start a new one.
+            hit_ms, hit_text = _ts_ms(d.get("timestamp")), _assistant_text(d) or ""
+            if mail_after_hit:
+                info["limitHit"], auto_cont, mail_after_hit = None, None, False  # the relapse after our mail
+            if not info["limitHit"]:
+                info["limitHit"] = {"ms": hit_ms, "text": hit_text}
+                if auto_cont:
+                    info["limitHit"].update(auto_cont)
+            # the episode keeps its first hit; the text (and with it the reset) and lastHitMs follow the last one
+            info["limitHit"].update(text=hit_text, lastHitMs=hit_ms)
+        elif t == "system" and isinstance(d.get("content"), str) and auto_continue_hm(d["content"]):
+            hm = auto_continue_hm(d["content"])
+            auto_cont = {"autoContinue": hm, "autoContinueMs": auto_continue_ms(hm, _ts_ms(d.get("timestamp")))}
+            if info["limitHit"]:
+                info["limitHit"].update(auto_cont)
+        elif t == "system" and isinstance(d.get("content"), str) and AUTO_RESET_RE.search(d["content"]):
+            info["limitHit"], auto_cont = None, None  # "Usage limit reset · Continuing automatically": it works
+            mail_after_hit = False
         elif t == "assistant":
             txt = _assistant_text(d)
             if txt:
                 info["limitHit"] = None  # a real answer after it: the session works again
+                auto_cont = None
+                mail_after_hit = False
                 last_text = txt
                 info["lastAssistantMs"] = _ts_ms(d.get("timestamp"))
                 if keep_texts:
@@ -982,6 +1073,10 @@ def build_sessions(env, regs, panes, manifest, fold, self_name=None, tr_cache=No
             s["endsWithQuestion"] = bool(ti.get("endsWithQuestion"))
             lh = ti.get("limitHit")
             s["limit"] = {"ms": lh.get("ms"), "text": safe_text(lh.get("text"), 80)} if isinstance(lh, dict) else None
+            if s["limit"] and isinstance(lh.get("autoContinue"), str):
+                s["limit"].update({k: lh.get(k) for k in ("autoContinue", "autoContinueMs") if lh.get(k) is not None})
+            if s["limit"] and lh.get("lastHitMs"):
+                s["limit"]["lastHitMs"] = lh["lastHitMs"]
             # Stored and shown only escaped: whatever reads status.json (a model included) gets data, not instructions.
             s["title"] = safe_text(ti.get("title"), 100) or None
             s["lastPrompt"] = safe_text(ti.get("lastPrompt"), 160) or None

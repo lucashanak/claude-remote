@@ -649,7 +649,7 @@ class AlertWorker:
         saver = self._safe("saver", self._saver, now, sessions, self_name)
         route = self.wake_route(now, self_name, bool(saver))
         self._safe("emit", self._emit, now, mode, sessions, tasks, mails, route is None)
-        self._safe("round", self._round, now, mode, sessions, route is None)
+        self._safe("round", self._round, now, mode, sessions, route is None, tasks, mails)
         self._safe("wake", self._wake, now, mode, fold, self_name, time_left, sessions, new_events or (), route)
         self._safe("auto", self._auto_orphans, now)
         self.summary = {"mode": mode, "until": until, "pending": len(self.s["items"]) + sum(
@@ -702,24 +702,29 @@ class AlertWorker:
             seen.add(name)
             since = _i(a.get("since")) or now
             sig = f"{kind}|{a.get('text') or ''}"
+            # rev-f5c N1 / rev-dbg2: a limit right after Jarvis's own "pokračuj" is a relapse Lukáš must hear, even
+            # when the episode kept its first hit (the "pokračuj" came in through the queue): judged on the LAST hit
+            last = max(since, _i((s.get("limit") or {}).get("lastHitMs"))) if kind == "limit" else since
+            relapse = (self.mail.resume_relapse(name, last) if kind == "limit" else None) or None
             b = self.s["blocks"].get(name)
-            if b and b.get("kind") == kind and b.get("since") == since:
+            # one relapse (= one delivered resume) is told ONCE (rev-dbg3): a teammate's message hitting the limit
+            # again moves `last`, but the relapse it belongs to has its id stored with the block already
+            if b and b.get("kind") == kind and b.get("since") == since and not (
+                    relapse and b.get("relapse") != relapse):
                 continue
             if b and b.get("kind") == kind and b.get("sig") == sig and not b.get("told"):
                 continue  # the same thing, re-stamped (the registry moved, still blocked): one item
             r = self.s["recent"].get(name) or {}
             told = False
-            if r.get("sig") == sig and now - _i(r.get("at")) < REPEAT_MS and not (
-                    kind == "limit" and self.mail.resume_relapse(name, since)):
-                # blocked again on the same thing right after it was told: the same item. Never a limit that came
-                # right after Jarvis's own "pokračuj" (rev-f5c N1): Lukáš must hear that it stands again
-                told = True
-            if now - since > BLOCK_STALE_MS:
+            if r.get("sig") == sig and now - _i(r.get("at")) < REPEAT_MS and (not relapse
+                                                                               or r.get("relapse") == relapse):
+                told = True  # blocked again on the same thing right after it was told: the same item
+            if now - last > BLOCK_STALE_MS:
                 told = True  # old news when first seen (a daemon that was down for hours)
             if task_names is None:
                 task_names = self.task_sessions(tasks, mails)
             self.s["blocks"][name] = {"kind": kind, "since": since, "sig": sig, "told": told,
-                                      "task": name in task_names}
+                                      "task": name in task_names, "last": last, "relapse": relapse}
         for m in mails or ():
             name = m.get("to") or ""
             first = _i(m.get("firstBlockedAt"))
@@ -998,7 +1003,7 @@ class AlertWorker:
             if ref[0] == "block":
                 b = self.s["blocks"][ref[1]]
                 b["told"] = True
-                self.s["recent"][ref[1]] = {"sig": b["sig"], "at": now}
+                self.s["recent"][ref[1]] = {"sig": b["sig"], "at": now, "relapse": b.get("relapse")}
         done_ids = {ref[1] for e, ref in chosen if ref[0] == "item"}
         self.s["items"] = [i for i in self.s["items"] if id(i) not in done_ids]
         if any(e["src"] != "incident" for e, _ in chosen):
@@ -1134,7 +1139,10 @@ class AlertWorker:
             if route is not None:
                 self._fallback(now, mode, wb, route)  # mail off, saver, the switch: the templates, now
                 return
-            deadline = wb["at"] + (0 if wb.get("urgent") else PASTE_WAIT_MS)
+            # live 2026-11-10: a batch made within 2 min of the last wake waited out the 5-min gap and then had no
+            # paste time left, so it always went out as templates; its 3 minutes start when the gap ends
+            gap_end = (max(self.s["wakes"]) + WAKE_GAP_MS) if self.s["wakes"] else 0
+            deadline = wb["at"] if wb.get("urgent") else max(wb["at"], gap_end) + PASTE_WAIT_MS
             why = self.wake_hold(now, self_name, sessions) or (None if time_left() >= MIN_TIME_LEFT_S else "time")
             t = None
             if not why:
@@ -1332,9 +1340,11 @@ class AlertWorker:
             self.log(f"alerts auto: {type(e).__name__}: {e}"[:300])
         return out
 
-    def _round(self, now, mode, sessions, wake_on):
+    def _round(self, now, mode, sessions, wake_on, tasks=None, mails=None):
         """F5c: every 30 min a round, only when something Jarvis has not seen yet (since his delta cursor) changed
-        since the last round. Normal mode only; never a template (it is not alert-worthy on its own)."""
+        since the last round. Normal mode only; never a template (it is not alert-worthy on its own). A session that
+        merely finished (`done`) and works on no task of Jarvis's is no reason (live 2026-11-10: 12 of 26 wakes ended
+        in [ticho], nearly all such rounds); it stays in the delta."""
         if not wake_on or mode != "normal" or self.s["wb"] is not None:
             return
         if not self.s["roundAt"]:
@@ -1346,6 +1356,7 @@ class AlertWorker:
         import cr_digest as CD
         gen = _i((CD.read_cursor(self.env) or {}).get("gen"))
         items = []
+        own = None
         for name, s in sorted(sessions.items()):
             if not isinstance(s, dict) or s.get("self"):
                 continue
@@ -1354,6 +1365,11 @@ class AlertWorker:
             k = CD.classify(s)
             if k in ("busy", "cleared", "idle"):
                 continue
+            if k == "done":
+                if own is None:
+                    own = self.task_sessions(tasks or {}, mails or [])
+                if name not in own:
+                    continue
             items.append({"name": name, "short": J.short_name(name), "kind": k})
         if not items:
             return
