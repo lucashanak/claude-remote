@@ -412,6 +412,69 @@ class Review2Test(FlowBase):
         self.assertEqual(got, ["idle", "idle", "idle", "idle", None])
 
 
+class DownTest(FlowBase):
+    """Lead 2026-11-11: a typefail, or Jarvis's pane without claude after ANY answer (ok, false, null, or a claim
+    that never answered), is told to Lukáš as `jblock` (he is offline: never a wake). `ok: null` = unknown: the
+    process decides whether a switch happened."""
+
+    def blocks(self):
+        try:
+            with open(self.env.alerts_path) as f:
+                return [a for a in map(JA.parse_alert, f) if a and a.get("kind") == "jblock"]
+        except FileNotFoundError:
+            return []
+
+    def answer(self, req, **res):
+        os.rename(self.env.path(JC.REQUEST), self.env.path(f"switch-request.{req['id']}.taken"))
+        J.atomic_write(self.env.path(JC.RESULT), json.dumps(dict({"id": req["id"], "by": "app:test"}, **res)))
+
+    def test_typefail_is_told_at_once(self):
+        req = self.requested()
+        self.answer(req, ok=False, error="typefail")
+        self.tick(state="dead", pid=None)
+        self.assertEqual([(a["text"], a["name"]) for a in self.blocks()], [(JC.DOWN_TEXT, JARVIS)])
+        self.fx.clock.advance(120)
+        self.tick(state="dead", pid=None)
+        self.assertEqual(len(self.blocks()), 1)  # once
+
+    def test_down_after_any_answer_is_told_after_a_minute(self):
+        for res in ({"ok": True}, {"ok": None}, {"ok": False, "error": "busy"}):
+            self.setUp()
+            req = self.requested()
+            self.answer(req, **res)
+            self.tick(state="dead", pid=None)
+            self.assertEqual(self.blocks(), [], res)
+            self.fx.clock.advance(61)
+            self.tick(state="dead", pid=None)
+            self.assertEqual(len(self.blocks()), 1, res)
+            self.assertIsNone(self.w.s["lastSwitch"])
+
+    def test_a_claim_without_an_answer_and_a_dead_pane_is_told(self):
+        req = self.requested()
+        os.rename(self.env.path(JC.REQUEST), self.env.path(f"switch-request.{req['id']}.taken"))
+        self.tick()
+        self.fx.clock.advance(11 * 60)
+        self.tick(state="dead", pid=None)
+        self.fx.clock.advance(61)
+        self.tick(state="dead", pid=None)
+        self.assertEqual(len(self.blocks()), 1)
+
+    def test_ok_null_decides_by_the_process(self):
+        req = self.requested()
+        self.answer(req, ok=None)
+        self.cur = B
+        self.tick()
+        self.assertEqual((self.w.s["lastSwitch"] or {}).get("to"), B)
+        self.setUp()
+        req = self.requested()
+        self.answer(req, ok=None)
+        self.tick()  # still on A
+        self.fx.clock.advance(4 * 60)
+        self.tick()
+        self.assertIsNone(self.w.s["lastSwitch"])
+        self.assertEqual(self.blocks(), [])
+
+
 class MutationTest(unittest.TestCase):
     MUTANTS = {
         "dotfile-usage": (lambda: _mut(J, "read_usage", "if os.path.isfile(dot):", "if False:"), UsageTest),
@@ -438,6 +501,12 @@ class MutationTest(unittest.TestCase):
                                         "if False:"), Review2Test),
         "LOW-wake-switch": (lambda: mock.patch.object(JC, "switch_pending", lambda env, now, window_ms=0: False),
                             Review2Test),
+        "down-alert": (lambda: mock.patch.object(JC.AccountWorker, "_down", lambda self, *a: None), DownTest),
+        "down-typefail": (lambda: _mut(JC, "AccountWorker", 'if ok is False and res.get("error") == "typefail":',
+                                       "if False:"), DownTest),
+        "down-after-any": (lambda: _mut(JC, "AccountWorker", "elif not running and now - _i(ver.get(\"since\")) >= "
+                                        "DOWN_GRACE_MS:", "elif False:"), DownTest),
+        "down-no-result": (lambda: _mut(JC, "AccountWorker", "if req.get(\"taken\"):\n", "if False:\n"), DownTest),
         "LOW-hysteresis": (lambda: _mut(J, "screen_state", "    reported = res\n    if hit and hit[1] != res:",
                                         "    reported = res\n    if False:"), Review2Test),
         "expiry": (lambda: mock.patch.object(JC, "REQUEST_TTL_MS", 10 ** 12), SwitchFlowTest),

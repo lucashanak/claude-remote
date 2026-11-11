@@ -37,6 +37,9 @@ SWITCH_GAP_MS = 2 * 3600 * 1000
 REQUEST_GAP_MS = 30 * 60 * 1000
 REQUEST_TTL_MS = 10 * 60 * 1000
 VERIFY_MS = 3 * 60 * 1000
+# after a result (or a claim that never answered) Jarvis must run again within this long, else Lukáš is told
+DOWN_GRACE_MS = 60 * 1000
+DOWN_TEXT = "Jarvis po přepnutí účtu neběží, spusť ho v aplikaci."
 CONVERSATION_MS = 2 * 60 * 1000
 SLOT_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._@+-]{0,119}")
 REQ_ID_RE = re.compile(r"s-\d{8}T\d{6}-[0-9a-f]{4}")
@@ -263,14 +266,20 @@ class AccountWorker:
                 self._unlink(RESULT)
                 self.s["request"] = None
                 with self.mail.lock():
-                    self.mail.log("acct-result", id=req["id"], ok=bool(res.get("ok")),
+                    self.mail.log("acct-result", id=req["id"], ok=res.get("ok") if res.get("ok") in (True, False) else None,
                                   by=str(res.get("by") or "")[:80], error=str(res.get("error") or "")[:120])
                 self._unlink(f"switch-request.{req['id']}.taken")
-                if res.get("ok") is True:
-                    self.s["lastOkAt"] = now
-                    self.s["verify"] = {"id": req["id"], "from": req["from"], "to": req["to"], "why": req.get("why"),
-                                        "since": now}
-                return
+                ok = res.get("ok")
+                if ok is not False:
+                    self.s["lastOkAt"] = now  # ok, or unknown (`null`): either may have restarted him; 2 h hold
+                # every answer is checked against the PROCESS: ok must show the new slot, null decides by it, and
+                # after any of them (a false one too) a pane without claude is told to Lukáš
+                self.s["verify"] = {"id": req["id"], "from": req["from"], "to": req["to"], "why": req.get("why"),
+                                    "since": now, "ok": ok, "error": str(res.get("error") or "")[:60]}
+                if ok is False and res.get("error") == "typefail":
+                    self._down(now, self_name, req["id"], "typefail")
+                req = None  # answered: the process is checked below, in this same tick
+        if req:
             taken = os.path.exists(self.env.path(f"switch-request.{req['id']}.taken"))
             if taken and not req.get("taken"):
                 # rev-f5d LOW: an app claimed it (maybe in its 9th minute): its answer is waited for another
@@ -286,21 +295,44 @@ class AccountWorker:
                 self.s["request"] = None
                 with self.mail.lock():
                     self.mail.log("acct-expired", id=req["id"])
+                if req.get("taken"):
+                    # an app claimed it and never answered: it may have stopped him half way; the process decides
+                    self.s["verify"] = {"id": req["id"], "from": req["from"], "to": req["to"], "why": req.get("why"),
+                                        "since": now, "ok": None, "error": "no-result"}
             return
         self._prune_taken(now)
+        ver = self.s["verify"]
         if ver:
             me = (sessions or {}).get(self_name) or {}
-            if slot_of(me, self.env) == ver["to"] and me.get("pid") and me.get("verified") and me.get("state") not in (
-                    "dead", "missing", "unknown", "gone"):
+            running = bool(me.get("pid")) and me.get("state") not in ("dead", "missing", "gone")
+            if ver.get("told"):
+                self.s["verify"] = None  # Lukáš knows he is down (typefail): nothing more to decide
+            elif slot_of(me, self.env) == ver["to"] and me.get("pid") and me.get("verified") and me.get(
+                    "state") not in ("dead", "missing", "unknown", "gone"):
                 self.s["verify"] = None
                 self.s["lastSwitch"] = {"at": now, "from": ver["from"], "to": ver["to"], "why": ver.get("why"),
                                         "id": ver["id"]}
                 self._tell(now, ver, usage)
+            elif not running and now - _i(ver.get("since")) >= DOWN_GRACE_MS:
+                self.s["verify"] = None
+                self._down(now, self_name, ver["id"], ver.get("error") or "down")
+            elif ver.get("ok") is False and running:
+                self.s["verify"] = None  # the app gave up and he runs on: no switch, nothing to tell
             elif now - _i(ver.get("since")) > VERIFY_MS:
                 self.s["verify"] = None
                 self.log(f"přepnutí {ver['id']} se neověřilo: Jarvis neběží na {ver['to']}")
                 with self.mail.lock():
                     self.mail.log("acct-unverified", id=ver["id"], to=ver["to"])
+
+    def _down(self, now, self_name, rid, why):
+        """`jblock` template: Jarvis is offline after a switch, so this is never a wake (jarvis-d writes it itself)."""
+        import jarvisalert as JA
+        if self.s["verify"] and self.s["verify"].get("id") == rid:
+            self.s["verify"]["told"] = True
+        JA.AlertFile(self.env).write(JA.alert_line(JA.new_id("a", now), "jblock", now, DOWN_TEXT, self_name))
+        self.log(f"přepnutí {rid}: Jarvis neběží ({why})")
+        with self.mail.lock():
+            self.mail.log("acct-down", id=rid, why=str(why)[:60])
 
     def _tell(self, now, ver, usage):
         """The `jsay` template: "Přešel jsem na účet X (Y % týdne), Z došel." (jarvis-d writes the alerts file)."""
