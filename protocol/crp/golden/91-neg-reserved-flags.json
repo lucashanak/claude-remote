@@ -1,0 +1,15 @@
+{
+  "id": "91-neg-reserved-flags",
+  "title": "Reserved flag bits set",
+  "spec": "3.1, 3.2",
+  "streamHex": "894352500d0a1a0a0000000b040200077b2274223a317d",
+  "description": "Receiver behaviour on a malformed or foreign stream.",
+  "expect": {
+    "error": "E_PROTO",
+    "decoded": null
+  },
+  "decodeOptions": {
+    "direction": "c2s",
+    "excerpt": true
+  }
+}

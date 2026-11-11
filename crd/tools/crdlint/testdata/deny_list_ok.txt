@@ -1,0 +1,11 @@
+// path: internal/tmuxgate/gate.go
+// want:
+package tmuxgate
+
+import "os/exec"
+
+var denied = []string{"new-session", "kill-server", "-A", "-g"}
+
+func binary() string { p, _ := exec.LookPath("tmux"); return p }
+
+func Run(path string, a ...string) error { return exec.Command(binary(), append([]string{"-N", "-S", path}, a...)...).Run() }

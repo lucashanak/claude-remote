@@ -1,0 +1,7 @@
+// path: internal/stream/n.go
+// want: exec exec-import
+package stream
+
+import "os/exec"
+
+func f() { c := new(exec.Cmd); c.Path = "/bin/sh"; _ = c.Run() }

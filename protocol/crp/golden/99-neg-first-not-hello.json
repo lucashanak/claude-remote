@@ -1,0 +1,14 @@
+{
+  "id": "99-neg-first-not-hello",
+  "title": "Client stream whose first frame is not HELLO",
+  "spec": "3.1, 3.2",
+  "streamHex": "894352500d0a1a0a0000000b040000077b2274223a317d",
+  "description": "Receiver behaviour on a malformed or foreign stream.",
+  "expect": {
+    "error": "E_PROTO",
+    "decoded": null
+  },
+  "decodeOptions": {
+    "direction": "c2s"
+  }
+}

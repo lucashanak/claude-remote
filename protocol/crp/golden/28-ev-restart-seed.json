@@ -1,0 +1,350 @@
+{
+  "id": "28-ev-restart-seed",
+  "title": "Daemon start: seed the ring with the last 25 lines of each source, then follow from EOF",
+  "spec": "4.4, 4.7",
+  "description": "A new epoch does not start empty: the daemon reads the last 25 lines of events, notify, legacy and forget (in that order), assigns seq 1.. and only then follows the files from EOF. A Stop marker written during the restart window is therefore in the backlog, as with Stage A's tail -n 25.",
+  "framing": "every frame: u32be len | u8 type | u8 flags | u16be hlen | header JSON | blob; each (conn, dir) stream starts with the 8-byte magic",
+  "frames": [
+    {
+      "conn": "A",
+      "dir": "c2s",
+      "hex": "000000d9010000d57b22617070223a22312e302e353630222c22617474223a372c22646576223a22616e64726f69642d3730366362643762222c226665617473223a5b226576222c2273657373222c227478222c227465726d222c22696e222c227270632e65786563222c22677a6970225d2c226667223a747275652c226965223a2235663163306539613762336432633431222c226c696e6b223a2235623165326630633961376433653431222c226d61784672616d65223a313034383537362c2270696e674d73223a31353030302c2270726f746f223a5b315d7d",
+      "type": 1,
+      "typeName": "HELLO",
+      "header": {
+        "proto": [
+          1
+        ],
+        "dev": "android-706cbd7b",
+        "link": "5b1e2f0c9a7d3e41",
+        "att": 7,
+        "ie": "5f1c0e9a7b3d2c41",
+        "app": "1.0.560",
+        "feats": [
+          "ev",
+          "sess",
+          "tx",
+          "term",
+          "in",
+          "rpc.exec",
+          "gzip"
+        ],
+        "maxFrame": 1048576,
+        "fg": true,
+        "pingMs": 15000
+      }
+    },
+    {
+      "conn": "A",
+      "dir": "s2c",
+      "hex": "00000116020001127b22636f6e6e223a22632d30303031222c226665617473223a5b226576222c2273657373222c227478222c227465726d222c22696e222c227270632e65786563222c22677a6970225d2c22686f7374223a7b22626f6f74223a22622d37376531222c226964223a223966326334316161222c22746d7578506964223a333136373230387d2c22696e47656e223a223665326139316630222c226d61784672616d65223a313034383537362c226e6f77223a313739333939303030303030302c2270726f746f223a312c22737276223a2263726420302e312e30222c2273747265616d73223a7b226576223a7b226570223a226131623263336434222c226669727374223a312c226c617374223a32387d7d7d",
+      "type": 2,
+      "typeName": "WELCOME",
+      "header": {
+        "proto": 1,
+        "conn": "c-0001",
+        "srv": "crd 0.1.0",
+        "feats": [
+          "ev",
+          "sess",
+          "tx",
+          "term",
+          "in",
+          "rpc.exec",
+          "gzip"
+        ],
+        "maxFrame": 1048576,
+        "now": 1793990000000,
+        "host": {
+          "id": "9f2c41aa",
+          "boot": "b-77e1",
+          "tmuxPid": 3167208
+        },
+        "streams": {
+          "ev": {
+            "ep": "a1b2c3d4",
+            "first": 1,
+            "last": 28
+          }
+        },
+        "inGen": "6e2a91f0"
+      }
+    },
+    {
+      "conn": "A",
+      "dir": "c2s",
+      "hex": "0000000f1000000b7b227374223a226576227d",
+      "type": 16,
+      "typeName": "SUB",
+      "header": {
+        "st": "ev"
+      }
+    },
+    {
+      "conn": "A",
+      "dir": "s2c",
+      "hex": "000000402100003c7b226570223a226131623263336434222c2266726f6d223a312c22726561736f6e223a226e6577222c22736571223a32382c227374223a226576227d",
+      "type": 33,
+      "typeName": "SNAP",
+      "header": {
+        "st": "ev",
+        "ep": "a1b2c3d4",
+        "seq": 28,
+        "from": 1,
+        "reason": "new"
+      }
+    },
+    {
+      "conn": "A",
+      "dir": "s2c",
+      "hex": "00000050200100467b226174223a313739333939303030303030302c226570223a226131623263336434222c22736571223a32362c22737263223a226e6f74696679222c227374223a226576227d73746f702d61",
+      "type": 32,
+      "typeName": "EV",
+      "header": {
+        "st": "ev",
+        "ep": "a1b2c3d4",
+        "seq": 26,
+        "src": "notify",
+        "at": 1793990000000
+      },
+      "blobHex": "73746f702d61",
+      "blobText": "stop-a"
+    },
+    {
+      "conn": "A",
+      "dir": "s2c",
+      "hex": "00000050200100467b226174223a313739333939303030303030302c226570223a226131623263336434222c22736571223a32372c22737263223a226e6f74696679222c227374223a226576227d73746f702d62",
+      "type": 32,
+      "typeName": "EV",
+      "header": {
+        "st": "ev",
+        "ep": "a1b2c3d4",
+        "seq": 27,
+        "src": "notify",
+        "at": 1793990000000
+      },
+      "blobHex": "73746f702d62",
+      "blobText": "stop-b"
+    },
+    {
+      "conn": "A",
+      "dir": "s2c",
+      "hex": "00000062200100467b226174223a313739333939303030303030302c226570223a226131623263336434222c22736571223a32382c22737263223a22666f72676574222c227374223a226576227d666f7267657420636c617564652d7365727665722d6f6c64",
+      "type": 32,
+      "typeName": "EV",
+      "header": {
+        "st": "ev",
+        "ep": "a1b2c3d4",
+        "seq": 28,
+        "src": "forget",
+        "at": 1793990000000
+      },
+      "blobHex": "666f7267657420636c617564652d7365727665722d6f6c64",
+      "blobText": "forget claude-server-old"
+    }
+  ],
+  "streams": [
+    {
+      "conn": "A",
+      "dir": "c2s",
+      "excerpt": false,
+      "maxFrame": 1048576,
+      "hex": "894352500d0a1a0a000000d9010000d57b22617070223a22312e302e353630222c22617474223a372c22646576223a22616e64726f69642d3730366362643762222c226665617473223a5b226576222c2273657373222c227478222c227465726d222c22696e222c227270632e65786563222c22677a6970225d2c226667223a747275652c226965223a2235663163306539613762336432633431222c226c696e6b223a2235623165326630633961376433653431222c226d61784672616d65223a313034383537362c2270696e674d73223a31353030302c2270726f746f223a5b315d7d0000000f1000000b7b227374223a226576227d"
+    },
+    {
+      "conn": "A",
+      "dir": "s2c",
+      "excerpt": false,
+      "maxFrame": 1048576,
+      "hex": "894352500d0a1a0a00000116020001127b22636f6e6e223a22632d30303031222c226665617473223a5b226576222c2273657373222c227478222c227465726d222c22696e222c227270632e65786563222c22677a6970225d2c22686f7374223a7b22626f6f74223a22622d37376531222c226964223a223966326334316161222c22746d7578506964223a333136373230387d2c22696e47656e223a223665326139316630222c226d61784672616d65223a313034383537362c226e6f77223a313739333939303030303030302c2270726f746f223a312c22737276223a2263726420302e312e30222c2273747265616d73223a7b226576223a7b226570223a226131623263336434222c226669727374223a312c226c617374223a32387d7d7d000000402100003c7b226570223a226131623263336434222c2266726f6d223a312c22726561736f6e223a226e6577222c22736571223a32382c227374223a226576227d00000050200100467b226174223a313739333939303030303030302c226570223a226131623263336434222c22736571223a32362c22737263223a226e6f74696679222c227374223a226576227d73746f702d6100000050200100467b226174223a313739333939303030303030302c226570223a226131623263336434222c22736571223a32372c22737263223a226e6f74696679222c227374223a226576227d73746f702d6200000062200100467b226174223a313739333939303030303030302c226570223a226131623263336434222c22736571223a32382c22737263223a22666f72676574222c227374223a226576227d666f7267657420636c617564652d7365727665722d6f6c64"
+    }
+  ],
+  "expect": {
+    "seeded": [
+      {
+        "seq": 1,
+        "src": "events"
+      },
+      {
+        "seq": 2,
+        "src": "events"
+      },
+      {
+        "seq": 3,
+        "src": "events"
+      },
+      {
+        "seq": 4,
+        "src": "events"
+      },
+      {
+        "seq": 5,
+        "src": "events"
+      },
+      {
+        "seq": 6,
+        "src": "events"
+      },
+      {
+        "seq": 7,
+        "src": "events"
+      },
+      {
+        "seq": 8,
+        "src": "events"
+      },
+      {
+        "seq": 9,
+        "src": "events"
+      },
+      {
+        "seq": 10,
+        "src": "events"
+      },
+      {
+        "seq": 11,
+        "src": "events"
+      },
+      {
+        "seq": 12,
+        "src": "events"
+      },
+      {
+        "seq": 13,
+        "src": "events"
+      },
+      {
+        "seq": 14,
+        "src": "events"
+      },
+      {
+        "seq": 15,
+        "src": "events"
+      },
+      {
+        "seq": 16,
+        "src": "events"
+      },
+      {
+        "seq": 17,
+        "src": "events"
+      },
+      {
+        "seq": 18,
+        "src": "events"
+      },
+      {
+        "seq": 19,
+        "src": "events"
+      },
+      {
+        "seq": 20,
+        "src": "events"
+      },
+      {
+        "seq": 21,
+        "src": "events"
+      },
+      {
+        "seq": 22,
+        "src": "events"
+      },
+      {
+        "seq": 23,
+        "src": "events"
+      },
+      {
+        "seq": 24,
+        "src": "events"
+      },
+      {
+        "seq": 25,
+        "src": "events"
+      },
+      {
+        "seq": 26,
+        "src": "notify"
+      },
+      {
+        "seq": 27,
+        "src": "notify"
+      },
+      {
+        "seq": 28,
+        "src": "forget"
+      }
+    ],
+    "last": 28,
+    "framesShown": 3
+  },
+  "modelInput": {
+    "ring": {
+      "ep": "a1b2c3d4",
+      "capacity": 4096,
+      "perSrc": 25,
+      "ops": [
+        {
+          "op": "seed",
+          "files": {
+            "events": [
+              "claude-remote-ev work x 1",
+              "claude-remote-ev work x 2",
+              "claude-remote-ev work x 3",
+              "claude-remote-ev work x 4",
+              "claude-remote-ev work x 5",
+              "claude-remote-ev work x 6",
+              "claude-remote-ev work x 7",
+              "claude-remote-ev work x 8",
+              "claude-remote-ev work x 9",
+              "claude-remote-ev work x 10",
+              "claude-remote-ev work x 11",
+              "claude-remote-ev work x 12",
+              "claude-remote-ev work x 13",
+              "claude-remote-ev work x 14",
+              "claude-remote-ev work x 15",
+              "claude-remote-ev work x 16",
+              "claude-remote-ev work x 17",
+              "claude-remote-ev work x 18",
+              "claude-remote-ev work x 19",
+              "claude-remote-ev work x 20",
+              "claude-remote-ev work x 21",
+              "claude-remote-ev work x 22",
+              "claude-remote-ev work x 23",
+              "claude-remote-ev work x 24",
+              "claude-remote-ev work x 25",
+              "claude-remote-ev work x 26",
+              "claude-remote-ev work x 27",
+              "claude-remote-ev work x 28",
+              "claude-remote-ev work x 29",
+              "claude-remote-ev work x 30"
+            ],
+            "notify": [
+              "stop-a",
+              "stop-b"
+            ],
+            "legacy": [],
+            "forget": [
+              "forget claude-server-old"
+            ]
+          }
+        }
+      ]
+    },
+    "negotiate": {
+      "serverProto": [
+        1,
+        1
+      ],
+      "serverFeats": [
+        "ev",
+        "sess",
+        "tx",
+        "term",
+        "in",
+        "rpc.exec",
+        "gzip"
+      ],
+      "serverMaxFrame": 1048576
+    }
+  }
+}

@@ -1,0 +1,129 @@
+{
+  "id": "29-ev-midstream-overflow",
+  "title": "A paused connection whose next item left the ring gets SNAP(overflow) in the middle of the connection",
+  "spec": "4.2, 4.3",
+  "description": "The client stopped acking (background), the daemon paused the stream at seq 50; meanwhile the ring (capacity 100 in this model) moved to 81..180. On the next ACK the daemon cannot send 51, so it sends SNAP(overflow) + backlog in the live connection. A client that ever sees seq > position+1 in the same ep outside a backlog MUST close and resume (here: 182 after 180).",
+  "framing": "every frame: u32be len | u8 type | u8 flags | u16be hlen | header JSON | blob; each (conn, dir) stream starts with the 8-byte magic",
+  "frames": [
+    {
+      "conn": "A",
+      "dir": "c2s",
+      "hex": "0000002e1200002a7b2261636b73223a7b226576223a7b226570223a226131623263336434222c22736571223a35307d7d7d",
+      "type": 18,
+      "typeName": "ACK",
+      "header": {
+        "acks": {
+          "ev": {
+            "ep": "a1b2c3d4",
+            "seq": 50
+          }
+        }
+      }
+    },
+    {
+      "conn": "A",
+      "dir": "s2c",
+      "hex": "00000048210000447b226570223a226131623263336434222c2266726f6d223a3135362c22726561736f6e223a226f766572666c6f77222c22736571223a3138302c227374223a226576227d",
+      "type": 33,
+      "typeName": "SNAP",
+      "header": {
+        "st": "ev",
+        "ep": "a1b2c3d4",
+        "seq": 180,
+        "from": 156,
+        "reason": "overflow"
+      }
+    },
+    {
+      "conn": "A",
+      "dir": "s2c",
+      "hex": "00000053200100477b226174223a313739333939303030303030302c226570223a226131623263336434222c22736571223a3137392c22737263223a226576656e7473222c227374223a226576227d6c696e652d313739",
+      "type": 32,
+      "typeName": "EV",
+      "header": {
+        "st": "ev",
+        "ep": "a1b2c3d4",
+        "seq": 179,
+        "src": "events",
+        "at": 1793990000000
+      },
+      "blobHex": "6c696e652d313739",
+      "blobText": "line-179"
+    },
+    {
+      "conn": "A",
+      "dir": "s2c",
+      "hex": "00000053200100477b226174223a313739333939303030303030302c226570223a226131623263336434222c22736571223a3138302c22737263223a226576656e7473222c227374223a226576227d6c696e652d313830",
+      "type": 32,
+      "typeName": "EV",
+      "header": {
+        "st": "ev",
+        "ep": "a1b2c3d4",
+        "seq": 180,
+        "src": "events",
+        "at": 1793990000000
+      },
+      "blobHex": "6c696e652d313830",
+      "blobText": "line-180"
+    }
+  ],
+  "streams": [
+    {
+      "conn": "A",
+      "dir": "c2s",
+      "excerpt": true,
+      "maxFrame": 1048576,
+      "hex": "894352500d0a1a0a0000002e1200002a7b2261636b73223a7b226576223a7b226570223a226131623263336434222c22736571223a35307d7d7d"
+    },
+    {
+      "conn": "A",
+      "dir": "s2c",
+      "excerpt": true,
+      "maxFrame": 1048576,
+      "hex": "894352500d0a1a0a00000048210000447b226570223a226131623263336434222c2266726f6d223a3135362c22726561736f6e223a226f766572666c6f77222c22736571223a3138302c227374223a226576227d00000053200100477b226174223a313739333939303030303030302c226570223a226131623263336434222c22736571223a3137392c22737263223a226576656e7473222c227374223a226576227d6c696e652d31373900000053200100477b226174223a313739333939303030303030302c226570223a226131623263336434222c22736571223a3138302c22737263223a226576656e7473222c227374223a226576227d6c696e652d313830"
+    }
+  ],
+  "expect": {
+    "next": [
+      "snapshot",
+      "overflow"
+    ],
+    "backlogCount": 25,
+    "clientSteps": [
+      "snapshot",
+      "process",
+      "process",
+      "close-resume:gap"
+    ],
+    "clientPosition": 180
+  },
+  "modelInput": {
+    "ring": {
+      "ep": "a1b2c3d4",
+      "capacity": 100,
+      "perSrc": 25,
+      "ops": [
+        {
+          "op": "appendLines",
+          "from": 1,
+          "to": 50,
+          "srcCycle": [
+            "events"
+          ]
+        },
+        {
+          "op": "appendLines",
+          "from": 51,
+          "to": 180,
+          "srcCycle": [
+            "events"
+          ]
+        },
+        {
+          "op": "nextFor",
+          "sent": 50
+        }
+      ]
+    }
+  }
+}

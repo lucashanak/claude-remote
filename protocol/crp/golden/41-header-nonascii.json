@@ -1,0 +1,36 @@
+{
+  "id": "41-header-nonascii",
+  "title": "Canonical header JSON: UTF-8 raw, U+2028 and <>& raw, only quote, backslash and C0 escaped",
+  "spec": "3.1",
+  "description": "Go's json.Marshal escapes <, >, & and U+2028 and MUST NOT be used for headers; kotlinx.serialization does not sort keys and MUST NOT be used either. Both implementations need a small canonical writer.",
+  "framing": "every frame: u32be len | u8 type | u8 flags | u16be hlen | header JSON | blob; each (conn, dir) stream starts with the 8-byte magic",
+  "frames": [
+    {
+      "conn": "A",
+      "dir": "c2s",
+      "hex": "00000097100000937b22637764223a227e2f446f6b756d656e74792fc39ac48d65746e69637476c3ad20323032362f3c6126623ee280a8785c22715c5c5c74222c22656e63223a226e6f6e65222c226f6666223a2d312c227374223a227478222c2275756964223a2231613262336334642d303030302d343030302d383030302d303030303030303030303033222c22776964223a22773131227d",
+      "type": 16,
+      "typeName": "SUB",
+      "header": {
+        "st": "tx",
+        "wid": "w11",
+        "uuid": "1a2b3c4d-0000-4000-8000-000000000003",
+        "cwd": "~/Dokumenty/Účetnictví 2026/<a&b> x\"q\\\t",
+        "off": -1,
+        "enc": "none"
+      }
+    }
+  ],
+  "streams": [
+    {
+      "conn": "A",
+      "dir": "c2s",
+      "excerpt": true,
+      "maxFrame": 1048576,
+      "hex": "894352500d0a1a0a00000097100000937b22637764223a227e2f446f6b756d656e74792fc39ac48d65746e69637476c3ad20323032362f3c6126623ee280a8785c22715c5c5c74222c22656e63223a226e6f6e65222c226f6666223a2d312c227374223a227478222c2275756964223a2231613262336334642d303030302d343030302d383030302d303030303030303030303033222c22776964223a22773131227d"
+    }
+  ],
+  "expect": {
+    "headerHex": "7b22637764223a227e2f446f6b756d656e74792fc39ac48d65746e69637476c3ad20323032362f3c6126623ee280a8785c22715c5c5c74222c22656e63223a226e6f6e65222c226f6666223a2d312c227374223a227478222c2275756964223a2231613262336334642d303030302d343030302d383030302d303030303030303030303033222c22776964223a22773131227d"
+  }
+}

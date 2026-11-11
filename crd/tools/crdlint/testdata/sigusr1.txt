@@ -1,0 +1,7 @@
+// path: internal/daemon/h.go
+// want: sigusr1
+package daemon
+
+import "syscall"
+
+var s = syscall.SIGUSR1

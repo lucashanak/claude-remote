@@ -1,0 +1,159 @@
+{
+  "id": "37-in-paste-plan",
+  "title": "Delivery plans: multi-line text and a trailing ';' go through paste-buffer; broken UTF-8 is refused",
+  "spec": "5.4",
+  "description": "A newline inside a reply is pasted (bracketed paste keeps it a newline, not a submit); a run ending in ';' is pasted because tmux reads an argv ending in ';' as a command separator; an IN that does not hold complete UTF-8 sequences is refused E_IN_UTF8 (final, consumes the iseq).",
+  "framing": "every frame: u32be len | u8 type | u8 flags | u16be hlen | header JSON | blob; each (conn, dir) stream starts with the 8-byte magic",
+  "frames": [
+    {
+      "conn": "A",
+      "dir": "c2s",
+      "hex": "000000674001004d7b22657870223a313739333939303036303030302c2269736571223a37302c22736964223a22636c617564652d7365727665722d636c617564652d72656d6f74652d2d6372746573742d31227d7072766ec3ad20c599c3a164656b0a64727568c3bd0d",
+      "type": 64,
+      "typeName": "IN",
+      "header": {
+        "sid": "claude-server-claude-remote--crtest-1",
+        "iseq": 70,
+        "exp": 1793990060000
+      },
+      "blobHex": "7072766ec3ad20c599c3a164656b0a64727568c3bd0d",
+      "blobText": "první řádek\ndruhý\r"
+    },
+    {
+      "conn": "A",
+      "dir": "s2c",
+      "hex": "00000059410000557b2269736571223a37302c22736964223a22636c617564652d7365727665722d636c617564652d72656d6f74652d2d6372746573742d31222c227374223a226170706c696564222c22766961223a226b657973227d",
+      "type": 65,
+      "typeName": "INACK",
+      "header": {
+        "sid": "claude-server-claude-remote--crtest-1",
+        "iseq": 70,
+        "st": "applied",
+        "via": "keys"
+      }
+    },
+    {
+      "conn": "A",
+      "dir": "c2s",
+      "hex": "000000524001004d7b22657870223a313739333939303036303030302c2269736571223a37312c22736964223a22636c617564652d7365727665722d636c617564652d72656d6f74652d2d6372746573742d31227dc5",
+      "type": 64,
+      "typeName": "IN",
+      "header": {
+        "sid": "claude-server-claude-remote--crtest-1",
+        "iseq": 71,
+        "exp": 1793990060000
+      },
+      "blobHex": "c5"
+    },
+    {
+      "conn": "A",
+      "dir": "s2c",
+      "hex": "0000005f4100005b7b22636f6465223a22455f494e5f55544638222c2269736571223a37312c22736964223a22636c617564652d7365727665722d636c617564652d72656d6f74652d2d6372746573742d31222c227374223a2272656675736564227d",
+      "type": 65,
+      "typeName": "INACK",
+      "header": {
+        "sid": "claude-server-claude-remote--crtest-1",
+        "iseq": 71,
+        "st": "refused",
+        "code": "E_IN_UTF8"
+      }
+    }
+  ],
+  "streams": [
+    {
+      "conn": "A",
+      "dir": "c2s",
+      "excerpt": true,
+      "maxFrame": 1048576,
+      "hex": "894352500d0a1a0a000000674001004d7b22657870223a313739333939303036303030302c2269736571223a37302c22736964223a22636c617564652d7365727665722d636c617564652d72656d6f74652d2d6372746573742d31227d7072766ec3ad20c599c3a164656b0a64727568c3bd0d000000524001004d7b22657870223a313739333939303036303030302c2269736571223a37312c22736964223a22636c617564652d7365727665722d636c617564652d72656d6f74652d2d6372746573742d31227dc5"
+    },
+    {
+      "conn": "A",
+      "dir": "s2c",
+      "excerpt": true,
+      "maxFrame": 1048576,
+      "hex": "894352500d0a1a0a00000059410000557b2269736571223a37302c22736964223a22636c617564652d7365727665722d636c617564652d72656d6f74652d2d6372746573742d31222c227374223a226170706c696564222c22766961223a226b657973227d0000005f4100005b7b22636f6465223a22455f494e5f55544638222c2269736571223a37312c22736964223a22636c617564652d7365727665722d636c617564652d72656d6f74652d2d6372746573742d31222c227374223a2272656675736564227d"
+    }
+  ],
+  "expect": {
+    "plans": {
+      "newline": {
+        "ops": [
+          {
+            "tmux": [
+              "load-buffer",
+              "-b",
+              "crp-in-1",
+              "-"
+            ],
+            "stdin": "první řádek\ndruhý"
+          },
+          {
+            "tmux": [
+              "paste-buffer",
+              "-p",
+              "-d",
+              "-b",
+              "crp-in-1",
+              "-t",
+              "=claude-server-claude-remote--crtest-1:"
+            ]
+          },
+          {
+            "sleepMs": 60
+          },
+          {
+            "tmux": [
+              "send-keys",
+              "-t",
+              "=claude-server-claude-remote--crtest-1:",
+              "Enter"
+            ]
+          }
+        ]
+      },
+      "trailing-semicolon": {
+        "ops": [
+          {
+            "tmux": [
+              "load-buffer",
+              "-b",
+              "crp-in-1",
+              "-"
+            ],
+            "stdin": "echo a;"
+          },
+          {
+            "tmux": [
+              "paste-buffer",
+              "-p",
+              "-d",
+              "-b",
+              "crp-in-1",
+              "-t",
+              "=claude-server-claude-remote--crtest-1:"
+            ]
+          },
+          {
+            "sleepMs": 60
+          },
+          {
+            "tmux": [
+              "send-keys",
+              "-t",
+              "=claude-server-claude-remote--crtest-1:",
+              "Enter"
+            ]
+          }
+        ]
+      },
+      "split-utf8": {
+        "refused": "E_IN_UTF8"
+      },
+      "ctrl-u": {
+        "refused": "E_IN_UNSUPPORTED",
+        "byte": "15"
+      }
+    }
+  }
+}

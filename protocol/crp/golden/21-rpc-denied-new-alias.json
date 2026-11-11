@@ -1,0 +1,59 @@
+{
+  "id": "21-rpc-denied-new-alias",
+  "title": "rpc exec refused: tmux-verb:new",
+  "spec": "6.2",
+  "description": "tmux accepts aliases and unique prefixes: the verb must be an exact allowlisted name. The daemon runs nothing; RPCRES ok:false E_DENIED with the rule. The client maps it to ExecUnavailable(REFUSED) and does NOT retry it on another transport.",
+  "framing": "every frame: u32be len | u8 type | u8 flags | u16be hlen | header JSON | blob; each (conn, dir) stream starts with the 8-byte magic",
+  "frames": [
+    {
+      "conn": "A",
+      "dir": "c2s",
+      "hex": "00000059500000557b22636d64223a22746d7578206e6577202d41202d732078222c226964223a34322c226b696e64223a2273686f7274222c226d223a2265786563222c226d73223a353030302c22746167223a22726564726177227d",
+      "type": 80,
+      "typeName": "RPC",
+      "header": {
+        "id": 42,
+        "m": "exec",
+        "tag": "redraw",
+        "cmd": "tmux new -A -s x",
+        "ms": 5000,
+        "kind": "short"
+      }
+    },
+    {
+      "conn": "A",
+      "dir": "s2c",
+      "hex": "00000056510000527b22636f6465223a22455f44454e494544222c226964223a34322c226c617374223a747275652c226f6b223a66616c73652c2270617274223a302c2272756c65223a22746d75782d766572623a6e6577227d",
+      "type": 81,
+      "typeName": "RPCRES",
+      "header": {
+        "id": 42,
+        "ok": false,
+        "code": "E_DENIED",
+        "rule": "tmux-verb:new",
+        "part": 0,
+        "last": true
+      }
+    }
+  ],
+  "streams": [
+    {
+      "conn": "A",
+      "dir": "c2s",
+      "excerpt": true,
+      "maxFrame": 1048576,
+      "hex": "894352500d0a1a0a00000059500000557b22636d64223a22746d7578206e6577202d41202d732078222c226964223a34322c226b696e64223a2273686f7274222c226d223a2265786563222c226d73223a353030302c22746167223a22726564726177227d"
+    },
+    {
+      "conn": "A",
+      "dir": "s2c",
+      "excerpt": true,
+      "maxFrame": 1048576,
+      "hex": "894352500d0a1a0a00000056510000527b22636f6465223a22455f44454e494544222c226964223a34322c226c617374223a747275652c226f6b223a66616c73652c2270617274223a302c2272756c65223a22746d75782d766572623a6e6577227d"
+    }
+  ],
+  "expect": {
+    "denyScan": "tmux-verb:new",
+    "kotlin": "ExecUnavailable(REFUSED)"
+  }
+}

@@ -1,0 +1,94 @@
+{
+  "id": "10-tx-sub-delta",
+  "title": "Transcript watch from an offset: one delta up to the last complete line",
+  "spec": "4.6",
+  "description": "Same semantics as streamd v4: f = start offset, o = offset after the chunk; a partial last line is held back. The file itself is the durable log, so a resume is a new SUB with the client's offset.",
+  "framing": "every frame: u32be len | u8 type | u8 flags | u16be hlen | header JSON | blob; each (conn, dir) stream starts with the 8-byte magic",
+  "frames": [
+    {
+      "conn": "A",
+      "dir": "c2s",
+      "hex": "00000077100000737b22637764223a227e2f636c617564652d72656d6f7465222c22656e63223a226e6f6e65222c226f6666223a3838302c227374223a227478222c2275756964223a2230663865326331612d313131312d343232322d383333332d393434343535353536363636222c22776964223a227737227d",
+      "type": 16,
+      "typeName": "SUB",
+      "header": {
+        "st": "tx",
+        "wid": "w7",
+        "uuid": "0f8e2c1a-1111-4222-8333-944455556666",
+        "cwd": "~/claude-remote",
+        "off": 880,
+        "enc": "none"
+      }
+    },
+    {
+      "conn": "A",
+      "dir": "s2c",
+      "hex": "00000073220100547b22656e63223a226e6f6e65222c2266223a3838302c226f223a3930372c2275223a2230663865326331612d313131312d343232322d383333332d393434343535353536363636222c22776964223a227737227d7b2274797065223a22617373697374616e74222c226e223a327d0a",
+      "type": 34,
+      "typeName": "TX",
+      "header": {
+        "wid": "w7",
+        "u": "0f8e2c1a-1111-4222-8333-944455556666",
+        "f": 880,
+        "o": 907,
+        "enc": "none"
+      },
+      "blobHex": "7b2274797065223a22617373697374616e74222c226e223a327d0a",
+      "blobText": "{\"type\":\"assistant\",\"n\":2}\n"
+    },
+    {
+      "conn": "A",
+      "dir": "c2s",
+      "hex": "0000001f1200001b7b2261636b73223a7b7d2c227478223a7b227737223a3930377d7d",
+      "type": 18,
+      "typeName": "ACK",
+      "header": {
+        "acks": {},
+        "tx": {
+          "w7": 907
+        }
+      }
+    }
+  ],
+  "streams": [
+    {
+      "conn": "A",
+      "dir": "c2s",
+      "excerpt": true,
+      "maxFrame": 1048576,
+      "hex": "894352500d0a1a0a00000077100000737b22637764223a227e2f636c617564652d72656d6f7465222c22656e63223a226e6f6e65222c226f6666223a3838302c227374223a227478222c2275756964223a2230663865326331612d313131312d343232322d383333332d393434343535353536363636222c22776964223a227737227d0000001f1200001b7b2261636b73223a7b7d2c227478223a7b227737223a3930377d7d"
+    },
+    {
+      "conn": "A",
+      "dir": "s2c",
+      "excerpt": true,
+      "maxFrame": 1048576,
+      "hex": "894352500d0a1a0a00000073220100547b22656e63223a226e6f6e65222c2266223a3838302c226f223a3930372c2275223a2230663865326331612d313131312d343232322d383333332d393434343535353536363636222c22776964223a227737227d7b2274797065223a22617373697374616e74222c226e223a327d0a"
+    }
+  ],
+  "expect": {
+    "model": {
+      "f": 880,
+      "o": 907,
+      "reset": false
+    },
+    "watchOff": 907
+  },
+  "modelInput": {
+    "tx": {
+      "off": 880,
+      "polls": [
+        [
+          {
+            "text": "{\"type\":\"user\",\"n\":1}\n",
+            "times": 40
+          },
+          {
+            "text": "{\"type\":\"assistant\",\"n\":2}\n{\"type\":\"assist",
+            "times": 1
+          }
+        ]
+      ]
+    }
+  }
+}

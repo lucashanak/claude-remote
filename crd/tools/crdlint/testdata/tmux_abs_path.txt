@@ -1,0 +1,5 @@
+// path: internal/stream/y.go
+// want: tmux-literal
+package stream
+
+var bin = "/usr/local/bin/tmux"

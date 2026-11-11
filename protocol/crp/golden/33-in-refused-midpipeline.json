@@ -1,0 +1,182 @@
+{
+  "id": "33-in-refused-midpipeline",
+  "title": "A permanent refusal consumes its iseq; a transient one does not; a dup reports the original result",
+  "spec": "5.4",
+  "description": "10 carries an unsupported control byte: refused E_IN_UNSUPPORTED, final, iseq consumed, so 11 applies (revision 1 would answer E_IN_GAP for 11 forever). 12 meets an unusable tmux socket: E_TMUX_SOCKET is transient, nothing is consumed, the client resends 12 later and it applies. A resend of 10 is dup with orig=refused:E_IN_UNSUPPORTED.",
+  "framing": "every frame: u32be len | u8 type | u8 flags | u16be hlen | header JSON | blob; each (conn, dir) stream starts with the 8-byte magic",
+  "frames": [
+    {
+      "conn": "A",
+      "dir": "c2s",
+      "hex": "000000524001004d7b22657870223a313739333939303036303030302c2269736571223a31302c22736964223a22636c617564652d7365727665722d636c617564652d72656d6f74652d2d6372746573742d31227d01",
+      "type": 64,
+      "typeName": "IN",
+      "header": {
+        "sid": "claude-server-claude-remote--crtest-1",
+        "iseq": 10,
+        "exp": 1793990060000
+      },
+      "blobHex": "01",
+      "blobText": "\u0001"
+    },
+    {
+      "conn": "A",
+      "dir": "c2s",
+      "hex": "000000524001004d7b22657870223a313739333939303036303030302c2269736571223a31312c22736964223a22636c617564652d7365727665722d636c617564652d72656d6f74652d2d6372746573742d31227d61",
+      "type": 64,
+      "typeName": "IN",
+      "header": {
+        "sid": "claude-server-claude-remote--crtest-1",
+        "iseq": 11,
+        "exp": 1793990060000
+      },
+      "blobHex": "61",
+      "blobText": "a"
+    },
+    {
+      "conn": "A",
+      "dir": "s2c",
+      "hex": "00000066410000627b22636f6465223a22455f494e5f554e535550504f52544544222c2269736571223a31302c22736964223a22636c617564652d7365727665722d636c617564652d72656d6f74652d2d6372746573742d31222c227374223a2272656675736564227d",
+      "type": 65,
+      "typeName": "INACK",
+      "header": {
+        "sid": "claude-server-claude-remote--crtest-1",
+        "iseq": 10,
+        "st": "refused",
+        "code": "E_IN_UNSUPPORTED"
+      }
+    },
+    {
+      "conn": "A",
+      "dir": "s2c",
+      "hex": "00000059410000557b2269736571223a31312c22736964223a22636c617564652d7365727665722d636c617564652d72656d6f74652d2d6372746573742d31222c227374223a226170706c696564222c22766961223a226b657973227d",
+      "type": 65,
+      "typeName": "INACK",
+      "header": {
+        "sid": "claude-server-claude-remote--crtest-1",
+        "iseq": 11,
+        "st": "applied",
+        "via": "keys"
+      }
+    },
+    {
+      "conn": "A",
+      "dir": "c2s",
+      "hex": "000000524001004d7b22657870223a313739333939303036303030302c2269736571223a31322c22736964223a22636c617564652d7365727665722d636c617564652d72656d6f74652d2d6372746573742d31227d62",
+      "type": 64,
+      "typeName": "IN",
+      "header": {
+        "sid": "claude-server-claude-remote--crtest-1",
+        "iseq": 12,
+        "exp": 1793990060000
+      },
+      "blobHex": "62",
+      "blobText": "b"
+    },
+    {
+      "conn": "A",
+      "dir": "s2c",
+      "hex": "000000634100005f7b22636f6465223a22455f544d55585f534f434b4554222c2269736571223a31322c22736964223a22636c617564652d7365727665722d636c617564652d72656d6f74652d2d6372746573742d31222c227374223a2272656675736564227d",
+      "type": 65,
+      "typeName": "INACK",
+      "header": {
+        "sid": "claude-server-claude-remote--crtest-1",
+        "iseq": 12,
+        "st": "refused",
+        "code": "E_TMUX_SOCKET"
+      }
+    },
+    {
+      "conn": "A",
+      "dir": "c2s",
+      "hex": "000000524001004d7b22657870223a313739333939303036303030302c2269736571223a31322c22736964223a22636c617564652d7365727665722d636c617564652d72656d6f74652d2d6372746573742d31227d62",
+      "type": 64,
+      "typeName": "IN",
+      "header": {
+        "sid": "claude-server-claude-remote--crtest-1",
+        "iseq": 12,
+        "exp": 1793990060000
+      },
+      "blobHex": "62",
+      "blobText": "b"
+    },
+    {
+      "conn": "A",
+      "dir": "s2c",
+      "hex": "00000059410000557b2269736571223a31322c22736964223a22636c617564652d7365727665722d636c617564652d72656d6f74652d2d6372746573742d31222c227374223a226170706c696564222c22766961223a226b657973227d",
+      "type": 65,
+      "typeName": "INACK",
+      "header": {
+        "sid": "claude-server-claude-remote--crtest-1",
+        "iseq": 12,
+        "st": "applied",
+        "via": "keys"
+      }
+    },
+    {
+      "conn": "A",
+      "dir": "c2s",
+      "hex": "000000524001004d7b22657870223a313739333939303036303030302c2269736571223a31302c22736964223a22636c617564652d7365727665722d636c617564652d72656d6f74652d2d6372746573742d31227d01",
+      "type": 64,
+      "typeName": "IN",
+      "header": {
+        "sid": "claude-server-claude-remote--crtest-1",
+        "iseq": 10,
+        "exp": 1793990060000
+      },
+      "blobHex": "01",
+      "blobText": "\u0001"
+    },
+    {
+      "conn": "A",
+      "dir": "s2c",
+      "hex": "0000006a410000667b2269736571223a31302c226f726967223a22726566757365643a455f494e5f554e535550504f52544544222c22736964223a22636c617564652d7365727665722d636c617564652d72656d6f74652d2d6372746573742d31222c227374223a22647570227d",
+      "type": 65,
+      "typeName": "INACK",
+      "header": {
+        "sid": "claude-server-claude-remote--crtest-1",
+        "iseq": 10,
+        "st": "dup",
+        "orig": "refused:E_IN_UNSUPPORTED"
+      }
+    }
+  ],
+  "streams": [
+    {
+      "conn": "A",
+      "dir": "c2s",
+      "excerpt": true,
+      "maxFrame": 1048576,
+      "hex": "894352500d0a1a0a000000524001004d7b22657870223a313739333939303036303030302c2269736571223a31302c22736964223a22636c617564652d7365727665722d636c617564652d72656d6f74652d2d6372746573742d31227d01000000524001004d7b22657870223a313739333939303036303030302c2269736571223a31312c22736964223a22636c617564652d7365727665722d636c617564652d72656d6f74652d2d6372746573742d31227d61000000524001004d7b22657870223a313739333939303036303030302c2269736571223a31322c22736964223a22636c617564652d7365727665722d636c617564652d72656d6f74652d2d6372746573742d31227d62000000524001004d7b22657870223a313739333939303036303030302c2269736571223a31322c22736964223a22636c617564652d7365727665722d636c617564652d72656d6f74652d2d6372746573742d31227d62000000524001004d7b22657870223a313739333939303036303030302c2269736571223a31302c22736964223a22636c617564652d7365727665722d636c617564652d72656d6f74652d2d6372746573742d31227d01"
+    },
+    {
+      "conn": "A",
+      "dir": "s2c",
+      "excerpt": true,
+      "maxFrame": 1048576,
+      "hex": "894352500d0a1a0a00000066410000627b22636f6465223a22455f494e5f554e535550504f52544544222c2269736571223a31302c22736964223a22636c617564652d7365727665722d636c617564652d72656d6f74652d2d6372746573742d31222c227374223a2272656675736564227d00000059410000557b2269736571223a31312c22736964223a22636c617564652d7365727665722d636c617564652d72656d6f74652d2d6372746573742d31222c227374223a226170706c696564222c22766961223a226b657973227d000000634100005f7b22636f6465223a22455f544d55585f534f434b4554222c2269736571223a31322c22736964223a22636c617564652d7365727665722d636c617564652d72656d6f74652d2d6372746573742d31222c227374223a2272656675736564227d00000059410000557b2269736571223a31322c22736964223a22636c617564652d7365727665722d636c617564652d72656d6f74652d2d6372746573742d31222c227374223a226170706c696564222c22766961223a226b657973227d0000006a410000667b2269736571223a31302c226f726967223a22726566757365643a455f494e5f554e535550504f52544544222c22736964223a22636c617564652d7365727665722d636c617564652d72656d6f74652d2d6372746573742d31222c227374223a22647570227d"
+    }
+  ],
+  "expect": {
+    "statuses": [
+      {
+        "st": "refused",
+        "code": "E_IN_UNSUPPORTED"
+      },
+      {
+        "st": "applied"
+      },
+      {
+        "st": "refused",
+        "code": "E_TMUX_SOCKET"
+      },
+      {
+        "st": "applied"
+      },
+      {
+        "st": "dup",
+        "orig": "refused:E_IN_UNSUPPORTED"
+      }
+    ]
+  }
+}

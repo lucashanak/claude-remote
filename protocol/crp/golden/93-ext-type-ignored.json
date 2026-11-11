@@ -1,0 +1,28 @@
+{
+  "id": "93-ext-type-ignored",
+  "title": "Unknown type in the extension range 0x80..0xFF is skipped",
+  "spec": "3.1, 3.2",
+  "streamHex": "894352500d0a1a0a00000006900000027b7d0000000b040000077b2274223a377d",
+  "description": "Receiver behaviour on a malformed or foreign stream.",
+  "expect": {
+    "error": null,
+    "decoded": [
+      {
+        "typeName": null,
+        "header": null,
+        "ignored": true
+      },
+      {
+        "typeName": "PING",
+        "header": {
+          "t": 7
+        },
+        "ignored": false
+      }
+    ]
+  },
+  "decodeOptions": {
+    "direction": "c2s",
+    "excerpt": true
+  }
+}

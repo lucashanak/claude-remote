@@ -1,0 +1,6 @@
+// path: internal/daemon/g.go
+// want: tmux-verb tmux-verb
+package daemon
+
+var a = []string{"show-options", "-g"}
+var b = []string{"attach-session", "-A"}

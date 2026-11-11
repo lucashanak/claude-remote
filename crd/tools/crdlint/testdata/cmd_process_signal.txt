@@ -1,0 +1,7 @@
+// path: internal/itest/x_test.go
+// want: exec-import signal
+package itest
+
+import "os/exec"
+
+func f(c *exec.Cmd) { _ = c.Process.Signal(nil) }

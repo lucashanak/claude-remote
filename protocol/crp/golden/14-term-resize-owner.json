@@ -1,0 +1,277 @@
+{
+  "id": "14-term-resize-owner",
+  "title": "Only the owner sizes the window; IN without a term SUB does not take ownership; TSTATE goes to all",
+  "spec": "5.3",
+  "description": "Desktop (conn A) subscribed active at 200x50. The phone (conn B) TSIZE is refused (ERR E_NOT_ACTIVE, non-fatal). A watch reply from the phone (IN, no term SUB) is typed through the existing attach but does NOT move ownership, so the next TSIZE is refused too. Then the phone subscribes active: it owns the size, and the TSTATE with the new geometry goes to EVERY subscriber; the desktop adopts 60x30 (letterbox) instead of drawing 60x30 bytes into a 200x50 emulator.",
+  "framing": "every frame: u32be len | u8 type | u8 flags | u16be hlen | header JSON | blob; each (conn, dir) stream starts with the 8-byte magic",
+  "frames": [
+    {
+      "conn": "A",
+      "dir": "c2s",
+      "hex": "000000621000005e7b22616374697665223a747275652c22636f6c73223a3230302c22726f7773223a35302c22736964223a22636c617564652d7365727665722d636c617564652d72656d6f74652d2d6372746573742d31222c227374223a227465726d227d",
+      "type": 16,
+      "typeName": "SUB",
+      "header": {
+        "st": "term",
+        "sid": "claude-server-claude-remote--crtest-1",
+        "cols": 200,
+        "rows": 50,
+        "active": true
+      }
+    },
+    {
+      "conn": "A",
+      "dir": "s2c",
+      "hex": "00000076310000727b22636f6c73223a3230302c226f776e6572223a226465736b746f702d6431346430343032222c22726f7773223a35302c22736964223a22636c617564652d7365727665722d636c617564652d72656d6f74652d2d6372746573742d31222c227374617465223a226174746163686564227d",
+      "type": 49,
+      "typeName": "TSTATE",
+      "header": {
+        "sid": "claude-server-claude-remote--crtest-1",
+        "state": "attached",
+        "cols": 200,
+        "rows": 50,
+        "owner": "desktop-d14d0402"
+      }
+    },
+    {
+      "conn": "B",
+      "dir": "c2s",
+      "hex": "00000047320000437b22636f6c73223a36302c22726f7773223a33302c22736964223a22636c617564652d7365727665722d636c617564652d72656d6f74652d2d6372746573742d31227d",
+      "type": 50,
+      "typeName": "TSIZE",
+      "header": {
+        "sid": "claude-server-claude-remote--crtest-1",
+        "cols": 60,
+        "rows": 30
+      }
+    },
+    {
+      "conn": "B",
+      "dir": "s2c",
+      "hex": "00000056060000527b22636f6465223a22455f4e4f545f414354495645222c227265223a225453495a45222c22736964223a22636c617564652d7365727665722d636c617564652d72656d6f74652d2d6372746573742d31227d",
+      "type": 6,
+      "typeName": "ERR",
+      "header": {
+        "code": "E_NOT_ACTIVE",
+        "re": "TSIZE",
+        "sid": "claude-server-claude-remote--crtest-1"
+      }
+    },
+    {
+      "conn": "B",
+      "dir": "c2s",
+      "hex": "000000514001004c7b22657870223a313739333939303036303030302c2269736571223a332c22736964223a22636c617564652d7365727665722d636c617564652d72656d6f74652d2d6372746573742d31227d78",
+      "type": 64,
+      "typeName": "IN",
+      "header": {
+        "sid": "claude-server-claude-remote--crtest-1",
+        "iseq": 3,
+        "exp": 1793990060000
+      },
+      "blobHex": "78",
+      "blobText": "x"
+    },
+    {
+      "conn": "B",
+      "dir": "s2c",
+      "hex": "00000057410000537b2269736571223a332c22736964223a22636c617564652d7365727665722d636c617564652d72656d6f74652d2d6372746573742d31222c227374223a226170706c696564222c22766961223a22707479227d",
+      "type": 65,
+      "typeName": "INACK",
+      "header": {
+        "sid": "claude-server-claude-remote--crtest-1",
+        "iseq": 3,
+        "st": "applied",
+        "via": "pty"
+      }
+    },
+    {
+      "conn": "B",
+      "dir": "c2s",
+      "hex": "00000047320000437b22636f6c73223a36302c22726f7773223a33302c22736964223a22636c617564652d7365727665722d636c617564652d72656d6f74652d2d6372746573742d31227d",
+      "type": 50,
+      "typeName": "TSIZE",
+      "header": {
+        "sid": "claude-server-claude-remote--crtest-1",
+        "cols": 60,
+        "rows": 30
+      }
+    },
+    {
+      "conn": "B",
+      "dir": "s2c",
+      "hex": "00000056060000527b22636f6465223a22455f4e4f545f414354495645222c227265223a225453495a45222c22736964223a22636c617564652d7365727665722d636c617564652d72656d6f74652d2d6372746573742d31227d",
+      "type": 6,
+      "typeName": "ERR",
+      "header": {
+        "code": "E_NOT_ACTIVE",
+        "re": "TSIZE",
+        "sid": "claude-server-claude-remote--crtest-1"
+      }
+    },
+    {
+      "conn": "B",
+      "dir": "c2s",
+      "hex": "000000611000005d7b22616374697665223a747275652c22636f6c73223a36302c22726f7773223a33302c22736964223a22636c617564652d7365727665722d636c617564652d72656d6f74652d2d6372746573742d31222c227374223a227465726d227d",
+      "type": 16,
+      "typeName": "SUB",
+      "header": {
+        "st": "term",
+        "sid": "claude-server-claude-remote--crtest-1",
+        "cols": 60,
+        "rows": 30,
+        "active": true
+      }
+    },
+    {
+      "conn": "B",
+      "dir": "s2c",
+      "hex": "00000075310000717b22636f6c73223a36302c226f776e6572223a22616e64726f69642d3730366362643762222c22726f7773223a33302c22736964223a22636c617564652d7365727665722d636c617564652d72656d6f74652d2d6372746573742d31222c227374617465223a226174746163686564227d",
+      "type": 49,
+      "typeName": "TSTATE",
+      "header": {
+        "sid": "claude-server-claude-remote--crtest-1",
+        "state": "attached",
+        "cols": 60,
+        "rows": 30,
+        "owner": "android-706cbd7b"
+      }
+    },
+    {
+      "conn": "A",
+      "dir": "s2c",
+      "hex": "00000075310000717b22636f6c73223a36302c226f776e6572223a22616e64726f69642d3730366362643762222c22726f7773223a33302c22736964223a22636c617564652d7365727665722d636c617564652d72656d6f74652d2d6372746573742d31222c227374617465223a226174746163686564227d",
+      "type": 49,
+      "typeName": "TSTATE",
+      "header": {
+        "sid": "claude-server-claude-remote--crtest-1",
+        "state": "attached",
+        "cols": 60,
+        "rows": 30,
+        "owner": "android-706cbd7b"
+      }
+    }
+  ],
+  "streams": [
+    {
+      "conn": "A",
+      "dir": "c2s",
+      "excerpt": true,
+      "maxFrame": 1048576,
+      "hex": "894352500d0a1a0a000000621000005e7b22616374697665223a747275652c22636f6c73223a3230302c22726f7773223a35302c22736964223a22636c617564652d7365727665722d636c617564652d72656d6f74652d2d6372746573742d31222c227374223a227465726d227d"
+    },
+    {
+      "conn": "A",
+      "dir": "s2c",
+      "excerpt": true,
+      "maxFrame": 1048576,
+      "hex": "894352500d0a1a0a00000076310000727b22636f6c73223a3230302c226f776e6572223a226465736b746f702d6431346430343032222c22726f7773223a35302c22736964223a22636c617564652d7365727665722d636c617564652d72656d6f74652d2d6372746573742d31222c227374617465223a226174746163686564227d00000075310000717b22636f6c73223a36302c226f776e6572223a22616e64726f69642d3730366362643762222c22726f7773223a33302c22736964223a22636c617564652d7365727665722d636c617564652d72656d6f74652d2d6372746573742d31222c227374617465223a226174746163686564227d"
+    },
+    {
+      "conn": "B",
+      "dir": "c2s",
+      "excerpt": true,
+      "maxFrame": 1048576,
+      "hex": "894352500d0a1a0a00000047320000437b22636f6c73223a36302c22726f7773223a33302c22736964223a22636c617564652d7365727665722d636c617564652d72656d6f74652d2d6372746573742d31227d000000514001004c7b22657870223a313739333939303036303030302c2269736571223a332c22736964223a22636c617564652d7365727665722d636c617564652d72656d6f74652d2d6372746573742d31227d7800000047320000437b22636f6c73223a36302c22726f7773223a33302c22736964223a22636c617564652d7365727665722d636c617564652d72656d6f74652d2d6372746573742d31227d000000611000005d7b22616374697665223a747275652c22636f6c73223a36302c22726f7773223a33302c22736964223a22636c617564652d7365727665722d636c617564652d72656d6f74652d2d6372746573742d31222c227374223a227465726d227d"
+    },
+    {
+      "conn": "B",
+      "dir": "s2c",
+      "excerpt": true,
+      "maxFrame": 1048576,
+      "hex": "894352500d0a1a0a00000056060000527b22636f6465223a22455f4e4f545f414354495645222c227265223a225453495a45222c22736964223a22636c617564652d7365727665722d636c617564652d72656d6f74652d2d6372746573742d31227d00000057410000537b2269736571223a332c22736964223a22636c617564652d7365727665722d636c617564652d72656d6f74652d2d6372746573742d31222c227374223a226170706c696564222c22766961223a22707479227d00000056060000527b22636f6465223a22455f4e4f545f414354495645222c227265223a225453495a45222c22736964223a22636c617564652d7365727665722d636c617564652d72656d6f74652d2d6372746573742d31227d00000075310000717b22636f6c73223a36302c226f776e6572223a22616e64726f69642d3730366362643762222c22726f7773223a33302c22736964223a22636c617564652d7365727665722d636c617564652d72656d6f74652d2d6372746573742d31222c227374617465223a226174746163686564227d"
+    }
+  ],
+  "expect": {
+    "model": [
+      {
+        "event": {
+          "sid": "claude-server-claude-remote--crtest-1",
+          "dev": "desktop-d14d0402",
+          "kind": "sub",
+          "active": true,
+          "cols": 200,
+          "rows": 50
+        },
+        "owner": "desktop-d14d0402",
+        "tstate": [
+          {
+            "to": "desktop-d14d0402",
+            "tstate": {
+              "sid": "claude-server-claude-remote--crtest-1",
+              "state": "attached",
+              "cols": 200,
+              "rows": 50,
+              "owner": "desktop-d14d0402"
+            }
+          }
+        ]
+      },
+      {
+        "event": {
+          "sid": "claude-server-claude-remote--crtest-1",
+          "dev": "android-706cbd7b",
+          "kind": "tsize",
+          "cols": 60,
+          "rows": 30
+        },
+        "applied": false,
+        "err": "E_NOT_ACTIVE"
+      },
+      {
+        "event": {
+          "sid": "claude-server-claude-remote--crtest-1",
+          "dev": "android-706cbd7b",
+          "kind": "in",
+          "note": "watch reply, phone has no term SUB"
+        },
+        "owner": "desktop-d14d0402",
+        "ownerMoved": false,
+        "tstate": []
+      },
+      {
+        "event": {
+          "sid": "claude-server-claude-remote--crtest-1",
+          "dev": "android-706cbd7b",
+          "kind": "tsize",
+          "cols": 60,
+          "rows": 30
+        },
+        "applied": false,
+        "err": "E_NOT_ACTIVE"
+      },
+      {
+        "event": {
+          "sid": "claude-server-claude-remote--crtest-1",
+          "dev": "android-706cbd7b",
+          "kind": "sub",
+          "active": true,
+          "cols": 60,
+          "rows": 30
+        },
+        "owner": "android-706cbd7b",
+        "tstate": [
+          {
+            "to": "android-706cbd7b",
+            "tstate": {
+              "sid": "claude-server-claude-remote--crtest-1",
+              "state": "attached",
+              "cols": 60,
+              "rows": 30,
+              "owner": "android-706cbd7b"
+            }
+          },
+          {
+            "to": "desktop-d14d0402",
+            "tstate": {
+              "sid": "claude-server-claude-remote--crtest-1",
+              "state": "attached",
+              "cols": 60,
+              "rows": 30,
+              "owner": "android-706cbd7b"
+            }
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -176,6 +176,45 @@ bad=0; [ "$wf" = OK ] || bad=1; out="$wf"; check workflow_invariants "$bad" "$wf
 t=$(cd "$TMP" && python3 -c 'import sys,yaml;print(yaml.safe_load(open(sys.argv[1]))["concurrency"]["group"])' "$(cd "$WFDIR" && pwd)/tests.yml")
 bad=0; case "$t" in *github.ref*) ;; *) bad=1 ;; esac; out="$t"; check tests_yml_group_per_ref "$bad" "$t"
 
+# tests.yml invariants for the Go job (a mutation of the YAML must fail here): a skipped, tolerated or missing Go
+# run must neither let a release through nor block every release (dodatek D-H16).
+tw=$(cd "$TMP" && python3 - "$(cd "$WFDIR" && pwd)/tests.yml" <<'PY'
+import sys, yaml
+d = yaml.safe_load(open(sys.argv[1]))
+errs = []
+on = d.get("on", d.get(True)) or {}
+if "pull_request_target" in on: errs.append("pull_request_target")
+for ev in ("push", "pull_request"):
+    e = on.get(ev) or {}
+    if isinstance(e, dict) and ("paths" in e or "paths-ignore" in e): errs.append(ev + " has a paths filter")
+if (d.get("permissions") or {}) != {"contents": "read"}: errs.append("permissions are not contents: read")
+jobs = d["jobs"]
+for name, j in jobs.items():
+    if "continue-on-error" in j: errs.append(name + ": job continue-on-error")
+    for st in j.get("steps", []):
+        if "continue-on-error" in st: errs.append(name + ": step continue-on-error: " + str(st.get("name")))
+c = jobs.get("crd")
+if c is None:
+    errs.append("no crd job")
+else:
+    if "if" in c: errs.append("crd job has an if")
+    if "needs" in c: errs.append("crd job has needs")
+    if c.get("timeout-minutes") != 20: errs.append("crd timeout-minutes")
+    env = c.get("env") or {}
+    if env.get("GOTOOLCHAIN") != "local" or env.get("CRD_REQUIRE_TMUX") != "1": errs.append("crd env pins")
+    text = "\n".join(st.get("run", "") for st in c.get("steps", []))
+    for need in ("go vet ./...", "CGO_ENABLED=1 go test -race -count=1 -timeout 10m ./...",
+                 "CGO_ENABLED=0 go test -count=1 -timeout 10m ./...", "python3 -I gen.py --check",
+                 "go run ./tools/crdlint .", "bash scripts/ci/test-tests-gate.sh", "statically linked",
+                 "go list -deps ./cmd/crd", "/internal/testenv$"):
+        if need not in text: errs.append("crd step missing: " + need)
+    if any("if" in st for st in c.get("steps", [])): errs.append("a crd step has an if")
+    if "secrets." in yaml.safe_dump(c): errs.append("crd job uses secrets")
+print("OK" if not errs else "; ".join(errs))
+PY
+)
+bad=0; [ "$tw" = OK ] || bad=1; out="$tw"; check tests_yml_crd_job_invariants "$bad" "$tw"
+
 if [ "${LIVE:-0}" = 1 ]; then
   LSHA=18faa58d38ab6afc09d86cc7d6af911ac3fd962f
   # Real run 42333770710 is the Tests run of this SHA; read-only API call, 60 s deadline.

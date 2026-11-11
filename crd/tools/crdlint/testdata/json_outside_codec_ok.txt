@@ -1,0 +1,7 @@
+// path: internal/daemon/x.go
+// want:
+package daemon
+
+import "encoding/json"
+
+func f(v any) []byte { b, _ := json.Marshal(v); return b }

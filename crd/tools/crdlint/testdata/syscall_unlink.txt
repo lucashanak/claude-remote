@@ -1,0 +1,7 @@
+// path: internal/stream/u.go
+// want: fs-link-remove fs-link-remove
+package stream
+
+import "syscall"
+
+func f() { _ = syscall.Unlink("/x"); _ = syscall.Rmdir("/y") }

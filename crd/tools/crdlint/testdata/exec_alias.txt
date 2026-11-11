@@ -1,0 +1,7 @@
+// path: internal/daemon/y.go
+// want: exec exec-import
+package daemon
+
+import "os/exec"
+
+func f() { run := exec.Command; _ = run("sh").Run() }

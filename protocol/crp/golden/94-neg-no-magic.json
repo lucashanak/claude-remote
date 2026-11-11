@@ -1,0 +1,15 @@
+{
+  "id": "94-neg-no-magic",
+  "title": "No magic within 64 KiB (crd missing: shell printed 'command not found')",
+  "spec": "3.1, 3.2",
+  "streamHex": "73683a20313a206372643a206e6f7420666f756e640a",
+  "description": "Receiver behaviour on a malformed or foreign stream.",
+  "expect": {
+    "error": "E_NO_DAEMON",
+    "decoded": null
+  },
+  "decodeOptions": {
+    "direction": "s2c",
+    "skip_junk": true
+  }
+}

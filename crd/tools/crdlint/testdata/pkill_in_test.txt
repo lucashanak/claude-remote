@@ -1,0 +1,5 @@
+// path: internal/itest/y_test.go
+// want: pgrep-pkill
+package itest
+
+const c = "pkill -f tmux: server"

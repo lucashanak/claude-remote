@@ -1,0 +1,5 @@
+// path: internal/daemon/k.go
+// want: tmux-verb
+package daemon
+
+var args = []string{"-N", "-S", "/x", "kill-server"}

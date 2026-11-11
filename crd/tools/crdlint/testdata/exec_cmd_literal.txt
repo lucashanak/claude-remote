@@ -1,0 +1,7 @@
+// path: internal/daemon/x.go
+// want: exec exec-import tmux-literal tmux-verb
+package daemon
+
+import "os/exec"
+
+func f() { _ = (&exec.Cmd{Path: "/usr/bin/" + "tm" + "ux", Args: []string{"t", "kill-" + "server"}}).Run() }

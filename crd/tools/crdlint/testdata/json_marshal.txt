@@ -1,0 +1,7 @@
+// path: internal/crp/x.go
+// want: codec-json
+package crp
+
+import "encoding/json"
+
+func f(v any) []byte { b, _ := json.Marshal(v); return b }

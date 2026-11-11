@@ -1,0 +1,7 @@
+// path: internal/stream/x.go
+// want: tmux-literal exec exec-import
+package stream
+
+import "os/exec"
+
+func f() { _ = exec.Command("tmux", "list-sessions").Run() }

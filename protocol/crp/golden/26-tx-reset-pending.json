@@ -1,0 +1,104 @@
+{
+  "id": "26-tx-reset-pending",
+  "title": "An adjusted read that yields nothing keeps reset pending until the next delta",
+  "spec": "4.6",
+  "description": "off=0 on a file larger than 200 000 B whose last 200 000 B lie inside one giant line: streamd drops the partial first line, the chunk is empty and nothing is sent, but the offset moves. CRP keeps reset pending, so the next delta carries reset:true (revision 1 lost it).",
+  "framing": "every frame: u32be len | u8 type | u8 flags | u16be hlen | header JSON | blob; each (conn, dir) stream starts with the 8-byte magic",
+  "frames": [
+    {
+      "conn": "A",
+      "dir": "c2s",
+      "hex": "00000068100000647b22637764223a227e222c22656e63223a226e6f6e65222c226f6666223a302c227374223a227478222c2275756964223a2231613262336334642d303030302d343030302d383030302d303030303030303030303032222c22776964223a22773130227d",
+      "type": 16,
+      "typeName": "SUB",
+      "header": {
+        "st": "tx",
+        "wid": "w10",
+        "uuid": "1a2b3c4d-0000-4000-8000-000000000002",
+        "cwd": "~",
+        "off": 0,
+        "enc": "none"
+      }
+    },
+    {
+      "conn": "A",
+      "dir": "s2c",
+      "hex": "00000074220100687b22656e63223a226e6f6e65222c2266223a3230353030392c226f223a3230353031372c227265736574223a747275652c2275223a2231613262336334642d303030302d343030302d383030302d303030303030303030303032222c22776964223a22773130227d7b2262223a327d0a",
+      "type": 34,
+      "typeName": "TX",
+      "header": {
+        "wid": "w10",
+        "u": "1a2b3c4d-0000-4000-8000-000000000002",
+        "f": 205009,
+        "o": 205017,
+        "enc": "none",
+        "reset": true
+      },
+      "blobHex": "7b2262223a327d0a",
+      "blobText": "{\"b\":2}\n"
+    }
+  ],
+  "streams": [
+    {
+      "conn": "A",
+      "dir": "c2s",
+      "excerpt": true,
+      "maxFrame": 1048576,
+      "hex": "894352500d0a1a0a00000068100000647b22637764223a227e222c22656e63223a226e6f6e65222c226f6666223a302c227374223a227478222c2275756964223a2231613262336334642d303030302d343030302d383030302d303030303030303030303032222c22776964223a22773130227d"
+    },
+    {
+      "conn": "A",
+      "dir": "s2c",
+      "excerpt": true,
+      "maxFrame": 1048576,
+      "hex": "894352500d0a1a0a00000074220100687b22656e63223a226e6f6e65222c2266223a3230353030392c226f223a3230353031372c227265736574223a747275652c2275223a2231613262336334642d303030302d343030302d383030302d303030303030303030303032222c22776964223a22773130227d7b2262223a327d0a"
+    }
+  ],
+  "expect": {
+    "poll1": null,
+    "poll2": {
+      "f": 205009,
+      "o": 205017,
+      "reset": true
+    }
+  },
+  "modelInput": {
+    "tx": {
+      "off": 0,
+      "polls": [
+        [
+          {
+            "text": "{\"a\":1}\n",
+            "times": 1
+          },
+          {
+            "text": "x",
+            "times": 205000
+          },
+          {
+            "text": "\n",
+            "times": 1
+          }
+        ],
+        [
+          {
+            "text": "{\"a\":1}\n",
+            "times": 1
+          },
+          {
+            "text": "x",
+            "times": 205000
+          },
+          {
+            "text": "\n",
+            "times": 1
+          },
+          {
+            "text": "{\"b\":2}\n",
+            "times": 1
+          }
+        ]
+      ]
+    }
+  }
+}

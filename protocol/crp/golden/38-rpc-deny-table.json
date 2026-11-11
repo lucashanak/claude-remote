@@ -1,0 +1,275 @@
+{
+  "id": "38-rpc-deny-table",
+  "title": "deny_scan negative table: every bypass the critiques found is refused",
+  "spec": "6.2",
+  "description": "Go and Kotlin MUST return exactly `rule` for every row. The frames show the first row on the wire.",
+  "framing": "every frame: u32be len | u8 type | u8 flags | u16be hlen | header JSON | blob; each (conn, dir) stream starts with the 8-byte magic",
+  "frames": [
+    {
+      "conn": "A",
+      "dir": "c2s",
+      "hex": "000000625000005e7b22636d64223a222f7573722f62696e2f746d7578206e6577202d41202d732078222c226964223a36302c226b696e64223a2273686f7274222c226d223a2265786563222c226d73223a353030302c22746167223a22726564726177227d",
+      "type": 80,
+      "typeName": "RPC",
+      "header": {
+        "id": 60,
+        "m": "exec",
+        "tag": "redraw",
+        "cmd": "/usr/bin/tmux new -A -s x",
+        "ms": 5000,
+        "kind": "short"
+      }
+    },
+    {
+      "conn": "A",
+      "dir": "s2c",
+      "hex": "00000056510000527b22636f6465223a22455f44454e494544222c226964223a36302c226c617374223a747275652c226f6b223a66616c73652c2270617274223a302c2272756c65223a22746d75782d766572623a6e6577227d",
+      "type": 81,
+      "typeName": "RPCRES",
+      "header": {
+        "id": 60,
+        "ok": false,
+        "code": "E_DENIED",
+        "rule": "tmux-verb:new",
+        "part": 0,
+        "last": true
+      }
+    }
+  ],
+  "streams": [
+    {
+      "conn": "A",
+      "dir": "c2s",
+      "excerpt": true,
+      "maxFrame": 1048576,
+      "hex": "894352500d0a1a0a000000625000005e7b22636d64223a222f7573722f62696e2f746d7578206e6577202d41202d732078222c226964223a36302c226b696e64223a2273686f7274222c226d223a2265786563222c226d73223a353030302c22746167223a22726564726177227d"
+    },
+    {
+      "conn": "A",
+      "dir": "s2c",
+      "excerpt": true,
+      "maxFrame": 1048576,
+      "hex": "894352500d0a1a0a00000056510000527b22636f6465223a22455f44454e494544222c226964223a36302c226c617374223a747275652c226f6b223a66616c73652c2270617274223a302c2272756c65223a22746d75782d766572623a6e6577227d"
+    }
+  ],
+  "expect": {
+    "cases": [
+      {
+        "tag": "redraw",
+        "cmd": "/usr/bin/tmux new -A -s x",
+        "rule": "tmux-verb:new",
+        "why": "absolute path to the second tmux on the box (3.3a)"
+      },
+      {
+        "tag": "redraw",
+        "cmd": "\\tmux new -d -s x",
+        "rule": "tmux-verb:new",
+        "why": "backslash-escaped command word"
+      },
+      {
+        "tag": "redraw",
+        "cmd": "'tmux' new -d -s x",
+        "rule": "tmux-verb:new",
+        "why": "quoted command word"
+      },
+      {
+        "tag": "redraw",
+        "cmd": "tm\\ux new -d -s x",
+        "rule": "tmux-verb:new",
+        "why": "backslash inside the word"
+      },
+      {
+        "tag": "redraw",
+        "cmd": "command tmux new -s x",
+        "rule": "tmux-verb:new",
+        "why": "wrapper"
+      },
+      {
+        "tag": "redraw",
+        "cmd": "env tmux new -s x",
+        "rule": "tmux-verb:new",
+        "why": "wrapper"
+      },
+      {
+        "tag": "redraw",
+        "cmd": "echo x|xargs tmux kill-ser",
+        "rule": "tmux-verb:kill-ser",
+        "why": "tmux as an argument of xargs"
+      },
+      {
+        "tag": "redraw",
+        "cmd": "T=tmux; $T new -d -s x",
+        "rule": "cmdvar",
+        "why": "variable at command position"
+      },
+      {
+        "tag": "redraw",
+        "cmd": "\"$(command -v tmux)\" kill-ser",
+        "rule": "cmdvar",
+        "why": "command substitution at command position"
+      },
+      {
+        "tag": "redraw",
+        "cmd": "tmux $(echo kill-ser)",
+        "rule": "tmux-verb:",
+        "why": "verb from a substitution: bare tmux = new-session"
+      },
+      {
+        "tag": "redraw",
+        "cmd": "tmux\nnew -s x",
+        "rule": "tmux-verb:",
+        "why": "newline: bare tmux is new-session"
+      },
+      {
+        "tag": "redraw",
+        "cmd": "tmux list-sessions ';' new -d -s x",
+        "rule": "tmux-verb:new",
+        "why": "quoted ';' argv is a tmux separator"
+      },
+      {
+        "tag": "redraw",
+        "cmd": "tmux list-sessions \";\" new -d -s x",
+        "rule": "tmux-verb:new",
+        "why": "double-quoted ';'"
+      },
+      {
+        "tag": "redraw",
+        "cmd": "tmux list-sessions foo\\; new -d -s x",
+        "rule": "tmux-verb:new",
+        "why": "argument ending in ';' is a tmux separator"
+      },
+      {
+        "tag": "redraw",
+        "cmd": "tmux -S /tmp/other list-sessions",
+        "rule": "tmux-flag:-S",
+        "why": "global -S"
+      },
+      {
+        "tag": "redraw",
+        "cmd": "tmux -L x list-sessions",
+        "rule": "tmux-flag:-L",
+        "why": "global -L"
+      },
+      {
+        "tag": "redraw",
+        "cmd": "tmux list-sessions && tmux detach-client -a",
+        "rule": "tmux-verb:detach-client",
+        "why": "verb not allowlisted"
+      },
+      {
+        "tag": "redraw",
+        "cmd": "tmux refresh-client -t /dev/pts/3 -C 10x10",
+        "rule": "tmux-args:refresh-client",
+        "why": "refresh-client may only take -t and -S"
+      },
+      {
+        "tag": "redraw",
+        "cmd": "tmux show-environment -g",
+        "rule": "tmux-flag:-g",
+        "why": "-g"
+      },
+      {
+        "tag": "redraw",
+        "cmd": "tmux list-panes -ag -F x",
+        "rule": "tmux-flag:-g",
+        "why": "-g inside a flag cluster"
+      },
+      {
+        "tag": "redraw",
+        "cmd": "tmux display-message -p '#(pkill -f claude)'",
+        "rule": "text:#(",
+        "why": "#() runs a shell in the tmux server"
+      },
+      {
+        "tag": "redraw",
+        "cmd": "tmux list-sessions -F '#(tmux kill-ser)'",
+        "rule": "text:#(",
+        "why": "#() runs a shell in the tmux server"
+      },
+      {
+        "tag": "reconcile",
+        "cmd": "tmux send-keys -t =x: '/exit' Enter",
+        "rule": "tmux-args:send-keys",
+        "why": "send-keys outside remote.scroll"
+      },
+      {
+        "tag": "remote.scroll",
+        "cmd": "tmux send-keys -t =x: C-d",
+        "rule": "tmux-args:send-keys",
+        "why": "send-keys not in the scroll shape"
+      },
+      {
+        "tag": "remote.scroll",
+        "cmd": "tmux send-keys -X -t x copy-pipe-and-cancel 'rm -rf ~'",
+        "rule": "text:copy-pipe",
+        "why": "copy-pipe"
+      },
+      {
+        "tag": "reconcile",
+        "cmd": "kill -9 $(pgrep -f 'tmux: server')",
+        "rule": "text:kill -",
+        "why": "kill"
+      },
+      {
+        "tag": "reconcile",
+        "cmd": "pkill -x tmux",
+        "rule": "text:pkill",
+        "why": "pkill"
+      },
+      {
+        "tag": "reconcile",
+        "cmd": "rm -rf /tmp/tmux-1000",
+        "rule": "text:/tmux-",
+        "why": "the socket directory"
+      },
+      {
+        "tag": "reconcile",
+        "cmd": "rm -f ${TMUX_TMPDIR:-/tmp}/tmux-$(id -u)/default",
+        "rule": "text:/tmux-",
+        "why": "the socket"
+      },
+      {
+        "tag": "reconcile",
+        "cmd": "bash ~/.claude-remote/tmux-sockheal.sh",
+        "rule": "text:tmux-sockheal",
+        "why": "a heal script"
+      },
+      {
+        "tag": "reconcile",
+        "cmd": "bash ~/.claude-remote/drift.sh",
+        "rule": "text:drift.sh",
+        "why": "drift"
+      },
+      {
+        "tag": "reconcile",
+        "cmd": "eval \"$X\"",
+        "rule": "cmd:eval",
+        "why": "eval"
+      },
+      {
+        "tag": "reconcile",
+        "cmd": "cat ~/.claude/.credentials.json",
+        "rule": "text:.credentials",
+        "why": "credentials"
+      },
+      {
+        "tag": "reconcile",
+        "cmd": "loginctl terminate-user lucas",
+        "rule": "text:loginctl",
+        "why": "loginctl"
+      },
+      {
+        "tag": "reconcile",
+        "cmd": "sh -c 'X=tmux; $X kill-ser'",
+        "rule": "cmdvar",
+        "why": "nested sh -c gets the full rules"
+      },
+      {
+        "tag": "probe.has-session",
+        "cmd": "tmux has-session -t '=claude-server-tmux-split-window-demo' 2>/dev/null && echo YES || echo NO",
+        "rule": "text:split-window",
+        "why": "data-dependent over-refusal: the client pre-scans and sends this untagged over Stage A (spec 6.2)"
+      }
+    ]
+  }
+}

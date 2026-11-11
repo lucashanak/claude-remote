@@ -1,0 +1,61 @@
+{
+  "id": "43-state-fg",
+  "title": "Foreground/background change mid-connection: STATE{fg, pingMs}",
+  "spec": "2.4",
+  "description": "The client tells the daemon its ping interval (15 s foreground, 60 s background, 5 s with an active term SUB). The daemon never pings on its own and closes a connection only after 3 x pingMs (min 45 s) without any frame. The client declares the connection dead after 2 x pingMs + 5 s without any frame RECEIVED, counted from the last received frame, not from its own last send.",
+  "framing": "every frame: u32be len | u8 type | u8 flags | u16be hlen | header JSON | blob; each (conn, dir) stream starts with the 8-byte magic",
+  "frames": [
+    {
+      "conn": "A",
+      "dir": "c2s",
+      "hex": "0000001f0700001b7b226667223a66616c73652c2270696e674d73223a36303030307d",
+      "type": 7,
+      "typeName": "STATE",
+      "header": {
+        "fg": false,
+        "pingMs": 60000
+      }
+    },
+    {
+      "conn": "A",
+      "dir": "c2s",
+      "hex": "0000000d040000097b2274223a3930307d",
+      "type": 4,
+      "typeName": "PING",
+      "header": {
+        "t": 900
+      }
+    },
+    {
+      "conn": "A",
+      "dir": "s2c",
+      "hex": "000000210500001d7b226e6f77223a313739333939303030303030302c2274223a3930307d",
+      "type": 5,
+      "typeName": "PONG",
+      "header": {
+        "t": 900,
+        "now": 1793990000000
+      }
+    }
+  ],
+  "streams": [
+    {
+      "conn": "A",
+      "dir": "c2s",
+      "excerpt": true,
+      "maxFrame": 1048576,
+      "hex": "894352500d0a1a0a0000001f0700001b7b226667223a66616c73652c2270696e674d73223a36303030307d0000000d040000097b2274223a3930307d"
+    },
+    {
+      "conn": "A",
+      "dir": "s2c",
+      "excerpt": true,
+      "maxFrame": 1048576,
+      "hex": "894352500d0a1a0a000000210500001d7b226e6f77223a313739333939303030303030302c2274223a3930307d"
+    }
+  ],
+  "expect": {
+    "daemonCloseAfterMs": 180000,
+    "clientDeadAfterMs": 125000
+  }
+}

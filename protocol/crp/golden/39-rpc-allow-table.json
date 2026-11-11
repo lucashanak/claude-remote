@@ -1,0 +1,120 @@
+{
+  "id": "39-rpc-allow-table",
+  "title": "deny_scan positive table: the tagged sites' real command shapes pass",
+  "spec": "6.2, 9.3",
+  "description": "Rendered from the builders at 2841e18 with representative inputs. B2's test renders the builders themselves; this table pins the scanner against false refusals of today's shapes.",
+  "framing": "every frame: u32be len | u8 type | u8 flags | u16be hlen | header JSON | blob; each (conn, dir) stream starts with the 8-byte magic",
+  "frames": [
+    {
+      "conn": "A",
+      "dir": "c2s",
+      "hex": "000000535000004f7b22636d64223a226563686f20706f6e67222c226964223a36312c226b696e64223a2273686f7274222c226d223a2265786563222c226d73223a31303030302c22746167223a226865616c7468227d",
+      "type": 80,
+      "typeName": "RPC",
+      "header": {
+        "id": 61,
+        "m": "exec",
+        "tag": "health",
+        "cmd": "echo pong",
+        "ms": 10000,
+        "kind": "short"
+      }
+    },
+    {
+      "conn": "A",
+      "dir": "s2c",
+      "hex": "000000385101002f7b226964223a36312c226c617374223a747275652c226f6b223a747275652c2270617274223a302c227263223a307d706f6e670a",
+      "type": 81,
+      "typeName": "RPCRES",
+      "header": {
+        "id": 61,
+        "ok": true,
+        "rc": 0,
+        "part": 0,
+        "last": true
+      },
+      "blobHex": "706f6e670a",
+      "blobText": "pong\n"
+    }
+  ],
+  "streams": [
+    {
+      "conn": "A",
+      "dir": "c2s",
+      "excerpt": true,
+      "maxFrame": 1048576,
+      "hex": "894352500d0a1a0a000000535000004f7b22636d64223a226563686f20706f6e67222c226964223a36312c226b696e64223a2273686f7274222c226d223a2265786563222c226d73223a31303030302c22746167223a226865616c7468227d"
+    },
+    {
+      "conn": "A",
+      "dir": "s2c",
+      "excerpt": true,
+      "maxFrame": 1048576,
+      "hex": "894352500d0a1a0a000000385101002f7b226964223a36312c226c617374223a747275652c226f6b223a747275652c2270617274223a302c227263223a307d706f6e670a"
+    }
+  ],
+  "expect": {
+    "cases": [
+      {
+        "tag": "reconcile",
+        "cmd": "set +e\nD=\"$HOME/.claude-remote\"; mkdir -p \"$D\"; LOCK=\"$D/sessions.lock\"; touch \"$LOCK\"\n( flock -s 9\ncat \"$D/forgotten\" 2>/dev/null\nfind \"$D/forgotten.d\" -maxdepth 1 -type f -mtime -30 -printf '%f\\n' 2>/dev/null\necho ---\ncat \"$D/sessions.json\" 2>/dev/null || :\necho\n) 9<>\"$LOCK\"; echo \"__END_snap__ rc=$?\"\ntmux -u list-sessions -F '#{session_name}' 2>/dev/null; echo \"__END_tmux__ rc=$?\"\nNAMES=$(printf '%s\\n' 'claude-server-a' 'claude-server-b')\nPANES=$(tmux -u list-panes -a -F '#{session_name} #{pane_pid}' 2>/dev/null); R=$?\nprintf '%s\\n' \"$PANES\" | while IFS= read -r l; do n=\"${l% *}\"; printf '%s\\n' \"$NAMES\" | grep -qxF -- \"$n\" && printf '%s\\n' \"$l\"; done\necho \"__END_panes__ rc=$R\"\nPS=$(ps -eo pid=,ppid=,comm= 2>/dev/null); R=$?; printf '%s\\n' \"$PS\"; echo \"__END_ps__ rc=$R\"\ndis() { f=\"$1\"; if [ -r \"$f\" ]; then if grep -Eq '\"disableAllHooks\"[[:space:]]*:[[:space:]]*true' \"$f\" 2>/dev/null; then echo 1; else echo 0; fi; elif [ -e \"$f\" ]; then echo -; else echo 0; fi; }\nif [ -e \"$D/hookev.off\" ]; then OFF=1; else OFF=0; fi\nfor p in $(printf '%s\\n' \"$PS\" | awk '$3==\"claude\" || $3 ~ /^[0-9]+(\\.[0-9]+)+$/ {print $1}'); do\nE=$(readlink /proc/$p/exe 2>/dev/null); echo \"EXE $p ${E:--}\"\nCFG=$(tr '\\0' '\\n' < /proc/$p/environ 2>/dev/null | sed -n 's|^CLAUDE_CONFIG_DIR=||p' | head -1); C=\"${CFG:-$HOME/.claude}\"\nif [ -r \"$C/settings.json\" ]; then if grep -q 'claude-remote-ev v' \"$C/settings.json\" 2>/dev/null; then M=1; else M=0; fi; elif [ -e \"$C/settings.json\" ]; then M=-; else M=0; fi\nD1=$(dis \"$C/settings.json\"); D2=$(dis \"$C/settings.local.json\")\nif [ \"$D1\" = 1 ] || [ \"$D2\" = 1 ]; then X=1; elif [ \"$D1\" = - ] || [ \"$D2\" = - ]; then X=-; else X=0; fi\necho \"CAPF $p $M $X $OFF\"\nf=\"$C/sessions/$p.json\"\nif [ -f \"$f\" ]; then v=$(jq -r '.sessionId // empty' \"$f\" 2>/dev/null); ok=-; [ -n \"$v\" ] && { ls \"$HOME\"/.claude/projects/*/\"$v\".jsonl >/dev/null 2>&1 || ls \"$C\"/projects/*/\"$v\".jsonl >/dev/null 2>&1; } && ok=$v; echo \"SID $p $ok\"; fi\ndone; true; echo \"__END_claude__ rc=$?\"",
+        "rule": null,
+        "site": "ManifestCommands.kt:190 RECONCILE_ALL (@@TD@@=30, two names)"
+      },
+      {
+        "tag": "git.status",
+        "cmd": "F='~/claude-remote'\nE=\"${F/#~/$HOME}\"\ncase \"$E\" in /*) ;; *) E=\"$HOME/$E\";; esac\ncd \"$E\" 2>/dev/null || exit 0\ngit rev-parse --abbrev-ref HEAD 2>/dev/null\ngit status --porcelain 2>/dev/null | head -1\ngit rev-list --left-right --count @{u}...HEAD 2>/dev/null",
+        "rule": null,
+        "site": "GitStatusService.kt:73-80"
+      },
+      {
+        "tag": "probe.transcript",
+        "cmd": "F='~/claude-remote'\nE=\"${F/#~/$HOME}\"\ncase \"$E\" in /*) ;; *) E=\"$HOME/$E\";; esac\n# UUID is globally unique — a transcript matching it anywhere means\n# it exists, immune to the lossy cwd->dir encoding. Fall back to the\n# corrected encoding (every non-alphanumeric -> '-') for a not-yet-\n# globbable path.\nENC=$(echo \"$E\" | sed 's|[^a-zA-Z0-9]|-|g')\nif ls \"$HOME/.claude/projects/\"*/\"0f8e2c1a-1111-4222-8333-944455556666.jsonl\" >/dev/null 2>&1 || [ -f \"$HOME/.claude/projects/$ENC/0f8e2c1a-1111-4222-8333-944455556666.jsonl\" ]; then echo YES; else echo NO; fi",
+        "rule": null,
+        "site": "TmuxProbes.kt:243-256"
+      },
+      {
+        "tag": "probe.has-session",
+        "cmd": "tmux has-session -t '=claude-server-cashy' 2>/dev/null && echo YES || echo NO",
+        "rule": null,
+        "site": "TmuxProbes.kt:236"
+      },
+      {
+        "tag": "redraw",
+        "cmd": "tmux list-clients -t '=claude-server-cashy' -F '#{client_name}' 2>/dev/null | while IFS= read -r c; do tmux refresh-client -t \"$c\" 2>/dev/null && echo OK; done",
+        "rule": null,
+        "site": "TmuxProbes.kt:155-156"
+      },
+      {
+        "tag": "remote.scroll",
+        "cmd": "tmux copy-mode -e -t '=claude-server-cashy:'; tmux send-keys -t '=claude-server-cashy:' -X page-up",
+        "rule": null,
+        "site": "RemoteOpsService.kt:53"
+      },
+      {
+        "tag": "health",
+        "cmd": "echo pong",
+        "rule": null,
+        "site": "ServerHealthService.kt:126"
+      },
+      {
+        "tag": "logship",
+        "cmd": "D=\"$HOME/.claude-remote/logs\"; mkdir -p \"$D\"; F=\"$D/android-706cbd7b.log\"; if [ -f \"$F\" ] && [ \"$(wc -c < \"$F\")\" -gt 41943040 ]; then tail -c 37748736 \"$F\" | tail -n +2 > \"$F.tmp\" && mv \"$F.tmp\" \"$F\"; fi; cat >> \"$F\"",
+        "rule": null,
+        "site": "LogShipper.kt:180-185"
+      },
+      {
+        "tag": "flags",
+        "cmd": "echo '===CRB flags==='; CF=\"$HOME/.claude-remote/client-flags.json\"; [ -f \"$CF\" ] && head -c 4096 \"$CF\"; echo",
+        "rule": null,
+        "site": "ServerBootstrap.kt:135"
+      },
+      {
+        "tag": "reconcile",
+        "cmd": "timeout 2 sh -c \"tmux list-sessions -F '#{session_name}|#{session_created}'\"",
+        "rule": null,
+        "site": "vector 17 shape"
+      }
+    ]
+  }
+}

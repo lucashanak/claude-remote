@@ -1,0 +1,59 @@
+{
+  "id": "23-rpc-denied-set-g",
+  "title": "rpc exec refused: tmux-verb:set",
+  "spec": "6.2",
+  "description": "A chained `\\;` verb is checked like the first one. The daemon runs nothing; RPCRES ok:false E_DENIED with the rule. The client maps it to ExecUnavailable(REFUSED) and does NOT retry it on another transport.",
+  "framing": "every frame: u32be len | u8 type | u8 flags | u16be hlen | header JSON | blob; each (conn, dir) stream starts with the 8-byte magic",
+  "frames": [
+    {
+      "conn": "A",
+      "dir": "c2s",
+      "hex": "00000075500000717b22636d64223a22746d757820726566726573682d636c69656e74202d53205c5c3b20736574202d6720737461747573206f6666222c226964223a34342c226b696e64223a2273686f7274222c226d223a2265786563222c226d73223a353030302c22746167223a22726564726177227d",
+      "type": 80,
+      "typeName": "RPC",
+      "header": {
+        "id": 44,
+        "m": "exec",
+        "tag": "redraw",
+        "cmd": "tmux refresh-client -S \\; set -g status off",
+        "ms": 5000,
+        "kind": "short"
+      }
+    },
+    {
+      "conn": "A",
+      "dir": "s2c",
+      "hex": "00000056510000527b22636f6465223a22455f44454e494544222c226964223a34342c226c617374223a747275652c226f6b223a66616c73652c2270617274223a302c2272756c65223a22746d75782d766572623a736574227d",
+      "type": 81,
+      "typeName": "RPCRES",
+      "header": {
+        "id": 44,
+        "ok": false,
+        "code": "E_DENIED",
+        "rule": "tmux-verb:set",
+        "part": 0,
+        "last": true
+      }
+    }
+  ],
+  "streams": [
+    {
+      "conn": "A",
+      "dir": "c2s",
+      "excerpt": true,
+      "maxFrame": 1048576,
+      "hex": "894352500d0a1a0a00000075500000717b22636d64223a22746d757820726566726573682d636c69656e74202d53205c5c3b20736574202d6720737461747573206f6666222c226964223a34342c226b696e64223a2273686f7274222c226d223a2265786563222c226d73223a353030302c22746167223a22726564726177227d"
+    },
+    {
+      "conn": "A",
+      "dir": "s2c",
+      "excerpt": true,
+      "maxFrame": 1048576,
+      "hex": "894352500d0a1a0a00000056510000527b22636f6465223a22455f44454e494544222c226964223a34342c226c617374223a747275652c226f6b223a66616c73652c2270617274223a302c2272756c65223a22746d75782d766572623a736574227d"
+    }
+  ],
+  "expect": {
+    "denyScan": "tmux-verb:set",
+    "kotlin": "ExecUnavailable(REFUSED)"
+  }
+}

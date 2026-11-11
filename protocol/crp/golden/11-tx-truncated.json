@@ -1,0 +1,81 @@
+{
+  "id": "11-tx-truncated",
+  "title": "Transcript shorter than the client's offset: reset delta",
+  "spec": "4.6, 4.4",
+  "description": "sz < off (file replaced). streamd re-reads from max(0, sz-TAIL); CRP marks it reset:true so the client drops what it had for this watch instead of appending.",
+  "framing": "every frame: u32be len | u8 type | u8 flags | u16be hlen | header JSON | blob; each (conn, dir) stream starts with the 8-byte magic",
+  "frames": [
+    {
+      "conn": "A",
+      "dir": "c2s",
+      "hex": "0000006a100000667b22637764223a227e222c22656e63223a226e6f6e65222c226f6666223a353030302c227374223a227478222c2275756964223a2231613262336334642d303030302d343030302d383030302d303030303030303030303031222c22776964223a227738227d",
+      "type": 16,
+      "typeName": "SUB",
+      "header": {
+        "st": "tx",
+        "wid": "w8",
+        "uuid": "1a2b3c4d-0000-4000-8000-000000000001",
+        "cwd": "~",
+        "off": 5000,
+        "enc": "none"
+      }
+    },
+    {
+      "conn": "A",
+      "dir": "s2c",
+      "hex": "000001632201005f7b22656e63223a226e6f6e65222c2266223a302c226f223a3235362c227265736574223a747275652c2275223a2231613262336334642d303030302d343030302d383030302d303030303030303030303031222c22776964223a227738227d7b226e223a317d0a7b226e223a327d0a7b226e223a337d0a7b226e223a337d0a7b226e223a337d0a7b226e223a337d0a7b226e223a337d0a7b226e223a337d0a7b226e223a337d0a7b226e223a337d0a7b226e223a337d0a7b226e223a337d0a7b226e223a337d0a7b226e223a337d0a7b226e223a337d0a7b226e223a337d0a7b226e223a337d0a7b226e223a337d0a7b226e223a337d0a7b226e223a337d0a7b226e223a337d0a7b226e223a337d0a7b226e223a337d0a7b226e223a337d0a7b226e223a337d0a7b226e223a337d0a7b226e223a337d0a7b226e223a337d0a7b226e223a337d0a7b226e223a337d0a7b226e223a337d0a7b226e223a337d0a",
+      "type": 34,
+      "typeName": "TX",
+      "header": {
+        "wid": "w8",
+        "u": "1a2b3c4d-0000-4000-8000-000000000001",
+        "f": 0,
+        "o": 256,
+        "enc": "none",
+        "reset": true
+      },
+      "blobHex": "7b226e223a317d0a7b226e223a327d0a7b226e223a337d0a7b226e223a337d0a7b226e223a337d0a7b226e223a337d0a7b226e223a337d0a7b226e223a337d0a7b226e223a337d0a7b226e223a337d0a7b226e223a337d0a7b226e223a337d0a7b226e223a337d0a7b226e223a337d0a7b226e223a337d0a7b226e223a337d0a7b226e223a337d0a7b226e223a337d0a7b226e223a337d0a7b226e223a337d0a7b226e223a337d0a7b226e223a337d0a7b226e223a337d0a7b226e223a337d0a7b226e223a337d0a7b226e223a337d0a7b226e223a337d0a7b226e223a337d0a7b226e223a337d0a7b226e223a337d0a7b226e223a337d0a7b226e223a337d0a",
+      "blobText": "{\"n\":1}\n{\"n\":2}\n{\"n\":3}\n{\"n\":3}\n{\"n\":3}\n{\"n\":3}\n{\"n\":3}\n{\"n\":3}\n{\"n\":3}\n{\"n\":3}\n{\"n\":3}\n{\"n\":3}\n{\"n\":3}\n{\"n\":3}\n{\"n\":3}\n{\"n\":3}\n{\"n\":3}\n{\"n\":3}\n{\"n\":3}\n{\"n\":3}\n{\"n\":3}\n{\"n\":3}\n{\"n\":3}\n{\"n\":3}\n{\"n\":3}\n{\"n\":3}\n{\"n\":3}\n{\"n\":3}\n{\"n\":3}\n{\"n\":3}\n{\"n\":3}\n{\"n\":3}\n"
+    }
+  ],
+  "streams": [
+    {
+      "conn": "A",
+      "dir": "c2s",
+      "excerpt": true,
+      "maxFrame": 1048576,
+      "hex": "894352500d0a1a0a0000006a100000667b22637764223a227e222c22656e63223a226e6f6e65222c226f6666223a353030302c227374223a227478222c2275756964223a2231613262336334642d303030302d343030302d383030302d303030303030303030303031222c22776964223a227738227d"
+    },
+    {
+      "conn": "A",
+      "dir": "s2c",
+      "excerpt": true,
+      "maxFrame": 1048576,
+      "hex": "894352500d0a1a0a000001632201005f7b22656e63223a226e6f6e65222c2266223a302c226f223a3235362c227265736574223a747275652c2275223a2231613262336334642d303030302d343030302d383030302d303030303030303030303031222c22776964223a227738227d7b226e223a317d0a7b226e223a327d0a7b226e223a337d0a7b226e223a337d0a7b226e223a337d0a7b226e223a337d0a7b226e223a337d0a7b226e223a337d0a7b226e223a337d0a7b226e223a337d0a7b226e223a337d0a7b226e223a337d0a7b226e223a337d0a7b226e223a337d0a7b226e223a337d0a7b226e223a337d0a7b226e223a337d0a7b226e223a337d0a7b226e223a337d0a7b226e223a337d0a7b226e223a337d0a7b226e223a337d0a7b226e223a337d0a7b226e223a337d0a7b226e223a337d0a7b226e223a337d0a7b226e223a337d0a7b226e223a337d0a7b226e223a337d0a7b226e223a337d0a7b226e223a337d0a7b226e223a337d0a"
+    }
+  ],
+  "expect": {
+    "model": {
+      "f": 0,
+      "o": 256,
+      "reset": true
+    }
+  },
+  "modelInput": {
+    "tx": {
+      "off": 5000,
+      "polls": [
+        [
+          {
+            "text": "{\"n\":1}\n{\"n\":2}\n",
+            "times": 1
+          },
+          {
+            "text": "{\"n\":3}\n",
+            "times": 30
+          }
+        ]
+      ]
+    }
+  }
+}

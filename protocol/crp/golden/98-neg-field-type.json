@@ -1,0 +1,15 @@
+{
+  "id": "98-neg-field-type",
+  "title": "EV with seq as a string",
+  "spec": "3.1, 3.2",
+  "streamHex": "894352500d0a1a0a0000002a200100257b226570223a226131623263336434222c22736571223a2235222c227374223a226576227d78",
+  "description": "Receiver behaviour on a malformed or foreign stream.",
+  "expect": {
+    "error": "E_PROTO",
+    "decoded": null
+  },
+  "decodeOptions": {
+    "direction": "s2c",
+    "excerpt": true
+  }
+}

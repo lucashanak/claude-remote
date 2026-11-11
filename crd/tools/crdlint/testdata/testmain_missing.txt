@@ -1,0 +1,11 @@
+// path: internal/stream/x_test.go
+// want: testmain
+package stream
+
+import (
+	"testing"
+
+	"github.com/lucashanak/claude-remote/crd/internal/testenv"
+)
+
+func TestX(t *testing.T) { _ = testenv.NewRoot(t) }
