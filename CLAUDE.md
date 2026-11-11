@@ -11,11 +11,16 @@ Details live in `docs/`; this file only points at the places of truth and at the
 - **Exec transport and channel budget** — `session/service/ExecTransportManager.kt`, `RemoteExec.kt` (`GatedExecChannels`, typed
   `ExecUnavailable`); routing helpers in `ConnectionRegistry` (`execRun`, `execRead`, `useChannel`). Fallbacks only onto a transport
   with channel headroom (sshd default `MaxSessions 10`; the dev box has 30). Every tab-side channel is counted against its transport
-  (`withTabChannel`/`onServerTabChannel`, `TabChannels`); no room = skip the turn, never let sshd refuse. One reserve slot for short
-  channels only; transfers never take it. A new channel site without a token is a budget leak.
+  (`withTabChannel`/`onServerTabChannel`, `TabChannels`); never let sshd refuse. No room = a poll (`ExecKind.POLL`) or a
+  `periodic = true` caller skips its turn; a one-off waits only for a slot that is still settling, within its own budget minus the
+  route's open floor, and gets "no room" at once when nothing settles (`docs/connection.md` "Who waits for a settling slot"). A new
+  periodic caller must pass `periodic = true`. One reserve slot for short channels only; transfers never take it. A new channel
+  site without a token is a budget leak.
 - **Channel opening** — every SSH channel open goes through `connection/ChannelOpen.kt`: floor `MIN_OPEN_MS` (cf 1.5 s / lan 0.3 s),
   the open keeps running detached until confirmed or `OPEN_DEAD_MS`, a late confirmation is closed. JSch 0.2.21 never sends
-  CHANNEL_CLOSE for an open that timed out, so a bare `ch.connect(t)` leaks an sshd slot. A transport is replaced after 3
+  CHANNEL_CLOSE for an open that timed out, so a bare `ch.connect(t)` leaks an sshd slot. sshd counts a channel against
+  MaxSessions until it reaped the command, so a counted slot comes back only once the channel settled (sshd's CLOSE, ≤ 3 s) plus
+  a 200 ms grace (`afterSettled`, `ServerTransportPool.releaseChannel`); giving it back at our own CLOSE was the n3 refusal. A transport is replaced after 3
   serially-started unanswered full-budget opens or 2 refusals with headroom; health swaps are spaced 30 s → 300 s. Pollers take
   `ExecKind.POLL` permits (no wait, silent skip, counted in the `poll skipped` line); 2 of 6 SHORT permits stay for interactive work.
 - **Keepalive over Cloudflare** — JSch's keepalive never fires through `CloudflareProxy` (no socket); `TunnelKeepAlive` sends
@@ -53,6 +58,8 @@ Details live in `docs/`; this file only points at the places of truth and at the
 ## Traps (each one has happened)
 - **Tests run inside one of the user's live tmux sessions.** Every Test task gets a private `TMUX_TMPDIR`/`HOME` and a tmux shim
   (root `build.gradle.kts`, `scripts/test-shims/tmux`, keep its exec bit). Never call tmux on the default socket from a test.
+  A tmux server a test starts (`SshdFixture`, `DriftWorld`) gets the shims first on its PATH, so a pane never runs the real
+  `~/.local/bin/claude`; keep it that way in any new fixture.
 - **Never create a symlink in a test that points outside the test's own temp root, and never use `File.deleteRecursively()` in tests**
   — Kotlin follows directory symlinks. On 2026-11-02 a test with `dirlink -> /tmp` deleted the live tmux socket; drift then relaunched
   all 51 sessions as duplicates. Use `testsupport/safeDeleteTree`; a syntax test enforces it.
@@ -72,8 +79,16 @@ Details live in `docs/`; this file only points at the places of truth and at the
   since 2026-11-10 (installed under supervision by the lead). The v19 installer kept `drift.sh.v18`/`restore.sh.v18` next to them;
   moving them back is the second exception to "never edit drift/restore" and only with Lukáš's explicit consent that day (a v19
   client launching later rewrites them again — then the way back is a v20 hotfix).
-- Drift's `for s in $(tmux list-sessions …)` splits names with a space: `claude-server-My Project` is adopted as `claude-server-My`
-  and self-heal starts a duplicate claude. Open (HIGH, predates v19; see `davka-D/predavka-D.md`).
+  - **The code carries v20** (batch E, `davka-E/predavka-E.md`); its installer keeps the v19 scripts as `.v19`. Pushing it to `main`
+    is a release, and the next client launch installs v20 on the live box: only after Lukáš's consent that day and a supervised
+    install with pre/post checks (marker via `sort -V`, `pane_pid`/`session_created` unchanged, 3 ticks `Result=success`).
+    v20 changes no shared file format; its own state lives in `drift.skipped`, `drift.seedhold` and `drift.off`, which v19 ignores.
+- Drift before v20 (`for s in $(tmux list-sessions …)`) splits names with a space: `claude-server-My Project` is adopted as
+  `claude-server-My` and self-heal starts a duplicate claude. v20 reads names with `while IFS= read -r` and targets a session as
+  `-t "=$s"` but a pane or window as `-t "=$s:"` (`display-message -p -t "=$s"` prints nothing with rc 0). The live box keeps the
+  bug until v20 is installed.
+- Drift brakes (v20): `~/.claude-remote/drift.off` stops a tick before it does anything; `drift-heal.off` only switches the socket
+  guard off and is **no relaunch brake** (`docs/architecture.md`).
 - Claude 2.1.32x dialogs have NO `y`/`n` keys: Enter takes the focused option, Escape says no. `n` + Enter was ignored and
   then picked the focused "1. Yes" — every "Ne" button approved (fixed 2026-11-11, 1445d7a/4b0f2c4). Answer a dialog only
   with Enter while the screen shows the focus on the one-time "1. Yes" (never "always allow"/"auto mode"), or Escape while
