@@ -358,7 +358,7 @@ class Rules(Store):
         """Whole-name match against the session's tmux name, short name, alias or folder: no globs, so a rule says
         exactly which sessions it covers (and the gate needs no `*` in an argument)."""
         # F4 "Zavřel jsem X." is the receipt of an act with its undo ("Vrátit"), not news: no rule silences it
-        if item.get("sub") in NEVER_SILENCED or item["src"] in ("incident", "reminder", "closed"):
+        if item.get("sub") in NEVER_SILENCED or item["src"] in ("incident", "reminder", "closed", "approve"):
             return False
         m = rule.get("match") or {}
         kind = m.get("kind") or "*"
@@ -496,8 +496,9 @@ def clean(s, n):
 
 BLOCK_CZ = {"perm": "chce povolení", "ask": "se ptá", "waiting": "čeká na tebe", "question": "se v odpovědi ptá",
             "limit": "narazila na limit účtu a stojí", "mail": "zatím nedostala zprávu od Jarvise"}
+UNREAD_TEXT = "Jarvis neřekl větu návrhu doslova, nic jsem neschválil. Zeptej se ho znovu."
 TEMPLATE_KIND = {"task": "done", "watch": "done", "reminder": "done", "incident": "incident", "closed": "done",
-                 "stuck": "info", "crashed": "info", "usage": "info", "round": "info", "auto": "done"}
+                 "stuck": "info", "crashed": "info", "usage": "info", "round": "info", "auto": "done", "approve": "jsay"}
 # A message approved but stuck in the queue this long is told (2026-11-09: one waited 16 h, nobody knew).
 MAIL_STUCK_MS = 10 * 60 * 1000
 
@@ -817,6 +818,15 @@ class AlertWorker:
             if e.get("ev") == "closed" and e.get("by") == "jarvis" and isinstance(e.get("name"), str):
                 self._add(now, src="closed", sub="closed", name=e["name"], at=e["at"],
                           text=f"Zavřel jsem {J.short_name(e['name'])}.")
+            elif e.get("ev") == "unread" and e.get("kind") == "approve":
+                # kolo 5: Lukáš's "ano" (the jask Ano too) was not taken, Jarvis did not say the sentence word for
+                # word: never silently; once per proposal (the ops ledger writes `unread` only the first time)
+                self._add(now, src="approve", sub="unread", name=e.get("target"), at=e["at"], text=UNREAD_TEXT)
+            elif e.get("ev") in ("done", "failed") and e.get("kind") == "approve" and isinstance(e.get("target"), str):
+                # F5e: the outcome of an approval Lukáš gave through Jarvis, in the code's words ("Schváleno: …" or
+                # "Dialog se mezitím změnil, nic jsem neschválil.")
+                self._add(now, src="approve", sub=e["ev"], name=e["target"], at=e["at"],
+                          text=clean(e.get("message"), 300) or "Hotovo.")
         cur["ops"] = ox
         # reminders that are due: fired under the store's lock, so one is never told twice
         for r in self.reminders.fold().values():
@@ -949,7 +959,8 @@ class AlertWorker:
         # F4: each close on its own line at once (outside the 5-minute batch, which would replace the name with `-`
         # and so lose the app's "Vrátit"); a mode that holds `done` back holds these too (dnd). Never a wake: it is
         # Jarvis's own act, he knows it.
-        closed = [it for it in self.s["items"] if it["src"] == "closed" and allowed_by_mode(it, mode)]
+        closed = [it for it in self.s["items"] if (it["src"] == "closed" and allowed_by_mode(it, mode))
+                  or it["src"] == "approve"]  # F5e: Lukáš just said yes; its outcome is told in every mode
         if closed:
             ids = {id(it) for it in closed}
             self.s["items"] = [i for i in self.s["items"] if id(i) not in ids]
@@ -957,7 +968,7 @@ class AlertWorker:
                 self._count(now, "alerts")
             self._persist()
             for it in closed:
-                self._write(now, "done", it["text"], it["name"])
+                self._write(now, "jsay" if it["src"] == "approve" else "done", it["text"], it["name"])
         # an incident never waits for the 5-minute batch (F3); the rest only when the batch is due
         gap_ok = now - self.s["lastEmit"] >= BATCH_GAP_MS
         due = []
@@ -972,7 +983,7 @@ class AlertWorker:
                     continue
                 due.append((it, ("block", name)))
         for it in self.s["items"]:
-            if it["src"] == "closed" or (not gap_ok and it["src"] != "incident"):
+            if it["src"] in ("closed", "approve") or (not gap_ok and it["src"] != "incident"):
                 continue
             if it["src"] == "task":
                 text, hold = self._task_text(it, tasks, mails, sessions)
@@ -1243,6 +1254,10 @@ class AlertWorker:
             return
         ask, block = self._pending_one(), bool(wb.get("blocking"))
         kind = "jblockask" if ask and block else "jask" if ask else "jblock" if block else "jsay"
+        if ask:
+            # rev-f5e MED: an approval's Ano shows the CODE's sentence, never Jarvis's words about it (a dialog's text
+            # could make him describe another command, and Lukáš taps Ano on what he reads)
+            text = self._approve_sentence() or text
         self.s["autoAt"] = now  # his own words cover the steps of his turn
         names = {e.get("name") for e in wb["entries"]}
         one = next(iter(names)) if len(names) == 1 else None
@@ -1252,6 +1267,17 @@ class AlertWorker:
         self._write(now, kind, text, one)
         with self.mail.lock():
             self.mail.log("wake-said", wake=wb["id"], kind=kind)
+
+    def _approve_sentence(self):
+        """The code's sentence of the one waiting `approve` proposal, or None."""
+        try:
+            import jarvisops as JO
+            props = [r for r in JO.Ops(self.env, mail=self.mail).all() if r["state"] == "proposed"]
+        except Exception:  # noqa: BLE001
+            return None
+        if len(props) == 1 and props[0].get("kind") == "approve" and isinstance(props[0].get("title"), str):
+            return _cap(props[0]["title"])
+        return None
 
     def _pending_one(self):
         try:

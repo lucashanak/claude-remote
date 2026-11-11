@@ -76,7 +76,8 @@ class SettingsTrapsTest(unittest.TestCase):
 
     def test_allow_is_exactly_the_jarvis_clis(self):
         # F2a adds cr-mail and cr-task, F3 cr-rules and cr-jarvis; which subcommands Jarvis may use is the gate's job
-        self.assertEqual(sorted(self.p["allow"]), ["Bash(cr-digest:*)", "Bash(cr-jarvis:*)", "Bash(cr-mail:*)",
+        self.assertEqual(sorted(self.p["allow"]), ["Bash(cr-approve:*)", "Bash(cr-digest:*)", "Bash(cr-jarvis:*)",
+                                                   "Bash(cr-mail:*)",
                                                    "Bash(cr-rules:*)", "Bash(cr-sessions:*)", "Bash(cr-task:*)"])
 
     def test_4i_tools_dont_ask_lets_through_are_denied(self):
@@ -266,7 +267,8 @@ class GateTest(unittest.TestCase):
                                                            "watches", "unwatch", "log", "remind", "reminders",
                                                            "unremind", "nudge"},
                                                "cr-rules": {"add", "list", "rm"},
-                                               "cr-jarvis": {"mode", "proposals"}})
+                                               "cr-jarvis": {"mode", "proposals"},
+                                               "cr-approve": {"show", "propose"}})
 
     def test_f4_commands_pass(self):
         for c in ("cr-sessions open kontexta", 'cr-sessions open kontexta --alias pdf-sloupce --task "Oprav sloupce v PDF exportu, hotovo až projdou testy."',

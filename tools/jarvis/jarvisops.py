@@ -37,7 +37,7 @@ import time
 import jarvislib as J
 
 ID_RE = re.compile(r"x-\d{8}T\d{6}-[0-9a-f]{4}")
-KINDS = ("open", "close", "restore")
+KINDS = ("open", "close", "restore", "approve")
 STATES = ("proposed", "approved", "running", "done", "failed", "dropped", "rejected", "expired")
 FINAL = ("done", "failed", "dropped", "rejected", "expired")
 
@@ -79,6 +79,21 @@ INTENT = {
                              r"|(?<!\w)nov(?:ou|á)\s+session", re.IGNORECASE),
     "reopenIntent": re.compile(r"(?<!\w)(?:vrať(?:te)?|vrátit|obnov(?:te)?|obnovit)(?!\w)", re.IGNORECASE),
 }
+# F5e: the option numbers Lukáš's prompt names ("zvol dvojku", "dvě", "2"): only to SAY a mismatch in the code's
+# sentence, never to approve anything
+_NUM_WORDS = {"jedna": 1, "jedničk": 1, "první": 1, "dvě": 2, "dva": 2, "dvojk": 2, "druh": 2, "tři": 3, "trojk": 3,
+              "třetí": 3, "čtyři": 4, "čtyřk": 4, "čtvrt": 4, "pět": 5, "pětk": 5, "pát": 5}
+
+
+def option_numbers(prompt):
+    if not isinstance(prompt, str):
+        return []
+    out = {int(x) for x in re.findall(r"(?<!\d)([1-9])(?!\d)", prompt)}
+    for w in re.findall(r"\w+", prompt.lower()):
+        for stem, n in _NUM_WORDS.items():
+            if w.startswith(stem):
+                out.add(n)
+    return sorted(out)[:5]
 # rev-f4 M1: the targets of every close proposed or run on one prompt of Lukáš's, together
 CLOSE_TARGETS_PER_PROMPT = 5
 # rev-f4 L4: a runner or cr-session must not run as Jarvis's pane / claude / account
@@ -96,10 +111,54 @@ class Refused(Exception):
     pass
 
 
+def _norm(s):
+    return " ".join(s.split()) if isinstance(s, str) else ""
+
+
+def last_turn_text(path, current=None, max_bytes=2 * 1024 * 1024):
+    """Jarvis's texts of the turn right BEFORE Lukáš's current prompt (kolo 5: only what he said after the prompt
+    before it; a turn without any text is "", never an older answer). The current prompt may already stand in the
+    transcript when the hook runs: a last prompt equal to `current` (the app's `[hlas] ` cut) is skipped."""
+    if not isinstance(path, str) or not path:
+        return None
+    import jarvismail as M
+    turns = [[None, []]]  # [prompt text, assistant texts]
+    for line in J.read_tail(path, max_bytes):
+        if not line.startswith("{"):
+            continue
+        try:
+            d = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(d, dict) or d.get("isSidechain"):
+            continue
+        if d.get("type") == "user" and J._is_prompt(d):
+            c = (d.get("message") or {}).get("content")
+            text = c if isinstance(c, str) else " ".join(b.get("text", "") for b in c or [] if isinstance(b, dict))
+            turns.append([text, []])
+        elif d.get("type") == "assistant":
+            t = J._assistant_text(d)
+            if t:
+                turns[-1][1].append(t)
+    if current is not None and len(turns) > 1 and not turns[-1][1] and \
+            _norm(M.strip_voice(turns[-1][0])) == _norm(M.strip_voice(current)):
+        turns.pop()  # the "ano" itself is already written
+    return " ".join(turns[-1][1])
+
+
+def said_verbatim(sentence, transcript, current=None):
+    """F5e: did Jarvis's last turn before this prompt hold the proposal's sentence word for word (only blanks
+    normalised)?"""
+    s = _norm(sentence)
+    return bool(s) and s in _norm(last_turn_text(transcript, current) or "")
+
+
 def intents(prompt):
     """{closeIntent, openIntent, reopenIntent}: booleans for the hook's last-prompt record (never the text)."""
-    return {k: bool(r.search(prompt)) for k, r in INTENT.items()} if isinstance(prompt, str) else \
+    d = {k: bool(r.search(prompt)) for k, r in INTENT.items()} if isinstance(prompt, str) else \
         {k: False for k in INTENT}
+    d["optionNumbers"] = option_numbers(prompt)
+    return d
 
 
 def scrubbed_env(environ):
@@ -808,7 +867,7 @@ class Ops:
             return rec, f"{xid} schválen"
         return self.run(xid)
 
-    def decide_on_prompt(self, prompt, prev_id, now, single=False):
+    def decide_on_prompt(self, prompt, prev_id, now, single=False, cur_id=None, transcript=None):
         """Lukáš's next prompt decides every action proposal (the mail's MED4 rule): approved only when it was made
         during the PREVIOUS prompt, within 10 minutes, and this prompt is a short yes or names its id; anything else
         drops it. Approved ones run in a detached process, so the hook stays fast."""
@@ -824,7 +883,16 @@ class Ops:
                 ok = (isinstance(prompt, str) and prev_id is not None and rec.get("prompt") == prev_id
                       and 0 <= now - J._int(rec.get("created")) <= PROPOSAL_MS
                       and (rec["id"] in named if named else short_yes))
-                if ok:
+                if ok and rec["kind"] == "approve" and not said_verbatim(rec.get("title"), transcript, prompt):
+                    # F5e (lead): Lukáš answered what Jarvis SAID; an approval goes only when Jarvis's last answer
+                    # held the code's sentence word for word. Otherwise it waits (re-keyed to this prompt) and the
+                    # delta tells Jarvis to read it again
+                    rec["prompt"] = cur_id
+                    first = not rec.get("unreadAt")
+                    rec["unreadAt"] = rec.get("unreadAt") or now
+                    # the first refusal is also told to Lukáš (jarvis-d, once per proposal); later ones only to Jarvis
+                    self.transition(rec, "proposed", ev="unread" if first else "unread-again")
+                elif ok:
                     self.transition(rec, "approved", decidedBy="prompt")
                     go.append(rec["id"])
                 else:
@@ -890,11 +958,11 @@ class Ops:
         try:
             if self.off():
                 raise Refused("Jarvis je vypnutý (off)")
-            why = self.cr.check()
+            why = None if rec["kind"] == "approve" else self.cr.check()  # F5e answers a dialog, no cr-session
             if why:
                 raise Refused(why)
-            ok, msg, result = {"open": self._do_open, "close": self._do_close_all,
-                               "restore": self._do_restore}[rec["kind"]](rec, wait, approved=True)
+            ok, msg, result = {"open": self._do_open, "close": self._do_close_all, "restore": self._do_restore,
+                               "approve": self._do_approve}[rec["kind"]](rec, wait, approved=True)
         except Refused as e:
             ok, msg, result = False, str(e), None
         except Exception as e:  # noqa: BLE001  a crash must end the record, never leave it running
@@ -915,6 +983,15 @@ class Ops:
             self.put(rec)
             self.log("approved", id=rec["id"], kind=kind, target=target, decidedBy=by, prompt=prompt_id)
         return self.run(rec["id"], wait=wait)
+
+    # ---- approve (F5e)
+
+    def _do_approve(self, rec, wait, approved):
+        """The approved answer of a session's dialog, by the code (jarvisapprove.execute: the same fingerprint, the
+        exact keys, never a persistent choice). Runs in the detached runner, never in Jarvis's turn."""
+        import jarvisapprove as JAP
+        ok, msg = JAP.execute(self.mail, rec["args"]["name"], rec["args"])
+        return ok, msg, {"status": "answered" if ok else "not-answered"}
 
     # ---- open
 
@@ -1081,6 +1158,10 @@ OPS_LINE = {
     "rejected": "⚙ návrh {id} ({title}) Lukáš v aplikaci zamítl",
     "expired": "⚙ návrh {id} ({title}) propadl",
     "approved": "⚙ návrh {id} ({title}): Lukáš řekl ano, provádím",
+    # F5e: a bare "ano" to an approval whose sentence Jarvis did not say word for word
+    "unread": "⚠ návrh {id}: Lukášovo ano jsem nepřijal. Přečti Lukášovi větu návrhu doslova a zeptej se znovu: "
+              "«{title}»",
+    "unread-again": "⚠ návrh {id}: Lukášovo ano jsem znovu nepřijal. Přečti Lukášovi větu návrhu doslova: «{title}»",
 }
 
 
@@ -1121,6 +1202,8 @@ def ops_say(it):
         return "Nepovedlo se: " + (it["message"] or "nevím proč")
     if k == "approved":
         return "Provádím, co jste schválil."
+    if k in ("unread", "unread-again"):
+        return "Lukášovo ano jsem nepřijal: přečti mu větu návrhu doslova a zeptej se znovu."
     return "Návrh jsem zahodil." if k in ("dropped", "expired") else "Návrh jste zamítl."
 
 

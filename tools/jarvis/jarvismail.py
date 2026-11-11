@@ -623,7 +623,9 @@ class Mail:
         prev_id = prev.get("id") if isinstance(prev, dict) else None
         single = self._pending() == 1
         self.decide_proposals(prompt, prev_id, now, single=single)
-        self._decide_ops(prompt, prev_id, now, single=single)
+        tp = payload.get("transcript_path")
+        self._decide_ops(prompt, prev_id, now, single=single, cur_id="p-" + h,
+                         transcript=tp if isinstance(tp, str) else None)
         return None
 
     def _pending(self):
@@ -636,13 +638,14 @@ class Mail:
             n += 2
         return n
 
-    def _decide_ops(self, prompt, prev_id, now, single=False):
+    def _decide_ops(self, prompt, prev_id, now, single=False, cur_id=None, transcript=None):
         """F4: the same "ano" decides the action proposals (open / close / restore). A broken jarvisops never costs
-        the prompt record or the mail: then its proposals simply expire (fail closed)."""
+        the prompt record or the mail: then its proposals simply expire (fail closed). F5e: `cur_id` and Jarvis's
+        `transcript` (the hook payload's) for the approvals' verbatim check."""
         try:
             import jarvisops as JO
             JO.Ops(self.env, mail=self, spawn=getattr(self, "ops_spawn", None)).decide_on_prompt(
-                prompt, prev_id, now, single=single)
+                prompt, prev_id, now, single=single, cur_id=cur_id, transcript=transcript)
         except Exception:  # noqa: BLE001
             pass
 

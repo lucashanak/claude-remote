@@ -42,6 +42,9 @@ rev-f4 L5: FORBIDDEN looks at unquoted words only, so a quoted "--force" (bash p
 `--forc` gets past this layer. The guarantee is the CLI: `cr-sessions close` has no such option and argparse refuses
 the call before any action (test_jarvisops ReviewFixTest.test_l5_…); this gate stays a second, cheaper layer.
 
+F5e adds `cr-approve show|propose <name> [--option N] [--deny]`: a proposal only; the answer runs in the detached
+runner after Lukáš's yes, never in Jarvis's turn.
+
 F5c adds `cr-digest wake w-…` (read only: the events of one wake), `cr-mail resume <name>` and `cr-task nudge t-…`,
 the two steps Jarvis takes without Lukáš's yes. Their gates and their texts are in the CLIs (jarvismail.resume_check,
 cr_task.nudge_check); Jarvis passes a name or an id, never a text.
@@ -66,6 +69,8 @@ ALLOWED = {
                           "reminders", "unremind", "nudge"}),
     "cr-rules": frozenset({"add", "list", "rm"}),
     "cr-jarvis": frozenset({"mode", "proposals"}),
+    # F5e: read a session's dialog, propose its answer (the keys are the code's, after Lukáš's yes)
+    "cr-approve": frozenset({"show", "propose"}),
 }
 # Options Jarvis may never pass. `cr-task done --force` closes a delegated task without its evidence; the CLI refuses
 # it to anyone but Lukáš's own shell already, this is the second layer.

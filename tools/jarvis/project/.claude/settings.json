@@ -9,7 +9,8 @@
       "Bash(cr-mail:*)",
       "Bash(cr-task:*)",
       "Bash(cr-rules:*)",
-      "Bash(cr-jarvis:*)"
+      "Bash(cr-jarvis:*)",
+      "Bash(cr-approve:*)"
     ],
     "deny": [
       "Agent",
