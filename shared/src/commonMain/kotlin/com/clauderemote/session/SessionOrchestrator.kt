@@ -1634,6 +1634,9 @@ class SessionOrchestrator(
      */
     @Volatile internal var connectSeam: ((path: String, session: ClaudeSession, isNew: Boolean, checkClosedElsewhere: Boolean) -> Boolean)? = null
 
+    /** Test seam: stands in for the process probe of [resolveSessionAccount] (server id, tmux name). Null in production. */
+    @Volatile internal var sessionAccountSeam: (suspend (serverId: String, tmux: String) -> com.clauderemote.session.service.SessionAccountReading)? = null
+
     /** Test seam (T6-1): the shell [autoReconnect] re-opens, given instead of connected. Null in production. */
     @Volatile internal var reconnectShellSeam: ((ClaudeSession) -> SshManager)? = null
 
@@ -1882,8 +1885,15 @@ class SessionOrchestrator(
     private fun persistLaunched(session: ClaudeSession) {
         val server = session.server
         val tmuxSessionName = session.tmuxSessionName
-        // Persist session for app-restart and server-reboot recovery.
-        sessionStorage?.upsert(SessionStorage.fromClaudeSession(session))
+        // A tab closed during the connect gets no bookkeeping at all: no record, and no tombstone clear or push, which
+        // would take the close's tombstone and let restore/drift bring the closed session back.
+        val current = tabManager.getTab(session.id) ?: run {
+            FileLogger.log(TAG, "Server-side bookkeeping of $tmuxSessionName skipped: its tab was closed during the launch")
+            return
+        }
+        // Persist session for app-restart and server-reboot recovery — the tab as it is NOW, not the launch's snapshot:
+        // an account correction (resolveSessionAccount) may have landed during the connect.
+        sessionStorage?.upsert(SessionStorage.fromClaudeSession(current))
         // kolo 4 (adv N9): not skipped while the tab's shell is being rebuilt (its autoReconnect): the exec path needs no
         // shell, the legacy one waits for the tab's shell a bounded time
         launchGuarded("Server-side bookkeeping of $tmuxSessionName") {
@@ -3858,6 +3868,7 @@ class SessionOrchestrator(
         connectionRegistry.removeEt(sessionId)
         etLocalPorts.remove(sessionId)
         reconnectedAt.remove(sessionId); earlyDeaths.remove(sessionId); lineSentAt.remove(sessionId)   // kolo 7, R1
+        pendingAccountSwitches.remove(sessionId)
         connectionRegistry.ssh(sessionId)?.disconnect()
         connectionRegistry.removeSsh(sessionId)
         connectionRegistry.mosh(sessionId)?.disconnect()
@@ -4112,6 +4123,17 @@ class SessionOrchestrator(
     suspend fun readClaudeAccountLoginScreen(serverId: String, slug: String): String? =
         accountService.readLoginScreen(serverId, slug)
 
+    /** An account switch of a session whose process may still run the old account (see [pendingAccountSwitches]). */
+    private class PendingAccountSwitch(val target: String?)
+
+    /**
+     * [switchSessionAccount] writes the tab's account at once, but the process moves only with its respawn — later, or
+     * never when the tab has no live shell then. A probe meanwhile reads the OLD process; correcting the tab to it
+     * would undo the user's choice and push that to the manifest. Kept until a probe reads the target (the switch took
+     * effect), the next switch of the session, or the tab's close.
+     */
+    private val pendingAccountSwitches = java.util.concurrent.ConcurrentHashMap<String, PendingAccountSwitch>()
+
     /** Type the pasted OAuth code into [slug]'s login pane and press Enter. */
     /**
      * Which account [sessionId] is REALLY running under, probed from the process.
@@ -4120,25 +4142,59 @@ class SessionOrchestrator(
      */
     suspend fun resolveSessionAccount(sessionId: String): String? {
         val tab = tabManager.getTab(sessionId) ?: return null
+        val expected = tab.accountSlug
         // Unknown — the probe timed out, or no claude is running (a dead pane
         // has no CLAUDE_CONFIG_DIR either) — keeps the stored account. Reading
         // either as "default" used to undo a fresh account switch.
-        val reading = accountService.readSessionAccountSlug(tab.server.id, tab.tmuxSessionName)
+        val reading = sessionAccountSeam?.invoke(tab.server.id, tab.tmuxSessionName)
+            ?: accountService.readSessionAccountSlug(tab.server.id, tab.tmuxSessionName)
         if (reading !is com.clauderemote.session.service.SessionAccountReading.Running) return tab.accountSlug
         val actual = reading.slug
-        if (actual != tab.accountSlug) {
+        pendingAccountSwitches[sessionId]?.let { pending ->
+            if (actual == pending.target) {
+                pendingAccountSwitches.remove(sessionId, pending)
+            } else if (pending.target == expected) {
+                FileLogger.log(
+                    TAG,
+                    "Session $sessionId is on account ${actual ?: "default"}, switch to ${expected ?: "default"} pending — not corrected",
+                )
+                return expected
+            }
+        }
+        if (actual == expected) return actual
+        // The probe suspended: the tab may have gone ACTIVE, got an alias, been closed or switched to another account
+        // meanwhile. Only the account field is written, and only while it still holds the value the probe was started
+        // against — writing the whole row read before the probe put a live tab back to CONNECTING ("Not connected — not
+        // sent" on every key), and a newer choice of the user is not undone by a probe of the old process.
+        val corrected = tabManager.updateTab(sessionId) { current ->
+            if (current.accountSlug == expected) current.copy(accountSlug = actual) else null
+        }
+        if (corrected == null) {
+            val now = tabManager.getTab(sessionId)
             FileLogger.log(
                 TAG,
-                "Session $sessionId is on account ${actual ?: "default"}, " +
-                    "stored was ${tab.accountSlug ?: "default"} — correcting",
+                "Session $sessionId is on account ${actual ?: "default"}, stored was ${expected ?: "default"} — correction skipped: " +
+                    (if (now == null) "the tab was closed" else "its account changed to ${now.accountSlug ?: "default"} meanwhile"),
             )
-            val updated = tab.copy(accountSlug = actual)
-            val previouslyActive = tabManager.activeTabId.value
-            tabManager.addTab(updated)
-            if (previouslyActive != null && previouslyActive != sessionId) {
-                tabManager.switchTab(previouslyActive)
+            return now?.accountSlug
+        }
+        FileLogger.log(
+            TAG,
+            "Session $sessionId is on account ${actual ?: "default"}, " +
+                "stored was ${expected ?: "default"} — correcting",
+        )
+        sessionStorage?.upsert(SessionStorage.fromClaudeSession(corrected))
+        // The server's manifest too, as an account switch does: restore/drift relaunch this session under the account
+        // it really runs under, also when the launch's own push went out before this correction.
+        // Over the exec transport only, waiting for it once: the legacy push opens a bare channel on the tab's
+        // transport (no ChannelOpen, no budget token). Without exec the record above is right and the next push takes it.
+        val serverId = corrected.server.id
+        launchGuarded("Manifest push after the account correction of $sessionId") {
+            if (!connectionRegistry.execActive(serverId)) {
+                FileLogger.log(TAG, "sessions.json push after the account correction of $sessionId skipped: no exec routing for $serverId")
+                return@launchGuarded
             }
-            sessionStorage?.upsert(SessionStorage.fromClaudeSession(updated))
+            whenExecUp(serverId, "sessions.json push after account correction") { persistence.pushSessionsToServer(serverId) }
         }
         return actual
     }
@@ -4182,25 +4238,21 @@ class SessionOrchestrator(
      * logs that and the new account takes effect at its next (re)launch instead.
      */
     fun switchSessionAccount(sessionId: String, accountSlug: String?) {
-        val tab = tabManager.getTab(sessionId) ?: return
         // Normalise "default" to null: the model treats them as the same account,
         // and null is what the launch builders check for the no-env-var case.
         val target = accountSlug?.takeUnless { it.isBlank() || it == ClaudeAccount.DEFAULT_SLUG }
-        if (tab.accountSlug == target) return
-        val updated = tab.copy(accountSlug = target)
 
         // In-memory first, so ANY relaunch from here on (reconnect, drift restore,
-        // respawn below) already carries the new account. addTab replaces in place
-        // (idempotent on id) but also makes the tab active — restore the previously
-        // active tab, since switching a BACKGROUND session's account must not yank
-        // the user's view (the terminal only repaints via switchTab/onTabSwitched,
-        // so a silent active-tab change would desync it).
-        val previouslyActive = tabManager.activeTabId.value
-        tabManager.addTab(updated)
-        if (previouslyActive != null && previouslyActive != sessionId) {
-            tabManager.switchTab(previouslyActive)
-        }
-        sessionStorage?.upsert(SessionStorage.fromClaudeSession(updated))
+        // respawn below) already carries the new account. Only the account field
+        // of the CURRENT row is written: the status, alias, … set from other threads
+        // stay, and the active tab is left alone (switching a BACKGROUND session's
+        // account must not yank the user's view — the terminal only repaints via
+        // switchTab/onTabSwitched, so a silent active-tab change would desync it).
+        val tab = tabManager.updateTab(sessionId) { current ->
+            if (current.accountSlug == target) null else current.copy(accountSlug = target)
+        } ?: return
+        pendingAccountSwitches[sessionId] = PendingAccountSwitch(target)
+        sessionStorage?.upsert(SessionStorage.fromClaudeSession(tab))
         FileLogger.log(TAG, "Switching $sessionId to account ${target ?: "default"} (resume ${tab.claudeSessionId})")
 
         launchGuarded("Account switch of $sessionId") {

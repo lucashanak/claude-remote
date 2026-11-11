@@ -381,4 +381,48 @@ class TabManagerTest {
         assertEquals("my-tab", manager.getTab("a")?.alias)
         assertFalse(manager.getTab("a") == null)
     }
+
+    // ---- updateTab ----
+
+    @Test
+    fun updateTab_changesOnlyTheTargetTabAndReturnsTheRowWritten() {
+        val manager = TabManager()
+        manager.addTab(session("a", alias = "alias-a"))
+        manager.addTab(session("b", alias = "alias-b"))
+        manager.addTab(session("c", alias = "alias-c"))
+        manager.switchTab("c")
+        manager.updateTabStatus("b", SessionStatus.ACTIVE)
+        val before = manager.tabs.value
+        val written = manager.updateTab("b") { it.copy(accountSlug = "acct") }
+        assertEquals("acct", written?.accountSlug)
+        assertEquals(SessionStatus.ACTIVE, written?.status, "built from the current row, not a stale copy")
+        assertEquals("alias-b", written?.alias)
+        assertEquals(written, manager.getTab("b"))
+        assertEquals(listOf("a", "b", "c"), manager.tabs.value.map { it.id }, "order kept")
+        assertSame(before[0], manager.tabs.value[0], "other tabs untouched")
+        assertSame(before[2], manager.tabs.value[2])
+        assertEquals("c", manager.activeTabId.value, "the active tab is not changed")
+    }
+
+    @Test
+    fun updateTab_nullTransformLeavesTheListAsItIs() {
+        val manager = TabManager()
+        manager.addTab(session("a"))
+        manager.addTab(session("b"))
+        val before = manager.tabs.value
+        assertNull(manager.updateTab("a") { null })
+        assertSame(before, manager.tabs.value, "nothing written")
+        assertEquals("b", manager.activeTabId.value)
+    }
+
+    @Test
+    fun updateTab_unknownIdIsNullAndAddsNothing() {
+        val manager = TabManager()
+        manager.addTab(session("a"))
+        var called = false
+        assertNull(manager.updateTab("gone") { called = true; it.copy(alias = "x") })
+        assertFalse(called)
+        assertEquals(listOf("a"), manager.tabs.value.map { it.id }, "a removed tab is never brought back")
+        assertEquals("a", manager.activeTabId.value)
+    }
 }

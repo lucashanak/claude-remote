@@ -85,5 +85,26 @@ class TabManager {
         }
     }
 
+    /**
+     * Change one tab atomically: [transform] gets the tab's CURRENT row and returns its new one, or null to leave it as
+     * it is (a conditional write — e.g. only while a field still holds the value read before a suspend). Returns the
+     * row written, or null when there is no such tab or [transform] declined. Never touches [activeTabId], the order or
+     * any other tab, and never brings back a tab that was removed. Use it instead of `addTab(snapshot.copy(…))` after
+     * a suspend point: the snapshot's status, alias, … would overwrite whatever changed meanwhile. [transform] may run
+     * more than once (a lost compare-and-set is retried), so it must be pure.
+     */
+    fun updateTab(id: String, transform: (ClaudeSession) -> ClaudeSession?): ClaudeSession? {
+        var written: ClaudeSession? = null
+        _tabs.update { tabs ->
+            written = null
+            val i = tabs.indexOfFirst { it.id == id }
+            if (i < 0) return@update tabs
+            val next = transform(tabs[i]) ?: return@update tabs
+            written = next
+            tabs.toMutableList().also { it[i] = next }
+        }
+        return written
+    }
+
     fun getTab(id: String): ClaudeSession? = _tabs.value.find { it.id == id }
 }

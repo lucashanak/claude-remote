@@ -524,6 +524,30 @@ the app narrows what it offers, the server refuses nothing — because it guards
 against mis-taps, not against an adversary. An empty allowed set means
 *unrestricted*, not *nothing*.
 
+The account a tab believes in is checked against the process
+(`SessionOrchestrator.resolveSessionAccount`, run when a tab becomes active): a
+`Running` reading that disagrees corrects the tab's `accountSlug` through
+`TabManager.updateTab`, only while the tab still holds the value read before the
+probe (a switch made meanwhile wins), then persists that row and pushes
+`sessions.json` (over the exec transport only, waiting for it once; without exec
+routing the record carries it to the next push). `Unknown` changes nothing. A
+switch (`switchSessionAccount`) stays *pending* until a probe reads its target,
+the next switch of the session or the tab's close: while it is pending, a probe
+that reads the old process does not correct the tab back (the respawn may not
+have run yet, or never, without a live shell) — so a switch that never takes
+effect disables the correction of that tab until the app restarts, by intent.
+The pending switch lives only in memory: after an app restart it is gone, and
+the first probe corrects the tab back to the account the process really runs
+under and pushes that to `sessions.json` — the user's choice is lost then. A mosh
+tab always ends there (it has no SSH shell for the respawn, so its switch never
+reaches the process).
+Writing the row read before the probe back with `addTab` put a tab that had gone
+ACTIVE during the probe back to CONNECTING, so every key was dropped as "Not
+connected — not sent" (2026-11-11). The launch's own record (`persistLaunched`)
+is likewise taken from the current tab, not from the launch's snapshot; a tab
+closed during the launch gets no bookkeeping at all (no record, tombstone clear
+or push).
+
 ## Storage
 
 ### ServerStorage (`storage/ServerStorage.kt`)

@@ -264,7 +264,7 @@ internal class TranscriptService(
                         } else {
                             FileLogger.log(TAG, "Session $sessionId UUID kick-sync from pid-probe: ${current.claudeSessionId} -> $real")
                             tabManager.updateClaudeSessionId(sessionId, real)
-                            sessionStorage?.upsert(SessionStorage.fromClaudeSession(current.copy(claudeSessionId = real)))
+                            tabManager.getTab(sessionId)?.let { sessionStorage?.upsert(SessionStorage.fromClaudeSession(it)) }
                             notifyClaudeSessionIdChanged(sessionId, real)
                             confirmedUuids[sessionId] = real
                         }

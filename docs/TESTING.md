@@ -308,7 +308,12 @@ Targets were chosen by *churn × fragility*, not coverage percentage.
   removing the active tab reassigns `activeTabId` to a valid remaining tab (or
   `null`), never a removed id; a dangling id renders a blank terminal. Also that
   `addTab` is idempotent on id — appending a duplicate produced a phantom tab
-  that every id-keyed lookup could never reach again.
+  that every id-keyed lookup could never reach again. And that `updateTab`
+  writes only its target row (from the current one), leaves the active tab and
+  the order alone, and never brings back a removed tab — it is what a write
+  after a suspend point uses instead of `addTab(snapshot.copy(…))`
+  (`SessionAccountCorrectionTest`: the account correction that put a live tab
+  back to CONNECTING, 2026-11-11).
 
 - **tmux target syntax** (`TmuxTargetSyntaxTest`) — a source-level scan, not a
   normal unit test, because this defect has been found and fixed **five** times
