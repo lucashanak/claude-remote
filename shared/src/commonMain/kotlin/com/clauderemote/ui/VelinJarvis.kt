@@ -65,6 +65,9 @@ internal class JarvisPanelState {
     /** Proposal ids with a decision on its way. */
     val deciding = mutableStateListOf<String>()
 
+    /** F5d: Jarvis' account from `status.json` → `jarvisAccount` (null = not read yet). */
+    var account by mutableStateOf<com.clauderemote.session.service.JarvisAccountView.Read?>(null)
+
     var briefing by mutableStateOf<String?>(null)
     var briefingLoading by mutableStateOf(false)
 
@@ -120,6 +123,9 @@ internal class JarvisPanelState {
                 jarvisError = null
             }
             orch.jarvisRun(server, JarvisData.MODE_READ)?.let { mode = JarvisData.parseMode(it) }
+            account = com.clauderemote.session.service.JarvisAccountView.parse(
+                orch.jarvisRun(server, com.clauderemote.session.service.JarvisAccountView.READ),
+            )
         } finally {
             jarvisLoading = false
         }
@@ -338,6 +344,7 @@ internal fun JarvisPane(
                             androidx.compose.material3.Switch(checked = on, onCheckedChange = { v -> h.enabled = v; on = v })
                         }
                     }
+                    state.account?.let { JarvisAccountBlock(it, now) }
                     Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         OutlinedButton(enabled = !state.briefingLoading && server != null, onClick = { scope.launch { state.loadBriefing(orch, server) } }) {
                             Text(if (state.briefingLoading) "Briefing…" else "Briefing")
@@ -500,3 +507,41 @@ internal fun jarvisTabOf(tabs: List<ClaudeSession>, serverId: String?): ClaudeSe
     tabs.filter { it.tmuxSessionName == QuickAccess.JARVIS_TMUX_NAME }
         .sortedByDescending { it.server.id == serverId }
         .firstOrNull()
+
+/**
+ * F5d: the account Jarvis runs on and its usage, the accounts jarvis-d may move him to, a pending request and the
+ * last move — all as `status.json` → `jarvisAccount` says (the app does not guess any of it).
+ */
+@Composable
+private fun JarvisAccountBlock(read: com.clauderemote.session.service.JarvisAccountView.Read, now: Long) {
+    val c = CRTheme.colors
+    val v = com.clauderemote.session.service.JarvisAccountView
+    Text("Účet", style = CRType.monoTiny, color = c.textDim)
+    when (read) {
+        com.clauderemote.session.service.JarvisAccountView.Read.Unreadable ->
+            Text("Stav účtu nejde načíst", style = CRType.bodyDim, color = c.textDim)
+        com.clauderemote.session.service.JarvisAccountView.Read.Absent ->
+            Text("Jarvis zatím účet nehlásí (starší jarvis-d)", style = CRType.bodyDim, color = c.textDim)
+        is com.clauderemote.session.service.JarvisAccountView.Read.Ok -> {
+            val a = read.info
+            val labels = a.candidates.associate { it.slot to v.label(it.slot, it.email) } +
+                listOfNotNull(a.slot?.let { it to a.label })
+            Text("${a.label} · ${v.usage(a.fiveHour, a.sevenDay)}", style = CRType.bodyDim, color = c.text)
+            Text(v.autopickText(a.autopick), style = CRType.monoTiny, color = if (a.autopickOn) c.textDim else c.approval)
+            a.candidates.filter { it.slot != a.slot }.forEach { k ->
+                val stale = k.ageS?.let { it > 10 * 60 } == true
+                Text(
+                    "· ${v.label(k.slot, k.email)} · ${v.usage(k.fiveHour, k.sevenDay)}" + (if (stale) " · stará data" else ""),
+                    style = CRType.monoTiny, color = c.textDim,
+                )
+            }
+            a.request?.let { r ->
+                Text("čeká přepnutí → ${r.to?.let { labels[it] ?: v.label(it, null) } ?: "?"}" + (r.why?.let { " ($it)" } ?: ""),
+                    style = CRType.monoTiny, color = c.approval)
+            }
+            a.lastSwitch?.let { sw ->
+                Text("naposledy " + v.switchText(sw, now, labels), style = CRType.monoTiny, color = c.textDim)
+            }
+        }
+    }
+}

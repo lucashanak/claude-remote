@@ -4075,6 +4075,10 @@ class SessionOrchestrator(
     suspend fun listClaudeAccounts(serverId: String): List<ClaudeAccount> =
         accountService.listAccounts(serverId)
 
+    /** F5d: slots and e-mails only, fast (no `claude auth status`): the Jarvis accounts picker. */
+    suspend fun listClaudeAccountsQuick(serverId: String): List<ClaudeAccount> =
+        accountService.listAccountsQuick(serverId)
+
     /**
      * Create the server-side config dir for [slug] (idempotent). Must complete
      * before any session launches under that slug — a session that starts first
@@ -4215,6 +4219,131 @@ class SessionOrchestrator(
             // The chips belong to the login — start (idempotently) the poller for
             // the account we just moved to.
             usageService.startServerRateLimitPolling(tab.server.id, target)
+        }
+    }
+
+    // ── Jarvis F5d: the account switch jarvis-d asks for (switch contract) ──────────────────────────────────────
+
+    /**
+     * Moves Jarvis' pane to [slot] (F5d switch contract) and changes the model ONLY when it happened (rev HIGH-2).
+     * The check and the restart are one shell run on the server ([com.clauderemote.session.service.JarvisSwitch.switchScript],
+     * on stdin behind [com.clauderemote.session.service.StdinScript.EXEC]): the slot is one Lukáš chose and has a
+     * login, the pane is idle with an empty input, and only then `respawn-pane` + the launch line (mode NORMAL, Opus,
+     * `--resume` of the tab's conversation). On [com.clauderemote.session.service.JarvisSwitch.SwitchRun.Ok]: tab and
+     * storage get the slot (`default` = null, contract a), NORMAL and Opus, and the manifest is pushed — never before,
+     * never after a failure, so restore and drift never start him on a slot he is not on.
+     */
+    internal suspend fun switchJarvisAccountNow(sessionId: String, slot: String): com.clauderemote.session.service.JarvisSwitch.SwitchRun {
+        val failed = { why: String -> com.clauderemote.session.service.JarvisSwitch.SwitchRun.Failed(why) }
+        val tab = tabManager.getTab(sessionId) ?: return failed("no tab")
+        val sid = tab.claudeSessionId?.takeIf { it.isNotBlank() } ?: return failed("no conversation to resume")
+        val body = com.clauderemote.session.service.JarvisSwitch.switchScript(tab.tmuxSessionName, tab.folder, sid, slot)
+        // the respawn redraws the pane: the prompt detector must not misfire on it (as restartClaude)
+        notificationService.promptDetector.suppressFor(sessionId, 5000)
+        val res = try {
+            jarvisSwitchExecOverride?.invoke(body) ?: connectionRegistry.execRun(
+                tab.server.id, com.clauderemote.session.service.StdinScript.EXEC,
+                stdin = com.clauderemote.session.service.StdinScript.stdin(body), totalMs = 20_000,
+            )?.stdout
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            FileLogger.log(TAG, "Jarvis switch exec failed: ${e::class.simpleName}: ${e.message}")
+            null
+        }
+        val run = com.clauderemote.session.service.JarvisSwitch.parseSwitch(res)
+        FileLogger.log(TAG, "Jarvis switch of $sessionId to $slot: $run")
+        if (run != com.clauderemote.session.service.JarvisSwitch.SwitchRun.Ok) return run
+        val target = com.clauderemote.session.service.JarvisSwitch.accountSlugOf(slot)
+        setTabModel(sessionId, tab.copy(accountSlug = target, mode = com.clauderemote.model.ClaudeMode.NORMAL, model = com.clauderemote.model.ClaudeModel.OPUS))
+        if (connectionRegistry.execActive(tab.server.id)) {
+            persistence.pushSessionsToServer(tab.server.id)
+        } else connectionRegistry.ssh(sessionId)?.let { conn ->
+            persistence.pushSessionsToServer(conn, tab.server.id)
+        }
+        usageService.startServerRateLimitPolling(tab.server.id, target)
+        return run
+    }
+
+    /** Test seam (desktopTest): runs the switch script instead of the server and returns its stdout. Null in the app. */
+    internal var jarvisSwitchExecOverride: (suspend (body: String) -> String?)? = null
+
+    /** Another client moved Jarvis: this device's model follows, no restart, no push (switch contract). */
+    internal fun alignJarvisAccountModel(sessionId: String, slot: String) {
+        val tab = tabManager.getTab(sessionId) ?: return
+        setTabModel(sessionId, tab.copy(accountSlug = com.clauderemote.session.service.JarvisSwitch.accountSlugOf(slot)))
+    }
+
+    /** Tab + SessionStorage in place, without yanking the user's view to it (as [switchSessionAccount] does). */
+    private fun setTabModel(sessionId: String, updated: ClaudeSession) {
+        val previouslyActive = tabManager.activeTabId.value
+        tabManager.addTab(updated)
+        if (previouslyActive != null && previouslyActive != sessionId) tabManager.switchTab(previouslyActive)
+        sessionStorage?.upsert(SessionStorage.fromClaudeSession(updated))
+    }
+
+    internal val jarvisSwitchAgent: com.clauderemote.session.service.JarvisSwitchAgent by lazy {
+        com.clauderemote.session.service.JarvisSwitchAgent(
+            installId = { deviceKey },
+            run = { cmd, periodic ->
+                val tab = jarvisTabIdForWatch()?.let { tabManager.getTab(it) }
+                tab?.let { jarvisRun(it.server, cmd, periodic = periodic) }
+            },
+            jarvisTab = {
+                jarvisTabIdForWatch()?.let { tabManager.getTab(it) }?.let {
+                    com.clauderemote.session.service.JarvisSwitchAgent.JarvisTabRef(it.id, it.tmuxSessionName, it.accountSlug, it.claudeSessionId)
+                }
+            },
+            appCheck = { id ->
+                val v = com.clauderemote.session.service.ReplyGuard.voiceCheck(
+                    statusService.promptTokens.current(id), statusService.currentActivity(id), claudeControl.canDeliverNow(id),
+                )
+                (v as? com.clauderemote.session.service.ReplyGuard.Verdict.Refuse)?.let { "${it.reason}: ${it.detail}" }
+            },
+            // under the answers' lock: no "ano" or spoken prompt lands in the pane while it restarts
+            switchNow = { id, slot -> jarvisAnswerLock.withLock { switchJarvisAccountNow(id, slot) } },
+            align = { id, slot -> alignJarvisAccountModel(id, slot) },
+        )
+    }
+
+    @kotlin.concurrent.Volatile private var jarvisSwitchWatch: kotlinx.coroutines.Job? = null
+
+    /**
+     * Rev LOW2: a push of Jarvis' server first checks this device's model of his account against `jarvisAccount`
+     * (at most once a minute), so a client that lost the claim never pushes the old slot over the winner's.
+     */
+    private suspend fun confirmJarvisBeforePush(serverId: String) {
+        val tab = jarvisTabIdForWatch()?.let { tabManager.getTab(it) } ?: return
+        if (tab.server.id != serverId) return
+        try {
+            jarvisSwitchAgent.confirmBeforePush()
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            FileLogger.log(TAG, "Jarvis account check before push failed: ${e::class.simpleName}")
+        }
+    }
+
+    /**
+     * Polls Jarvis' server for a switch request every [JARVIS_SWITCH_POLL_MS] while this device holds his tab (a
+     * device without it cannot restart his pane, and its read would be wasted). A POLL permit: a busy server skips it.
+     */
+    fun startJarvisSwitchWatch() {
+        if (jarvisSwitchWatch?.isActive == true) return
+        persistence.beforePush = { serverId -> confirmJarvisBeforePush(serverId) }
+        jarvisSwitchWatch = reconnectScope.launch {
+            while (isActive) {
+                kotlinx.coroutines.delay(JARVIS_SWITCH_POLL_MS)
+                if (deviceKey.isBlank() || jarvisTabIdForWatch() == null) continue
+                try {
+                    val o = jarvisSwitchAgent.tick()
+                    if (o !is com.clauderemote.session.service.JarvisSwitchOutcome.Nothing) FileLogger.log(TAG, "Jarvis switch watch: $o")
+                } catch (e: kotlinx.coroutines.CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    FileLogger.log(TAG, "Jarvis switch watch failed: ${e::class.simpleName}: ${e.message}")
+                }
+            }
         }
     }
 
@@ -4371,6 +4500,8 @@ class SessionOrchestrator(
 
     companion object {
         private const val TAG = "SessionOrchestrator"
+        /** F5d: how often a device holding Jarvis' tab looks for a switch request (it lives 10 min on the server). */
+        internal const val JARVIS_SWITCH_POLL_MS = 30_000L
         /** Foreground re-read of `client-flags.json` per server. */
         internal const val FLAGS_REFRESH_MS = 10L * 60 * 1000
         /** How long a connect waits for the first bootstrap of its server before it goes on (the order hooks -> tmux is kept when it is quick). */

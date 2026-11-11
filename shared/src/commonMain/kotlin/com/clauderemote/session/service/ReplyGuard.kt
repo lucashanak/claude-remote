@@ -226,7 +226,47 @@ object ReplyGuard {
     // word-split by zsh, and the login shell of the exec is the server's choice.
     private const val TMUX_CAPPED = "timeout -k 1 2 tmux -u"
 
-    fun serverCommand(tmux: String, expect: ServerExpectation, text: String, approve: Boolean = false, emptyInput: Boolean = false): String {
+    fun serverCommand(tmux: String, expect: ServerExpectation, text: String, approve: Boolean = false, emptyInput: Boolean = false): String =
+        build(tmux, expect, text, approve, emptyInput, checkOnly = false)
+
+    /**
+     * F5d: the same checks as [serverCommand] with `emptyInput` against an idle session — the last hook event is
+     * `stop`/`start`, the pane exists, its input box is empty — and NO key: prints `CR_REPLY IDLE` when all hold, else
+     * the token that failed (`STALE|NOHOOKS|NOPANE|DRAFT`). The Jarvis account switch asks it right before it
+     * restarts his pane.
+     */
+    fun idleCheckCommand(tmux: String): String = build(tmux, ServerExpectation.Idle, "", approve = false, emptyInput = true, checkOnly = true)
+
+    /**
+     * F5d (rev HIGH-1): [idleCheckCommand], and [then] runs in the SAME shell right after `CR_REPLY IDLE` — never
+     * otherwise — with `$P` set to the pane the check read (the first pane of the session, the one every checked reply
+     * types into). Nothing can slip between the check and [then] but the few ms of the shell itself.
+     */
+    fun idleThenCommand(tmux: String, then: String): String =
+        build(tmux, ServerExpectation.Idle, "", approve = false, emptyInput = true, checkOnly = true, onIdle = then)
+
+    /** [idleCheckCommand]'s output: null = idle with an empty input, else why not. */
+    fun idleCheckResult(output: String?): RefuseReason? {
+        val token = output?.lineSequence()?.map { it.trim() }?.lastOrNull { it.startsWith("$SERVER_TOKEN ") }
+            ?.removePrefix("$SERVER_TOKEN ")?.substringBefore(' ')
+        return when (token) {
+            "IDLE" -> null
+            "STALE" -> RefuseReason.PROMPT_CHANGED
+            "NOHOOKS" -> RefuseReason.NO_HOOKS
+            "DRAFT" -> RefuseReason.DRAFT_IN_INPUT
+            else -> RefuseReason.NOT_VERIFIABLE
+        }
+    }
+
+    private fun build(
+        tmux: String,
+        expect: ServerExpectation,
+        text: String,
+        approve: Boolean,
+        emptyInput: Boolean,
+        checkOnly: Boolean,
+        onIdle: String? = null,
+    ): String {
         val decide = when (expect) {
             is ServerExpectation.Dialog -> {
                 val want = sq("${expect.ev} ${expect.atMs}")
@@ -277,7 +317,7 @@ object ReplyGuard {
             "P=\$($TMUX_CAPPED list-panes -s -t ${sq("=$tmux")} -F '#{pane_id}' 2>/dev/null | head -n 1); " +
             "if [ -z \"\$P\" ]; then echo '$SERVER_TOKEN NOPANE'; " +
             (if (emptyInput) "elif [ \"\$($TMUX_CAPPED capture-pane -p -e -t \"\$P\" 2>/dev/null | $DRAFT_AWK)\" != 0 ]; then echo '$SERVER_TOKEN DRAFT'; " else "") +
-            "else echo '$SERVER_TOKEN SENDING'; $send; fi; " +
+            (if (checkOnly) "else echo '$SERVER_TOKEN IDLE'; ${onIdle?.let { "$it; " }.orEmpty()}fi; " else "else echo '$SERVER_TOKEN SENDING'; $send; fi; ") +
             "else echo \"$SERVER_TOKEN \$W\"; fi"
     }
 

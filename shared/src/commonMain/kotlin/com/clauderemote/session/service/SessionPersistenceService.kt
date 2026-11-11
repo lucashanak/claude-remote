@@ -1799,8 +1799,15 @@ fi
      * `cat > tmp && mv tmp final` (atomic rename). The systemd restore unit
      * reads this file at boot.
      */
+    /**
+     * F5d (rev LOW2): runs before every manifest push of a server — the orchestrator checks this device's model of
+     * Jarvis' account against his status first, so a stale slot is never pushed. Null = nothing to check.
+     */
+    @Volatile var beforePush: (suspend (serverId: String) -> Unit)? = null
+
     suspend fun pushSessionsToServer(sshManager: SshManager, serverId: String) {
         val storage = sessionStorage ?: return
+        beforePush?.invoke(serverId)
         try {
             val payload = storage.serializeForServer(serverId)
             withContext(Dispatchers.IO) {
@@ -1844,6 +1851,7 @@ fi
      */
     suspend fun pushSessionsToServer(serverId: String): Boolean {
         val storage = sessionStorage ?: return true
+        beforePush?.invoke(serverId)
         try {
             val payload = storage.serializeForServer(serverId)
             val res = registry.execRun(

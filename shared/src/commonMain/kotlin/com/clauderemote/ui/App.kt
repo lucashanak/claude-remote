@@ -2049,6 +2049,8 @@ fun App(
                         onTranscriptFontChange = applyTranscriptFontPercent,
                         // the install / remove buttons of hooks v2 are per server
                         hookServers = serverList.map { it.id to it.name },
+                        // F5d: which accounts Jarvis may run on (written to his server's jarvis/accounts)
+                        jarvisAccounts = { JarvisAccountsCard(sessionOrchestrator, tabs) },
                     )
                 }
 

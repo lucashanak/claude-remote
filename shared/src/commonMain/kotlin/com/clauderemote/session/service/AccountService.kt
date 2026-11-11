@@ -62,6 +62,23 @@ internal class AccountService(
     }
 
     /**
+     * F5d: the slots and their e-mails only, in well under a second. [listAccounts] starts `claude auth status` once per
+     * account (a Node process start each, up to 15 s apiece, one after another: ~45 s for four logins), which a
+     * picker that needs no login state cannot wait for. This reads each config dir's `.claude.json` →
+     * `oauthAccount` (identity metadata; the credentials file is never touched), default first.
+     */
+    suspend fun listAccountsQuick(serverId: String): List<ClaudeAccount> = withContext(Dispatchers.IO) {
+        val out = try {
+            withServerSession(serverId) { sess -> execReadWithWatchdog(sess, LIST_ACCOUNTS_QUICK_CMD, totalMs = 10_000) }
+        } catch (e: Exception) {
+            FileLogger.error(TAG, "listAccountsQuick failed for $serverId: ${e.message}", e)
+            null
+        }
+        if (out.isNullOrBlank()) return@withContext emptyList()
+        parseAccounts(out)
+    }
+
+    /**
      * Create (idempotently) the config dir for [slug] in the ONE order that
      * works — `mkdir -m 700` → onboarding seed → symlinks → *then* a session may
      * launch; see the doc on the provisioning script for why the order matters.
@@ -553,6 +570,17 @@ internal class AccountService(
          * only source for the labels. `|| true` + `timeout` keep one wedged or
          * logged-out account from failing the whole listing.
          */
+        /** [listAccountsQuick]: `===<slug>` blocks with `{"email":…,"orgName":…}`, the shape [parseAccounts] reads. */
+        internal const val LIST_ACCOUNTS_QUICK_CMD = "python3 -c 'import json,os,glob\n" +
+            "h=os.path.expanduser(\"~\")\n" +
+            "def em(p):\n" +
+            " try: a=json.load(open(p)).get(\"oauthAccount\") or {}\n" +
+            " except Exception: a={}\n" +
+            " return json.dumps({\"email\":a.get(\"emailAddress\") or \"\",\"orgName\":a.get(\"organizationName\") or \"\"},ensure_ascii=False)\n" +
+            "print(\"===default\");print(em(h+\"/.claude.json\"))\n" +
+            "for d in sorted(glob.glob(h+\"/.claude-remote/accounts/*/\")):\n" +
+            " print(\"===\"+os.path.basename(d.rstrip(\"/\")));print(em(d+\".claude.json\"))' 2>/dev/null"
+
         private val LIST_ACCOUNTS_CMD = PATH_PREAMBLE +
             "ROOT=\"\$HOME/.claude-remote/accounts\"; " +
             "TO=\"\"; command -v timeout >/dev/null 2>&1 && TO=\"timeout 15\"; " +

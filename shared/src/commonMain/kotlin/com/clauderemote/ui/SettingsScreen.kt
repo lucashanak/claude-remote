@@ -69,6 +69,8 @@ fun SettingsScreen(
     onNotificationSettingsChange: () -> Unit = {},
     /** (server id, display name) of the saved servers, for the per-server hook buttons. Empty hides them. */
     hookServers: List<Pair<String, String>> = emptyList(),
+    /** Jarvis F5d: the "Účty pro Jarvise" card (it needs the orchestrator); null hides the Jarvis section. */
+    jarvisAccounts: (@Composable () -> Unit)? = null,
 ) {
     val c = CRTheme.colors
 
@@ -537,6 +539,12 @@ fun SettingsScreen(
                 WakeWordSettingsCard(settings)
             } else {
                 DesktopVoiceCard(settings)
+            }
+
+            // ── Jarvis ──────────────────────────────────────────────────────
+            if (jarvisAccounts != null) {
+                SectionHeader("Jarvis")
+                jarvisAccounts()
             }
 
             // ── About ───────────────────────────────────────────────────────

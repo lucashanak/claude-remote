@@ -308,6 +308,8 @@ class MainActivity : FragmentActivity() {
         // Mirror FileLogger to the server (per-install file) — makes phone
         // logs readable from the dev box without adb.
         sessionOrchestrator.startLogShipping(appSettings.installId)
+        // F5d: carry out a Jarvis account switch jarvis-d asks for (only while this device holds his tab)
+        sessionOrchestrator.startJarvisSwitchWatch()
         // Expose to non-Compose entry points (notification RemoteInput reply,
         // future Wear data layer).
         OrchestratorHolder.orchestrator = sessionOrchestrator

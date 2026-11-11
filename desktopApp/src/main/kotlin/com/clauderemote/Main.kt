@@ -375,6 +375,8 @@ fun main() = application {
     // Mirror FileLogger to the server (per-install file) — same remote
     // diagnostics as the Android app.
     sessionOrchestrator.startLogShipping(appSettings.installId)
+    // F5d: carry out a Jarvis account switch jarvis-d asks for (only while this device holds his tab)
+    sessionOrchestrator.startJarvisSwitchWatch()
     // Jarvis' conversation mode (F5a): desktop Soniox dictation + read-aloud over this orchestrator
     com.clauderemote.voice.DesktopJarvisTalk.install(kotlinx.coroutines.flow.MutableStateFlow(sessionOrchestrator))
     val sshKeyManager = com.clauderemote.connection.SshKeyManager(prefs)

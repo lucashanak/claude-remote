@@ -316,4 +316,34 @@ class ReplyServerCommandTest {
         drawScreen(box = "rozepsan")
         assertEquals("CR_REPLY SENT", run(ServerExpectation.Idle), "the watch's reply path is unchanged (no time either)")
     }
+
+    // ---- F5d: the idle check before Jarvis' account switch types nothing ----
+
+    private fun runIdleCheck(): String {
+        val pb = ProcessBuilder("bash", "-c", ReplyGuard.idleCheckCommand(tmux))
+        pb.environment()["HOME"] = home.absolutePath
+        pb.environment()["PATH"] = bin.absolutePath + ":" + System.getenv("PATH")
+        pb.redirectErrorStream(true)
+        val p = pb.start()
+        val out = p.inputStream.bufferedReader().readText()
+        p.waitFor()
+        return out.trim()
+    }
+
+    @Test fun theIdleCheckSaysIdleOnlyForAnIdleEmptyPaneAndNeverTypes() {
+        events(ev("stop", 1_000))
+        drawScreen(box = null)
+        assertEquals("CR_REPLY IDLE", runIdleCheck())
+        assertEquals(null, ReplyGuard.idleCheckResult(runIdleCheck()))
+        drawScreen(box = "rozepsan")
+        assertEquals(RefuseReason.DRAFT_IN_INPUT, ReplyGuard.idleCheckResult(runIdleCheck()))
+        events(ev("work", 1_000))
+        drawScreen(box = null)
+        assertEquals(RefuseReason.PROMPT_CHANGED, ReplyGuard.idleCheckResult(runIdleCheck()))
+        events(ev("perm", 1_000))
+        assertEquals(RefuseReason.PROMPT_CHANGED, ReplyGuard.idleCheckResult(runIdleCheck()))
+        assertEquals("", keys(), "no key, no Enter, ever")
+        assertEquals(RefuseReason.NOT_VERIFIABLE, ReplyGuard.idleCheckResult(""))
+        assertEquals(RefuseReason.NOT_VERIFIABLE, ReplyGuard.idleCheckResult("CR_REPLY SENT"), "a send is no idle answer")
+    }
 }
