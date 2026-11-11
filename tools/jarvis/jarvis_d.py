@@ -93,6 +93,10 @@ class Daemon:
                     # live 2026-11-10: without it every new cron run dropped `limit` of a session that stands on
                     # its limit (its transcript does not change, so the seeded entry is used as it is)
                     "limitHit": s.get("limit") if isinstance(s.get("limit"), dict) else None})
+        # F5d: the screen readings of claude without a record carry over (their hysteresis, rev-f5d)
+        for s in self.prev.values():
+            if isinstance(s, dict) and s.get("noRegistry") and isinstance(s.get("screenPane"), str):
+                self.tr_cache[("screen", s["screenPane"])] = (0, s.get("screen"), s.get("screen"))
         self.fetched, self.panes_at, self.live_key = None, 0, None
         self.good_panes, self.good_at = None, 0
         self.usage, self.usage_at = {}, 0
@@ -110,6 +114,14 @@ class Daemon:
                                          persist=self._write_dstate)
         except Exception:
             self.log("alerts off: " + traceback.format_exc(limit=3))
+        # F5d: Jarvis's own account (autopick among the slots in <state>/accounts); lazy like the alerts
+        self.acct = None
+        self._acct_state = st.get("acct")
+        try:
+            import jarvisacct as JC
+            self.acct = JC.AccountWorker(env, st.get("acct"), mail=self.mail.mail, log=self.log)
+        except Exception:
+            self.log("acct off: " + traceback.format_exc(limit=3))
         self.time_left = lambda: 60.0
         self.integrity, self.integrity_at = [], 0
 
@@ -163,6 +175,7 @@ class Daemon:
             "inbox": [{"name": s["name"], "short": s["short"], **s["attention"]} for s in J.inbox(sessions)],
             "usage": self.usage, "closed": closed, "errors": self.errors[-5:], "integrity": self.integrity,
             "watches": self.watch.summary, "alerts": self.alerts.summary if self.alerts else None,
+            "jarvisAccount": self.acct.summary if self.acct else None,
             "sessions": sessions,
         }
         J.atomic_write(env.path("status.json"), json.dumps(status, ensure_ascii=False, separators=(",", ":")))
@@ -185,6 +198,14 @@ class Daemon:
                 self._write_dstate()
         except Exception:
             self.log("alerts: " + traceback.format_exc(limit=3))
+        # F5d: after the alerts (an open wake holds a switch back); its summary reaches status.json next tick
+        if self.acct and self.time_left() >= JO_MIN_TIME_LEFT_S:
+            try:
+                wake_open = bool(self.alerts and self.alerts.state.get("wb"))
+                if self.acct.tick(sessions, self_name, now, self.fold, self.usage or None, wake_open):
+                    self._write_dstate()
+            except Exception:
+                self.log("acct: " + traceback.format_exc(limit=3))
         # F4, last: proposals past their 10 minutes expire, and an approved action whose detached runner never
         # started (the prompt hook could not spawn it) runs here, only with time left for cr-session's wait
         if self.time_left() >= JO_MIN_TIME_LEFT_S:
@@ -198,7 +219,8 @@ class Daemon:
     def _write_dstate(self):
         J.atomic_write(self.env.path("d-state.json"), json.dumps(
             {"v": 1, "gen": self.gen, "reader": self.reader.state(), "fold": self.fold.s,
-             "alerts": self.alerts.state if self.alerts else self._alerts_state},
+             "alerts": self.alerts.state if self.alerts else self._alerts_state,
+             "acct": self.acct.state if self.acct else self._acct_state},
             separators=(",", ":")))
 
     def _integrity(self):

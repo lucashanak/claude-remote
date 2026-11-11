@@ -1184,14 +1184,14 @@ class Mail:
         lim = ((st.get("sessions") or {}).get(name) or {}).get("limit")
         return lim if isinstance(lim, dict) else None
 
-    def probe(self, name, fold, now, expect=None, after_limit=None):
+    def probe(self, name, fold, now, expect=None, after_limit=None, ignore_limit=False):
         """Target, or the first reason not to paste. Order: cheap file checks first, tmux last.
         `after_limit` (F5c): the time a `--after limit` message was told to wait for. The limit mark in the transcript
         stays until the session answers again, which it cannot do before it gets this very message; so once that time
         has passed and it lies after the limit hit, the mark no longer blocks."""
         if self.off():
             return "off"
-        lim = self.status_limit(name)
+        lim = None if ignore_limit else self.status_limit(name)  # F5d: a switch away from a spent account
         if lim and not (after_limit and now >= after_limit > J._int(lim.get("ms"))):
             return "limit"  # the account hit its limit: a pasted line would wait in Claude's queue until the reset
         t = self.resolve_target(name)

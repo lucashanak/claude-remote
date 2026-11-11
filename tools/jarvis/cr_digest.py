@@ -195,10 +195,12 @@ def read_cursor(env):
     return None
 
 
-def write_cursor(env, gen, at, mail_at=None, watch_at=None, ops_at=None, saver_told=None):
+def write_cursor(env, gen, at, mail_at=None, watch_at=None, ops_at=None, saver_told=None, acct_told=None):
     d = {"gen": gen, "at": at}
     if saver_told:
         d["saverTold"] = saver_told
+    if acct_told:
+        d["acctTold"] = acct_told
     if mail_at is not None:
         d["mailAt"] = mail_at
     if watch_at is not None:
@@ -245,17 +247,20 @@ def cmd_delta(env, a, now):
     # F5c: the saver (Jarvis's own account nearly spent: no wakes, templates only) is told once per episode
     saver = _i(((st or {}).get("alerts") or {}).get("saver"))
     saver_note = bool(saver) and _i((cur or {}).get("saverTold")) != saver
+    # F5d: his account runs out and no other listed account has room (the saver goes on): told once, too
+    nocand = _i(((st or {}).get("jarvisAccount") or {}).get("noCandidate"))
+    acct_note = bool(nocand) and _i((cur or {}).get("acctTold")) != nocand
     if not a.peek and (st or cur):
         told = saver or None
         if st:
-            write_cursor(env, gen, _i(st.get("at")), mail_at, watch_at, ops_at, told)
+            write_cursor(env, gen, _i(st.get("at")), mail_at, watch_at, ops_at, told, nocand or None)
         else:
-            write_cursor(env, _i(cur.get("gen")), _i(cur.get("at")), mail_at, watch_at, ops_at, told)
+            write_cursor(env, _i(cur.get("gen")), _i(cur.get("at")), mail_at, watch_at, ops_at, told, nocand or None)
     busy_n = sum(1 for s in vis.values() if s.get("state") == "busy")
     if a.json:
         return _dump({"gen": gen, "from": (cur or {}).get("gen"), "first": first, "warning": warn, "items": items,
                       "done": done, "mail": mail, "ops": ops, "unchanged": len(vis) - len(picked), "busy": busy_n,
-                      "saver": saver_note})
+                      "saver": saver_note, "noAccount": acct_note})
     if a.say:
         notable = [i for i in items if i["kind"] not in ("busy", "cleared", "idle")]
         empty = "Nic nového." + (f" {works_cz(busy_n)}." if busy_n else "")
@@ -271,6 +276,8 @@ def cmd_delta(env, a, now):
     lines = [head] + ([f"⚠ {warn}"] if warn else [])
     if saver_note:
         lines.append(SAVER_NOTE)
+    if acct_note:
+        lines.append(NO_ACCOUNT_NOTE)
     main = [i for i in items if i["kind"] != "busy"]
     busy = [i for i in items if i["kind"] == "busy"]
     body = [JW.notice_line(i) for i in done] + [_ops_line(i) for i in ops] + [_mail_line(i) for i in mail] \
@@ -283,6 +290,8 @@ def cmd_delta(env, a, now):
     return fit(lines + body, a.max_chars or 1500, tail)
 
 
+NO_ACCOUNT_NOTE = ("⚠ Tvůj účet dochází a žádný jiný z účtů pro Jarvise nemá rezervu, takže nepřejdu. Řekni to Lukášovi "
+                   "jednou a šetři.")
 SAVER_NOTE = ("⚠ Úsporný režim: tvůj účet je skoro vyčerpaný (≥ 95 % týden nebo ≥ 85 % za 5 h). jarvis-d tě nebudí, "
               "upozornění jdou šablonou. Řekni to Lukášovi jednou a odpovídej úsporně.")
 
@@ -443,7 +452,8 @@ def usage_line(usage):
         f5 = "?" if u.get("fiveHour") is None else f"{u['fiveHour']:.0f} %"
         f7 = "?" if u.get("sevenDay") is None else f"{u['sevenDay']:.0f} %"
         old = f" (staré {u['ageS'] // 60} min)" if (u.get("ageS") or 0) > 900 else ""
-        parts.append(f"{names[k]} 5h {f5} / 7d {f7}{old}")
+        mail = f" ({J.safe_text(u['email'], 80)})" if u.get("email") else ""
+        parts.append(f"{names[k]}{mail} 5h {f5} / 7d {f7}{old}")
     return " · ".join(parts)
 
 

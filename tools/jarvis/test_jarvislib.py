@@ -264,8 +264,13 @@ class RegistryTest(unittest.TestCase):
         fx.pane("%9", 70, "claude-server-noreg")
         fx.ptable = {70: (1, "bash"), 71: (70, "bash"), 72: (71, "claude")}
         s = J.snapshot(fx.env())["sessions"]["claude-server-noreg"]
-        # no registry record and no hook event since it started: it sits idle at its prompt (inferred, 2026-11-09)
-        self.assertEqual((s["state"], s["pid"], s["noRegistry"], s.get("stateInferred")), ("idle", 72, True, True))
+        # no registry record, no hook event since it started and nothing readable on the screen: unknown, never a
+        # blind "idle" (F5d: 8 sessions sat on the trust dialog for days as "idle")
+        self.assertEqual((s["state"], s["pid"], s["noRegistry"]), ("unknown", 72, True))
+        import test_jarvismail as TM
+        fx.screens["%9"] = TM.screen()  # its prompt box on the screen: idle (inferred, 2026-11-09)
+        s = J.snapshot(fx.env())["sessions"]["claude-server-noreg"]
+        self.assertEqual((s["state"], s.get("stateInferred")), ("idle", True))
 
     def test_claude_without_registry_takes_its_state_from_the_last_hook_event(self):
         fx = self.fx
@@ -295,9 +300,11 @@ class RegistryTest(unittest.TestCase):
         fx.append_events(ev_line("work", "claude-server-old", 1000, 131))  # long before the process started
         env = fx.env()
         import unittest.mock as um
+        import test_jarvismail as TM
+        fx.screens["%13"] = TM.screen()
         with um.patch.object(J, "_proc_start_ms", return_value=5000):
             s = J.snapshot(env)["sessions"]["claude-server-old"]
-        self.assertEqual((s["state"], s.get("stateInferred")), ("idle", True))
+        self.assertEqual((s["state"], s.get("stateInferred")), ("idle", True))  # the event is not read as busy
 
     def test_a_stop_with_background_tasks_is_not_idle(self):
         fx = self.fx

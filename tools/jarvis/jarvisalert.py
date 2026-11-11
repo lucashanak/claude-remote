@@ -1124,6 +1124,12 @@ class AlertWorker:
             return "conversation"
         if self.mail._pending():
             return "proposal"  # a wake would bury the question Lukáš is about to answer
+        try:
+            import jarvisacct as JC
+            if JC.switch_pending(self.env, now):
+                return "switch"  # F5d: the app is about to restart Jarvis on another account (rev-f5d LOW)
+        except Exception:  # noqa: BLE001  a broken F5d module never stops the wakes
+            pass
         # rev-f5c M3: Jarvis's last answer is a question (no proposal behind it): Lukáš's "ano" belongs to it, and a
         # proposal made in a wake in between would take that "ano" for itself
         me = ((sessions or {}).get(self_name) or {})

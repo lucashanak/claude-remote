@@ -52,6 +52,7 @@ class Fx:
         self.ptable = {}
         self.clock = Clock()
         self.manifest = []
+        self.screens = {}  # pane -> what `capture-pane -p -e` shows (F5d); none = tmux gives nothing
 
     def close(self):
         self._td.cleanup()
@@ -61,6 +62,7 @@ class Fx:
         environ.update(environ_extra or {})
         # a pid no fixture uses, so the "claude above me" self detection never matches by accident
         kw.setdefault("my_pid", 999999)
+        kw.setdefault("capture_pane", lambda pane: self.screens.get(pane))
         return J.Env(environ=environ, proc_start=lambda pid: self.procs.get(pid), ppid=lambda pid: self.ppids.get(pid),
                      tmux_panes=lambda: (list(self.panes) if self.panes is not None else None), now_ms=self.clock,
                      pid_ns="pid:[1]", proc_table=lambda: dict(self.ptable), **kw)

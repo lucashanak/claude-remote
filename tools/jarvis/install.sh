@@ -37,7 +37,7 @@ while [ $# -gt 0 ]; do
   esac
 done
 
-FILES=(jarvislib.py jarvismail.py jarviswatch.py jarvisalert.py jarvisops.py cr_sessions.py cr_digest.py jarvis_d.py cr_mail.py
+FILES=(jarvislib.py jarvismail.py jarviswatch.py jarvisalert.py jarvisops.py jarvisacct.py cr_sessions.py cr_digest.py jarvis_d.py cr_mail.py
        cr_task.py cr_rules.py cr_jarvis.py)
 declare -A BIN=([cr-sessions]=cr_sessions.py [cr-digest]=cr_digest.py [jarvis-d]=jarvis_d.py [cr-mail]=cr_mail.py
                 [cr-task]=cr_task.py [cr-rules]=cr_rules.py [cr-jarvis]=cr_jarvis.py)

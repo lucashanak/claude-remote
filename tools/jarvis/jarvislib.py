@@ -117,6 +117,42 @@ def own_pid_ns():
         return None
 
 
+def tmux_capture_pane(tmux_bin, pane):
+    """F5d: the visible screen of one pane (`capture-pane -p -e`), read only, or None. Same timeout rules as below."""
+    if not tmux_bin or not re.fullmatch(r"%\d{1,9}", pane or ""):
+        return None
+    try:
+        with tempfile.TemporaryFile() as out:
+            rc = subprocess.run(["timeout", "-k", "1", "2", tmux_bin, "-u", "capture-pane", "-p", "-e", "-t", pane],
+                                stdin=subprocess.DEVNULL, stdout=out, stderr=subprocess.DEVNULL, timeout=5).returncode
+            if rc != 0:
+                return None
+            out.seek(0)
+            return out.read(1024 * 1024).decode("utf-8", "replace")
+    except (OSError, subprocess.SubprocessError):
+        return None
+
+
+# F5d: Claude's folder-trust dialog (2.1.32x, live 2026-11-11 on 8 `claude-server-~-yolo*` sessions):
+#   Accessing workspace: / … Quick safety check: Is this a project you created or one you trust? …
+#   ❯ No, exit / Yes, I trust this folder / Enter to confirm · Esc to cancel
+# Claude writes no registry record before it is answered. Recognised only when ALL of these are on the screen; two
+# of them alone (a transcript quoting the option, a similar selector) are not the dialog.
+_ANSI = re.compile(r"\x1b\[[0-9;:?]*[A-Za-z]")
+TRUST_MARKS = (re.compile(r"^\s*(?:❯\s*)?(?:\d\.\s*)?Yes, I trust this folder\s*$", re.M),
+               re.compile(r"^\s*(?:❯\s*)?(?:\d\.\s*)?No, exit\s*$", re.M),
+               re.compile(r"Accessing workspace:|Quick safety check: Is this a project you created or one you trust\?"),
+               re.compile(r"Enter to confirm"))
+TRUST_CZ = "důvěra ke složce"
+
+
+def trust_dialog(screen):
+    if not isinstance(screen, str):
+        return False
+    text = _ANSI.sub("", screen).replace("\u00a0", " ")
+    return all(p.search(text) for p in TRUST_MARKS)
+
+
 def tmux_list_panes(tmux_bin):
     """[(pane_id, pane_pid, session, dead)] in tmux's order (session, window, pane), or None when tmux cannot say.
 
@@ -152,7 +188,7 @@ class Env:
     """Paths and seams. Tests pass their own `environ` (temp HOME) and fake liveness/tmux/clock."""
 
     def __init__(self, environ=None, proc_start=None, ppid=None, tmux_panes=None, now_ms=None, pid_ns=None,
-                 proc_table=None, my_pid=None):
+                 proc_table=None, my_pid=None, capture_pane=None):
         e = os.environ if environ is None else environ
         # kept for the F2 mail provenance (TMUX_PANE, CLAUDECODE): tests pass their own, never the real one
         self.environ = e
@@ -180,6 +216,7 @@ class Env:
         self.ppid = ppid or read_ppid
         self.proc_table = proc_table or read_proc_table
         self.tmux_panes = tmux_panes or (lambda: tmux_list_panes(self.tmux_bin))
+        self.capture_pane = capture_pane or (lambda pane: tmux_capture_pane(self.tmux_bin, pane))
         self.now_ms = now_ms or (lambda: int(time.time() * 1000))
         self.pid_ns = own_pid_ns() if pid_ns is None else pid_ns
         self.my_pid = os.getpid() if my_pid is None else my_pid
@@ -814,7 +851,13 @@ def read_usage(env, now_ms):
     """{account: {fiveHour, fiveHourResets, sevenDay, sevenDayResets, ageS}} from the app's cache. Read only; the
     credentials are never touched (the cache exists precisely so nothing else needs them)."""
     out = {}
-    for f in sorted(glob.glob(os.path.join(env.cr, "usage", "*.json"))):
+    # F5d: the default login's cache is `usage/.claude.json`, a dotfile `*.json` never matched: Jarvis did not see the
+    # default account at all
+    files = sorted(glob.glob(os.path.join(env.cr, "usage", "*.json")))
+    dot = os.path.join(env.cr, "usage", ".claude.json")
+    if os.path.isfile(dot):
+        files.append(dot)
+    for f in files:
         try:
             with open(f, "rb") as fh:
                 raw = fh.read(1024 * 1024).decode("utf-8", "replace")
@@ -835,13 +878,47 @@ def read_usage(env, now_ms):
         fh_, sd = (fh_ if isinstance(fh_, dict) else {}), (sd if isinstance(sd, dict) else {})
         scoped, scoped_reset = _scoped(d)
         out[acct or "default"] = {
-            "account": acct,
+            "account": acct, "email": account_email(env, acct),
             "fiveHour": _num(fh_.get("utilization")), "fiveHourResets": _str(fh_.get("resets_at")),
             "sevenDay": _num(sd.get("utilization")), "sevenDayResets": _str(sd.get("resets_at")),
             "scoped": scoped, "scopedResets": scoped_reset,
             "ageS": (now_ms // 1000 - fetched) if fetched else None,
         }
     return out
+
+
+_EMAIL_CACHE = {}
+
+
+def slot_dir(env, slot):
+    """The config dir of a slot: `default` (or None) = ~/.claude, else ~/.claude-remote/accounts/<slug>."""
+    if not slot or slot == "default":
+        return os.path.join(env.home, ".claude")
+    return os.path.join(env.cr, "accounts", slot)
+
+
+def account_email(env, slot):
+    """F5d: the e-mail of a slot from `<cfg>/.claude.json` → oauthAccount.emailAddress (the default login keeps it in
+    ~/.claude.json). Metadata only: the credentials file is never opened. Cached by mtime (the file can be large)."""
+    cands = [os.path.join(slot_dir(env, slot), ".claude.json")]
+    if not slot or slot == "default":
+        cands.append(os.path.join(env.home, ".claude.json"))
+    for p in cands:
+        try:
+            mt = os.stat(p).st_mtime_ns
+        except OSError:
+            continue
+        hit = _EMAIL_CACHE.get(p)
+        if hit and hit[0] == mt:
+            return hit[1]
+        d = read_json(p, {}, max_bytes=32 * 1024 * 1024)
+        acct = d.get("oauthAccount") if isinstance(d, dict) else None
+        email = acct.get("emailAddress") if isinstance(acct, dict) else None
+        email = email if isinstance(email, str) and "@" in email and len(email) <= 200 else None
+        _EMAIL_CACHE[p] = (mt, email)
+        if email:
+            return email
+    return None
 
 
 def _scoped(d):
@@ -1004,7 +1081,7 @@ def build_sessions(env, regs, panes, manifest, fold, self_name=None, tr_cache=No
             if primary:
                 r = primary
                 cfg = r.cfg
-                s.update(cwd=r.cwd, account=r.account or man.get("accountSlug"), pid=r.pid, pane=r.pane,
+                s.update(cwd=r.cwd, account=r.account or man.get("accountSlug"), cfgDir=r.cfg, pid=r.pid, pane=r.pane,
                          sessionId=r.session_id, version=r.version, state=r.status or "unknown",
                          waitingFor=safe_text(r.waiting_for, 80) or None, stateSince=r.status_at)
                 # I1 without capture-pane: the record was keyed through its pane (live pane of THIS session, pid below
@@ -1044,7 +1121,20 @@ def build_sessions(env, regs, panes, manifest, fold, self_name=None, tr_cache=No
                 if ev and ev["ev"] in EVENT_STATE:
                     s["state"], s["stateInferred"] = EVENT_STATE[ev["ev"]], True
                 elif ev is None and s.get("pid"):
-                    s["state"], s["stateInferred"] = "idle", True
+                    # F5d: no record and no event of this life: the SCREEN decides (read only). The trust dialog =
+                    # waiting for Lukáš; a plain prompt = idle; anything else = unknown, never a blind "idle" (8
+                    # sessions sat on the trust dialog for days while Jarvis called them idle)
+                    seen = screen_state(env, main_pane.get(name), tr_cache, now_ms)
+                    s["screen"], s["screenPane"] = seen, main_pane.get(name)
+                    if seen == "trust":
+                        s["state"], s["waitingFor"], s["stateInferred"] = "waiting", TRUST_CZ, True
+                        # rev-f5d LOW: a stateSince from an event of the PREVIOUS life would make a fresh dialog
+                        # look hours old (stale, never told): this life starts at the process start
+                        if born and born > (s.get("stateSince") or 0):
+                            s["stateSince"] = born
+                        s["stateSince"] = s.get("stateSince") or born
+                    elif seen == "idle":
+                        s["state"], s["stateInferred"] = "idle", True
             stop = fs.get("stop")
             if s["state"] == "idle" and last and last["ev"] == "stop" and stop and stop.get("bg"):
                 # the turn ended with background tasks (agents, a watched build) still running: not idle, and it
@@ -1090,6 +1180,38 @@ def build_sessions(env, regs, panes, manifest, fold, self_name=None, tr_cache=No
             out[name] = {"name": name, "short": shorts[name], "alias": parse_name(name)[1], "state": "unknown",
                          "attention": None, "self": name == self_name, "error": f"{type(e).__name__}: {e}"[:200]}
     return out
+
+
+SCREEN_TTL_MS = 30 * 1000
+
+
+def screen_state(env, pane, cache, now_ms):
+    """'trust' | 'idle' | None from one read-only capture of the pane, cached for 30 s in `cache` (jarvis-d's
+    transcript cache: the 8 sessions without a record must not cost a tmux call each every 5 s)."""
+    if not pane:
+        return None
+    key = ("screen", pane)
+    hit = cache.get(key) if isinstance(cache, dict) else None
+    if hit and now_ms - hit[0] < SCREEN_TTL_MS:
+        return hit[1]
+    raw = env.capture_pane(pane)
+    res = None
+    if trust_dialog(raw):
+        res = "trust"
+    elif raw:
+        import jarvismail as M
+        f = M.screen_facts(raw)
+        if f["box"] and not f["selector"] and not f["working"]:
+            res = "idle"
+    # rev-f5d LOW: hysteresis. A changed reading counts only when the next one (30 s later) says the same, so one
+    # odd frame (a redraw, a spinner) never flips idle <-> unknown and moves changedAt. The first reading counts at
+    # once; a reading carried over from the last status (jarvis-d's seed) has no time and is checked again at once.
+    reported = res
+    if hit and hit[1] != res:
+        reported = hit[1] if not (len(hit) > 2 and hit[2] == res) else res
+    if isinstance(cache, dict):
+        cache[key] = (now_ms, reported, res)
+    return reported
 
 
 def _children(table):
