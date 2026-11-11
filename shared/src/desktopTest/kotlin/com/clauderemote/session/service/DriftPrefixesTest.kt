@@ -25,13 +25,13 @@ class DriftPrefixesTest {
 
     @AfterTest fun tearDown() { safeDeleteTree(root) }
 
-    // ---- the golden v18 ---------------------------------------------------------------------------
+    // ---- the goldens v18 and v19 -----------------------------------------------------------------
 
     /**
      * `golden/restore-installer-v18.sh` is the installer cedfd70 generated (drift.sh, restore.sh and tmux-sockheal.sh
-     * in it are byte for byte what the live box runs since 2026-11-08, checked when the golden was made). The extraction
-     * below reads the installer out of the Kotlin source the way the compiler builds it; that it gives today's constant
-     * from today's source is what makes its reading of cedfd70 trustworthy.
+     * in it are byte for byte what the live box ran from 2026-11-08 to 2026-11-10, checked when the golden was made). The
+     * extraction below reads the installer out of the Kotlin source the way the compiler builds it; that it gives today's
+     * constant from today's source is what makes its reading of cedfd70 trustworthy.
      */
     @Test fun theGoldenV18IsTheInstallerCedfd70Generated() {
         val golden = golden()
@@ -47,94 +47,114 @@ class DriftPrefixesTest {
     }
 
     /**
-     * Hradlo A: what the app sends for the box `server` differs from cedfd70's only in the marker (MARKER, the three
-     * compat lines), drift's prefix reader (one block), drift's two comparisons that knew only `claude-server-` (and
-     * the header comment that said so), the prefix write before the end line, (D6S-zaloha) the rollback copies of
-     * a v18 restore.sh and drift.sh with their temp files in the installer's trap, and (kolo 3, B1) the three blocks
-     * by which drift adopts a session only a line of `prefixes` names only with proof — without such a line (the box
-     * `server`) none of them changes what drift does (hradlo B, `DriftPrefixesIntegrationTest`).
+     * `golden/restore-installer-v19.sh` is the installer 1bdcbd5 generated: the scripts the live box runs since
+     * 2026-11-10T10:17Z (v19). The base of hradlo A below and of the v19 worlds in `DriftV20IdentityIntegrationTest`.
      */
-    @Test fun forServerTheInstallerChangedOnlyTheMarkerThePrefixesAndTheTwoComparisons() {
-        val old = (golden() + "\n" + SessionPersistenceService.INSTALL_RESTORE_END + "\n").lines()
-        val new = String(SessionPersistenceService.installRestoreStdin(TmuxNameParser.DEFAULT_PREFIX), Charsets.UTF_8).lines()
-        val (removed, added) = lineDiff(old, new)
-        val compat18 = "# marker-compat (do NOT remove): " + (6..18).joinToString(" ") { "claude-remote-restore-v$it" }
-        val compat19 = "$compat18 claude-remote-restore-v19"
-        val trap18 = "        trap 'rm -f \"\$SCRIPT.tmp.\$\$\" \"\$DRIFT.tmp.\$\$\" \"\$SOCKHEAL.tmp.\$\$\"' EXIT"
-        val trap19 = "        trap 'rm -f \"\$SCRIPT.tmp.\$\$\" \"\$DRIFT.tmp.\$\$\" \"\$SOCKHEAL.tmp.\$\$\" \"\$SCRIPT.v18.tmp.\$\$\" \"\$DRIFT.v18.tmp.\$\$\"' EXIT"
-        assertEquals(
-            listOf(
-                "        MARKER=\"claude-remote-restore-v18\"",
-                trap18,
-                compat18,
-                compat18,
-                "# the LIVE claude-server-* tmux sessions every minute. Self-healing: re-adds",
-                "if [ \"\$(tmux -u list-sessions -F '#{session_name}' 2>/dev/null | grep -c '^claude-server-')\" -gt 0 ]; then",
-                "    case \"\$s\" in claude-server-*) ;; *) continue;; esac",
-                compat18,
-            ),
-            removed,
-            "removed lines",
-        )
-        val reader = block(SessionPersistenceService.INSTALL_RESTORE_COMMAND, "# ---- prefixes of this box (D6-S) ----", "# ---- end of prefixes ----")
-        val write = SessionPersistenceService.prefixWrite(TmuxNameParser.DEFAULT_PREFIX).lines()
-        // the rollback copies of the v18 restore.sh and drift.sh (D6S-zaloha) and their temp files in the trap
-        fun rollback(name: String) = block(SessionPersistenceService.INSTALL_RESTORE_COMMAND,
-            "            # ---- rollback copy of $name (D6-S) ----", "            # ---- end of the rollback copy of $name ----")
-        // kolo 3 (B1): drift adopts a session only a line of `prefixes` names only with proof (claude, or the app's entry)
-        val adoptHelpers = block(SessionPersistenceService.INSTALL_RESTORE_COMMAND,
-            "# ---- sessions only a line of prefixes names (B1) ----", "# ---- end of sessions only a line of prefixes names ----")
-        val adoptCase = block(SessionPersistenceService.INSTALL_RESTORE_COMMAND,
-            "    # ---- a session only a line of prefixes names (B1) ----", "    # ---- end of a session only a line of prefixes names ----")
-        val adoptEntry = block(SessionPersistenceService.INSTALL_RESTORE_COMMAND,
-            "# ---- the app's entry of a session only a line of prefixes names (B1) ----", "# ---- end of the app's entry ----")
-        assertEquals(
-            listOf("        MARKER=\"claude-remote-restore-v19\"", trap19,
-                compat19) + rollback("restore.sh") + listOf(compat19,
-                "# the LIVE tmux sessions of this box (claude-server-* and the prefixes file) every minute. Self-healing: re-adds") +
-                reader +
-                listOf("if tmux -u list-sessions -F '#{session_name}' 2>/dev/null | { while IFS= read -r s; do case \"\$s\" in \"claude-server-\"*) exit 0;; esac; done; exit 1; }; then") +
-                adoptHelpers + listOf("", "    is_ours \"\$s\" || continue") + adoptCase + adoptEntry +
-                rollback("drift.sh") + listOf(compat19) + write,
-            added,
-            "added lines",
-        )
-        assertTrue(reader.size in 20..40 && write.size in 20..45, "the reader (${reader.size}) and the write (${write.size}) are small blocks")
-        assertEquals(12, rollback("drift.sh").size)
-        assertTrue(adoptHelpers.size + adoptCase.size + adoptEntry.size < 50, "B1 is three small blocks")
+    @Test fun theGoldenV19IsTheInstaller1bdcbd5Generated() {
+        val golden = golden19()
+        assertEquals(GOLDEN_V19_SHA256, sha256(golden.toByteArray(Charsets.UTF_8)), "the golden changed")
+        assertTrue("MARKER=\"claude-remote-restore-v19\"" in golden)
+        val base = gitShow("$BASE_V19:shared/$SPS")
+        if (base == null) {
+            println("$BASE_V19 is not in this clone (a shallow checkout): the golden is checked by its SHA-256 only")
+            return
+        }
+        assertEquals(golden, installerOf(base), "the golden is not what 1bdcbd5 generated")
+        // the prefix write is outside INSTALL_RESTORE_COMMAND: v20 sends v19's unchanged (the v19 worlds use today's)
+        assertEquals(prefixWriteOf(base), prefixWriteOf(File(SPS).readText()), "the prefix write changed since v19")
     }
 
     /**
-     * Review D2 kód K2 / adv N4: v19's compat line names v18 too, so "the replaced script is v18" also holds for a v19
-     * script (one a second installer put there in between). The copy itself must then not be v19: no `.v18` from it and
-     * no temp file left. A v18 script is copied byte for byte, published by `ln` (which never replaces a copy).
-     * Each of the installer's two rollback blocks (restore.sh, drift.sh: review D3 N-T9), run alone in bash.
+     * Hradlo A, rewritten for v20 over the golden v19 (it was v18 → v19 over the golden v18; dodatek E "Marker v20"):
+     * what the app sends for the box `server` differs from 1bdcbd5's in exactly the lines v19 had and v20 has not
+     * ([REMOVED_V19], each reviewed), and every line v20 adds lies in a block named for v20 (`# ---- … v20 … ----` to
+     * the next `# ---- end of … ----`) or is one of [ADDED_V20_OUTSIDE_BLOCKS]. The behaviour of the blocks is tested in
+     * `DriftV20Test` and `DriftV20IntegrationTest`; that the box `server` sees none of it in `DriftV20IdentityIntegrationTest`.
      */
-    @Test fun theRollbackCopyIsNeverAV19Script() {
-        for ((name, variable) in listOf("restore.sh" to "SCRIPT", "drift.sh" to "DRIFT")) {
+    @Test fun forServerV20ChangedOnlyItsNamedBlocksAndTheseLines() {
+        val old = (golden19() + "\n" + SessionPersistenceService.prefixWrite(TmuxNameParser.DEFAULT_PREFIX) + "\n" +
+            SessionPersistenceService.INSTALL_RESTORE_END + "\n").lines()
+        val new = String(SessionPersistenceService.installRestoreStdin(TmuxNameParser.DEFAULT_PREFIX), Charsets.UTF_8).lines()
+        val (removed, addedAt) = lineDiffAt(old, new)
+        assertEquals(REMOVED_V19, removed, "removed lines")
+        val start = Regex("""^\s*# ---- .*\bv20\b.* ----$""")
+        val end = Regex("""^\s*# ---- end of .* ----$""")
+        // a block runs to the next end line (a block inside another ends the outer one there)
+        val inBlock = mutableSetOf<Int>()
+        var i = 0
+        while (i < new.size) {
+            if (start.matches(new[i])) {
+                val j = (i until new.size).first { end.matches(new[it]) }
+                (i..j).forEach { inBlock += it }
+                i = j + 1
+            } else i++
+        }
+        val names = new.filter { start.matches(it) }.map { it.trim() }
+        assertEquals(ADDED_V20_OUTSIDE_BLOCKS, addedAt.filter { it !in inBlock }.map { new[it] }, "added lines outside the named v20 blocks")
+        assertEquals(V20_BLOCKS.sorted(), names.distinct().sorted(), "the named v20 blocks")
+        assertTrue(names.size <= 20, "v20 is ${names.size} named blocks")
+    }
+
+    /**
+     * Review D2 kód K2 / adv N4, dodatek E "záloha": a script's compat line names every older marker, so "the replaced
+     * script is v<ver>" also holds for a newer one (a second installer may have put it there in between). The copy
+     * must then carry no newer marker: no copy from it and no temp file left. A script of that very marker is copied
+     * byte for byte, published by `ln` (which never replaces a copy). Each of the installer's four rollback blocks
+     * (restore.sh and drift.sh, as of v18 and v19), run alone in bash, over scripts of v17 … v20.
+     */
+    @Test fun theRollbackCopyIsOnlyOfItsOwnMarkerAndOnlyOnce() {
+        fun compat(upTo: Int) = "# marker-compat (do NOT remove): " + (6..upTo).joinToString(" ") { "claude-remote-restore-v$it" }
+        for ((name, variable) in listOf("restore.sh" to "SCRIPT", "drift.sh" to "DRIFT")) for (ver in listOf(18, 19)) {
             val rollback = block(SessionPersistenceService.INSTALL_RESTORE_COMMAND,
-                "            # ---- rollback copy of $name (D6-S) ----", "            # ---- end of the rollback copy of $name ----")
-            assertTrue(rollback.any { "ln \"\$$variable.v18.tmp.\$\$\" \"\$$variable.v18\"" in it } && rollback.none { "mv -f" in it },
-                "$name: published by ln, never mv -f")
-            val compat = "# marker-compat (do NOT remove): " + (6..18).joinToString(" ") { "claude-remote-restore-v$it" }
-            for ((what, script, copied) in listOf(
-                Triple("v19", "#!/usr/bin/env bash\n$compat claude-remote-restore-v19\nexit 0\n", false),
-                Triple("v18", "#!/usr/bin/env bash\n$compat\nexit 0\n", true),
-            )) {
-                val home = freshHome()
-                val target = File(home, ".claude-remote/$name").apply { writeText(script) }
-                val r = run(listOf("bash", "-c", "set -e\n$variable=\"\$HOME/.claude-remote/$name\"\n" + rollback.joinToString("\n") + "\necho DONE\n"), home, dir = home)
-                assertEquals(0, r.exit, "$name $what: ${r.err}")
-                assertEquals("DONE", r.out.trim(), "$name $what")
-                val copy = File(home, ".claude-remote/$name.v18")
-                assertEquals(copied, copy.exists(), "$name $what: a copy ${if (copied) "is" else "is not"} made")
-                if (copied) assertEquals(script, copy.readText(), "$name $what: byte for byte")
-                assertEquals(copied, File(home, ".claude-remote/install.log").readTextOrNull()?.contains("kept as $name.v18") == true, "$name $what")
-                assertEquals((listOf(name) + (if (copied) listOf("$name.v18", "install.log") else emptyList())).sorted(),
-                    File(home, ".claude-remote").list()!!.sorted(), "$name $what: no temp file left")
-                assertEquals(script, target.readText(), "$name $what: the script itself untouched")
+                "            # ---- rollback copy of $name as of v$ver (D6-S, v20) ----", "            # ---- end of the rollback copy of $name as of v$ver ----")
+            assertTrue(rollback.any { "ln \"\$$variable.v$ver.tmp.\$\$\" \"\$$variable.v$ver\"" in it } && rollback.none { "mv -f" in it },
+                "$name v$ver: published by ln, never mv -f")
+            for (scriptVer in 17..20) {
+                val script = "#!/usr/bin/env bash\n${compat(scriptVer)}\nexit 0\n"
+                val copied = scriptVer == ver
+                for (existing in listOf(false, true)) {
+                    val home = freshHome()
+                    val target = File(home, ".claude-remote/$name").apply { writeText(script) }
+                    val copy = File(home, ".claude-remote/$name.v$ver")
+                    if (existing) copy.writeText("an earlier copy\n")
+                    val r = run(listOf("bash", "-c", "set -e\n$variable=\"\$HOME/.claude-remote/$name\"\n" + rollback.joinToString("\n") + "\necho DONE\n"), home, dir = home)
+                    val what = "$name as of v$ver, a v$scriptVer script${if (existing) ", a copy there" else ""}"
+                    assertEquals(0, r.exit, "$what: ${r.err}")
+                    assertEquals("DONE", r.out.trim(), what)
+                    when {
+                        existing -> assertEquals("an earlier copy\n", copy.readText(), "$what: a copy was overwritten")
+                        copied -> assertEquals(script, copy.readText(), "$what: byte for byte")
+                        else -> assertFalse(copy.exists(), "$what: a copy of a script of another marker")
+                    }
+                    val made = copied && !existing
+                    assertEquals(made, File(home, ".claude-remote/install.log").readTextOrNull()?.contains("kept as $name.v$ver") == true, what)
+                    assertEquals((listOf(name) + (if (made) listOf("install.log") else emptyList()) + (if (made || existing) listOf("$name.v$ver") else emptyList())).sorted(),
+                        File(home, ".claude-remote").list()!!.sorted(), "$what: no temp file left")
+                    assertEquals(script, target.readText(), "$what: the script itself untouched")
+                }
             }
         }
+    }
+
+    /**
+     * Dodatek E: the compat line carries v6 … v20 in all three scripts (a v18 or v19 client then finds its marker in a
+     * v20 script and rewrites nothing), and tmux-sockheal.sh, which gets no rollback copy, is v19's but for that line
+     * and the corrected comment on `drift-heal.off` (it is no brake on drift's relaunch: kritika E H6, KK22).
+     */
+    @Test fun theCompatLineNamesEveryMarkerAndSockhealIsV19ButForItsMarkerAndOneComment() {
+        val cmd = SessionPersistenceService.INSTALL_RESTORE_COMMAND
+        // one source for the marker (review E-D K-ED5): MARKER is made of MARKER_VERSION, the compat lines are held to it
+        assertEquals(20, SessionPersistenceService.MARKER_VERSION)
+        assertTrue("        MARKER=\"claude-remote-restore-v${SessionPersistenceService.MARKER_VERSION}\"" in cmd.lines())
+        val compat = "# marker-compat (do NOT remove): " + (6..SessionPersistenceService.MARKER_VERSION).joinToString(" ") { "claude-remote-restore-v$it" }
+        for (eof in listOf("RESTORE_EOF", "DRIFT_EOF", "SOCKHEAL_EOF")) assertEquals(compat, heredoc(cmd, eof).lines()[1], eof)
+        val (removed, added) = lineDiff(heredoc(golden19(), "SOCKHEAL_EOF").lines(), heredoc(cmd, "SOCKHEAL_EOF").lines())
+        assertEquals(listOf(compat.removeSuffix(" claude-remote-restore-v20"),
+            "# ~/.claude-remote/drift-heal.off switches all of this off: the only rollback, since an older client never",
+            "# rewrites a v18 script."), removed)
+        assertEquals(listOf(compat,
+            "# ~/.claude-remote/drift-heal.off switches this guard off, and only the guard: it is no brake on drift's relaunch",
+            "# (self-heal then runs without it). The brakes for drift are ~/.claude-remote/drift.off and stopping its timer."), added)
     }
 
     /**
@@ -159,7 +179,7 @@ class DriftPrefixesTest {
                 if (failingJq) append("jq() { case \" \$* \" in *\" --slurpfile \"*) return 5;; esac; command jq \"\$@\"; }\n")
                 append("APP_JSON=\$(cat \"\$HOME/app.json\")\n")
                 append("LIVE='[${row("claude-server-a")},${row("claude-box-b")},${row("claude-box-c")}]'\n")
-                append("OWN_META=' a:claude-box-b c:claude-box-c'\n")
+                append("OWN_META=\$'\\na:claude-box-b\\nc:claude-box-c'\n")
                 append(overlayBlock.joinToString("\n")).append("\nprintf '%s' \"\$LIVE\"\n")
             }
             val r = run(listOf("bash", "-c", script), home, dir = home)
@@ -173,7 +193,7 @@ class DriftPrefixesTest {
         assertEquals(Json.parseToJsonElement(entryB), Json.parseToJsonElement(whole).jsonArray[1], "a: the app's entry as it wrote it, from an app file over 128 KB")
         assertEquals(Json.parseToJsonElement(row("claude-box-c").replace("\"serverId\":\"\"", "\"serverId\":\"srv-box-c\"")), Json.parseToJsonElement(whole).jsonArray[2],
             "c: its own row with the serverId of the app's entry")
-        assertEquals("kill-session -t __anchor__\n", killed, "an adopted session drops the anchor")
+        assertEquals("kill-session -t =__anchor__\n", killed, "an adopted session drops the anchor (exactly that name)")
         val (dropped, notKilled) = overlay(failingJq = true)
         assertEquals(listOf("claude-server-a"), names(dropped), "the overlay failed: only its names drop out")
         assertEquals("", notKilled, "nothing adopted: the anchor stays")
@@ -381,7 +401,11 @@ class DriftPrefixesTest {
     }
 
     /** Lines only in [old] and lines only in [new], each in order (longest common subsequence). */
-    private fun lineDiff(old: List<String>, new: List<String>): Pair<List<String>, List<String>> {
+    private fun lineDiff(old: List<String>, new: List<String>): Pair<List<String>, List<String>> =
+        lineDiffAt(old, new).let { (removed, at) -> removed to at.map { new[it] } }
+
+    /** Lines only in [old], and the indices in [new] of the lines only in [new] (longest common subsequence). */
+    private fun lineDiffAt(old: List<String>, new: List<String>): Pair<List<String>, List<Int>> {
         val n = old.size
         val m = new.size
         val lcs = Array(n + 1) { IntArray(m + 1) }
@@ -389,19 +413,25 @@ class DriftPrefixesTest {
             lcs[i][j] = if (old[i] == new[j]) lcs[i + 1][j + 1] + 1 else maxOf(lcs[i + 1][j], lcs[i][j + 1])
         }
         val removed = mutableListOf<String>()
-        val added = mutableListOf<String>()
+        val added = mutableListOf<Int>()
         var i = 0
         var j = 0
         while (i < n && j < m) {
             when {
                 old[i] == new[j] -> { i++; j++ }
                 lcs[i + 1][j] >= lcs[i][j + 1] -> removed += old[i++]
-                else -> added += new[j++]
+                else -> added += j++
             }
         }
         while (i < n) removed += old[i++]
-        while (j < m) added += new[j++]
+        while (j < m) added += j++
         return removed to added
+    }
+
+    /** The body of the heredoc `<<'[eof]'` in [script], its last newline included. */
+    private fun heredoc(script: String, eof: String): String {
+        val start = script.indexOf('\n', script.indexOf("<<'$eof'")) + 1
+        return script.substring(start, script.indexOf("\n$eof\n", start) + 1)
     }
 
     private fun gitShow(spec: String): String? = runCatching {
@@ -417,9 +447,230 @@ class DriftPrefixesTest {
         const val BASE = "cedfd70e57906ca8d49858a73b96b25a4c9c3885"
         const val SPS = "src/commonMain/kotlin/com/clauderemote/session/service/SessionPersistenceService.kt"
 
-        fun golden(): String {
-            val rel = "src/desktopTest/resources/golden/restore-installer-v18.sh"
+        /** Hradlo A: the lines of 1bdcbd5's installer (for `server`) that v20 no longer has, in order. */
+        val REMOVED_V19 = listOf(
+            "        MARKER=\"claude-remote-restore-v19\"",
+            "        trap 'rm -f \"\$SCRIPT.tmp.\$\$\" \"\$DRIFT.tmp.\$\$\" \"\$SOCKHEAL.tmp.\$\$\" \"\$SCRIPT.v18.tmp.\$\$\" \"\$DRIFT.v18.tmp.\$\$\"' EXIT",
+            "# marker-compat (do NOT remove): claude-remote-restore-v6 claude-remote-restore-v7 claude-remote-restore-v8 claude-remote-restore-v9 claude-remote-restore-v10 claude-remote-restore-v11 claude-remote-restore-v12 claude-remote-restore-v13 claude-remote-restore-v14 claude-remote-restore-v15 claude-remote-restore-v16 claude-remote-restore-v17 claude-remote-restore-v18 claude-remote-restore-v19",
+            "# ~/.claude-remote/drift-heal.off switches all of this off: the only rollback, since an older client never",
+            "# rewrites a v18 script.",
+            "        FOLDER_EXP=\"\${FOLDER/#\\~/\$HOME}\"",
+            "        case \"\$FOLDER_EXP\" in /*) ;; *) FOLDER_EXP=\"\$HOME/\$FOLDER_EXP\";; esac",
+            "        [ -d \"\$FOLDER_EXP\" ] || { echo \"skip \$TMUX_NAME — folder \$FOLDER_EXP missing\"; continue; }",
+            "        CMD=\"\${ARGS[*]}\"",
+            "            CMD=\"CLAUDE_CONFIG_DIR=\\\"\$HOME/.claude-remote/accounts/\$ACCT\\\" \$CMD\"",
+            "                if [ -n \"\${TMUX_NAME:-}\" ] && [ -n \"\${FOLDER:-}\" ] \\",
+            "                        FOLDER_EXP=\"\${FOLDER/#\\~/\$HOME}\"",
+            "                        [ -d \"\$FOLDER_EXP\" ] && {",
+            "                                    CMD=\"\$CMD --resume \$UUID\"",
+            "                                    CMD=\"\$CMD --session-id \$UUID\"",
+            "                                CMD=\"CLAUDE_CONFIG_DIR=\\\"\$HOME/.claude-remote/accounts/\$ACCT\\\" \$CMD\"",
+            "            # ---- rollback copy of restore.sh (D6-S) ----",
+            "            # Kept once when the script replaced here is v18 (kritika D2 N17): moving it back is the way back to v18, by",
+            "            # hand and only with Lukáš's consent that day (any v19 client's next install rewrites it to v19 again).",
+            "            # v19's compat line names v18 too, so the copy itself must not be v19 (a second installer may have replaced",
+            "            # the script in between), and `ln` publishes it only where no copy is yet (K2): never one over another.",
+            "                { cp -p \"\$SCRIPT\" \"\$SCRIPT.v18.tmp.\$\$\" && ! grep -q 'claude-remote-restore-v19' \"\$SCRIPT.v18.tmp.\$\$\" \\",
+            "            # ---- end of the rollback copy of restore.sh ----",
+            "            mv -f \"\$SCRIPT.tmp.\$\$\" \"\$SCRIPT\"",
+            "            echo \"RESTORE_SCRIPT_INSTALLED\"",
+            "        else",
+            "            echo \"RESTORE_SCRIPT_PRESENT\"",
+            "# marker-compat (do NOT remove): claude-remote-restore-v6 claude-remote-restore-v7 claude-remote-restore-v8 claude-remote-restore-v9 claude-remote-restore-v10 claude-remote-restore-v11 claude-remote-restore-v12 claude-remote-restore-v13 claude-remote-restore-v14 claude-remote-restore-v15 claude-remote-restore-v16 claude-remote-restore-v17 claude-remote-restore-v18 claude-remote-restore-v19",
+            "# ~/.claude-remote/drift-heal.off switches all of this off: the only rollback, since an older client never",
+            "# rewrites a v18 script.",
+            "    # Every tmux call of a tick gets a time limit: a hung server must not wedge the timer unit.",
+            "    command -v timeout >/dev/null 2>&1 && tmux() { timeout -k 2 10 tmux \"\$@\"; }",
+            "    tmux kill-session -t __anchor__ 2>/dev/null || true",
+            "APP_JSON=\"[]\"; OWN_META=\"\"",
+            "for s in \$(tmux -u list-sessions -F '#{session_name}' 2>/dev/null); do",
+            "    pane_pid=\$(tmux -u list-panes -t \"\$s\" -F '#{pane_pid}' 2>/dev/null | head -1)",
+            "    folder=\$(tmux -u display-message -p -t \"\$s\" '#{pane_current_path}' 2>/dev/null)",
+            "        *)  sig=\"\"",
+            "            [ -n \"\$pid\" ] && case \" \$(tr '\\0' ' ' < \"/proc/\$pid/cmdline\" 2>/dev/null) \" in",
+            "                *\" --dangerously-skip-permissions \"*|*\" --allow-dangerously-skip-permissions \"*) sig=1;;",
+            "            esac",
+            "            if [ -n \"\$sig\" ]; then OWN_META=\"\$OWN_META c:\$s\"",
+            "            elif app_has \"\$s\"; then OWN_META=\"\$OWN_META a:\$s\"",
+            "        args=\$(tr '\\0' ' ' < \"/proc/\$pid/cmdline\" 2>/dev/null)",
+            "        case \"\$args\" in",
+            "            *\"--model opus\"*)   model=OPUS;;",
+            "            *\"--model sonnet\"*) model=SONNET;;",
+            "            *\"--model haiku\"*)  model=HAIKU;;",
+            "            *\"--model fable\"*)  model=FABLE;;",
+            "        case \"\$args\" in",
+            "            *\"--permission-mode auto\"*) mode=AUTO;;",
+            "            *\"--permission-mode acceptEdits\"*) mode=AUTO_ACCEPT;;",
+            "            *\"--allow-dangerously-skip-permissions\"*) mode=DEFAULT;;",
+            "        sid=\$(echo \"\$args\" | sed -n 's/.*--\\(resume\\|session-id\\) \\([0-9a-f-]*\\).*/\\2/p' | head -1)",
+            "done",
+            "        | (\$own | split(\" \") | map(select(length > 0) | {key: .[2:], value: .[0:1]}) | from_entries) as \$om",
+            "            | if \$om[\$n] == \"a\" then \$am[\$n]",
+            "        tmux kill-session -t __anchor__ 2>/dev/null || true",
+            "        LIVE=\$(printf '%s' \"\$LIVE\" | jq -c --arg own \"\$OWN_META\" '(\$own | split(\" \") | map(.[2:])) as \$o",
+            "    NEW=\$(jq -n --argjson old \"\$OLD\" --argjson live \"\$LIVE\" --argjson forget \"\$FORGET\" '",
+            "        ((\$live | map({key:.tmuxSessionName, value:.}) | from_entries) as \$lm",
+            "    if [ -n \"\$NEW\" ] && { [ \"\$NEW\" != \"\$OLD\" ] || [ \"\${CORRUPT:-0}\" = \"1\" ]; }; then",
+            "        DROP_EXPLAINED=\$(jq -n --argjson old \"\$OLD\" --argjson forget \"\$FORGET\" \\",
+            "            '((\$old | map(.tmuxSessionName)) - \$forget | length) == 0' 2>/dev/null)",
+            "    if [ -f \"\$FORGOTTEN\" ] && [ -s \"\$FORGOTTEN\" ]; then",
+            "# Mirror the server-owned source of truth to the app-facing sessions.json (the",
+            "# client may have blanked/shrunk it on reconnect); keeps the app view correct",
+            "# within 60s and re-expands a client that wrongly forgot sessions.",
+            "# Mirror ONLY a valid, non-empty manifest: an unguarded cp would copy a",
+            "# truncated/empty \$SF over the app-facing file every tick and blank the app view.",
+            "if [ -f \"\$SF\" ] && [ -s \"\$SF\" ] && jq -e 'length>0' \"\$SF\" >/dev/null 2>&1 \\",
+            "   && ! cmp -s \"\$SF\" \"\$SF_APP\" 2>/dev/null; then",
+            "    cp -f \"\$SF\" \"\$SF_APP\" 2>/dev/null || true",
+            "fi",
+            "    MISSING=\$(jq -r '.[].tmuxSessionName' \"\$SF\" 2>/dev/null | while IFS= read -r n; do",
+            "        ! tmux has-session -t=\"\$n\" 2>/dev/null && echo \"\$n\"; done)",
+            "        echo \"[\$(date -u +%FT%TZ)] drift: self-heal — relaunching missing: \$(echo \$MISSING | tr '\\n' ' ')\"",
+            "            # ---- rollback copy of drift.sh (D6-S) ----",
+            "            # Kept once when the script replaced here is v18 (kritika D2 N17): moving it back is the way back to v18, by",
+            "            # hand and only with Lukáš's consent that day (any v19 client's next install rewrites it to v19 again).",
+            "            # v19's compat line names v18 too, so the copy itself must not be v19 (a second installer may have replaced",
+            "            # the script in between), and `ln` publishes it only where no copy is yet (K2): never one over another.",
+            "                { cp -p \"\$DRIFT\" \"\$DRIFT.v18.tmp.\$\$\" && ! grep -q 'claude-remote-restore-v19' \"\$DRIFT.v18.tmp.\$\$\" \\",
+            "            # ---- end of the rollback copy of drift.sh ----",
+            "            mv -f \"\$DRIFT.tmp.\$\$\" \"\$DRIFT\"",
+            "            echo \"DRIFT_SCRIPT_INSTALLED\"",
+            "# marker-compat (do NOT remove): claude-remote-restore-v6 claude-remote-restore-v7 claude-remote-restore-v8 claude-remote-restore-v9 claude-remote-restore-v10 claude-remote-restore-v11 claude-remote-restore-v12 claude-remote-restore-v13 claude-remote-restore-v14 claude-remote-restore-v15 claude-remote-restore-v16 claude-remote-restore-v17 claude-remote-restore-v18 claude-remote-restore-v19",
+            "# ~/.claude-remote/drift-heal.off switches all of this off: the only rollback, since an older client never",
+            "# rewrites a v18 script.",
+            "            mv -f \"\$SOCKHEAL.tmp.\$\$\" \"\$SOCKHEAL\"",
+            "            echo \"SOCKHEAL_SCRIPT_INSTALLED\"",
+        )
+
+        /** Hradlo A: the lines v20 adds outside its named blocks, in order. */
+        val ADDED_V20_OUTSIDE_BLOCKS = listOf(
+            "        MARKER=\"claude-remote-restore-v20\"",
+            "        trap 'rm -f \"\$SCRIPT.tmp.\$\$\" \"\$DRIFT.tmp.\$\$\" \"\$SOCKHEAL.tmp.\$\$\" \"\$SCRIPT.v18.tmp.\$\$\" \"\$DRIFT.v18.tmp.\$\$\" \"\$SCRIPT.v19.tmp.\$\$\" \"\$DRIFT.v19.tmp.\$\$\"' EXIT",
+            "        # v20 (H10): each script missing the marker is written to its temp file first; the three renames follow back to",
+            "        # back once all three are written, and only then the output: an install cut short while writing replaces no",
+            "        # script, and a mix of versions is left only by one killed within the window of the three renames.",
+            "        # An install killed outright (SIGKILL: no trap) leaves its temp files: ours, older than an hour, go here.",
+            "        find \"\$HOME/.claude-remote\" -maxdepth 1 -type f \\( -name 'restore.sh.tmp.[0-9]*' -o -name 'drift.sh.tmp.[0-9]*' \\",
+            "            -o -name 'tmux-sockheal.sh.tmp.[0-9]*' -o -name 'restore.sh.v1[89].tmp.[0-9]*' -o -name 'drift.sh.v1[89].tmp.[0-9]*' \\) \\",
+            "            -mmin +60 -delete 2>/dev/null || true",
+            "        R_NEW=0; D_NEW=0; S_NEW=0",
+            "# marker-compat (do NOT remove): claude-remote-restore-v6 claude-remote-restore-v7 claude-remote-restore-v8 claude-remote-restore-v9 claude-remote-restore-v10 claude-remote-restore-v11 claude-remote-restore-v12 claude-remote-restore-v13 claude-remote-restore-v14 claude-remote-restore-v15 claude-remote-restore-v16 claude-remote-restore-v17 claude-remote-restore-v18 claude-remote-restore-v19 claude-remote-restore-v20",
+            "# ~/.claude-remote/drift-heal.off switches this guard off, and only the guard: it is no brake on drift's relaunch",
+            "# (self-heal then runs without it). The brakes for drift are ~/.claude-remote/drift.off and stopping its timer.",
+            "",
+            "        cr_acct_ok \"\$ACCT\" || { echo \"account \$(cr_q \"\$ACCT\") of \$TMUX_NAME is a path — starting it without an account\"; ACCT=\"\"; }",
+            "        cr_name_ok \"\$TMUX_NAME\" || { echo \"skip \$TMUX_NAME — tmux cannot hold this name as written\"; continue; }",
+            "            CMD=\"\$(cr_acct \"\$ACCT\") \$CMD\"",
+            "                cr_acct_ok \"\${ACCT:-}\" || { echo \"account \$(cr_q \"\$ACCT\") of \${TMUX_NAME:-} is a path — starting it without an account\"; ACCT=\"\"; }",
+            "                if [ -n \"\${TMUX_NAME:-}\" ] && [ -n \"\${FOLDER:-}\" ] && cr_name_ok \"\$TMUX_NAME\" \\",
+            "                        FOLDER_EXP=\$(cr_folder \"\$FOLDER\") && [ -d \"\$FOLDER_EXP\" ] && {",
+            "                                    CMD=\"\$CMD --resume \$(cr_q \"\$UUID\")\"",
+            "                                    CMD=\"\$CMD --session-id \$(cr_q \"\$UUID\")\"",
+            "                                CMD=\"\$(cr_acct \"\$ACCT\") \$CMD\"",
+            "            R_NEW=1",
+            "# marker-compat (do NOT remove): claude-remote-restore-v6 claude-remote-restore-v7 claude-remote-restore-v8 claude-remote-restore-v9 claude-remote-restore-v10 claude-remote-restore-v11 claude-remote-restore-v12 claude-remote-restore-v13 claude-remote-restore-v14 claude-remote-restore-v15 claude-remote-restore-v16 claude-remote-restore-v17 claude-remote-restore-v18 claude-remote-restore-v19 claude-remote-restore-v20",
+            "# ~/.claude-remote/drift-heal.off switches this guard off, and only the guard: it is no brake on drift's relaunch",
+            "# (self-heal then runs without it). The brakes for drift are ~/.claude-remote/drift.off and stopping its timer.",
+            "# Every tmux call of a tick gets a time limit, with the guard or without it (v20: it used to go with drift-heal.off).",
+            "# It ends the client; a pipe or \$(…) reading from it still waits while a stopped server holds the client's stdout, so",
+            "# only the guard (on by default) keeps a tick short over a hung server.",
+            "command -v timeout >/dev/null 2>&1 && tmux() { timeout -k 2 10 tmux \"\$@\"; }",
+            "    tmux kill-session -t =__anchor__ 2>/dev/null || true",
+            "APP_JSON=\"[]\"; OWN_META=\"\"; B1_DROPPED=0",
+            "        *)  if [ -n \"\$a_sig\" ]; then OWN_META=\"\$OWN_META\"\$'\\n'\"c:\$s\"",
+            "            elif app_has \"\$s\"; then OWN_META=\"\$OWN_META\"\$'\\n'\"a:\$s\"",
+            "        case \"\$a_model\" in",
+            "            opus)   model=OPUS;;",
+            "            sonnet) model=SONNET;;",
+            "            haiku)  model=HAIKU;;",
+            "            fable)  model=FABLE;;",
+            "        case \"\$a_pmode\" in",
+            "            auto) mode=AUTO;;",
+            "            acceptEdits) mode=AUTO_ACCEPT;;",
+            "            *) [ -z \"\$a_allow\" ] || mode=DEFAULT;;",
+            "        # a session id is hex and dashes (a uuid): anything else after --resume (a search term, a flag) is none",
+            "        case \"\$a_sid\" in ''|-*|*[!0-9a-f-]*) ;; *) sid=\$a_sid;; esac",
+            "done < <(tmux -u list-sessions -F '#{session_name}' 2>/dev/null)",
+            "# ---- end of the live sessions ----",
+            "        def crsafe: (if has(\"claudeSessionId\") then .claudeSessionId |= (if type == \"string\" and test(\"\\\\A[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\\\\z\") then . else null end) else . end)",
+            "            | (if has(\"accountSlug\") then .accountSlug |= (if type == \"string\" and test(\"\\\\A[\\\\p{L}\\\\p{N}@._-]{1,64}\\\\z\") and . != \".\" and . != \"..\" then . else null end) else . end);",
+            "        | (\$own | split(\"\\n\") | map(select(length > 0) | {key: .[2:], value: .[0:1]}) | from_entries) as \$om",
+            "            | if \$om[\$n] == \"a\" then (\$am[\$n] | crsafe)",
+            "        tmux kill-session -t =__anchor__ 2>/dev/null || true",
+            "        LIVE=\$(printf '%s' \"\$LIVE\" | jq -c --arg own \"\$OWN_META\" '(\$own | split(\"\\n\") | map(select(length > 0) | .[2:])) as \$o",
+            "        # v20 (E3): this tick's manifest misses these names, so the mirror below must not copy it over the app's",
+            "        # sessions.json, which still has the app's entries of them",
+            "        B1_DROPPED=1",
+            "        fi",
+            "    fi",
+            "    # ---- end of the first manifest ----",
+            "    NEW=\$(jq -n --slurpfile old0 <(printf '%s' \"\$OLD\") --slurpfile live0 <(printf '%s' \"\$LIVE\") --argjson forget \"\$FORGET\" '",
+            "        \$old0[0] as \$old | \$live0[0] as \$live",
+            "        | ((\$live | map({key:.tmuxSessionName, value:.}) | from_entries) as \$lm",
+            "    if [ \"\$SEED_HOLD\" = 0 ] && [ -n \"\$NEW\" ] && { [ \"\$NEW\" != \"\$OLD\" ] || [ \"\${CORRUPT:-0}\" = \"1\" ] || [ \"\$SEEDED\" = \"1\" ]; }; then",
+            "        DROP_EXPLAINED=\$(jq -n --slurpfile old0 <(printf '%s' \"\$OLD\") --argjson forget \"\$FORGET\" \\",
+            "            '\$old0[0] as \$old | ((\$old | map(.tmuxSessionName)) - \$forget | length) == 0' 2>/dev/null)",
+            "            # the first manifest is logged once it is written (A-ED3: not when the write could not happen)",
+            "            [ \"\$SEEDED\" = 1 ] && [ -f \"\$SF\" ] && echo \"[\$(date -u +%FT%TZ)] drift: first manifest of this box — \$SEEDLEN entries from the app's sessions.json\"",
+            "            [ -f \"\$HOLD_ST\" ] && [ -f \"\$SF\" ] && rm -f \"\$HOLD_ST\"",
+            "    if [ \"\$SEED_HOLD\" = 0 ] && [ -f \"\$FORGOTTEN\" ] && [ -s \"\$FORGOTTEN\" ]; then",
+            "    # A name tmux cannot hold as written (`.`, `:`, a control character: tmux makes it `_` or escapes it) is never",
+            "    # \"missing\": its relaunch would start a session of another name, every tick (v20, A-ED1). On the box `server` the",
+            "    # manifest holds only names of live sessions, so no such name is ever there.",
+            "    MISSING=\$(jq -r '.[].tmuxSessionName | select((type == \"string\" and test(\"[.:]|[[:cntrl:]]\")) | not)' \"\$SF\" 2>/dev/null | while IFS= read -r n; do",
+            "        tmux has-session -t=\"\$n\" 2>/dev/null && continue",
+            "    done)",
+            "    SKIPPED=\$(printf '%s\\n' \"\$MISSING\" | sed -n 's/^s://p')",
+            "    MISSING=\$(printf '%s\\n' \"\$MISSING\" | sed -n 's/^m://p')",
+            "        echo \"[\$(date -u +%FT%TZ)] drift: self-heal — relaunching missing: \$(printf '%s\\n' \"\$MISSING\" | tr '\\n' ' ')\"",
+            "            D_NEW=1",
+            "# marker-compat (do NOT remove): claude-remote-restore-v6 claude-remote-restore-v7 claude-remote-restore-v8 claude-remote-restore-v9 claude-remote-restore-v10 claude-remote-restore-v11 claude-remote-restore-v12 claude-remote-restore-v13 claude-remote-restore-v14 claude-remote-restore-v15 claude-remote-restore-v16 claude-remote-restore-v17 claude-remote-restore-v18 claude-remote-restore-v19 claude-remote-restore-v20",
+            "# ~/.claude-remote/drift-heal.off switches this guard off, and only the guard: it is no brake on drift's relaunch",
+            "# (self-heal then runs without it). The brakes for drift are ~/.claude-remote/drift.off and stopping its timer.",
+            "            S_NEW=1",
+        )
+
+        /** Hradlo A: the blocks v20 adds or rewrites, by their opening line. */
+        val V20_BLOCKS = listOf(
+            "# ---- a name tmux holds as written (v20, A-ED1) ----",
+            "# ---- an account slug that is no path (v20, T-ED13) ----",
+            "# ---- an entry whose folder is missing (v20, E4b) ----",
+            "# ---- claude's arguments, one by one (v20, E2 and E2b) ----",
+            "# ---- one shell word (v20, A-ED2) ----",
+            "# ---- publish the scripts (v20, H10) ----",
+            "# ---- rollback copy of drift.sh as of v18 (D6-S, v20) ----",
+            "# ---- rollback copy of drift.sh as of v19 (D6-S, v20) ----",
+            "# ---- rollback copy of restore.sh as of v18 (D6-S, v20) ----",
+            "# ---- rollback copy of restore.sh as of v19 (D6-S, v20) ----",
+            "# ---- the brake (v20, H6) ----",
+            "# ---- the command, word by word (v20, A-ED2) ----",
+            "# ---- the entries left out for their folder, logged once per change (v20, E4b) ----",
+            "# ---- the first manifest of a box with another name (v20, E3) ----",
+            "# ---- the first manifest postponed (v20, A-ED9) ----",
+            "# ---- the folder (v20, E4b) ----",
+            "# ---- the folder of a manifest entry (v20, E4b) ----",
+            "# ---- the live sessions, one name per line (v20, E1) ----",
+            "# ---- the mirror (v20: under the manifest lock, by rename) ----",
+        )
+
+        const val GOLDEN_V19_SHA256 = "e620cc7c7f5e974b1e3817923ae96f8fc1a56b66a5f45d40ea938045f60745b8"
+        const val BASE_V19 = "1bdcbd5c0031b14cf3c5e7fbc86e27cb148b15a3"
+
+        fun golden(): String = goldenFile("restore-installer-v18.sh")
+
+        fun golden19(): String = goldenFile("restore-installer-v19.sh")
+
+        private fun goldenFile(name: String): String {
+            val rel = "src/desktopTest/resources/golden/$name"
             return (listOf(File(rel), File("shared/$rel")).firstOrNull { it.isFile } ?: File(rel)).readText()
+        }
+
+        /** The raw template of `prefixWrite` in a source text of `SessionPersistenceService.kt`. */
+        fun prefixWriteOf(source: String): String {
+            val start = "internal fun prefixWrite(prefix: String): String = \"\"\""
+            val a = source.indexOf(start)
+            require(a >= 0) { "no prefixWrite in the source" }
+            return source.substring(a, source.indexOf("\"\"\"", a + start.length))
         }
 
         /**
@@ -457,6 +708,19 @@ class DriftPrefixesTest {
                 "TmuxNameParser.DEFAULT_PREFIX" to TmuxNameParser.DEFAULT_PREFIX,
             )
             if ("private val PREFIX_CHECK_FUNC = $q" in source) env["PREFIX_CHECK_FUNC"] = kt(raw("private val PREFIX_CHECK_FUNC = $q", q), emptyMap())
+            Regex("""MARKER_VERSION = (\d+)""").find(source)?.let { env["MARKER_VERSION"] = it.groupValues[1] }
+            if ("private val FOLDER_EXPAND_FUNC = $q" in source) env["FOLDER_EXPAND_FUNC"] = kt(raw("private val FOLDER_EXPAND_FUNC = $q", q), emptyMap())
+            // v20: the rollback copies come from one function; its template is read from the same source
+            if ("internal fun rollbackCopy(" in source) {
+                val markerVersion = Regex("""MARKER_VERSION = (\d+)""").find(source)!!.groupValues[1].toInt()
+                val template = raw("internal fun rollbackCopy(", ".removePrefix(").let { it.substring(it.indexOf("return $q") + "return $q".length).removeSuffix(q) }
+                for (m in Regex("""\$\{rollbackCopy\("(\w+)", "([^"]+)", (\d+)\)\}""").findAll(source)) {
+                    val (variable, name, ver) = m.destructured
+                    val newer = (ver.toInt() + 1..markerVersion).joinToString("|")
+                    env[m.value.removePrefix("\${").removeSuffix("}")] = template.replace("\${d}", "\$").replace("\$d", "\$")
+                        .replace("\$variable", variable).replace("\$name", name).replace("\$ver", ver).replace("\$newer", newer).removePrefix("\n")
+                }
+            }
             return kt(raw("internal val INSTALL_RESTORE_COMMAND = $q", "$q.trimIndent()"), env).trimIndent()
         }
     }

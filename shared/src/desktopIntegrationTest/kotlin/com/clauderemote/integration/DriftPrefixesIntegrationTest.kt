@@ -60,10 +60,11 @@ class DriftPrefixesIntegrationTest {
         return r.out
     }
 
-    private fun World.installV19(prefix: String): String {
+    /** The installer of this tree: v19 when these hradla were written (dávka D), v20 since dávka E. */
+    private fun World.installCurrent(prefix: String): String {
         val r = session.execCapture(SessionPersistenceService.INSTALL_RESTORE_EXEC, timeoutMs = 60_000,
             stdin = SessionPersistenceService.installRestoreStdin(prefix))
-        assertEquals(0, r.exit, "v19 install:\n${r.out}")
+        assertEquals(0, r.exit, "current install:\n${r.out}")
         return r.out
     }
 
@@ -86,6 +87,14 @@ class DriftPrefixesIntegrationTest {
      */
     private fun World.seed(live: List<String>, manifest: List<String>, durable: String? = null, transient: String? = null,
                            claude: Map<String, List<String>> = emptyMap()) {
+        // dávka E: the private server is started over ssh (wrap.sh: the fixture's shims first on PATH), so a pane
+        // restore.sh relaunches finds the fixture's claude shim; started from the JVM it had the JVM's PATH, on which
+        // a developer's real `claude` may be
+        if (fixture.tmuxSessions().isEmpty()) {
+            session.execCapture("tmux new-session -d -s ${SshdFixture.KEEPALIVE_SESSION} sleep 86400", timeoutMs = 20_000)
+            waitUntil(10_000, "the private tmux server") { SshdFixture.KEEPALIVE_SESSION in fixture.tmuxSessions() }
+            check(fixture.tmux("show-environment", "-g", "PATH").out.contains(fixture.shims.absolutePath)) { "the private server runs without the fixture's shims" }
+        }
         for (name in live) {
             val folder = File(fixture.home, "w/$name").apply { mkdirs() }
             val cmd = claude[name]?.let { listOf(claudeShim().absolutePath) + it } ?: listOf("sleep", "86400")
@@ -155,22 +164,22 @@ class DriftPrefixesIntegrationTest {
         assertContains(v18.log, "drift: reconciled 1 live (was 2)")
 
         val v19 = world {
-            installV19(TmuxNameParser.DEFAULT_PREFIX)
+            installCurrent(TmuxNameParser.DEFAULT_PREFIX)
             assertFalse(File(crDir(), "prefixes").exists(), "the box `server` gets no file")
-            assertContains(File(crDir(), "drift.sh").readText(), "claude-remote-restore-v19")
+            assertContains(File(crDir(), "drift.sh").readText(), "claude-remote-restore-v20")
             seedBC(); tickTwice()
         }
         assertEquals(v18, v19, "B: v19 on `server` without the file")
 
         val v19junk = world {
-            installV19(TmuxNameParser.DEFAULT_PREFIX)
+            installCurrent(TmuxNameParser.DEFAULT_PREFIX)
             File(crDir(), "prefixes").writeText(JUNK.joinToString("\n") + "\nclaude-server-\n")
             seedBC(); tickTwice()
         }
         assertEquals(v18, v19junk, "B: v19 on `server` with a file of junk and the default")
 
         val box = world {
-            installV19(TmuxNameParser.prefixFor("box"))
+            installCurrent(TmuxNameParser.prefixFor("box"))
             assertEquals("claude-box-\n", File(crDir(), "prefixes").readText(), "the installer wrote the box's prefix")
             seedBC(); tickTwice()
         }
@@ -200,7 +209,7 @@ class DriftPrefixesIntegrationTest {
         val live = listOf("claude-box-b", "claude-test", "__anchor__", "other")
         val v18 = world { installV18(); seed(live, emptyList()); tickTwice() }
         val junk = world {
-            installV19(TmuxNameParser.DEFAULT_PREFIX)
+            installCurrent(TmuxNameParser.DEFAULT_PREFIX)
             File(crDir(), "prefixes").writeText(JUNK.joinToString("\n") + "\n")
             seed(live, emptyList()); tickTwice()
         }
@@ -210,7 +219,7 @@ class DriftPrefixesIntegrationTest {
         assertEquals(live.sorted(), junk.live, "__anchor__ lives on (none of ours is live)")
 
         val mixed = world {
-            installV19(TmuxNameParser.DEFAULT_PREFIX)
+            installCurrent(TmuxNameParser.DEFAULT_PREFIX)
             File(crDir(), "prefixes").writeText((JUNK + listOf("claude-server-", "claude-server-lan-", "claude-box-", "claude-box-lan-")).joinToString("\n") + "\n")
             seed(listOf("claude-server-lan-1", "claude-box-lan-c", "claude-test", "__anchor__", "other", "claude-boxer"), emptyList(),
                 claude = mapOf("claude-box-lan-c" to listOf("--allow-dangerously-skip-permissions"), "claude-boxer" to listOf("--allow-dangerously-skip-permissions")))
@@ -236,7 +245,7 @@ class DriftPrefixesIntegrationTest {
         }
         val v18 = world { installV18(); scenario() }
         val box = world {
-            installV19(TmuxNameParser.prefixFor("box"))
+            installCurrent(TmuxNameParser.prefixFor("box"))
             assertEquals("claude-box-\n", File(crDir(), "prefixes").readText())
             scenario().also {
                 assertFalse(File(crDir(), "restore.log").readTextOrEmpty().contains("claude-box-scratch"), "relaunched")
@@ -257,12 +266,14 @@ class DriftPrefixesIntegrationTest {
      * is one; a pane whose claude lacks the flag (B4) keeps the app's entry like a pane without claude.
      */
     @Test fun theAppsEntryOfASessionWithoutClaudeStaysAsTheAppWroteIt() = world {
-        installV19(TmuxNameParser.prefixFor("box"))
+        installCurrent(TmuxNameParser.prefixFor("box"))
         val work = File(fixture.home, "w/claude-box-work").apply { mkdirs() }.absolutePath
         val entries = """[{"id":"tab-1","serverId":"srv-box-123","folder":"$work","mode":"DEFAULT","model":"OPUS","tmuxSessionName":"claude-box-work","connectionType":"MOSH","alias":"","claudeSessionId":null,"createdAt":1762700000000,"accountSlug":null},""" +
             """{"id":"tab-2","serverId":"srv-box-123","folder":"/elsewhere","mode":"YOLO","model":"DEFAULT","tmuxSessionName":"claude-box-run","connectionType":"SSH","alias":"","claudeSessionId":null,"createdAt":1762700000001,"accountSlug":null},""" +
             """{"id":"tab-3","serverId":"srv-box-123","folder":"/bare","mode":"DEFAULT","model":"HAIKU","tmuxSessionName":"claude-box-bare","connectionType":"MOSH","alias":"","claudeSessionId":null,"createdAt":1762700000002,"accountSlug":null}]"""
         File(crDir(), "sessions.json").writeText(entries)
+        // a manifest is there, as on any box after its first tick: no first manifest from the app's entries (E3, dávka E)
+        File(crDir(), "sessions.restore.json").writeText("[]")
         val before = rows(entries).associateBy { it.name() }
         seed(listOf("claude-box-work", "claude-box-run", "claude-box-new", "claude-box-stray", "claude-box-bare", "claude-box-yolo"), emptyList(),
             claude = mapOf("claude-box-run" to listOf("--permission-mode", "auto", "--allow-dangerously-skip-permissions"),
@@ -317,7 +328,7 @@ class DriftPrefixesIntegrationTest {
         }
         val v18 = world { installV18(); scenario() }
         val box = world {
-            installV19(TmuxNameParser.prefixFor("box"))
+            installCurrent(TmuxNameParser.prefixFor("box"))
             assertEquals("claude-box-\n", File(crDir(), "prefixes").readText())
             scenario().also {
                 val restoreLog = File(crDir(), "restore.log").readTextOrEmpty()
@@ -339,8 +350,10 @@ class DriftPrefixesIntegrationTest {
      * of another name in `sessions.json`.
      */
     @Test fun theAnchorGoesForAnAdoptedSessionOfTheBoxsPrefixAndStaysForAStray() = world {
-        installV19(TmuxNameParser.prefixFor("box"))
+        installCurrent(TmuxNameParser.prefixFor("box"))
         File(crDir(), "sessions.json").writeText("""[{"id":"tab-9","serverId":"srv-box-123","folder":"/elsewhere","mode":"DEFAULT","model":"DEFAULT","tmuxSessionName":"claude-box-other","connectionType":"SSH","alias":"","claudeSessionId":null,"createdAt":1,"accountSlug":null}]""")
+        // a manifest is there: no first manifest from the app's entries (E3, dávka E)
+        File(crDir(), "sessions.restore.json").writeText("[]")
         fun live() = fixture.tmuxSessions().filter { it != SshdFixture.KEEPALIVE_SESSION }.sorted()
         seed(listOf("claude-box-stray", "__anchor__"), emptyList())
         tick()
@@ -363,18 +376,18 @@ class DriftPrefixesIntegrationTest {
         val before = files.map { inode(it) }
         val logBefore = File(crDir(), "install.log").readText().length
 
-        val out = installV19(TmuxNameParser.DEFAULT_PREFIX)
+        val out = installCurrent(TmuxNameParser.DEFAULT_PREFIX)
         for (tag in listOf("RESTORE_SCRIPT_INSTALLED", "DRIFT_SCRIPT_INSTALLED", "SOCKHEAL_SCRIPT_INSTALLED", "RESTORE_UNIT_PRESENT")) {
             assertTrue(tag in out.lines(), "$tag:\n$out")
         }
         assertFalse("DRIFT_TIMER_INSTALLED" in out || "RESTORE_UNIT_INSTALLED" in out, "the units stay: no daemon-reload\n$out")
         files.forEachIndexed { i, f ->
             assertTrue(before[i] != inode(f), "${f.name} rewritten in place")
-            assertContains(f.readText(), "claude-remote-restore-v19", message = f.name)
+            assertContains(f.readText(), "claude-remote-restore-v20", message = f.name)
         }
         val log = File(crDir(), "install.log").readText().substring(logBefore)
         for (f in files) {
-            assertContains(log, "${f.name} missing claude-remote-restore-v19 — rewriting; prior marker line: # marker-compat (do NOT remove): " +
+            assertContains(log, "${f.name} missing claude-remote-restore-v20 — rewriting; prior marker line: # marker-compat (do NOT remove): " +
                 (6..18).joinToString(" ") { "claude-remote-restore-v$it" } + "\n", message = log)
         }
         // D6S-zaloha: the replaced v18 restore.sh and drift.sh are kept next to them, byte for byte; the guard script
@@ -387,7 +400,7 @@ class DriftPrefixesIntegrationTest {
         }
         assertFalse(File(crDir(), "tmux-sockheal.sh.v18").exists())
         val now = files.map { it.readText() }
-        assertTrue("PRESENT" in installV19(TmuxNameParser.DEFAULT_PREFIX))
+        assertTrue("PRESENT" in installCurrent(TmuxNameParser.DEFAULT_PREFIX))
         val old = installV18()
         assertTrue("RESTORE_SCRIPT_PRESENT" in old.lines() && "INSTALLED" !in old, "a v18 client rewrote v19 scripts:\n$old")
         assertEquals(now, files.map { it.readText() }, "nothing rewritten after v19")
@@ -402,14 +415,14 @@ class DriftPrefixesIntegrationTest {
             val v17 = "#!/usr/bin/env bash\n# marker-compat (do NOT remove): " + (6..17).joinToString(" ") { "claude-remote-restore-v$it" } + "\nexit 0\n"
             File(crDir(), "restore.sh").writeText(v17)
             File(crDir(), "drift.sh").writeText(v17)
-            val out = installV19(TmuxNameParser.DEFAULT_PREFIX)
+            val out = installCurrent(TmuxNameParser.DEFAULT_PREFIX)
             assertTrue("DRIFT_SCRIPT_INSTALLED" in out.lines(), out)
             assertTrue(crDir().list()!!.none { it.endsWith(".v18") }, "a copy of a v17 script: ${crDir().list()!!.toList()}")
         }
         world {
             installV18()
             File(crDir(), "drift.sh.v18").writeText("an earlier copy\n")
-            installV19(TmuxNameParser.DEFAULT_PREFIX)
+            installCurrent(TmuxNameParser.DEFAULT_PREFIX)
             assertEquals("an earlier copy\n", File(crDir(), "drift.sh.v18").readText(), "an existing copy was overwritten")
             assertEquals(heredoc(golden(), "RESTORE_EOF"), File(crDir(), "restore.sh.v18").readText())
         }

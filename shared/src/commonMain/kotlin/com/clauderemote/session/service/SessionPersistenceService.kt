@@ -158,8 +158,8 @@ internal class SessionPersistenceService(
 # anchor attaches a session that is still there). On rc 1 SG_WHY names the cause (split, hung, unsafe, heal).
 # Never relaunch while anything listens there. The server is identified by the listening socket's exact path,
 # never by cmdline: the live server's cmdline names no socket, and test servers isolate through TMUX_TMPDIR.
-# ~/.claude-remote/drift-heal.off switches all of this off: the only rollback, since an older client never
-# rewrites a v18 script.
+# ~/.claude-remote/drift-heal.off switches this guard off, and only the guard: it is no brake on drift's relaunch
+# (self-heal then runs without it). The brakes for drift are ~/.claude-remote/drift.off and stopping its timer.
 SG_DIR="${'$'}HOME/.claude-remote"
 SG_UID=${'$'}(id -u)
 # tmux binds realpath(TMUX_TMPDIR)/tmux-<uid>/default: a trailing / or a symlink in TMUX_TMPDIR must not hide it.
@@ -318,6 +318,51 @@ cr_prefix_ok() {
 }"""
 
         /**
+         * E4b (v20): the folder of a manifest entry as restore.sh starts it, pasted VERBATIM into restore.sh (its jq
+         * branch) and drift.sh (which leaves an entry whose folder is missing out of self-heal), so both read a folder
+         * the same way. Must be declared before [INSTALL_RESTORE_COMMAND]: companion properties initialise in textual
+         * order.
+         */
+        private val FOLDER_EXPAND_FUNC = """
+# ---- the folder of a manifest entry (v20, E4b) ----
+# As restore.sh starts it: ~ is ${'$'}HOME, a relative path lies under ${'$'}HOME. An empty folder or jq's null (no folder
+# at all) is no folder: rc 1, nothing printed (v19's restore.sh started an empty folder in ${'$'}HOME/ and looked for
+# a folder "null" as ${'$'}HOME/null).
+cr_folder() {
+    local f
+    case "${'$'}1" in ''|null) return 1;; esac
+    f="${'$'}{1/#\~/${'$'}HOME}"
+    case "${'$'}f" in /*) ;; *) f="${'$'}HOME/${'$'}f";; esac
+    printf '%s' "${'$'}f"
+}
+# ---- end of the folder of a manifest entry ----"""
+
+        /** The marker version [INSTALL_RESTORE_COMMAND] carries: `MARKER` is made of it; `DriftPrefixesTest` holds the compat lines to it. */
+        internal const val MARKER_VERSION = 20
+
+        /**
+         * The installer's rollback copy of [name] (in `$`[variable]) as of marker v[ver]: kept once when the script the
+         * installer replaces is v[ver], so moving it back is the way back to v[ver] (by hand, only with Lukáš's consent
+         * that day; any client of a newer marker rewrites it on its next launch, a lasting way back is a hotfix). A
+         * script of a newer marker names v[ver] in its compat line too, so the copy must carry no newer marker (a
+         * second installer may have replaced the script in between), and `ln` publishes it only where no copy is yet
+         * (K2): never one over another. Its temp file is in the installer's `trap`.
+         */
+        internal fun rollbackCopy(variable: String, name: String, ver: Int): String {
+            val d = "${'$'}"
+            val newer = (ver + 1..MARKER_VERSION).joinToString("|")
+            return """
+            # ---- rollback copy of $name as of v$ver (D6-S, v20) ----
+            if grep -qE 'claude-remote-restore-v$ver( |$d)' "$d$variable" 2>/dev/null && [ ! -e "$d$variable.v$ver" ]; then
+                { cp -p "$d$variable" "$d$variable.v$ver.tmp.$d$d" && ! grep -qE 'claude-remote-restore-v($newer)( |$d)' "$d$variable.v$ver.tmp.$d$d" \
+                    && ln "$d$variable.v$ver.tmp.$d$d" "$d$variable.v$ver" \
+                    && echo "[$d(date -u +%FT%TZ)] install: the v$ver $name kept as $name.v$ver (rollback)" >> "${d}HOME/.claude-remote/install.log"; } 2>/dev/null || :
+                rm -f "$d$variable.v$ver.tmp.$d$d"
+            fi
+            # ---- end of the rollback copy of $name as of v$ver ----""".removePrefix("\n")
+        }
+
+        /**
          * Idempotent installer for the user-level systemd service that restores
          * tmux + claude sessions after a server reboot. Writes:
          *   ~/.claude-remote/restore.sh
@@ -338,18 +383,26 @@ cr_prefix_ok() {
         DUNIT="${'$'}HOME/.config/systemd/user/claude-remote-drift.service"
         DTIMER="${'$'}HOME/.config/systemd/user/claude-remote-drift.timer"
         LOCK="${'$'}HOME/.claude-remote/sessions.lock"
-        MARKER="claude-remote-restore-v19"
+        MARKER="claude-remote-restore-v$MARKER_VERSION"
         # An install cut short (set -e, a dropped SSH session) must not leave a temp script behind.
-        trap 'rm -f "${'$'}SCRIPT.tmp.${'$'}${'$'}" "${'$'}DRIFT.tmp.${'$'}${'$'}" "${'$'}SOCKHEAL.tmp.${'$'}${'$'}" "${'$'}SCRIPT.v18.tmp.${'$'}${'$'}" "${'$'}DRIFT.v18.tmp.${'$'}${'$'}"' EXIT
+        trap 'rm -f "${'$'}SCRIPT.tmp.${'$'}${'$'}" "${'$'}DRIFT.tmp.${'$'}${'$'}" "${'$'}SOCKHEAL.tmp.${'$'}${'$'}" "${'$'}SCRIPT.v18.tmp.${'$'}${'$'}" "${'$'}DRIFT.v18.tmp.${'$'}${'$'}" "${'$'}SCRIPT.v19.tmp.${'$'}${'$'}" "${'$'}DRIFT.v19.tmp.${'$'}${'$'}"' EXIT
         touch "${'$'}LOCK"
         echo "[${'$'}(date -u +%FT%TZ)] install: invoked by client" >> "${'$'}HOME/.claude-remote/install.log"
+        # v20 (H10): each script missing the marker is written to its temp file first; the three renames follow back to
+        # back once all three are written, and only then the output: an install cut short while writing replaces no
+        # script, and a mix of versions is left only by one killed within the window of the three renames.
+        # An install killed outright (SIGKILL: no trap) leaves its temp files: ours, older than an hour, go here.
+        find "${'$'}HOME/.claude-remote" -maxdepth 1 -type f \( -name 'restore.sh.tmp.[0-9]*' -o -name 'drift.sh.tmp.[0-9]*' \
+            -o -name 'tmux-sockheal.sh.tmp.[0-9]*' -o -name 'restore.sh.v1[89].tmp.[0-9]*' -o -name 'drift.sh.v1[89].tmp.[0-9]*' \) \
+            -mmin +60 -delete 2>/dev/null || true
+        R_NEW=0; D_NEW=0; S_NEW=0
         if ! grep -q "${'$'}MARKER" "${'$'}SCRIPT" 2>/dev/null; then
             echo "[${'$'}(date -u +%FT%TZ)] install: restore.sh missing ${'$'}MARKER — rewriting; prior marker line: ${'$'}(grep -m1 'claude-remote-restore-v' "${'$'}SCRIPT" 2>/dev/null || echo '<none/new file>')" >> "${'$'}HOME/.claude-remote/install.log"
             # Atomic: a fresh inode renamed into place. `cat >` truncated the file a running bash may be reading
             # block by block, which could execute a mix of the old and the new script.
             cat > "${'$'}SCRIPT.tmp.${'$'}${'$'}" <<'RESTORE_EOF'
 #!/usr/bin/env bash
-# marker-compat (do NOT remove): claude-remote-restore-v6 claude-remote-restore-v7 claude-remote-restore-v8 claude-remote-restore-v9 claude-remote-restore-v10 claude-remote-restore-v11 claude-remote-restore-v12 claude-remote-restore-v13 claude-remote-restore-v14 claude-remote-restore-v15 claude-remote-restore-v16 claude-remote-restore-v17 claude-remote-restore-v18 claude-remote-restore-v19
+# marker-compat (do NOT remove): claude-remote-restore-v6 claude-remote-restore-v7 claude-remote-restore-v8 claude-remote-restore-v9 claude-remote-restore-v10 claude-remote-restore-v11 claude-remote-restore-v12 claude-remote-restore-v13 claude-remote-restore-v14 claude-remote-restore-v15 claude-remote-restore-v16 claude-remote-restore-v17 claude-remote-restore-v18 claude-remote-restore-v19 claude-remote-restore-v20
 # Makes any installed client's `grep -q ${'$'}MARKER` find its marker so it takes the
 # PRESENT no-op path and does NOT rewrite this file (reverting the fixes) nor run
 # the daemon-reload/enable reinstall that correlates with the tmux-server death.
@@ -481,6 +534,36 @@ is_tombstoned() {
         && return 0
     return 1
 }
+$FOLDER_EXPAND_FUNC
+# ---- one shell word (v20, A-ED2) ----
+# ${'$'}1 as one word of the pane's command: the value itself when it holds only characters no shell reads specially (every
+# id, model, flag and account slug the app writes, so the command is v19's byte for byte), else single-quoted. A value
+# from a client's file (the manifest's claudeSessionId, accountSlug) never becomes code. The class is spelled out.
+cr_q() {
+    case "${'$'}1" in
+        ''|*[!abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789@%+=:,./_-]*) printf "'%s'" "${'$'}{1//"'"/"'\\''"}";;
+        *) printf '%s' "${'$'}1";;
+    esac
+}
+# CLAUDE_CONFIG_DIR=… for account ${'$'}1, as v19 wrote it when the slug is one plain word
+cr_acct() {
+    local q
+    q=${'$'}(cr_q "${'$'}1")
+    if [ "${'$'}q" = "${'$'}1" ]; then printf 'CLAUDE_CONFIG_DIR="%s"' "${'$'}HOME/.claude-remote/accounts/${'$'}1"
+    else printf 'CLAUDE_CONFIG_DIR="%s"%s' "${'$'}HOME/.claude-remote/accounts/" "${'$'}q"
+    fi
+}
+# ---- end of one shell word ----
+# ---- a name tmux holds as written (v20, A-ED1) ----
+# tmux makes `.` and `:` of a session name into `_` and escapes a control character: such a name of the manifest would
+# start a session of another name (a closed one, or a second row for one session), so it is skipped.
+cr_name_ok() { case "${'$'}1" in *[.:]*|*[[:cntrl:]]*) return 1;; esac; return 0; }
+# ---- end of a name tmux holds as written ----
+# ---- an account slug that is no path (v20, T-ED13) ----
+# A slug is a directory under accounts/: one with `/`, or `.` / `..`, would put CLAUDE_CONFIG_DIR somewhere else. Such
+# an entry starts without an account (logged) rather than not at all: a session that never starts is "missing" every tick.
+cr_acct_ok() { case "${'$'}1" in .|..|*/*) return 1;; esac; return 0; }
+# ---- end of an account slug that is no path ----
 if [ "${'$'}HAVE_JQ" = "1" ]; then
     COUNT=${'$'}(echo "${'$'}SNAP" | jq 'length')
     for i in ${'$'}(seq 0 ${'$'}((COUNT-1))); do
@@ -493,11 +576,14 @@ if [ "${'$'}HAVE_JQ" = "1" ]; then
         # the pre-existing ~/.claude login, which MUST run with CLAUDE_CONFIG_DIR
         # unset — see the ENVPFX note below.
         ACCT=${'$'}(echo "${'$'}SNAP" | jq -r ".[${'$'}i].accountSlug // empty")
+        cr_acct_ok "${'$'}ACCT" || { echo "account ${'$'}(cr_q "${'$'}ACCT") of ${'$'}TMUX_NAME is a path — starting it without an account"; ACCT=""; }
+        cr_name_ok "${'$'}TMUX_NAME" || { echo "skip ${'$'}TMUX_NAME — tmux cannot hold this name as written"; continue; }
         is_tombstoned "${'$'}TMUX_NAME" && { echo "skip ${'$'}TMUX_NAME — closed by the user (tombstoned)"; continue; }
         tmux has-session -t="${'$'}TMUX_NAME" 2>/dev/null && continue
-        FOLDER_EXP="${'$'}{FOLDER/#\~/${'$'}HOME}"
-        case "${'$'}FOLDER_EXP" in /*) ;; *) FOLDER_EXP="${'$'}HOME/${'$'}FOLDER_EXP";; esac
-        [ -d "${'$'}FOLDER_EXP" ] || { echo "skip ${'$'}TMUX_NAME — folder ${'$'}FOLDER_EXP missing"; continue; }
+        # ---- the folder (v20, E4b) ----
+        FOLDER_EXP=${'$'}(cr_folder "${'$'}FOLDER") && [ -d "${'$'}FOLDER_EXP" ] \
+            || { echo "skip ${'$'}TMUX_NAME — folder ${'$'}{FOLDER_EXP:-<none>} missing"; continue; }
+        # ---- end of the folder ----
         case "${'$'}MODEL" in
             LOCAL|LOCAL_ORNITH|LOCAL_QWEN) ARGS=("claude-local");;
             *) ARGS=("claude");;
@@ -540,7 +626,10 @@ if [ "${'$'}HAVE_JQ" = "1" ]; then
                 ARGS+=(--session-id "${'$'}UUID")
             fi
         fi
-        CMD="${'$'}{ARGS[*]}"
+        # ---- the command, word by word (v20, A-ED2) ----
+        CMD=""
+        for a in "${'$'}{ARGS[@]}"; do CMD="${'$'}CMD${'$'}{CMD:+ }${'$'}(cr_q "${'$'}a")"; done
+        # ---- end of the command ----
         # ACCOUNT. This script builds the claude command a SECOND time, entirely
         # independently of the app's ClaudeConfig — so the account has to be
         # honoured HERE too or a restored/self-healed session silently reverts to
@@ -551,7 +640,7 @@ if [ "${'$'}HAVE_JQ" = "1" ]; then
         # set, claude reads ~/.claude/.claude.json, which doesn't exist, gets
         # created empty, and the session loses its project trust map + MCP config.
         if [ -n "${'$'}{ACCT:-}" ] && [ "${'$'}{ACCT:-}" != "default" ]; then
-            CMD="CLAUDE_CONFIG_DIR=\"${'$'}HOME/.claude-remote/accounts/${'$'}ACCT\" ${'$'}CMD"
+            CMD="${'$'}(cr_acct "${'$'}ACCT") ${'$'}CMD"
         fi
         # `exec bash -l` keepalive: when claude exits (crash, usage limit, OOM,
         # /exit, network blip) the pane drops to a login shell instead of the
@@ -576,20 +665,20 @@ else
             *claudeSessionId*) UUID=${'$'}(parse_field claudeSessionId "${'$'}line");;
             *accountSlug*)     ACCT=${'$'}(parse_field accountSlug "${'$'}line");;
             *\}*)
-                if [ -n "${'$'}{TMUX_NAME:-}" ] && [ -n "${'$'}{FOLDER:-}" ] \
+                cr_acct_ok "${'$'}{ACCT:-}" || { echo "account ${'$'}(cr_q "${'$'}ACCT") of ${'$'}{TMUX_NAME:-} is a path — starting it without an account"; ACCT=""; }
+                if [ -n "${'$'}{TMUX_NAME:-}" ] && [ -n "${'$'}{FOLDER:-}" ] && cr_name_ok "${'$'}TMUX_NAME" \
                    && ! is_tombstoned "${'$'}TMUX_NAME"; then
                     if ! tmux has-session -t="${'$'}TMUX_NAME" 2>/dev/null; then
-                        FOLDER_EXP="${'$'}{FOLDER/#\~/${'$'}HOME}"
-                        [ -d "${'$'}FOLDER_EXP" ] && {
+                        FOLDER_EXP=${'$'}(cr_folder "${'$'}FOLDER") && [ -d "${'$'}FOLDER_EXP" ] && {
                             CMD="claude --allow-dangerously-skip-permissions"
                             # Resume only a conversation that exists: --resume on a
                             # session nobody spoke to exits "No conversation found".
                             if [ -n "${'$'}{UUID:-}" ]; then
                                 if ls "${'$'}HOME"/.claude/projects/*/"${'$'}UUID".jsonl >/dev/null 2>&1 \
                                    || { [ -n "${'$'}{ACCT:-}" ] && ls "${'$'}HOME/.claude-remote/accounts/${'$'}ACCT/projects/"*/"${'$'}UUID".jsonl >/dev/null 2>&1; }; then
-                                    CMD="${'$'}CMD --resume ${'$'}UUID"
+                                    CMD="${'$'}CMD --resume ${'$'}(cr_q "${'$'}UUID")"
                                 else
-                                    CMD="${'$'}CMD --session-id ${'$'}UUID"
+                                    CMD="${'$'}CMD --session-id ${'$'}(cr_q "${'$'}UUID")"
                                 fi
                             fi
                             # Same account rule as the jq branch above — this
@@ -597,7 +686,7 @@ else
                             # jq-less box quietly restores every session onto the
                             # default login. Empty/"default" ⇒ NO env var at all.
                             if [ -n "${'$'}{ACCT:-}" ] && [ "${'$'}{ACCT:-}" != "default" ]; then
-                                CMD="CLAUDE_CONFIG_DIR=\"${'$'}HOME/.claude-remote/accounts/${'$'}ACCT\" ${'$'}CMD"
+                                CMD="${'$'}(cr_acct "${'$'}ACCT") ${'$'}CMD"
                             fi
                             tmux new-session -d -x 200 -y 50 -s "${'$'}TMUX_NAME" -c "${'$'}FOLDER_EXP" \
                                 "tmux set-option -g mouse on; tmux set-option -g history-limit 100000; ${'$'}CMD; exec bash -l"
@@ -612,28 +701,15 @@ else
 fi
 RESTORE_EOF
             chmod +x "${'$'}SCRIPT.tmp.${'$'}${'$'}"
-            # ---- rollback copy of restore.sh (D6-S) ----
-            # Kept once when the script replaced here is v18 (kritika D2 N17): moving it back is the way back to v18, by
-            # hand and only with Lukáš's consent that day (any v19 client's next install rewrites it to v19 again).
-            # v19's compat line names v18 too, so the copy itself must not be v19 (a second installer may have replaced
-            # the script in between), and `ln` publishes it only where no copy is yet (K2): never one over another.
-            if grep -qE 'claude-remote-restore-v18( |${'$'})' "${'$'}SCRIPT" 2>/dev/null && [ ! -e "${'$'}SCRIPT.v18" ]; then
-                { cp -p "${'$'}SCRIPT" "${'$'}SCRIPT.v18.tmp.${'$'}${'$'}" && ! grep -q 'claude-remote-restore-v19' "${'$'}SCRIPT.v18.tmp.${'$'}${'$'}" \
-                    && ln "${'$'}SCRIPT.v18.tmp.${'$'}${'$'}" "${'$'}SCRIPT.v18" \
-                    && echo "[${'$'}(date -u +%FT%TZ)] install: the v18 restore.sh kept as restore.sh.v18 (rollback)" >> "${'$'}HOME/.claude-remote/install.log"; } 2>/dev/null || :
-                rm -f "${'$'}SCRIPT.v18.tmp.${'$'}${'$'}"
-            fi
-            # ---- end of the rollback copy of restore.sh ----
-            mv -f "${'$'}SCRIPT.tmp.${'$'}${'$'}" "${'$'}SCRIPT"
-            echo "RESTORE_SCRIPT_INSTALLED"
-        else
-            echo "RESTORE_SCRIPT_PRESENT"
+${rollbackCopy("SCRIPT", "restore.sh", 18)}
+${rollbackCopy("SCRIPT", "restore.sh", 19)}
+            R_NEW=1
         fi
         if ! grep -q "${'$'}MARKER" "${'$'}DRIFT" 2>/dev/null; then
             echo "[${'$'}(date -u +%FT%TZ)] install: drift.sh missing ${'$'}MARKER — rewriting; prior marker line: ${'$'}(grep -m1 'claude-remote-restore-v' "${'$'}DRIFT" 2>/dev/null || echo '<none/new file>')" >> "${'$'}HOME/.claude-remote/install.log"
             cat > "${'$'}DRIFT.tmp.${'$'}${'$'}" <<'DRIFT_EOF'
 #!/usr/bin/env bash
-# marker-compat (do NOT remove): claude-remote-restore-v6 claude-remote-restore-v7 claude-remote-restore-v8 claude-remote-restore-v9 claude-remote-restore-v10 claude-remote-restore-v11 claude-remote-restore-v12 claude-remote-restore-v13 claude-remote-restore-v14 claude-remote-restore-v15 claude-remote-restore-v16 claude-remote-restore-v17 claude-remote-restore-v18 claude-remote-restore-v19
+# marker-compat (do NOT remove): claude-remote-restore-v6 claude-remote-restore-v7 claude-remote-restore-v8 claude-remote-restore-v9 claude-remote-restore-v10 claude-remote-restore-v11 claude-remote-restore-v12 claude-remote-restore-v13 claude-remote-restore-v14 claude-remote-restore-v15 claude-remote-restore-v16 claude-remote-restore-v17 claude-remote-restore-v18 claude-remote-restore-v19 claude-remote-restore-v20
 # Makes any installed client's `grep -q ${'$'}MARKER` find its marker so it takes the
 # PRESENT no-op path and does NOT rewrite this file (reverting the fixes) nor run
 # the daemon-reload/enable reinstall that correlates with the tmux-server death.
@@ -646,6 +722,12 @@ RESTORE_EOF
 # client is non-fatal — within 60s the snapshot is rebuilt from ground truth,
 # so the next reboot's restore service still rebuilds every live session.
 set -u
+# ---- the brake (v20, H6) ----
+# ~/.claude-remote/drift.off stops drift before it does anything at all: no tmux call, no manifest, no mirror, no
+# relaunch, no log. Remove the file to let the next tick run. (drift-heal.off is no brake: it only turns the socket
+# guard off, and self-heal then relaunches without it.) The other brake: systemctl --user stop claude-remote-drift.timer.
+[ -e "${'$'}HOME/.claude-remote/drift.off" ] && exit 0
+# ---- end of the brake ----
 # Any tmux server started from here (incl. auto-start by `tmux new-session`,
 # which does NOT inherit the anchor scope's LimitCORE) must be able to dump a
 # core: the deaths are tmux SIGSEGV and a backtrace is the only way past theory.
@@ -684,9 +766,11 @@ SG_WHO=drift
 # SOCKET GUARD, every tick and before anything below can decide to relaunch (not only at LIVE=[]: at 23:38:14 on
 # 2026-11-02 LIVE held part of a SECOND server's sessions and drift relaunched 24 more duplicates).
 # Healed (rc 2) or refused (rc 1): this tick relaunches nothing and writes no manifest.
+# Every tmux call of a tick gets a time limit, with the guard or without it (v20: it used to go with drift-heal.off).
+# It ends the client; a pipe or $(…) reading from it still waits while a stopped server holds the client's stdout, so
+# only the guard (on by default) keeps a tick short over a hung server.
+command -v timeout >/dev/null 2>&1 && tmux() { timeout -k 2 10 tmux "${'$'}@"; }
 if [ ! -e "${'$'}SG_OFF" ]; then
-    # Every tmux call of a tick gets a time limit: a hung server must not wedge the timer unit.
-    command -v timeout >/dev/null 2>&1 && tmux() { timeout -k 2 10 tmux "${'$'}@"; }
     SG_RC=0; sg_guard || SG_RC=${'$'}?
     [ "${'$'}SG_RC" -eq 0 ] || exit 0
 fi
@@ -740,7 +824,7 @@ is_ours() {
 # real session and churn it (kill/relaunch). Safe — exit-empty=off keeps the
 # server alive at 0 sessions.
 if tmux -u list-sessions -F '#{session_name}' 2>/dev/null | { while IFS= read -r s; do case "${'$'}s" in "${TmuxNameParser.DEFAULT_PREFIX}"*) exit 0;; esac; done; exit 1; }; then
-    tmux kill-session -t __anchor__ 2>/dev/null || true
+    tmux kill-session -t =__anchor__ 2>/dev/null || true
 fi
 
 # CORE DUMPS, enforced on whatever server is actually live. Setting `ulimit -c`
@@ -794,7 +878,7 @@ find_claude_descendant() {
 # with (metadata from claude's cmdline and environ, a missing serverId from the app's entry of that name), or the app's
 # sessions.json has an entry of that name, kept as the app wrote it (claude without the flag gets no YOLO default).
 # Neither: not adopted, not written, not counted as a live session of ours, never relaunched.
-APP_JSON="[]"; OWN_META=""
+APP_JSON="[]"; OWN_META=""; B1_DROPPED=0
 if [ "${'$'}PFX" != "${TmuxNameParser.DEFAULT_PREFIX}" ] && [ -f "${'$'}SF_APP" ]; then
     APP_JSON=${'$'}(jq -c 'if type == "array" then map(select(type == "object" and (.tmuxSessionName | type) == "string")) else [] end' "${'$'}SF_APP" 2>/dev/null)
     [ -n "${'$'}APP_JSON" ] || APP_JSON="[]"
@@ -813,28 +897,53 @@ LIVE_TBL=${'$'}(mktemp "${'$'}HOME/.claude-remote/.drift.live.XXXXXX" 2>/dev/nul
 # TRUTH: the real session's entry vanished, the mangled one collapsed onto any
 # genuinely mangled twin (two identical rows in the manifest), and the next
 # client to read it relaunched the "missing" session under the broken name.
-for s in ${'$'}(tmux -u list-sessions -F '#{session_name}' 2>/dev/null); do
+# ---- the live sessions, one name per line (v20, E1) ----
+# A name is read whole, one per line: a name with a space or a glob character (`claude-server-My Project`, `…a*b`) is
+# one name, never words or file names of the cwd (`for s in ${'$'}(…)` split it, and self-heal started a duplicate). Every
+# tmux target below is exact: a bare name matches by prefix or pattern, so `claude-server-My` read the pane of
+# `claude-server-My Project`. A pane target carries the colon (`=name:`): display-message with `=name` alone prints
+# nothing and exits 0 (tmux 3.5a), which would give every new adoption an empty folder.
+while IFS= read -r s; do
     is_ours "${'$'}s" || continue
-    pane_pid=${'$'}(tmux -u list-panes -t "${'$'}s" -F '#{pane_pid}' 2>/dev/null | head -1)
+    pane_pid=${'$'}(tmux -u list-panes -t "=${'$'}s:" -F '#{pane_pid}' 2>/dev/null | head -1)
     [ -n "${'$'}pane_pid" ] || continue
-    folder=${'$'}(tmux -u display-message -p -t "${'$'}s" '#{pane_current_path}' 2>/dev/null)
+    folder=${'$'}(tmux -u display-message -p -t "=${'$'}s:" '#{pane_current_path}' 2>/dev/null)
     pid=${'$'}(find_claude_descendant "${'$'}pane_pid")
+    # ---- claude's arguments, one by one (v20, E2 and E2b) ----
+    # /proc/<pid>/cmdline read argument by argument (NUL-separated) up to the first `--`: everything after it is
+    # positional (a prompt). The app's signature is an argument equal to one of its two flags, never a piece of a
+    # prompt; model, mode and session id are the argument after --model, --permission-mode and --resume or
+    # --session-id, the first of each (a prompt that names `--session-id <id>` is one argument and never matches). A
+    # value that equals a flag's text counts as that flag, as claude's own parser reads it (a limit).
+    a_sig=""; a_allow=""; a_model=""; a_pmode=""; a_sid=""; a_gm=""; a_gp=""; a_gs=""
+    if [ -n "${'$'}pid" ]; then
+        a_prev=""
+        while IFS= read -r -d '' a || [ -n "${'$'}a" ]; do
+            [ "${'$'}a" = "--" ] && break
+            case "${'$'}a_prev" in
+                --model) [ -n "${'$'}a_gm" ] || { a_gm=1; a_model=${'$'}a; };;
+                --permission-mode) [ -n "${'$'}a_gp" ] || { a_gp=1; a_pmode=${'$'}a; };;
+                --resume|--session-id) [ -n "${'$'}a_gs" ] || { a_gs=1; a_sid=${'$'}a; };;
+            esac
+            case "${'$'}a" in
+                --dangerously-skip-permissions) a_sig=1;;
+                --allow-dangerously-skip-permissions) a_sig=1; a_allow=1;;
+            esac
+            a_prev=${'$'}a
+        done 2>/dev/null < "/proc/${'$'}pid/cmdline"
+    fi
+    # ---- end of claude's arguments ----
     # ---- a session only a line of prefixes names (B1) ----
     case "${'$'}s" in
         "${TmuxNameParser.DEFAULT_PREFIX}"*) ;;
-        *)  sig=""
-            [ -n "${'$'}pid" ] && case " ${'$'}(tr '\0' ' ' < "/proc/${'$'}pid/cmdline" 2>/dev/null) " in
-                *" --dangerously-skip-permissions "*|*" --allow-dangerously-skip-permissions "*) sig=1;;
-            esac
-            if [ -n "${'$'}sig" ]; then OWN_META="${'$'}OWN_META c:${'$'}s"
-            elif app_has "${'$'}s"; then OWN_META="${'$'}OWN_META a:${'$'}s"
+        *)  if [ -n "${'$'}a_sig" ]; then OWN_META="${'$'}OWN_META"${'$'}'\n'"c:${'$'}s"
+            elif app_has "${'$'}s"; then OWN_META="${'$'}OWN_META"${'$'}'\n'"a:${'$'}s"
             else continue
             fi;;
     esac
     # ---- end of a session only a line of prefixes names ----
     sid=""; model="DEFAULT"; mode="YOLO"; acct=""
     if [ -n "${'$'}pid" ]; then
-        args=${'$'}(tr '\0' ' ' < "/proc/${'$'}pid/cmdline" 2>/dev/null)
         # ACCOUNT: the login this pane actually runs under. The command PREFIX
         # (CLAUDE_CONFIG_DIR=... claude ...) is an env assignment, not an argv
         # token, so cmdline can't show it — the process's own environ can.
@@ -846,18 +955,19 @@ for s in ${'$'}(tmux -u list-sessions -F '#{session_name}' 2>/dev/null); do
                 | sed -n 's|^CLAUDE_CONFIG_DIR=||p' | head -1)
             acct=${'$'}(printf '%s' "${'$'}cfg" | sed -n 's|.*/accounts/\([^/]*\)/*${'$'}|\1|p')
         fi
-        case "${'$'}args" in
-            *"--model opus"*)   model=OPUS;;
-            *"--model sonnet"*) model=SONNET;;
-            *"--model haiku"*)  model=HAIKU;;
-            *"--model fable"*)  model=FABLE;;
+        case "${'$'}a_model" in
+            opus)   model=OPUS;;
+            sonnet) model=SONNET;;
+            haiku)  model=HAIKU;;
+            fable)  model=FABLE;;
         esac
-        case "${'$'}args" in
-            *"--permission-mode auto"*) mode=AUTO;;
-            *"--permission-mode acceptEdits"*) mode=AUTO_ACCEPT;;
-            *"--allow-dangerously-skip-permissions"*) mode=DEFAULT;;
+        case "${'$'}a_pmode" in
+            auto) mode=AUTO;;
+            acceptEdits) mode=AUTO_ACCEPT;;
+            *) [ -z "${'$'}a_allow" ] || mode=DEFAULT;;
         esac
-        sid=${'$'}(echo "${'$'}args" | sed -n 's/.*--\(resume\|session-id\) \([0-9a-f-]*\).*/\2/p' | head -1)
+        # a session id is hex and dashes (a uuid): anything else after --resume (a search term, a flag) is none
+        case "${'$'}a_sid" in ''|-*|*[!0-9a-f-]*) ;; *) sid=${'$'}a_sid;; esac
         # Claude writes its per-pid state under the CONFIG DIR, so a pane running
         # under a non-default login keeps it in ~/.claude-remote/accounts/<slug>/
         # sessions/, not ~/.claude/sessions/. Hardcoding the latter made this
@@ -886,7 +996,8 @@ for s in ${'$'}(tmux -u list-sessions -F '#{session_name}' 2>/dev/null); do
     fi
     case "${'$'}s" in *--*) alias="${'$'}{s##*--}";; *) alias="";; esac
     [ -n "${'$'}LIVE_TBL" ] && printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "${'$'}s" "${'$'}folder" "${'$'}mode" "${'$'}model" "${'$'}alias" "${'$'}sid" "${'$'}acct" >> "${'$'}LIVE_TBL"
-done
+done < <(tmux -u list-sessions -F '#{session_name}' 2>/dev/null)
+# ---- end of the live sessions ----
 LIVE="[]"
 if [ -n "${'$'}LIVE_TBL" ]; then
     LIVE=${'$'}(jq -R -s -c '
@@ -904,20 +1015,25 @@ fi
 # come from a file (an execve argument stops at 128 KB); if this jq fails, only these names miss this tick.
 if [ -n "${'$'}OWN_META" ]; then
     if NL=${'$'}(printf '%s' "${'$'}LIVE" | jq -c --slurpfile app0 <(printf '%s' "${'$'}APP_JSON") --arg own "${'$'}OWN_META" '
+        def crsafe: (if has("claudeSessionId") then .claudeSessionId |= (if type == "string" and test("\\A[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\\z") then . else null end) else . end)
+            | (if has("accountSlug") then .accountSlug |= (if type == "string" and test("\\A[\\p{L}\\p{N}@._-]{1,64}\\z") and . != "." and . != ".." then . else null end) else . end);
         (${'$'}app0[0] | map({key: .tmuxSessionName, value: .}) | from_entries) as ${'$'}am
-        | (${'$'}own | split(" ") | map(select(length > 0) | {key: .[2:], value: .[0:1]}) | from_entries) as ${'$'}om
+        | (${'$'}own | split("\n") | map(select(length > 0) | {key: .[2:], value: .[0:1]}) | from_entries) as ${'$'}om
         | map(.tmuxSessionName as ${'$'}n
-            | if ${'$'}om[${'$'}n] == "a" then ${'$'}am[${'$'}n]
+            | if ${'$'}om[${'$'}n] == "a" then (${'$'}am[${'$'}n] | crsafe)
               elif ${'$'}om[${'$'}n] == "c" then . + {serverId: ((${'$'}am[${'$'}n].serverId // "") | if type == "string" then . else "" end)}
               else . end)
         | map(select(type == "object"))' 2>/dev/null) && [ -n "${'$'}NL" ]; then
         LIVE=${'$'}NL
         # an adopted session of ours lives: the anchor goes, as above for ${TmuxNameParser.DEFAULT_PREFIX}*
-        tmux kill-session -t __anchor__ 2>/dev/null || true
+        tmux kill-session -t =__anchor__ 2>/dev/null || true
     else
-        LIVE=${'$'}(printf '%s' "${'$'}LIVE" | jq -c --arg own "${'$'}OWN_META" '(${'$'}own | split(" ") | map(.[2:])) as ${'$'}o
+        LIVE=${'$'}(printf '%s' "${'$'}LIVE" | jq -c --arg own "${'$'}OWN_META" '(${'$'}own | split("\n") | map(select(length > 0) | .[2:])) as ${'$'}o
             | map(select(.tmuxSessionName as ${'$'}n | ${'$'}o | any(.[]; . == ${'$'}n) | not))' 2>/dev/null)
         [ -n "${'$'}LIVE" ] || LIVE="[]"
+        # v20 (E3): this tick's manifest misses these names, so the mirror below must not copy it over the app's
+        # sessions.json, which still has the app's entries of them
+        B1_DROPPED=1
     fi
 fi
 # ---- end of the app's entry ----
@@ -993,6 +1109,62 @@ LIVE=${'$'}(echo "${'$'}LIVE" | jq -c 'map(.tmuxSessionName)')"
         [ -n "${'$'}FORGET" ] || FORGET="${'$'}DFG"
         FGLEN=${'$'}(echo "${'$'}FORGET" | jq 'length' 2>/dev/null || echo 0)
     fi
+    # ---- the first manifest of a box with another name (v20, E3) ----
+    # On a box whose prefixes file names a prefix of its own, the first manifest drift wrote used to hold the live
+    # sessions alone, and the mirror then dropped from sessions.json every entry of the app whose session was not alive
+    # at that moment. Drift's first manifest there (no sessions.restore.json yet) starts from the app's entries of
+    # this box's own prefixes: never claude-server-*, never a tombstoned name, one row per name. A migration, once:
+    # from then on the manifest is drift's own, as on server, and no client's push is an authority for self-heal.
+    # Self-heal relaunches the entries whose session is not alive, as for any entry whose session died.
+    # The app's file is read here, under the manifest lock (the app's push writes it under the same lock): a file jq
+    # cannot read (half written: unparsable or empty, and changed within two minutes) postpones the first manifest, and
+    # this tick writes no manifest, no mirror and consumes no tombstone (SEED_HOLD), so the next tick seeds from the
+    # whole file (review E-D K-ED1). Only a name tmux holds as
+    # written: tmux turns `.` and `:` into `_` and escapes control characters, so such a name would be "missing"
+    # forever and its relaunch would start a session of another name (A-ED1). Only a session id that is a uuid (what the
+    # app and claude write; a 40 KB id made tmux refuse the command every tick) and an account slug of 1 to 64 letters,
+    # digits, @ . _ - (what the app's slugs are made of; never `.` or `..`), each matched on the whole string, else null.
+    SEEDED=0; SEED_HOLD=0; SEEDLEN=0; HOLD_ST="${'$'}HOME/.claude-remote/drift.seedhold"
+    if [ "${'$'}PFX" != "${TmuxNameParser.DEFAULT_PREFIX}" ] && [ ! -f "${'$'}SF" ] && [ -f "${'$'}SF_APP" ]; then
+        if SEED=${'$'}(jq -c --arg pfx "${'$'}PFX" --argjson forget "${'$'}FORGET" '
+            def crsafe: (if has("claudeSessionId") then .claudeSessionId |= (if type == "string" and test("\\A[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\\z") then . else null end) else . end)
+            | (if has("accountSlug") then .accountSlug |= (if type == "string" and test("\\A[\\p{L}\\p{N}@._-]{1,64}\\z") and . != "." and . != ".." then . else null end) else . end);
+            (if type == "array" then . else [] end) | map(select(type == "object" and (.tmuxSessionName | type) == "string"))
+            | (${'$'}pfx | split(" ") | map(select(length > 0 and . != "${TmuxNameParser.DEFAULT_PREFIX}"))) as ${'$'}own
+            | map(select(.tmuxSessionName as ${'$'}n
+                | (${'$'}n | test("[.:]|[[:cntrl:]]") | not)
+                  and (${'$'}n | startswith("${TmuxNameParser.DEFAULT_PREFIX}") | not)
+                  and any(${'$'}own[]; . as ${'$'}q | ${'$'}n | startswith(${'$'}q))
+                  and ((${'$'}forget | index(${'$'}n)) | not)))
+            | map(crsafe)
+            | reduce .[] as ${'$'}e ([]; if any(.[]; .tmuxSessionName == ${'$'}e.tmuxSessionName) then . else . + [${'$'}e] end)' "${'$'}SF_APP" 2>/dev/null) \
+           && [ -n "${'$'}SEED" ]; then
+            [ -f "${'$'}HOLD_ST" ] && rm -f "${'$'}HOLD_ST"
+            SEEDLEN=${'$'}(printf '%s' "${'$'}SEED" | jq 'length' 2>/dev/null || echo 0)
+            if [ "${'$'}{SEEDLEN:-0}" -gt 0 ]; then OLD=${'$'}SEED; SEEDED=1; fi
+        else
+            # ---- the first manifest postponed (v20, A-ED9) ----
+            # A write in progress has an mtime of now (-2 min … +1 min); one older or in the future is none. A file the app
+            # keeps rewriting broken would postpone the first manifest for ever, so a series of postponements has a cap of
+            # 5 ticks, counted in drift.seedhold (garbled or empty = 0, so at most 5 more; a directory = no state, so no
+            # postponement). Then, or for a file broken for longer, the first manifest goes on from the live sessions
+            # without the app's entries. One line opens a series and one ends it; none per tick (99 = ended, logged).
+            sh_m=${'$'}(stat -c %Y "${'$'}SF_APP" 2>/dev/null || echo 0); sh_now=${'$'}(date +%s); sh_n=0
+            [ -f "${'$'}HOLD_ST" ] && sh_n=${'$'}(head -c 16 "${'$'}HOLD_ST" 2>/dev/null | tr -cd 0123456789)
+            sh_n=${'$'}{sh_n:-0}
+            if [ "${'$'}sh_m" -gt ${'$'}((sh_now - 120)) ] && [ "${'$'}sh_m" -le ${'$'}((sh_now + 60)) ] && [ ! -d "${'$'}HOLD_ST" ] && [ "${'$'}sh_n" -lt 5 ]; then
+                SEED_HOLD=1
+                [ "${'$'}sh_n" -eq 0 ] && echo "[${'$'}(date -u +%FT%TZ)] drift: the app's sessions.json is unreadable and being written — first manifest postponed (at most 5 ticks)"
+                sh_n=${'$'}((sh_n + 1))
+            elif [ ! -d "${'$'}HOLD_ST" ] && [ "${'$'}sh_n" -lt 99 ]; then
+                echo "[${'$'}(date -u +%FT%TZ)] drift: the app's sessions.json is unreadable — first manifest from the live sessions, without the app's entries"
+                sh_n=99
+            fi
+            [ -d "${'$'}HOLD_ST" ] || { printf '%s\n' "${'$'}sh_n" > "${'$'}HOLD_ST.tmp.${'$'}${'$'}" && mv -f "${'$'}HOLD_ST.tmp.${'$'}${'$'}" "${'$'}HOLD_ST"; } 2>/dev/null || rm -f "${'$'}HOLD_ST.tmp.${'$'}${'$'}"
+            # ---- end of the first manifest postponed ----
+        fi
+    fi
+    # ---- end of the first manifest ----
     # Keep client metadata for sessions already in OLD (refresh only the live
     # claudeSessionId); add live sessions missing from OLD.
     # UNION reconcile — never DROP a manifest entry just because its tmux isn't
@@ -1001,8 +1173,9 @@ LIVE=${'$'}(echo "${'$'}LIVE" | jq -c 'map(.tmuxSessionName)')"
     # "forget" the session. Keep every OLD entry (refresh its live sid), append
     # live sessions not yet in the manifest, THEN subtract tombstoned names so
     # an explicit close leaves the manifest for good.
-    NEW=${'$'}(jq -n --argjson old "${'$'}OLD" --argjson live "${'$'}LIVE" --argjson forget "${'$'}FORGET" '
-        ((${'$'}live | map({key:.tmuxSessionName, value:.}) | from_entries) as ${'$'}lm
+    NEW=${'$'}(jq -n --slurpfile old0 <(printf '%s' "${'$'}OLD") --slurpfile live0 <(printf '%s' "${'$'}LIVE") --argjson forget "${'$'}FORGET" '
+        ${'$'}old0[0] as ${'$'}old | ${'$'}live0[0] as ${'$'}live
+        | ((${'$'}live | map({key:.tmuxSessionName, value:.}) | from_entries) as ${'$'}lm
         | (${'$'}old | map(.tmuxSessionName)) as ${'$'}on
         | (${'$'}old | map(. as ${'$'}o | (${'$'}lm[${'$'}o.tmuxSessionName]) as ${'$'}l
              | (if ${'$'}l and (${'$'}l.claudeSessionId != null) then ${'$'}o + {claudeSessionId:${'$'}l.claudeSessionId} else ${'$'}o end)
@@ -1011,7 +1184,7 @@ LIVE=${'$'}(echo "${'$'}LIVE" | jq -c 'map(.tmuxSessionName)')"
         | map(select(.tmuxSessionName as ${'$'}n | (${'$'}forget | index(${'$'}n)) | not))' 2>/dev/null)
     NEWLEN=${'$'}(echo "${'$'}NEW" | jq 'length' 2>/dev/null || echo 0)
     OLDLEN=${'$'}(echo "${'$'}OLD" | jq 'length // 0' 2>/dev/null || echo 0)
-    if [ -n "${'$'}NEW" ] && { [ "${'$'}NEW" != "${'$'}OLD" ] || [ "${'$'}{CORRUPT:-0}" = "1" ]; }; then
+    if [ "${'$'}SEED_HOLD" = 0 ] && [ -n "${'$'}NEW" ] && { [ "${'$'}NEW" != "${'$'}OLD" ] || [ "${'$'}{CORRUPT:-0}" = "1" ] || [ "${'$'}SEEDED" = "1" ]; }; then
         # NEVER replace a non-empty manifest with an empty one — a live tmux
         # server that momentarily lists no claude-server-* sessions (crash,
         # race, shutdown the STATE probe missed) must not destroy the restore
@@ -1023,8 +1196,8 @@ LIVE=${'$'}(echo "${'$'}LIVE" | jq -c 'map(.tmuxSessionName)')"
         # non-empty tombstone set would leave this protection switched off for a
         # fortnight after any close — and then a whole-server outage could blank
         # the manifest, which is the incident this guard was added for.
-        DROP_EXPLAINED=${'$'}(jq -n --argjson old "${'$'}OLD" --argjson forget "${'$'}FORGET" \
-            '((${'$'}old | map(.tmuxSessionName)) - ${'$'}forget | length) == 0' 2>/dev/null)
+        DROP_EXPLAINED=${'$'}(jq -n --slurpfile old0 <(printf '%s' "${'$'}OLD") --argjson forget "${'$'}FORGET" \
+            '${'$'}old0[0] as ${'$'}old | ((${'$'}old | map(.tmuxSessionName)) - ${'$'}forget | length) == 0' 2>/dev/null)
         if [ "${'$'}NEWLEN" -eq 0 ] && [ "${'$'}OLDLEN" -gt 0 ] && [ "${'$'}{DROP_EXPLAINED:-false}" != "true" ]; then
             echo "[${'$'}(date -u +%FT%TZ)] drift: refusing to blank non-empty manifest (${'$'}OLDLEN entries) — likely shutdown/tmux restart"
         else
@@ -1055,13 +1228,16 @@ LIVE=${'$'}(echo "${'$'}LIVE" | jq -c 'map(.tmuxSessionName)')"
               if [ -f "${'$'}MDIR/highwater.json" ]; then HW=${'$'}(jq 'length' "${'$'}MDIR/highwater.json" 2>/dev/null || echo 0); fi
               if [ "${'$'}NEWLEN" -gt "${'$'}{HW:-0}" ]; then printf '%s' "${'$'}NEW" > "${'$'}MDIR/highwater.json" 2>/dev/null || true; fi
             echo "${'$'}NEW" > "${'$'}SF.tmp.${'$'}${'$'}" && mv "${'$'}SF.tmp.${'$'}${'$'}" "${'$'}SF"
+            # the first manifest is logged once it is written (A-ED3: not when the write could not happen)
+            [ "${'$'}SEEDED" = 1 ] && [ -f "${'$'}SF" ] && echo "[${'$'}(date -u +%FT%TZ)] drift: first manifest of this box — ${'$'}SEEDLEN entries from the app's sessions.json"
+            [ -f "${'$'}HOLD_ST" ] && [ -f "${'$'}SF" ] && rm -f "${'$'}HOLD_ST"
             echo "[${'$'}(date -u +%FT%TZ)] drift: reconciled ${'$'}NEWLEN live (was ${'$'}OLDLEN)"
         fi
     fi
     # Tombstone self-clean: a forgotten name now absent from BOTH live tmux AND
     # the written manifest has done its job — drop it so a future session
     # reusing the same tmux name isn't blocked. Race-safe under this flock.
-    if [ -f "${'$'}FORGOTTEN" ] && [ -s "${'$'}FORGOTTEN" ]; then
+    if [ "${'$'}SEED_HOLD" = 0 ] && [ -f "${'$'}FORGOTTEN" ] && [ -s "${'$'}FORGOTTEN" ]; then
         MANIFEST="[]"; [ -f "${'$'}SF" ] && MANIFEST=${'$'}(cat "${'$'}SF")
         KEEP=${'$'}(while IFS= read -r fn; do
             [ -n "${'$'}fn" ] || continue
@@ -1070,17 +1246,20 @@ LIVE=${'$'}(echo "${'$'}LIVE" | jq -c 'map(.tmuxSessionName)')"
         done < "${'$'}FORGOTTEN")
         if [ -n "${'$'}KEEP" ]; then printf '%s\n' "${'$'}KEEP" > "${'$'}FORGOTTEN.tmp.${'$'}${'$'}" && mv "${'$'}FORGOTTEN.tmp.${'$'}${'$'}" "${'$'}FORGOTTEN"; else : > "${'$'}FORGOTTEN"; fi
     fi
+    # ---- the mirror (v20: under the manifest lock, by rename) ----
+    # Mirror the server-owned source of truth to the app-facing sessions.json (the client may have blanked/shrunk it on
+    # reconnect); keeps the app view correct within 60s and re-expands a client that wrongly forgot sessions. Mirror ONLY
+    # a valid, non-empty manifest (an unguarded copy blanked the app view), written whole: a temp file checked as a JSON
+    # array and renamed into place under this lock, so the app's reader never sees half a file. Not in a tick whose
+    # manifest misses the names of a failed overlay of the app's entries (B1_DROPPED).
+    if [ "${'$'}B1_DROPPED" = 0 ] && [ "${'$'}SEED_HOLD" = 0 ] && [ ! -d "${'$'}SF_APP" ] && [ -f "${'$'}SF" ] && [ -s "${'$'}SF" ] && jq -e 'length>0' "${'$'}SF" >/dev/null 2>&1 \
+       && ! cmp -s "${'$'}SF" "${'$'}SF_APP" 2>/dev/null; then
+        { cp -f "${'$'}SF" "${'$'}SF_APP.tmp.${'$'}${'$'}" && jq -e 'type=="array"' "${'$'}SF_APP.tmp.${'$'}${'$'}" >/dev/null 2>&1 \
+            && mv -f "${'$'}SF_APP.tmp.${'$'}${'$'}" "${'$'}SF_APP"; } 2>/dev/null || rm -f "${'$'}SF_APP.tmp.${'$'}${'$'}"
+    fi
+    # ---- end of the mirror ----
 ) 9<>"${'$'}LOCK"
-
-# Mirror the server-owned source of truth to the app-facing sessions.json (the
-# client may have blanked/shrunk it on reconnect); keeps the app view correct
-# within 60s and re-expands a client that wrongly forgot sessions.
-# Mirror ONLY a valid, non-empty manifest: an unguarded cp would copy a
-# truncated/empty ${'$'}SF over the app-facing file every tick and blank the app view.
-if [ -f "${'$'}SF" ] && [ -s "${'$'}SF" ] && jq -e 'length>0' "${'$'}SF" >/dev/null 2>&1 \
-   && ! cmp -s "${'$'}SF" "${'$'}SF_APP" 2>/dev/null; then
-    cp -f "${'$'}SF" "${'$'}SF_APP" 2>/dev/null || true
-fi
+$FOLDER_EXPAND_FUNC
 
 # SELF-HEAL: relaunch any manifest session whose tmux is gone (tmux-server
 # crash, OOM, stray kill) so it returns within 60s instead of staying dead
@@ -1090,7 +1269,10 @@ fi
 # sessions and missing folders. Tombstoned names are skipped so an explicit
 # close is never relaunched.
 if [ -f "${'$'}SF" ]; then
-    MISSING=${'$'}(jq -r '.[].tmuxSessionName' "${'$'}SF" 2>/dev/null | while IFS= read -r n; do
+    # A name tmux cannot hold as written (`.`, `:`, a control character: tmux makes it `_` or escapes it) is never
+    # "missing": its relaunch would start a session of another name, every tick (v20, A-ED1). On the box `server` the
+    # manifest holds only names of live sessions, so no such name is ever there.
+    MISSING=${'$'}(jq -r '.[].tmuxSessionName | select((type == "string" and test("[.:]|[[:cntrl:]]")) | not)' "${'$'}SF" 2>/dev/null | while IFS= read -r n; do
         [ -n "${'$'}n" ] || continue
         [ -f "${'$'}FORGOTTEN" ] && grep -qxF "${'$'}n" "${'$'}FORGOTTEN" && continue
         # Durable marker = the user closed this. Checked separately from the
@@ -1100,14 +1282,38 @@ if [ -f "${'$'}SF" ]; then
         [ -f "${'$'}FORGOTTEN_D/${'$'}n" ] \
             && [ -n "${'$'}(find "${'$'}FORGOTTEN_D/${'$'}n" -maxdepth 0 -mtime -${'$'}TOMBSTONE_WINDOW 2>/dev/null)" ] \
             && continue
-        ! tmux has-session -t="${'$'}n" 2>/dev/null && echo "${'$'}n"; done)
+        tmux has-session -t="${'$'}n" 2>/dev/null && continue
+        # ---- an entry whose folder is missing (v20, E4b) ----
+        # restore.sh skips it ("folder … missing"), so relaunching it only ran restore.sh and logged the line every
+        # minute. It stays in the manifest (a folder on a mount comes back) and is relaunched once its folder is there.
+        nf=${'$'}(jq -r --arg n "${'$'}n" 'first(.[] | select(.tmuxSessionName == ${'$'}n) | .folder) // ""' "${'$'}SF" 2>/dev/null)
+        if nf=${'$'}(cr_folder "${'$'}nf") && [ -d "${'$'}nf" ]; then echo "m:${'$'}n"; else echo "s:${'$'}n"; fi
+        # ---- end of an entry whose folder is missing ----
+    done)
+    SKIPPED=${'$'}(printf '%s\n' "${'$'}MISSING" | sed -n 's/^s://p')
+    MISSING=${'$'}(printf '%s\n' "${'$'}MISSING" | sed -n 's/^m://p')
+    # ---- the entries left out for their folder, logged once per change (v20, E4b) ----
+    # drift.skipped holds the names this tick left out; it only decides whether to log (missing or garbled: log once
+    # more), never what self-heal relaunches.
+    SKIP_ST="${'$'}HOME/.claude-remote/drift.skipped"
+    if [ -d "${'$'}SKIP_ST" ]; then
+        :   # a directory in its place (nobody makes one): no state, so no line, and nothing is written into it
+    elif [ -n "${'$'}SKIPPED" ]; then
+        if [ "${'$'}(cat "${'$'}SKIP_ST" 2>/dev/null)" != "${'$'}SKIPPED" ]; then
+            echo "[${'$'}(date -u +%FT%TZ)] drift: not relaunching, folder missing (kept in the manifest): ${'$'}(printf '%s\n' "${'$'}SKIPPED" | tr '\n' ' ')"
+            { printf '%s\n' "${'$'}SKIPPED" > "${'$'}SKIP_ST.tmp.${'$'}${'$'}" && mv -f "${'$'}SKIP_ST.tmp.${'$'}${'$'}" "${'$'}SKIP_ST"; } 2>/dev/null || rm -f "${'$'}SKIP_ST.tmp.${'$'}${'$'}"
+        fi
+    elif [ -e "${'$'}SKIP_ST" ]; then
+        rm -f "${'$'}SKIP_ST"
+    fi
+    # ---- end of the entries left out ----
     # Same guard again right before relaunching: the socket may have gone (or a second server appeared) during
     # this tick, and then every name above is "missing".
     if [ -n "${'$'}MISSING" ] && [ ! -e "${'$'}SG_OFF" ]; then
         sg_guard || MISSING=""
     fi
     if [ -n "${'$'}MISSING" ]; then
-        echo "[${'$'}(date -u +%FT%TZ)] drift: self-heal — relaunching missing: ${'$'}(echo ${'$'}MISSING | tr '\n' ' ')"
+        echo "[${'$'}(date -u +%FT%TZ)] drift: self-heal — relaunching missing: ${'$'}(printf '%s\n' "${'$'}MISSING" | tr '\n' ' ')"
         # Run the heal in its OWN transient scope. Anything restore.sh starts
         # (notably a tmux server, when none is running) then belongs to that
         # scope instead of claude-remote-drift.service, whose cgroup systemd
@@ -1123,27 +1329,16 @@ if [ -f "${'$'}SF" ]; then
 fi
 DRIFT_EOF
             chmod +x "${'$'}DRIFT.tmp.${'$'}${'$'}"
-            # ---- rollback copy of drift.sh (D6-S) ----
-            # Kept once when the script replaced here is v18 (kritika D2 N17): moving it back is the way back to v18, by
-            # hand and only with Lukáš's consent that day (any v19 client's next install rewrites it to v19 again).
-            # v19's compat line names v18 too, so the copy itself must not be v19 (a second installer may have replaced
-            # the script in between), and `ln` publishes it only where no copy is yet (K2): never one over another.
-            if grep -qE 'claude-remote-restore-v18( |${'$'})' "${'$'}DRIFT" 2>/dev/null && [ ! -e "${'$'}DRIFT.v18" ]; then
-                { cp -p "${'$'}DRIFT" "${'$'}DRIFT.v18.tmp.${'$'}${'$'}" && ! grep -q 'claude-remote-restore-v19' "${'$'}DRIFT.v18.tmp.${'$'}${'$'}" \
-                    && ln "${'$'}DRIFT.v18.tmp.${'$'}${'$'}" "${'$'}DRIFT.v18" \
-                    && echo "[${'$'}(date -u +%FT%TZ)] install: the v18 drift.sh kept as drift.sh.v18 (rollback)" >> "${'$'}HOME/.claude-remote/install.log"; } 2>/dev/null || :
-                rm -f "${'$'}DRIFT.v18.tmp.${'$'}${'$'}"
-            fi
-            # ---- end of the rollback copy of drift.sh ----
-            mv -f "${'$'}DRIFT.tmp.${'$'}${'$'}" "${'$'}DRIFT"
-            echo "DRIFT_SCRIPT_INSTALLED"
+${rollbackCopy("DRIFT", "drift.sh", 18)}
+${rollbackCopy("DRIFT", "drift.sh", 19)}
+            D_NEW=1
         fi
         # The app's tmux anchor (ClaudeConfig.buildTmuxRunCommand) runs this before it may create a server.
         if ! grep -q "${'$'}MARKER" "${'$'}SOCKHEAL" 2>/dev/null; then
             echo "[${'$'}(date -u +%FT%TZ)] install: tmux-sockheal.sh missing ${'$'}MARKER — rewriting; prior marker line: ${'$'}(grep -m1 'claude-remote-restore-v' "${'$'}SOCKHEAL" 2>/dev/null || echo '<none/new file>')" >> "${'$'}HOME/.claude-remote/install.log"
             cat > "${'$'}SOCKHEAL.tmp.${'$'}${'$'}" <<'SOCKHEAL_EOF'
 #!/usr/bin/env bash
-# marker-compat (do NOT remove): claude-remote-restore-v6 claude-remote-restore-v7 claude-remote-restore-v8 claude-remote-restore-v9 claude-remote-restore-v10 claude-remote-restore-v11 claude-remote-restore-v12 claude-remote-restore-v13 claude-remote-restore-v14 claude-remote-restore-v15 claude-remote-restore-v16 claude-remote-restore-v17 claude-remote-restore-v18 claude-remote-restore-v19
+# marker-compat (do NOT remove): claude-remote-restore-v6 claude-remote-restore-v7 claude-remote-restore-v8 claude-remote-restore-v9 claude-remote-restore-v10 claude-remote-restore-v11 claude-remote-restore-v12 claude-remote-restore-v13 claude-remote-restore-v14 claude-remote-restore-v15 claude-remote-restore-v16 claude-remote-restore-v17 claude-remote-restore-v18 claude-remote-restore-v19 claude-remote-restore-v20
 # claude-remote-restore-v18 — tmux socket guard for the app's own tmux anchor. The app runs it before any command
 # that may create a tmux server (a second server next to a live one is how 51 sessions got duplicated on 2026-11-02):
 #   exit 0  nothing listens on the default socket path, or the socket answers: the app goes on as before
@@ -1187,9 +1382,16 @@ echo "claude-remote: ${'$'}why — not starting a second tmux server (details: $
 exit 1
 SOCKHEAL_EOF
             chmod +x "${'$'}SOCKHEAL.tmp.${'$'}${'$'}"
-            mv -f "${'$'}SOCKHEAL.tmp.${'$'}${'$'}" "${'$'}SOCKHEAL"
-            echo "SOCKHEAL_SCRIPT_INSTALLED"
+            S_NEW=1
         fi
+        # ---- publish the scripts (v20, H10) ----
+        if [ "${'$'}R_NEW" = 1 ]; then mv -f "${'$'}SCRIPT.tmp.${'$'}${'$'}" "${'$'}SCRIPT"; fi
+        if [ "${'$'}D_NEW" = 1 ]; then mv -f "${'$'}DRIFT.tmp.${'$'}${'$'}" "${'$'}DRIFT"; fi
+        if [ "${'$'}S_NEW" = 1 ]; then mv -f "${'$'}SOCKHEAL.tmp.${'$'}${'$'}" "${'$'}SOCKHEAL"; fi
+        if [ "${'$'}R_NEW" = 1 ]; then echo "RESTORE_SCRIPT_INSTALLED"; else echo "RESTORE_SCRIPT_PRESENT"; fi
+        if [ "${'$'}D_NEW" = 1 ]; then echo "DRIFT_SCRIPT_INSTALLED"; fi
+        if [ "${'$'}S_NEW" = 1 ]; then echo "SOCKHEAL_SCRIPT_INSTALLED"; fi
+        # ---- end of publishing the scripts ----
         # REMOVED (was: an OWNING claude-tmux.service that "ended a create-race").
         # The create-race theory is refuted — a second `tmux new-session` on the
         # same socket cannot kill a server, it just returns "duplicate session";

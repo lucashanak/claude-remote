@@ -164,8 +164,11 @@ When the SSH read loop detects connection loss:
 ### Server-side scripts and the tmux socket guard
 
 `SessionPersistenceService.INSTALL_RESTORE_COMMAND` installs three scripts in `~/.claude-remote` (on the first
-launch per server and app run, `persistLaunched`) whose marker (`claude-remote-restore-v19`) is missing, each
-written to a temp file and renamed into place (never `cat >` over a script a running bash may be reading):
+launch per server and app run, `persistLaunched`) whose marker (`claude-remote-restore-v20`) is missing, each
+written to a temp file and renamed into place (never `cat >` over a script a running bash may be reading). Since v20
+all three temp files are written first and the three renames follow back to back, the output lines only after them
+(kritika E H10: an install cut short between two renames left a box on two versions until the next launch; now only
+one killed within the window of the three renames can):
 
 - `restore.sh` (boot unit, and drift's self-heal) recreates sessions from the manifest;
 - `drift.sh` (user timer, every minute) reconciles the manifest with live tmux and relaunches what died;
@@ -205,10 +208,21 @@ drift tick ends without relaunching or writing the manifest; one that answers on
 directory is not private → `chmod 700`; one that does not answer (a single 5 s wait), or two and more (split
 brain) → no signal, no relaunch, no new server, a log line rate-limited per caller and kind (drift.log, restore.log
 and sockheal.log each get it once per 15 minutes). Heals and `restore.sh`'s server creation share
-`~/.claude-remote/tmux-server.lock`. Every tmux call of a drift tick has a time limit.
-`~/.claude-remote/drift-heal.off` switches the guard off in all three scripts (an older client never rewrites a
-script of a newer marker; the way back to v18 as a whole is below). An install cut short removes its temp files
-(`trap … EXIT`).
+`~/.claude-remote/tmux-server.lock`. Every tmux call of a drift tick has a time limit (`timeout -k 2 10`), with the
+guard on or off (v20; v19 dropped it with `drift-heal.off`, and a hung server then wedged the timer unit).
+`~/.claude-remote/drift-heal.off` switches the guard off in all three scripts, and only the guard: **it is no brake on
+drift's relaunch** — self-heal then runs without the guard (kritika E H6, KK22). An install cut short removes its temp
+files (`trap … EXIT`).
+
+**Brakes for drift (v20).** `~/.claude-remote/drift.off` stops drift before it does anything at all: the tick exits 0
+with no tmux call, no manifest or mirror write, no relaunch and no log line, until the file is removed. The other
+brake, on every version, is `systemctl --user stop claude-remote-drift.timer` (no `daemon-reload` involved; the
+installer does not start the timer again while its unit files exist, so it holds until a reboot). In an incident:
+first one of the two brakes, then decide. Limits: the time limit ends a tmux client, but a pipe or `$(…)` that reads
+from it waits as long as a stopped (SIGSTOP) server holds the client's stdout, which the client hands to the server;
+with the guard on the tick ends within about 6 s (the guard sees the hung server first), with `drift-heal.off` it hangs
+until the server goes on. With `drift-heal.off` and a slow server a `has-session` cut off after 10 s counts its entry as
+missing and restore.sh runs; restore.sh asks tmux again itself and tmux refuses a name that exists, so no duplicate.
 
 **Session prefixes (`~/.claude-remote/prefixes`, marker v19, dávka D6-S).** The sessions drift adopts into the
 manifest, counts as "a session of ours is live" (which drops `__anchor__`) and so relaunches, are those starting with
@@ -217,19 +231,36 @@ manifest, counts as "a session of ours is live" (which drops `__anchor__`) and s
 become a YOLO relaunch): claude runs in the pane **with the app's signature** — one of the two flags the app
 (`ClaudeConfig`) and restore.sh always start it with, `--dangerously-skip-permissions` or
 `--allow-dangerously-skip-permissions` (kolo 4, B4: a bare `claude` typed by hand or a `claude -p` of somebody's script
-is no proof) — and then its metadata come from claude's command line and environ like any session, a missing
+is no proof). Since v20 (E2) the signature is an *argument* equal to one of the two flags: `/proc/<pid>/cmdline` is
+read argument by argument (NUL-separated) up to the first `--`, so the flag's text inside a prompt, inside a path or
+after `--` is no signature (v19 looked for it as a piece of the joined command line). A limit, as claude's own parser
+reads it: a value of another option that equals a flag's text (`--append-system-prompt --dangerously-skip-permissions`)
+counts as the flag. Model, mode and session id are read from the same arguments for every session (E2b): the argument
+after `--model`, `--permission-mode` and `--resume`/`--session-id`, the first of each before `--`, and a session id only
+when it is hex and dashes (v19 took the *last* `--resume`/`--session-id ` anywhere in the joined line, so a prompt
+naming `--session-id deadbeef` behind the real one put `deadbeef` into the manifest whenever claude's per-pid state had
+no transcript yet; the model from a prompt's `--model opus` reached only a first adoption). On every command line the
+app and restore.sh build, the two readings agree byte for byte (`DriftV20Test`, the shapes of the live box). Then the
+session's metadata come from claude's command line and environ like any session, a missing
 `serverId` from the app's entry of the same name in `sessions.json`; or `sessions.json` has an entry of that name
 (claude without the signature or no claude at all), which is then taken as the app wrote it (mode, model, connection
 type, serverId, createdAt, account — never the YOLO default drift gives a command line without a flag). Neither: not
 adopted, not written, not counted (`__anchor__` stays), never relaunched. The app's entries reach jq from a file
 (`--slurpfile`), not as one argument, which stops at 128 KB; if that jq fails anyway only these sessions drop out of
 the tick, `claude-server-*` are adopted as always. A foreign script that starts claude with one of the two flags in
-a session of the box's prefix still looks like the app's (a limit). On a box other than `server`, the first adoption
-writes `sessions.restore.json`, and from then on drift's mirror copies it over `sessions.json`: an entry of the app
-whose tmux session is not alive at that moment (dead when the box first runs v19, or dead within a tick of its
-launch) is dropped from `sessions.json`, so a reboot with no client connected does not bring it back — the same as on
-`server`, where such a session is missing from the manifest too; a client that connects rebuilds it (review D3 N12,
-a limit, the fix is handed over). The restore
+a session of the box's prefix still looks like the app's (a limit). On a box other than `server` drift writes its first
+manifest (`sessions.restore.json` does not exist yet, and the box has a `prefixes` line) from the app's entries of the
+box's own prefixes in `sessions.json` (v20, E3): only objects with a string `tmuxSessionName`, never `claude-server-*`,
+never a tombstoned name, one row per name, logged as one line with the count. It is a migration, done once — `server`
+never had one, its manifest just has a longer history (kritika KK12) — and from then on the manifest is drift's own
+and drift's mirror copies it over `sessions.json`, as on `server`. No client's push is an authority for self-heal: a
+merge of `sessions.json` every tick would bring back, once its tombstone expired, any session an old client still
+holds (kritika KK11, H11). The entries that came in this way and whose session is not alive are relaunched by
+self-heal in the first tick (their folder there), like any entry whose session died. v19 wrote the live sessions alone
+and its mirror dropped the rest from `sessions.json` (review D3 N12). In a tick whose overlay of the app's entries
+failed (its jq), the manifest misses those names, so the mirror skips that tick. The mirror runs under the manifest
+lock and is a temp file checked as a JSON array and renamed into place (v19: `cp` over the file the app reads, outside
+the lock). The restore
 installer adds the box's own prefix (`TmuxNameParser.prefixFor(server name)`, e.g. `claude-box-`) on every install,
 outside the marker check, before its end line: under `flock -w 5` on `sessions.lock`, the file rewritten whole (tmp
 + `mv`, keeping only valid lines) because drift reads it without the lock; the default prefix gets no line, so the
@@ -243,19 +274,68 @@ empty line compared as a prefix would match every session, and drift would adopt
 kill the anchor every tick and relaunch them all. The comparison is a fixed string (`case "$s" in "$q"*)`), one pass
 that stops at the first match (overlapping prefixes give one row), and the read is silent: a tick without a change
 adds nothing to drift.log with the file or without it. On the box `server` v19 does byte for byte what v18 did
-(`DriftPrefixesIntegrationTest` runs both over the same world). A client older than v19 writes no prefix, so a box
-with another name has no adoption until a v19 client launched there once.
+(`DriftPrefixesIntegrationTest` runs both over the same world), and v20 what v19 does (`DriftV20IdentityIntegrationTest`,
+ticks as the unit runs them: no locale, the unit's PATH; the socket guard on and `drift-heal.off`; without and with a
+`prefixes` line). A client older than v19 writes no prefix, so a box with another name has no adoption until a v19
+client launched there once. A line of `prefixes` is never removed automatically (dávka E, volba D3): renaming a server
+in the app leaves the names of its live sessions as they are, and any client that still knows the old name writes the
+line again on its next install. By hand, only when no session of that prefix lives and none is in the manifest, and
+never `claude-server-`.
 
-**The way back to v18.** When the installer replaces a v18 `restore.sh` or `drift.sh` it first keeps it next to
-it as `restore.sh.v18` / `drift.sh.v18` (copied to a temp file, which must not carry the v19 marker — v19's compat
-line names v18 too, so a script a second installer has just replaced also "is v18" — then published with `ln`, which
-never replaces a copy that is there; logged to install.log; `tmux-sockheal.sh` gets none, its v19 differs only in the
-compat line). Moving the two copies back is the rollback to v18 — an exception to "never edit drift/restore by hand"
-that only the lead may use, and only with Lukáš's explicit consent that day. It holds only while no v19 client launches
-a session on that box (its next install rewrites both to v19 again); otherwise the way back is a hotfix v20. Going back
-does not undo v19's adoptions: the sessions of another prefix v19 wrote into `sessions.restore.json` (and
-`manifests/highwater.json`) stay there, and v18's union reconcile and self-heal keep relaunching them (review D2 adv
-N3). On the box `server` this cannot happen — it has no `prefixes` file, so v19 adopts nothing v18 would not.
+**Names, folders and self-heal (v20).** Drift reads the live sessions one name per line (`while IFS= read -r … done < <(tmux
+-u list-sessions …)`), so a name with a space or a glob character is one name (E1: v19's `for s in $(…)` made
+`claude-server-My Project` into `claude-server-My`, whose pane tmux found by prefix, and self-heal started a duplicate
+claude in its folder; a name like `claude-server-a*b` was expanded against the files of drift's cwd). Every tmux target
+over a name is exact: `=name` for a session, `=name:` for a pane (`display-message` with `=name` alone prints nothing
+and exits 0 on tmux 3.5a, which would give every new adoption an empty folder), `=__anchor__`. The B1 bookkeeping
+separates names by newlines. An entry of the manifest whose folder is missing is left out of self-heal (E4b) and stays
+in the manifest (a folder on a mount comes back, and is relaunched then): restore.sh skips it anyway, so relaunching it
+only ran restore.sh and logged a line every minute. Drift reads the folder as restore.sh does, with one function in
+both scripts (`cr_folder`: `~` and a relative path under HOME; an empty folder or JSON null is no folder — v19's
+restore.sh started an empty folder in HOME and looked for a folder `null` as `$HOME/null`). Since round 2 the branch of
+restore.sh without jq reads the folder the same way. The names left out are logged once per change, kept in
+`~/.claude-remote/drift.skipped`, which decides only whether to log: missing or garbled it costs one more line, never
+a relaunch decision.
+
+**The way back (v18, v19).** When the installer replaces a v18 or a v19 `restore.sh` or `drift.sh` it first keeps it
+next to it as `restore.sh.v18` / `drift.sh.v18` or `restore.sh.v19` / `drift.sh.v19` (one generator,
+`SessionPersistenceService.rollbackCopy`: copied to a temp file, which must not carry a newer marker — a newer compat
+line names every older marker, so a script a second installer has just replaced also "is v18" — then published with
+`ln`, which never replaces a copy that is there; logged to install.log). A box that comes straight from v19 gets no
+`.v18`, one straight from v18 no `.v19`. `tmux-sockheal.sh` gets none: its v20 differs from v19 only in the compat
+line and the corrected comment on `drift-heal.off` (`DriftPrefixesTest` holds it to that). Moving the two copies back
+is the rollback — an exception to "never edit drift/restore by hand" that only the lead may use, and only with Lukáš's
+explicit consent that day. It holds only until a client of the newer marker launches a session on that box (its next
+install rewrites both again and keeps a new copy, byte for byte the old one); a lasting way back is a hotfix (v21).
+There is deliberately no pin file: a pin is state that can freeze old scripts on a box silently for good. For the way
+back to work, v20 changes no format a v19 reads — `prefixes`, `sessions.json`, `sessions.restore.json`, `forgotten`,
+`forgotten.d/`, `manifests/highwater.json` — and keeps its own state only in files v19 ignores (`drift.skipped`,
+`drift.off`); v19 over the state v20 left rewrites nothing (`DriftV20IntegrationTest`).
+
+**What comes from a client's file (v20, round 2).** The first manifest takes only names tmux holds as written: a name
+with `.`, `:` or a control character (tmux makes `.`/`:` into `_` and escapes the rest; old clients wrote `.`) would be
+"missing" for ever, and its relaunch starts a session of another name — on a box that came from v18 a session the user
+had closed came back. Self-heal never counts such a name as missing, and restore.sh skips it ("tmux cannot hold this
+name as written"; on `server` the manifest holds live names only). A session id from the app's file (the first manifest,
+the app's entry of the B1 overlay) is kept only as a uuid, an account slug only as 1 to 64 letters, digits and
+`@ . _ -` (what `accountSlugFromEmail` makes, at most 48; never `.` or `..`), each matched on the whole string, else
+null (round 3: a 40 KB hex id made tmux refuse the command, and self-heal ran restore.sh every minute for good; `$`
+let a value ending in a newline through). restore.sh starts an entry whose slug is a path (holds `/`, or is `.` or
+`..`) without an account and logs it — whoever wrote the manifest — rather than not at all, which would be a session
+"missing" every tick. restore.sh builds the pane's command from
+words no shell reads specially (`cr_q`: the value itself when it is a plain word — every id, model, flag and slug the
+app writes, so the command is v19's byte for byte — else single-quoted), so a value of the manifest is never code,
+whoever put it there. The first manifest reads `sessions.json` under the manifest lock; a file jq cannot read whose mtime is now
+(−2 min … +1 min: a write in progress) postpones it, with no manifest, mirror or tombstone change that tick, at most 5
+ticks in a row (counted in `~/.claude-remote/drift.seedhold`; garbled counts from 0, a directory postpones nothing). One
+line opens a series and one ends it. A file broken for longer, from the future, or past the cap: the first manifest is
+written from the live sessions without the app's entries — a limit: that migration is then lost for good, as on v19.
+The mirror never writes into a directory in place of `sessions.json`.
+The union reads the old manifest and the live rows from files, so a manifest over 128 KB (one execve argument) is no
+longer stuck. The installer removes its own temp files older than an hour (an install killed outright leaves them). Going back does not undo
+adoptions: the sessions of another prefix a newer drift wrote into `sessions.restore.json` (and
+`manifests/highwater.json`) stay there, and the older union reconcile and self-heal keep relaunching them (review D2
+adv N3). On the box `server` this cannot happen — it has no `prefixes` file.
 
 `tmux-sockheal.sh` exits 0 (nothing to do), 3 (it was unusable and is usable again) or 1 (refused). A heal that
 failed (lock not taken within 2 s, listeners changed meanwhile, socket not back) mostly lost a race with another
