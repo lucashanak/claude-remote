@@ -289,8 +289,24 @@ object ReplyGuard {
         val name = sq(tmux)
         val keys = sq(tmuxLiteral(text))
         val send = if (approve) {
-            "if $TMUX_CAPPED send-keys -t \"\$P\" -l -- $keys \\; send-keys -t \"\$P\" Enter 2>/dev/null; " +
-                "then echo '$SERVER_TOKEN SENT'; else echo '$SERVER_TOKEN FAILED'; fi"
+            // Claude 2.1.32x's Confirmation keys (verified live 2026-11-11 on a permission dialog): Enter = the focused
+            // option, Escape = no. There is NO `y`/`n` binding: the old `n` + Enter was ignored and the Enter then
+            // picked the focused "1. Yes" — the watch's and the Velín's "Ne" APPROVED the command. So: Escape for no,
+            // and Enter for yes only while the focus sits on "1. Yes" of a permission dialog (never "Yes, and always
+            // allow…" or "switch to auto mode", whatever the user moved the focus to on a terminal meanwhile).
+            when (text) {
+                "n" -> "if $TMUX_CAPPED send-keys -t \"\$P\" Escape 2>/dev/null; " +
+                    "then echo '$SERVER_TOKEN SENT'; else echo '$SERVER_TOKEN FAILED'; fi"
+                "y" -> {
+                    val focusOk = if ((expect as? ServerExpectation.Dialog)?.ev == "perm") {
+                        "$TMUX_CAPPED capture-pane -p -t \"\$P\" 2>/dev/null | grep -Eq '❯ *1\\. Yes[[:space:]]*\$'"
+                    } else "true"
+                    "if ! $focusOk; then echo '$SERVER_TOKEN STALE'; " +
+                        "elif $TMUX_CAPPED send-keys -t \"\$P\" Enter 2>/dev/null; " +
+                        "then echo '$SERVER_TOKEN SENT'; else echo '$SERVER_TOKEN FAILED'; fi"
+                }
+                else -> "echo '$SERVER_TOKEN FAILED'"
+            }
         } else {
             // emptyInput (the conversation mode): SENT carries the server's ms right before Enter, so the app reads
             // only a Stop after it as the answer (a wake's Stop still in flight is older)

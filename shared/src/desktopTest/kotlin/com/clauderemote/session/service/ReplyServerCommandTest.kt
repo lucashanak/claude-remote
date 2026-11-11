@@ -77,9 +77,46 @@ class ReplyServerCommandTest {
 
     @Test fun aDialogAnswerGoesOutOnlyWhileThatPermIsThePanesNewestEvent() {
         events(ev("work", 1_000), ev("perm", 2_000), ev("work", 2_500, name = "claude-server-other"))
+        screen.writeText(PERM_SCREEN)
         assertEquals("CR_REPLY SENT", run(ServerExpectation.Dialog("perm", 2_000), "y", approve = true))
-        // one tmux call, no gap between the answer and its Enter; to the main pane, not `=name:`
-        assertEquals("send-keys -t %3 -l -- y ; send-keys -t %3 Enter\n", keys(), "another pane's newer line does not count")
+        // Enter only, with the focus on "1. Yes"; to the main pane, not `=name:`
+        assertEquals("send-keys -t %3 Enter\n", keys(), "another pane's newer line does not count")
+    }
+
+    // Claude 2.1.322's permission dialog as captured live (2026-11-11)
+    private val PERM_SCREEN = """
+         Do you want to proceed?
+         ❯ 1. Yes
+           2. Yes, and always allow access to /tmp/x from this project
+           3. Yes, and switch to auto mode · auto mode handles these prompts for you
+           4. No
+         Esc to cancel · Tab to amend
+    """.trimIndent() + "\n"
+
+    @Test fun neDeniesWithEscapeNeverWithAnEnterThatWouldPickTheFocusedYes() {
+        // live 2026-11-11: `n` + Enter ran the command — Claude has no `n` binding, the Enter picked "1. Yes"
+        events(ev("perm", 2_000))
+        screen.writeText(PERM_SCREEN)
+        assertEquals("CR_REPLY SENT", run(ServerExpectation.Dialog("perm", 2_000), "n", approve = true))
+        assertEquals("send-keys -t %3 Escape\n", keys())
+        assertTrue("Enter" !in keys() && "-l" !in keys(), "no Enter, no typed letter")
+    }
+
+    @Test fun anoGoesOutOnlyWhileTheFocusIsOnTheOneTimeYes() {
+        events(ev("perm", 2_000))
+        screen.writeText(PERM_SCREEN.replace("❯ 1. Yes", "  1. Yes").replace("  2. Yes, and always", "❯ 2. Yes, and always"))
+        assertEquals("CR_REPLY STALE", run(ServerExpectation.Dialog("perm", 2_000), "y", approve = true))
+        assertEquals("", keys(), "focus on 'always allow': nothing pressed")
+        screen.delete()
+        assertEquals("CR_REPLY STALE", run(ServerExpectation.Dialog("perm", 2_000), "y", approve = true))
+        assertEquals("", keys(), "no dialog on the screen: nothing pressed")
+    }
+
+    @Test fun anyOtherDialogAnswerTextIsRefused() {
+        events(ev("perm", 2_000))
+        screen.writeText(PERM_SCREEN)
+        assertEquals("CR_REPLY FAILED", run(ServerExpectation.Dialog("perm", 2_000), "2", approve = true))
+        assertEquals("", keys())
     }
 
     @Test fun aNewerDialogOrAnyLaterEventMakesItStale() {
