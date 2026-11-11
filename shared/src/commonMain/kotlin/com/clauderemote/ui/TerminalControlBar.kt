@@ -318,8 +318,10 @@ internal fun CRControlBar(
             CtrlButton("C-c") { onSendCommand("") }
             // y / n — emphasized when the agent is waiting for approval
             val awaiting = activity == com.clauderemote.model.SessionActivity.APPROVAL_NEEDED
-            CtrlButton("y", emphasized = awaiting) { onSendCommand("y\r") }
-            CtrlButton("n", emphasized = awaiting) { onSendCommand("n\r") }
+            // Claude 2.1.32x's dialogs have no y/n keys: Enter takes the focused option, Escape says no.
+            // `n\r` was ignored but its Enter picked the focused "1. Yes" — "n" APPROVED (2026-11-11).
+            CtrlButton("y", emphasized = awaiting) { onSendCommand("\r") }
+            CtrlButton("n", emphasized = awaiting) { onSendEscape() }
             } // end scrollable button Row
         }
     }

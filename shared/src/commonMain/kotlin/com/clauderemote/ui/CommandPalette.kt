@@ -125,8 +125,9 @@ fun buildPaletteActions(
     actions.add(PaletteAction("escape", "Send Escape", "Terminal", "Esc") { onSendEscape() })
     actions.add(PaletteAction("ctrl_c", "Send Ctrl+C", "Terminal") { onSendCommand("") })
     actions.add(PaletteAction("clear", "Clear terminal", "Terminal") { onSendCommand("c") })
-    actions.add(PaletteAction("approve_yes", "Approve (y)", "Terminal") { onSendCommand("y\r") })
-    actions.add(PaletteAction("approve_no", "Reject (n)", "Terminal") { onSendCommand("n\r") })
+    // Enter = the dialog's focused option, Escape = no (Claude 2.1.32x has no y/n keys; `n\r` approved)
+    actions.add(PaletteAction("approve_yes", "Approve (Enter)", "Terminal") { onSendCommand("\r") })
+    actions.add(PaletteAction("approve_no", "Reject (Esc)", "Terminal") { onSendEscape() })
 
     // Navigation
     actions.add(PaletteAction("nav_settings", "Open Settings", "Navigation") { onNavigate("settings") })

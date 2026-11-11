@@ -102,6 +102,25 @@ class ReplyServerCommandTest {
         assertTrue("Enter" !in keys() && "-l" !in keys(), "no Enter, no typed letter")
     }
 
+    @Test fun neDoesNotEscapeARunningTurnWhenTheDialogIsGoneFromTheScreen() {
+        // answered on a terminal: no event, the newest line is still that perm, but Escape would interrupt the turn
+        events(ev("perm", 2_000))
+        screen.writeText("● Running the tests…\n")
+        assertEquals("CR_REPLY STALE", run(ServerExpectation.Dialog("perm", 2_000), "n", approve = true))
+        assertEquals("", keys())
+    }
+
+    @Test fun anoOnAQuestionGoesOutOnlyWithTheFocusOnItsFirstOption() {
+        events(ev("ask", 2_000))
+        screen.writeText(" Jak dál?\n ❯ 1. Commitnout lokálně (Recommended)\n   2. Jeden commit\n")
+        assertEquals("CR_REPLY SENT", run(ServerExpectation.Dialog("ask", 2_000), "y", approve = true))
+        assertEquals("send-keys -t %3 Enter\n", keys())
+        sent.delete()
+        screen.writeText(" Jak dál?\n   1. Commitnout lokálně (Recommended)\n ❯ 2. Jeden commit\n")
+        assertEquals("CR_REPLY STALE", run(ServerExpectation.Dialog("ask", 2_000), "y", approve = true))
+        assertEquals("", keys())
+    }
+
     @Test fun anoGoesOutOnlyWhileTheFocusIsOnTheOneTimeYes() {
         events(ev("perm", 2_000))
         screen.writeText(PERM_SCREEN.replace("❯ 1. Yes", "  1. Yes").replace("  2. Yes, and always", "❯ 2. Yes, and always"))

@@ -295,12 +295,16 @@ object ReplyGuard {
             // and Enter for yes only while the focus sits on "1. Yes" of a permission dialog (never "Yes, and always
             // allow…" or "switch to auto mode", whatever the user moved the focus to on a terminal meanwhile).
             when (text) {
-                "n" -> "if $TMUX_CAPPED send-keys -t \"\$P\" Escape 2>/dev/null; " +
+                // A dialog answered on a terminal meanwhile writes no event, so the hook check alone would let an
+                // Escape interrupt the running turn: the screen must still show the dialog's numbered options.
+                "n" -> "if ! $TMUX_CAPPED capture-pane -p -t \"\$P\" 2>/dev/null | grep -Eq '❯ *[0-9]+\\. '; " +
+                    "then echo '$SERVER_TOKEN STALE'; " +
+                    "elif $TMUX_CAPPED send-keys -t \"\$P\" Escape 2>/dev/null; " +
                     "then echo '$SERVER_TOKEN SENT'; else echo '$SERVER_TOKEN FAILED'; fi"
                 "y" -> {
-                    val focusOk = if ((expect as? ServerExpectation.Dialog)?.ev == "perm") {
-                        "$TMUX_CAPPED capture-pane -p -t \"\$P\" 2>/dev/null | grep -Eq '❯ *1\\. Yes[[:space:]]*\$'"
-                    } else "true"
+                    // a permission: the one-time "1. Yes"; a question: its first option, focused as it opened
+                    val focused = if ((expect as? ServerExpectation.Dialog)?.ev == "perm") "❯ *1\\. Yes[[:space:]]*\$" else "❯ *1\\. "
+                    val focusOk = "$TMUX_CAPPED capture-pane -p -t \"\$P\" 2>/dev/null | grep -Eq '$focused'"
                     "if ! $focusOk; then echo '$SERVER_TOKEN STALE'; " +
                         "elif $TMUX_CAPPED send-keys -t \"\$P\" Enter 2>/dev/null; " +
                         "then echo '$SERVER_TOKEN SENT'; else echo '$SERVER_TOKEN FAILED'; fi"
