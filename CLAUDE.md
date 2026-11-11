@@ -32,6 +32,12 @@ Details live in `docs/`; this file only points at the places of truth and at the
   sent later (the offline queue is gone: after a reconnect it could confirm a different dialog). Terminal-emulator replies go through
   `sendTerminalReply`; watch/notification replies through `ReplyGuard` over exec. A reconnect never ends ACTIVE over a dead shell, the
   SSH attach line ends with `|| exit 1`, and an early death after "success" counts as a failed attempt (backoff 4 s → 60 s).
+- **Tab row writes** — never write back a whole `ClaudeSession` read before a suspend point (`addTab(tab.copy(…))`, an upsert of that
+  snapshot): it reverts what changed meanwhile — an ACTIVE tab went back to CONNECTING and every key ended "Not connected — not sent"
+  over a live link (2026-11-11). Change fields with `TabManager.updateTab(id) { … }` and persist its result; null (tab closed or
+  transform declined) = write nothing. `resolveSessionAccount` corrects only while the tab holds the account read before its probe and
+  never while a user's switch is pending (in memory only — lost on app restart); its manifest push goes only over exec (`whenExecUp`).
+  Details: `docs/architecture.md` (account check).
 - **Big exec requests** — nothing over 4 KB as an exec argument (`ExecArgumentSizeTest`); larger payloads go over stdin, paced (the
   80 KB restore installer through cloudflared left a transport that opened no channels). Close, close facts, restore and the
   `cr-session` install go through `StdinScript` (short launcher, body on stdin, runs only when the end marker arrived; no
