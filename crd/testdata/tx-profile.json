@@ -1,0 +1,5199 @@
+{
+"note": "shape of one real transcript: line lengths and top-level key names only",
+"lines": [
+{
+"len": 123,
+"keys": [
+"leafUuid",
+"sessionId",
+"type"
+]
+},
+{
+"len": 82,
+"keys": [
+"mode",
+"sessionId",
+"type"
+]
+},
+{
+"len": 114,
+"keys": [
+"permissionMode",
+"sessionId",
+"type"
+]
+},
+{
+"len": 927,
+"keys": [
+"attachment",
+"cwd",
+"entrypoint",
+"gitBranch",
+"isSidechain",
+"parentUuid",
+"sessionId",
+"timestamp",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 784,
+"keys": [
+"attachment",
+"cwd",
+"entrypoint",
+"gitBranch",
+"isSidechain",
+"parentUuid",
+"sessionId",
+"timestamp",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 706,
+"keys": [
+"attachment",
+"cwd",
+"entrypoint",
+"gitBranch",
+"isSidechain",
+"parentUuid",
+"sessionId",
+"timestamp",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 702,
+"keys": [
+"attachment",
+"cwd",
+"entrypoint",
+"gitBranch",
+"isSidechain",
+"parentUuid",
+"sessionId",
+"timestamp",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 739,
+"keys": [
+"attachment",
+"cwd",
+"entrypoint",
+"gitBranch",
+"isSidechain",
+"parentUuid",
+"sessionId",
+"timestamp",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 235,
+"keys": [
+"isSnapshotUpdate",
+"messageId",
+"snapshot",
+"type"
+]
+},
+{
+"len": 522,
+"keys": [
+"cwd",
+"entrypoint",
+"gitBranch",
+"isSidechain",
+"message",
+"origin",
+"parentUuid",
+"permissionMode",
+"promptId",
+"promptSource",
+"sessionId",
+"timestamp",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 8483,
+"keys": [
+"attachment",
+"cwd",
+"entrypoint",
+"gitBranch",
+"isSidechain",
+"parentUuid",
+"sessionId",
+"timestamp",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 6145,
+"keys": [
+"attachment",
+"cwd",
+"entrypoint",
+"gitBranch",
+"isSidechain",
+"parentUuid",
+"sessionId",
+"timestamp",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 12839,
+"keys": [
+"attachment",
+"cwd",
+"entrypoint",
+"gitBranch",
+"isSidechain",
+"parentUuid",
+"sessionId",
+"timestamp",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 103,
+"keys": [
+"aiTitle",
+"sessionId",
+"type"
+]
+},
+{
+"len": 2017,
+"keys": [
+"cwd",
+"effort",
+"entrypoint",
+"gitBranch",
+"isSidechain",
+"message",
+"parentUuid",
+"requestId",
+"sessionId",
+"session_id",
+"timestamp",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 1290,
+"keys": [
+"cwd",
+"effort",
+"entrypoint",
+"gitBranch",
+"isSidechain",
+"message",
+"parentUuid",
+"requestId",
+"sessionId",
+"session_id",
+"timestamp",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 1699,
+"keys": [
+"cwd",
+"effort",
+"entrypoint",
+"gitBranch",
+"isSidechain",
+"message",
+"parentUuid",
+"requestId",
+"sessionId",
+"session_id",
+"timestamp",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 947,
+"keys": [
+"attachment",
+"cwd",
+"entrypoint",
+"gitBranch",
+"isSidechain",
+"parentUuid",
+"sessionId",
+"session_id",
+"timestamp",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 660,
+"keys": [
+"attachment",
+"cwd",
+"entrypoint",
+"gitBranch",
+"isSidechain",
+"parentUuid",
+"sessionId",
+"session_id",
+"timestamp",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 1463,
+"keys": [
+"cwd",
+"entrypoint",
+"gitBranch",
+"isSidechain",
+"message",
+"parentUuid",
+"promptId",
+"sessionId",
+"session_id",
+"sourceToolAssistantUUID",
+"timestamp",
+"toolUseResult",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 748,
+"keys": [
+"attachment",
+"cwd",
+"entrypoint",
+"gitBranch",
+"isSidechain",
+"parentUuid",
+"sessionId",
+"session_id",
+"timestamp",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 747,
+"keys": [
+"attachment",
+"cwd",
+"entrypoint",
+"gitBranch",
+"isSidechain",
+"parentUuid",
+"sessionId",
+"session_id",
+"timestamp",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 910,
+"keys": [
+"attachment",
+"cwd",
+"entrypoint",
+"gitBranch",
+"isSidechain",
+"parentUuid",
+"sessionId",
+"session_id",
+"timestamp",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 621,
+"keys": [
+"attachment",
+"cwd",
+"entrypoint",
+"gitBranch",
+"isSidechain",
+"parentUuid",
+"sessionId",
+"session_id",
+"timestamp",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 163,
+"keys": [
+"lastPrompt",
+"leafUuid",
+"sessionId",
+"type"
+]
+},
+{
+"len": 103,
+"keys": [
+"aiTitle",
+"sessionId",
+"type"
+]
+},
+{
+"len": 82,
+"keys": [
+"mode",
+"sessionId",
+"type"
+]
+},
+{
+"len": 114,
+"keys": [
+"permissionMode",
+"sessionId",
+"type"
+]
+},
+{
+"len": 1921,
+"keys": [
+"cwd",
+"effort",
+"entrypoint",
+"gitBranch",
+"isSidechain",
+"message",
+"parentUuid",
+"requestId",
+"sessionId",
+"session_id",
+"timestamp",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 1663,
+"keys": [
+"cwd",
+"effort",
+"entrypoint",
+"gitBranch",
+"isSidechain",
+"message",
+"parentUuid",
+"requestId",
+"sessionId",
+"session_id",
+"timestamp",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 739,
+"keys": [
+"attachment",
+"cwd",
+"entrypoint",
+"gitBranch",
+"isSidechain",
+"parentUuid",
+"sessionId",
+"session_id",
+"timestamp",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 1625,
+"keys": [
+"cwd",
+"entrypoint",
+"gitBranch",
+"isSidechain",
+"message",
+"parentUuid",
+"promptId",
+"sessionId",
+"session_id",
+"sourceToolAssistantUUID",
+"timestamp",
+"toolUseResult",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 748,
+"keys": [
+"attachment",
+"cwd",
+"entrypoint",
+"gitBranch",
+"isSidechain",
+"parentUuid",
+"sessionId",
+"session_id",
+"timestamp",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 747,
+"keys": [
+"attachment",
+"cwd",
+"entrypoint",
+"gitBranch",
+"isSidechain",
+"parentUuid",
+"sessionId",
+"session_id",
+"timestamp",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 754,
+"keys": [
+"attachment",
+"cwd",
+"entrypoint",
+"gitBranch",
+"isSidechain",
+"parentUuid",
+"sessionId",
+"session_id",
+"timestamp",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 3009,
+"keys": [
+"cwd",
+"effort",
+"entrypoint",
+"gitBranch",
+"isSidechain",
+"message",
+"parentUuid",
+"requestId",
+"sessionId",
+"session_id",
+"timestamp",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 1583,
+"keys": [
+"cwd",
+"effort",
+"entrypoint",
+"gitBranch",
+"isSidechain",
+"message",
+"parentUuid",
+"requestId",
+"sessionId",
+"session_id",
+"timestamp",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 739,
+"keys": [
+"attachment",
+"cwd",
+"entrypoint",
+"gitBranch",
+"isSidechain",
+"parentUuid",
+"sessionId",
+"session_id",
+"timestamp",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 49171,
+"keys": [
+"cwd",
+"entrypoint",
+"gitBranch",
+"isSidechain",
+"message",
+"parentUuid",
+"promptId",
+"sessionId",
+"session_id",
+"sourceToolAssistantUUID",
+"timestamp",
+"toolUseResult",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 748,
+"keys": [
+"attachment",
+"cwd",
+"entrypoint",
+"gitBranch",
+"isSidechain",
+"parentUuid",
+"sessionId",
+"session_id",
+"timestamp",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 747,
+"keys": [
+"attachment",
+"cwd",
+"entrypoint",
+"gitBranch",
+"isSidechain",
+"parentUuid",
+"sessionId",
+"session_id",
+"timestamp",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 910,
+"keys": [
+"attachment",
+"cwd",
+"entrypoint",
+"gitBranch",
+"isSidechain",
+"parentUuid",
+"sessionId",
+"session_id",
+"timestamp",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 621,
+"keys": [
+"attachment",
+"cwd",
+"entrypoint",
+"gitBranch",
+"isSidechain",
+"parentUuid",
+"sessionId",
+"session_id",
+"timestamp",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 163,
+"keys": [
+"lastPrompt",
+"leafUuid",
+"sessionId",
+"type"
+]
+},
+{
+"len": 103,
+"keys": [
+"aiTitle",
+"sessionId",
+"type"
+]
+},
+{
+"len": 82,
+"keys": [
+"mode",
+"sessionId",
+"type"
+]
+},
+{
+"len": 114,
+"keys": [
+"permissionMode",
+"sessionId",
+"type"
+]
+},
+{
+"len": 3365,
+"keys": [
+"cwd",
+"effort",
+"entrypoint",
+"gitBranch",
+"isSidechain",
+"message",
+"parentUuid",
+"requestId",
+"sessionId",
+"session_id",
+"timestamp",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 1761,
+"keys": [
+"cwd",
+"effort",
+"entrypoint",
+"gitBranch",
+"isSidechain",
+"message",
+"parentUuid",
+"requestId",
+"sessionId",
+"session_id",
+"timestamp",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 1852,
+"keys": [
+"cwd",
+"effort",
+"entrypoint",
+"gitBranch",
+"isSidechain",
+"message",
+"parentUuid",
+"requestId",
+"sessionId",
+"session_id",
+"timestamp",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 750,
+"keys": [
+"attachment",
+"cwd",
+"entrypoint",
+"gitBranch",
+"isSidechain",
+"parentUuid",
+"sessionId",
+"session_id",
+"timestamp",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 1484,
+"keys": [
+"cwd",
+"entrypoint",
+"gitBranch",
+"isSidechain",
+"message",
+"parentUuid",
+"promptId",
+"sessionId",
+"session_id",
+"sourceToolAssistantUUID",
+"timestamp",
+"toolUseResult",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 765,
+"keys": [
+"attachment",
+"cwd",
+"entrypoint",
+"gitBranch",
+"isSidechain",
+"parentUuid",
+"sessionId",
+"session_id",
+"timestamp",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 759,
+"keys": [
+"attachment",
+"cwd",
+"entrypoint",
+"gitBranch",
+"isSidechain",
+"parentUuid",
+"sessionId",
+"session_id",
+"timestamp",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 758,
+"keys": [
+"attachment",
+"cwd",
+"entrypoint",
+"gitBranch",
+"isSidechain",
+"parentUuid",
+"sessionId",
+"session_id",
+"timestamp",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 3317,
+"keys": [
+"cwd",
+"effort",
+"entrypoint",
+"gitBranch",
+"isSidechain",
+"message",
+"parentUuid",
+"requestId",
+"sessionId",
+"session_id",
+"timestamp",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 1348,
+"keys": [
+"cwd",
+"effort",
+"entrypoint",
+"gitBranch",
+"isSidechain",
+"message",
+"parentUuid",
+"requestId",
+"sessionId",
+"session_id",
+"timestamp",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 1635,
+"keys": [
+"cwd",
+"effort",
+"entrypoint",
+"gitBranch",
+"isSidechain",
+"message",
+"parentUuid",
+"requestId",
+"sessionId",
+"session_id",
+"timestamp",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 1644,
+"keys": [
+"cwd",
+"effort",
+"entrypoint",
+"gitBranch",
+"isSidechain",
+"message",
+"parentUuid",
+"requestId",
+"sessionId",
+"session_id",
+"timestamp",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 739,
+"keys": [
+"attachment",
+"cwd",
+"entrypoint",
+"gitBranch",
+"isSidechain",
+"parentUuid",
+"sessionId",
+"session_id",
+"timestamp",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 957,
+"keys": [
+"cwd",
+"entrypoint",
+"gitBranch",
+"isSidechain",
+"message",
+"parentUuid",
+"promptId",
+"sessionId",
+"session_id",
+"sourceToolAssistantUUID",
+"timestamp",
+"toolUseResult",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 748,
+"keys": [
+"attachment",
+"cwd",
+"entrypoint",
+"gitBranch",
+"isSidechain",
+"parentUuid",
+"sessionId",
+"session_id",
+"timestamp",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 747,
+"keys": [
+"attachment",
+"cwd",
+"entrypoint",
+"gitBranch",
+"isSidechain",
+"parentUuid",
+"sessionId",
+"session_id",
+"timestamp",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 754,
+"keys": [
+"attachment",
+"cwd",
+"entrypoint",
+"gitBranch",
+"isSidechain",
+"parentUuid",
+"sessionId",
+"session_id",
+"timestamp",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 739,
+"keys": [
+"attachment",
+"cwd",
+"entrypoint",
+"gitBranch",
+"isSidechain",
+"parentUuid",
+"sessionId",
+"session_id",
+"timestamp",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 1167,
+"keys": [
+"cwd",
+"entrypoint",
+"gitBranch",
+"isSidechain",
+"message",
+"parentUuid",
+"promptId",
+"sessionId",
+"session_id",
+"sourceToolAssistantUUID",
+"timestamp",
+"toolUseResult",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 748,
+"keys": [
+"attachment",
+"cwd",
+"entrypoint",
+"gitBranch",
+"isSidechain",
+"parentUuid",
+"sessionId",
+"session_id",
+"timestamp",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 747,
+"keys": [
+"attachment",
+"cwd",
+"entrypoint",
+"gitBranch",
+"isSidechain",
+"parentUuid",
+"sessionId",
+"session_id",
+"timestamp",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 754,
+"keys": [
+"attachment",
+"cwd",
+"entrypoint",
+"gitBranch",
+"isSidechain",
+"parentUuid",
+"sessionId",
+"session_id",
+"timestamp",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 1841,
+"keys": [
+"cwd",
+"effort",
+"entrypoint",
+"gitBranch",
+"isSidechain",
+"message",
+"parentUuid",
+"requestId",
+"sessionId",
+"session_id",
+"timestamp",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 1334,
+"keys": [
+"cwd",
+"effort",
+"entrypoint",
+"gitBranch",
+"isSidechain",
+"message",
+"parentUuid",
+"requestId",
+"sessionId",
+"session_id",
+"timestamp",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 1550,
+"keys": [
+"cwd",
+"effort",
+"entrypoint",
+"gitBranch",
+"isSidechain",
+"message",
+"parentUuid",
+"requestId",
+"sessionId",
+"session_id",
+"timestamp",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 739,
+"keys": [
+"attachment",
+"cwd",
+"entrypoint",
+"gitBranch",
+"isSidechain",
+"parentUuid",
+"sessionId",
+"session_id",
+"timestamp",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 4495,
+"keys": [
+"cwd",
+"entrypoint",
+"gitBranch",
+"isSidechain",
+"message",
+"parentUuid",
+"promptId",
+"sessionId",
+"session_id",
+"sourceToolAssistantUUID",
+"timestamp",
+"toolUseResult",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 748,
+"keys": [
+"attachment",
+"cwd",
+"entrypoint",
+"gitBranch",
+"isSidechain",
+"parentUuid",
+"sessionId",
+"session_id",
+"timestamp",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 747,
+"keys": [
+"attachment",
+"cwd",
+"entrypoint",
+"gitBranch",
+"isSidechain",
+"parentUuid",
+"sessionId",
+"session_id",
+"timestamp",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 754,
+"keys": [
+"attachment",
+"cwd",
+"entrypoint",
+"gitBranch",
+"isSidechain",
+"parentUuid",
+"sessionId",
+"session_id",
+"timestamp",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 446,
+"keys": [
+"attachment",
+"cwd",
+"entrypoint",
+"gitBranch",
+"isSidechain",
+"parentUuid",
+"sessionId",
+"session_id",
+"timestamp",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 163,
+"keys": [
+"lastPrompt",
+"leafUuid",
+"sessionId",
+"type"
+]
+},
+{
+"len": 103,
+"keys": [
+"aiTitle",
+"sessionId",
+"type"
+]
+},
+{
+"len": 82,
+"keys": [
+"mode",
+"sessionId",
+"type"
+]
+},
+{
+"len": 114,
+"keys": [
+"permissionMode",
+"sessionId",
+"type"
+]
+},
+{
+"len": 1721,
+"keys": [
+"cwd",
+"effort",
+"entrypoint",
+"gitBranch",
+"isSidechain",
+"message",
+"parentUuid",
+"requestId",
+"sessionId",
+"session_id",
+"timestamp",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 1304,
+"keys": [
+"cwd",
+"effort",
+"entrypoint",
+"gitBranch",
+"isSidechain",
+"message",
+"parentUuid",
+"requestId",
+"sessionId",
+"session_id",
+"timestamp",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 1522,
+"keys": [
+"cwd",
+"effort",
+"entrypoint",
+"gitBranch",
+"isSidechain",
+"message",
+"parentUuid",
+"requestId",
+"sessionId",
+"session_id",
+"timestamp",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 739,
+"keys": [
+"attachment",
+"cwd",
+"entrypoint",
+"gitBranch",
+"isSidechain",
+"parentUuid",
+"sessionId",
+"session_id",
+"timestamp",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 1295,
+"keys": [
+"cwd",
+"entrypoint",
+"gitBranch",
+"isSidechain",
+"message",
+"parentUuid",
+"promptId",
+"sessionId",
+"session_id",
+"sourceToolAssistantUUID",
+"timestamp",
+"toolUseResult",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 748,
+"keys": [
+"attachment",
+"cwd",
+"entrypoint",
+"gitBranch",
+"isSidechain",
+"parentUuid",
+"sessionId",
+"session_id",
+"timestamp",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 747,
+"keys": [
+"attachment",
+"cwd",
+"entrypoint",
+"gitBranch",
+"isSidechain",
+"parentUuid",
+"sessionId",
+"session_id",
+"timestamp",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 754,
+"keys": [
+"attachment",
+"cwd",
+"entrypoint",
+"gitBranch",
+"isSidechain",
+"parentUuid",
+"sessionId",
+"session_id",
+"timestamp",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 1653,
+"keys": [
+"cwd",
+"effort",
+"entrypoint",
+"gitBranch",
+"isSidechain",
+"message",
+"parentUuid",
+"requestId",
+"sessionId",
+"session_id",
+"timestamp",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 1600,
+"keys": [
+"cwd",
+"effort",
+"entrypoint",
+"gitBranch",
+"isSidechain",
+"message",
+"parentUuid",
+"requestId",
+"sessionId",
+"session_id",
+"timestamp",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 739,
+"keys": [
+"attachment",
+"cwd",
+"entrypoint",
+"gitBranch",
+"isSidechain",
+"parentUuid",
+"sessionId",
+"session_id",
+"timestamp",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 1173,
+"keys": [
+"cwd",
+"entrypoint",
+"gitBranch",
+"isSidechain",
+"message",
+"parentUuid",
+"promptId",
+"sessionId",
+"session_id",
+"sourceToolAssistantUUID",
+"timestamp",
+"toolUseResult",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 748,
+"keys": [
+"attachment",
+"cwd",
+"entrypoint",
+"gitBranch",
+"isSidechain",
+"parentUuid",
+"sessionId",
+"session_id",
+"timestamp",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 754,
+"keys": [
+"attachment",
+"cwd",
+"entrypoint",
+"gitBranch",
+"isSidechain",
+"parentUuid",
+"sessionId",
+"session_id",
+"timestamp",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 747,
+"keys": [
+"attachment",
+"cwd",
+"entrypoint",
+"gitBranch",
+"isSidechain",
+"parentUuid",
+"sessionId",
+"session_id",
+"timestamp",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 1269,
+"keys": [
+"cwd",
+"effort",
+"entrypoint",
+"gitBranch",
+"isSidechain",
+"message",
+"parentUuid",
+"requestId",
+"sessionId",
+"session_id",
+"timestamp",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 1671,
+"keys": [
+"cwd",
+"effort",
+"entrypoint",
+"gitBranch",
+"isSidechain",
+"message",
+"parentUuid",
+"requestId",
+"sessionId",
+"session_id",
+"timestamp",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 739,
+"keys": [
+"attachment",
+"cwd",
+"entrypoint",
+"gitBranch",
+"isSidechain",
+"parentUuid",
+"sessionId",
+"session_id",
+"timestamp",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 1021,
+"keys": [
+"cwd",
+"entrypoint",
+"gitBranch",
+"isSidechain",
+"message",
+"parentUuid",
+"promptId",
+"sessionId",
+"session_id",
+"sourceToolAssistantUUID",
+"timestamp",
+"toolUseResult",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 748,
+"keys": [
+"attachment",
+"cwd",
+"entrypoint",
+"gitBranch",
+"isSidechain",
+"parentUuid",
+"sessionId",
+"session_id",
+"timestamp",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 747,
+"keys": [
+"attachment",
+"cwd",
+"entrypoint",
+"gitBranch",
+"isSidechain",
+"parentUuid",
+"sessionId",
+"session_id",
+"timestamp",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 754,
+"keys": [
+"attachment",
+"cwd",
+"entrypoint",
+"gitBranch",
+"isSidechain",
+"parentUuid",
+"sessionId",
+"session_id",
+"timestamp",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 1644,
+"keys": [
+"cwd",
+"effort",
+"entrypoint",
+"gitBranch",
+"isSidechain",
+"message",
+"parentUuid",
+"requestId",
+"sessionId",
+"session_id",
+"timestamp",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 739,
+"keys": [
+"attachment",
+"cwd",
+"entrypoint",
+"gitBranch",
+"isSidechain",
+"parentUuid",
+"sessionId",
+"session_id",
+"timestamp",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 7107,
+"keys": [
+"cwd",
+"entrypoint",
+"gitBranch",
+"isSidechain",
+"message",
+"parentUuid",
+"promptId",
+"sessionId",
+"session_id",
+"sourceToolAssistantUUID",
+"timestamp",
+"toolUseResult",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 748,
+"keys": [
+"attachment",
+"cwd",
+"entrypoint",
+"gitBranch",
+"isSidechain",
+"parentUuid",
+"sessionId",
+"session_id",
+"timestamp",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 747,
+"keys": [
+"attachment",
+"cwd",
+"entrypoint",
+"gitBranch",
+"isSidechain",
+"parentUuid",
+"sessionId",
+"session_id",
+"timestamp",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 910,
+"keys": [
+"attachment",
+"cwd",
+"entrypoint",
+"gitBranch",
+"isSidechain",
+"parentUuid",
+"sessionId",
+"session_id",
+"timestamp",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 621,
+"keys": [
+"attachment",
+"cwd",
+"entrypoint",
+"gitBranch",
+"isSidechain",
+"parentUuid",
+"sessionId",
+"session_id",
+"timestamp",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 163,
+"keys": [
+"lastPrompt",
+"leafUuid",
+"sessionId",
+"type"
+]
+},
+{
+"len": 103,
+"keys": [
+"aiTitle",
+"sessionId",
+"type"
+]
+},
+{
+"len": 82,
+"keys": [
+"mode",
+"sessionId",
+"type"
+]
+},
+{
+"len": 114,
+"keys": [
+"permissionMode",
+"sessionId",
+"type"
+]
+},
+{
+"len": 2573,
+"keys": [
+"cwd",
+"effort",
+"entrypoint",
+"gitBranch",
+"isSidechain",
+"message",
+"parentUuid",
+"requestId",
+"sessionId",
+"session_id",
+"timestamp",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 1820,
+"keys": [
+"cwd",
+"effort",
+"entrypoint",
+"gitBranch",
+"isSidechain",
+"message",
+"parentUuid",
+"requestId",
+"sessionId",
+"session_id",
+"timestamp",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 739,
+"keys": [
+"attachment",
+"cwd",
+"entrypoint",
+"gitBranch",
+"isSidechain",
+"parentUuid",
+"sessionId",
+"session_id",
+"timestamp",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 2081,
+"keys": [
+"cwd",
+"entrypoint",
+"gitBranch",
+"isSidechain",
+"message",
+"parentUuid",
+"promptId",
+"sessionId",
+"session_id",
+"sourceToolAssistantUUID",
+"timestamp",
+"toolUseResult",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 748,
+"keys": [
+"attachment",
+"cwd",
+"entrypoint",
+"gitBranch",
+"isSidechain",
+"parentUuid",
+"sessionId",
+"session_id",
+"timestamp",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 747,
+"keys": [
+"attachment",
+"cwd",
+"entrypoint",
+"gitBranch",
+"isSidechain",
+"parentUuid",
+"sessionId",
+"session_id",
+"timestamp",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 754,
+"keys": [
+"attachment",
+"cwd",
+"entrypoint",
+"gitBranch",
+"isSidechain",
+"parentUuid",
+"sessionId",
+"session_id",
+"timestamp",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 2407,
+"keys": [
+"cwd",
+"effort",
+"entrypoint",
+"gitBranch",
+"isSidechain",
+"message",
+"parentUuid",
+"requestId",
+"sessionId",
+"session_id",
+"timestamp",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 713,
+"keys": [
+"attachment",
+"cwd",
+"entrypoint",
+"gitBranch",
+"isSidechain",
+"parentUuid",
+"sessionId",
+"session_id",
+"timestamp",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 729,
+"keys": [
+"attachment",
+"cwd",
+"entrypoint",
+"gitBranch",
+"isSidechain",
+"parentUuid",
+"sessionId",
+"session_id",
+"timestamp",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 702,
+"keys": [
+"attachment",
+"cwd",
+"entrypoint",
+"gitBranch",
+"isSidechain",
+"parentUuid",
+"sessionId",
+"session_id",
+"timestamp",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 726,
+"keys": [
+"attachment",
+"cwd",
+"entrypoint",
+"gitBranch",
+"isSidechain",
+"parentUuid",
+"sessionId",
+"session_id",
+"timestamp",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 1279,
+"keys": [
+"cwd",
+"entrypoint",
+"gitBranch",
+"hasOutput",
+"hookAdditionalContext",
+"hookCount",
+"hookErrors",
+"hookInfos",
+"isSidechain",
+"level",
+"parentUuid",
+"preventedContinuation",
+"sessionId",
+"session_id",
+"stopReason",
+"subtype",
+"timestamp",
+"toolUseID",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 405,
+"keys": [
+"cwd",
+"durationMs",
+"entrypoint",
+"gitBranch",
+"isMeta",
+"isSidechain",
+"messageCount",
+"parentUuid",
+"sessionId",
+"subtype",
+"timestamp",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 235,
+"keys": [
+"isSnapshotUpdate",
+"messageId",
+"snapshot",
+"type"
+]
+},
+{
+"len": 565,
+"keys": [
+"cwd",
+"entrypoint",
+"gitBranch",
+"isSidechain",
+"message",
+"origin",
+"parentUuid",
+"permissionMode",
+"promptId",
+"promptSource",
+"sessionId",
+"timestamp",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 388,
+"keys": [
+"attachment",
+"cwd",
+"entrypoint",
+"gitBranch",
+"isSidechain",
+"parentUuid",
+"sessionId",
+"timestamp",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 1936,
+"keys": [
+"cwd",
+"effort",
+"entrypoint",
+"gitBranch",
+"isSidechain",
+"message",
+"parentUuid",
+"requestId",
+"sessionId",
+"session_id",
+"timestamp",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 1495,
+"keys": [
+"cwd",
+"effort",
+"entrypoint",
+"gitBranch",
+"isSidechain",
+"message",
+"parentUuid",
+"requestId",
+"sessionId",
+"session_id",
+"timestamp",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 896,
+"keys": [
+"attachment",
+"cwd",
+"entrypoint",
+"gitBranch",
+"isSidechain",
+"parentUuid",
+"sessionId",
+"session_id",
+"timestamp",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 609,
+"keys": [
+"attachment",
+"cwd",
+"entrypoint",
+"gitBranch",
+"isSidechain",
+"parentUuid",
+"sessionId",
+"session_id",
+"timestamp",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 2674,
+"keys": [
+"cwd",
+"entrypoint",
+"gitBranch",
+"isSidechain",
+"message",
+"parentUuid",
+"promptId",
+"sessionId",
+"session_id",
+"sourceToolAssistantUUID",
+"timestamp",
+"toolUseResult",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 748,
+"keys": [
+"attachment",
+"cwd",
+"entrypoint",
+"gitBranch",
+"isSidechain",
+"parentUuid",
+"sessionId",
+"session_id",
+"timestamp",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 747,
+"keys": [
+"attachment",
+"cwd",
+"entrypoint",
+"gitBranch",
+"isSidechain",
+"parentUuid",
+"sessionId",
+"session_id",
+"timestamp",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 754,
+"keys": [
+"attachment",
+"cwd",
+"entrypoint",
+"gitBranch",
+"isSidechain",
+"parentUuid",
+"sessionId",
+"session_id",
+"timestamp",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 1493,
+"keys": [
+"cwd",
+"effort",
+"entrypoint",
+"gitBranch",
+"isSidechain",
+"message",
+"parentUuid",
+"requestId",
+"sessionId",
+"session_id",
+"timestamp",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 739,
+"keys": [
+"attachment",
+"cwd",
+"entrypoint",
+"gitBranch",
+"isSidechain",
+"parentUuid",
+"sessionId",
+"session_id",
+"timestamp",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 2852,
+"keys": [
+"cwd",
+"entrypoint",
+"gitBranch",
+"isSidechain",
+"message",
+"parentUuid",
+"promptId",
+"sessionId",
+"session_id",
+"sourceToolAssistantUUID",
+"timestamp",
+"toolUseResult",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 748,
+"keys": [
+"attachment",
+"cwd",
+"entrypoint",
+"gitBranch",
+"isSidechain",
+"parentUuid",
+"sessionId",
+"session_id",
+"timestamp",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 747,
+"keys": [
+"attachment",
+"cwd",
+"entrypoint",
+"gitBranch",
+"isSidechain",
+"parentUuid",
+"sessionId",
+"session_id",
+"timestamp",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 754,
+"keys": [
+"attachment",
+"cwd",
+"entrypoint",
+"gitBranch",
+"isSidechain",
+"parentUuid",
+"sessionId",
+"session_id",
+"timestamp",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 446,
+"keys": [
+"attachment",
+"cwd",
+"entrypoint",
+"gitBranch",
+"isSidechain",
+"parentUuid",
+"sessionId",
+"session_id",
+"timestamp",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 206,
+"keys": [
+"lastPrompt",
+"leafUuid",
+"sessionId",
+"type"
+]
+},
+{
+"len": 103,
+"keys": [
+"aiTitle",
+"sessionId",
+"type"
+]
+},
+{
+"len": 82,
+"keys": [
+"mode",
+"sessionId",
+"type"
+]
+},
+{
+"len": 114,
+"keys": [
+"permissionMode",
+"sessionId",
+"type"
+]
+},
+{
+"len": 572,
+"keys": [
+"cwd",
+"entrypoint",
+"gitBranch",
+"interruptedMessageId",
+"isSidechain",
+"message",
+"parentUuid",
+"promptId",
+"sessionId",
+"session_id",
+"timestamp",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 235,
+"keys": [
+"isSnapshotUpdate",
+"messageId",
+"snapshot",
+"type"
+]
+},
+{
+"len": 566,
+"keys": [
+"cwd",
+"entrypoint",
+"gitBranch",
+"isSidechain",
+"message",
+"origin",
+"parentUuid",
+"permissionMode",
+"promptId",
+"promptSource",
+"sessionId",
+"timestamp",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 1865,
+"keys": [
+"cwd",
+"effort",
+"entrypoint",
+"gitBranch",
+"isSidechain",
+"message",
+"parentUuid",
+"requestId",
+"sessionId",
+"session_id",
+"timestamp",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 1290,
+"keys": [
+"cwd",
+"effort",
+"entrypoint",
+"gitBranch",
+"isSidechain",
+"message",
+"parentUuid",
+"requestId",
+"sessionId",
+"session_id",
+"timestamp",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 1686,
+"keys": [
+"cwd",
+"effort",
+"entrypoint",
+"gitBranch",
+"isSidechain",
+"message",
+"parentUuid",
+"requestId",
+"sessionId",
+"session_id",
+"timestamp",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 947,
+"keys": [
+"attachment",
+"cwd",
+"entrypoint",
+"gitBranch",
+"isSidechain",
+"parentUuid",
+"sessionId",
+"session_id",
+"timestamp",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 660,
+"keys": [
+"attachment",
+"cwd",
+"entrypoint",
+"gitBranch",
+"isSidechain",
+"parentUuid",
+"sessionId",
+"session_id",
+"timestamp",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 1685,
+"keys": [
+"cwd",
+"entrypoint",
+"gitBranch",
+"isSidechain",
+"message",
+"parentUuid",
+"promptId",
+"sessionId",
+"session_id",
+"sourceToolAssistantUUID",
+"timestamp",
+"toolUseResult",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 748,
+"keys": [
+"attachment",
+"cwd",
+"entrypoint",
+"gitBranch",
+"isSidechain",
+"parentUuid",
+"sessionId",
+"session_id",
+"timestamp",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 747,
+"keys": [
+"attachment",
+"cwd",
+"entrypoint",
+"gitBranch",
+"isSidechain",
+"parentUuid",
+"sessionId",
+"session_id",
+"timestamp",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 754,
+"keys": [
+"attachment",
+"cwd",
+"entrypoint",
+"gitBranch",
+"isSidechain",
+"parentUuid",
+"sessionId",
+"session_id",
+"timestamp",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 1633,
+"keys": [
+"cwd",
+"effort",
+"entrypoint",
+"gitBranch",
+"isSidechain",
+"message",
+"parentUuid",
+"requestId",
+"sessionId",
+"session_id",
+"timestamp",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 1527,
+"keys": [
+"cwd",
+"effort",
+"entrypoint",
+"gitBranch",
+"isSidechain",
+"message",
+"parentUuid",
+"requestId",
+"sessionId",
+"session_id",
+"timestamp",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 739,
+"keys": [
+"attachment",
+"cwd",
+"entrypoint",
+"gitBranch",
+"isSidechain",
+"parentUuid",
+"sessionId",
+"session_id",
+"timestamp",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 4339,
+"keys": [
+"cwd",
+"entrypoint",
+"gitBranch",
+"isSidechain",
+"message",
+"parentUuid",
+"promptId",
+"sessionId",
+"session_id",
+"sourceToolAssistantUUID",
+"timestamp",
+"toolUseResult",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 747,
+"keys": [
+"attachment",
+"cwd",
+"entrypoint",
+"gitBranch",
+"isSidechain",
+"parentUuid",
+"sessionId",
+"session_id",
+"timestamp",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 748,
+"keys": [
+"attachment",
+"cwd",
+"entrypoint",
+"gitBranch",
+"isSidechain",
+"parentUuid",
+"sessionId",
+"session_id",
+"timestamp",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 754,
+"keys": [
+"attachment",
+"cwd",
+"entrypoint",
+"gitBranch",
+"isSidechain",
+"parentUuid",
+"sessionId",
+"session_id",
+"timestamp",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 1829,
+"keys": [
+"cwd",
+"effort",
+"entrypoint",
+"gitBranch",
+"isSidechain",
+"message",
+"parentUuid",
+"requestId",
+"sessionId",
+"session_id",
+"timestamp",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 1320,
+"keys": [
+"cwd",
+"effort",
+"entrypoint",
+"gitBranch",
+"isSidechain",
+"message",
+"parentUuid",
+"requestId",
+"sessionId",
+"session_id",
+"timestamp",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 1777,
+"keys": [
+"cwd",
+"effort",
+"entrypoint",
+"gitBranch",
+"isSidechain",
+"message",
+"parentUuid",
+"requestId",
+"sessionId",
+"session_id",
+"timestamp",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 739,
+"keys": [
+"attachment",
+"cwd",
+"entrypoint",
+"gitBranch",
+"isSidechain",
+"parentUuid",
+"sessionId",
+"session_id",
+"timestamp",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 23977,
+"keys": [
+"cwd",
+"entrypoint",
+"gitBranch",
+"isSidechain",
+"message",
+"parentUuid",
+"promptId",
+"sessionId",
+"session_id",
+"sourceToolAssistantUUID",
+"timestamp",
+"toolUseResult",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 748,
+"keys": [
+"attachment",
+"cwd",
+"entrypoint",
+"gitBranch",
+"isSidechain",
+"parentUuid",
+"sessionId",
+"session_id",
+"timestamp",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 747,
+"keys": [
+"attachment",
+"cwd",
+"entrypoint",
+"gitBranch",
+"isSidechain",
+"parentUuid",
+"sessionId",
+"session_id",
+"timestamp",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 754,
+"keys": [
+"attachment",
+"cwd",
+"entrypoint",
+"gitBranch",
+"isSidechain",
+"parentUuid",
+"sessionId",
+"session_id",
+"timestamp",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 207,
+"keys": [
+"lastPrompt",
+"leafUuid",
+"sessionId",
+"type"
+]
+},
+{
+"len": 103,
+"keys": [
+"aiTitle",
+"sessionId",
+"type"
+]
+},
+{
+"len": 82,
+"keys": [
+"mode",
+"sessionId",
+"type"
+]
+},
+{
+"len": 114,
+"keys": [
+"permissionMode",
+"sessionId",
+"type"
+]
+},
+{
+"len": 2925,
+"keys": [
+"cwd",
+"effort",
+"entrypoint",
+"gitBranch",
+"isSidechain",
+"message",
+"parentUuid",
+"requestId",
+"sessionId",
+"session_id",
+"timestamp",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 1413,
+"keys": [
+"cwd",
+"effort",
+"entrypoint",
+"gitBranch",
+"isSidechain",
+"message",
+"parentUuid",
+"requestId",
+"sessionId",
+"session_id",
+"timestamp",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 1885,
+"keys": [
+"cwd",
+"effort",
+"entrypoint",
+"gitBranch",
+"isSidechain",
+"message",
+"parentUuid",
+"requestId",
+"sessionId",
+"session_id",
+"timestamp",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 739,
+"keys": [
+"attachment",
+"cwd",
+"entrypoint",
+"gitBranch",
+"isSidechain",
+"parentUuid",
+"sessionId",
+"session_id",
+"timestamp",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 1463,
+"keys": [
+"cwd",
+"entrypoint",
+"gitBranch",
+"isSidechain",
+"message",
+"parentUuid",
+"promptId",
+"sessionId",
+"session_id",
+"sourceToolAssistantUUID",
+"timestamp",
+"toolUseResult",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 748,
+"keys": [
+"attachment",
+"cwd",
+"entrypoint",
+"gitBranch",
+"isSidechain",
+"parentUuid",
+"sessionId",
+"session_id",
+"timestamp",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 747,
+"keys": [
+"attachment",
+"cwd",
+"entrypoint",
+"gitBranch",
+"isSidechain",
+"parentUuid",
+"sessionId",
+"session_id",
+"timestamp",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 754,
+"keys": [
+"attachment",
+"cwd",
+"entrypoint",
+"gitBranch",
+"isSidechain",
+"parentUuid",
+"sessionId",
+"session_id",
+"timestamp",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 2461,
+"keys": [
+"cwd",
+"effort",
+"entrypoint",
+"gitBranch",
+"isSidechain",
+"message",
+"parentUuid",
+"requestId",
+"sessionId",
+"session_id",
+"timestamp",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 1363,
+"keys": [
+"cwd",
+"effort",
+"entrypoint",
+"gitBranch",
+"isSidechain",
+"message",
+"parentUuid",
+"requestId",
+"sessionId",
+"session_id",
+"timestamp",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 2004,
+"keys": [
+"cwd",
+"effort",
+"entrypoint",
+"gitBranch",
+"isSidechain",
+"message",
+"parentUuid",
+"requestId",
+"sessionId",
+"session_id",
+"timestamp",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 739,
+"keys": [
+"attachment",
+"cwd",
+"entrypoint",
+"gitBranch",
+"isSidechain",
+"parentUuid",
+"sessionId",
+"session_id",
+"timestamp",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 1487,
+"keys": [
+"cwd",
+"entrypoint",
+"gitBranch",
+"isSidechain",
+"message",
+"parentUuid",
+"promptId",
+"sessionId",
+"session_id",
+"sourceToolAssistantUUID",
+"timestamp",
+"toolUseResult",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 748,
+"keys": [
+"attachment",
+"cwd",
+"entrypoint",
+"gitBranch",
+"isSidechain",
+"parentUuid",
+"sessionId",
+"session_id",
+"timestamp",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 747,
+"keys": [
+"attachment",
+"cwd",
+"entrypoint",
+"gitBranch",
+"isSidechain",
+"parentUuid",
+"sessionId",
+"session_id",
+"timestamp",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 754,
+"keys": [
+"attachment",
+"cwd",
+"entrypoint",
+"gitBranch",
+"isSidechain",
+"parentUuid",
+"sessionId",
+"session_id",
+"timestamp",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 3293,
+"keys": [
+"cwd",
+"effort",
+"entrypoint",
+"gitBranch",
+"isSidechain",
+"message",
+"parentUuid",
+"requestId",
+"sessionId",
+"session_id",
+"timestamp",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 1432,
+"keys": [
+"cwd",
+"effort",
+"entrypoint",
+"gitBranch",
+"isSidechain",
+"message",
+"parentUuid",
+"requestId",
+"sessionId",
+"session_id",
+"timestamp",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 1572,
+"keys": [
+"cwd",
+"effort",
+"entrypoint",
+"gitBranch",
+"isSidechain",
+"message",
+"parentUuid",
+"requestId",
+"sessionId",
+"session_id",
+"timestamp",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 739,
+"keys": [
+"attachment",
+"cwd",
+"entrypoint",
+"gitBranch",
+"isSidechain",
+"parentUuid",
+"sessionId",
+"session_id",
+"timestamp",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 4863,
+"keys": [
+"cwd",
+"entrypoint",
+"gitBranch",
+"isSidechain",
+"message",
+"parentUuid",
+"promptId",
+"sessionId",
+"session_id",
+"sourceToolAssistantUUID",
+"timestamp",
+"toolUseResult",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 748,
+"keys": [
+"attachment",
+"cwd",
+"entrypoint",
+"gitBranch",
+"isSidechain",
+"parentUuid",
+"sessionId",
+"session_id",
+"timestamp",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 747,
+"keys": [
+"attachment",
+"cwd",
+"entrypoint",
+"gitBranch",
+"isSidechain",
+"parentUuid",
+"sessionId",
+"session_id",
+"timestamp",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 754,
+"keys": [
+"attachment",
+"cwd",
+"entrypoint",
+"gitBranch",
+"isSidechain",
+"parentUuid",
+"sessionId",
+"session_id",
+"timestamp",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 446,
+"keys": [
+"attachment",
+"cwd",
+"entrypoint",
+"gitBranch",
+"isSidechain",
+"parentUuid",
+"sessionId",
+"session_id",
+"timestamp",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 207,
+"keys": [
+"lastPrompt",
+"leafUuid",
+"sessionId",
+"type"
+]
+},
+{
+"len": 103,
+"keys": [
+"aiTitle",
+"sessionId",
+"type"
+]
+},
+{
+"len": 82,
+"keys": [
+"mode",
+"sessionId",
+"type"
+]
+},
+{
+"len": 114,
+"keys": [
+"permissionMode",
+"sessionId",
+"type"
+]
+},
+{
+"len": 3329,
+"keys": [
+"cwd",
+"effort",
+"entrypoint",
+"gitBranch",
+"isSidechain",
+"message",
+"parentUuid",
+"requestId",
+"sessionId",
+"session_id",
+"timestamp",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 1306,
+"keys": [
+"cwd",
+"effort",
+"entrypoint",
+"gitBranch",
+"isSidechain",
+"message",
+"parentUuid",
+"requestId",
+"sessionId",
+"session_id",
+"timestamp",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 1480,
+"keys": [
+"cwd",
+"effort",
+"entrypoint",
+"gitBranch",
+"isSidechain",
+"message",
+"parentUuid",
+"requestId",
+"sessionId",
+"session_id",
+"timestamp",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 739,
+"keys": [
+"attachment",
+"cwd",
+"entrypoint",
+"gitBranch",
+"isSidechain",
+"parentUuid",
+"sessionId",
+"session_id",
+"timestamp",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 1633,
+"keys": [
+"cwd",
+"entrypoint",
+"gitBranch",
+"isSidechain",
+"message",
+"parentUuid",
+"promptId",
+"sessionId",
+"session_id",
+"sourceToolAssistantUUID",
+"timestamp",
+"toolUseResult",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 748,
+"keys": [
+"attachment",
+"cwd",
+"entrypoint",
+"gitBranch",
+"isSidechain",
+"parentUuid",
+"sessionId",
+"session_id",
+"timestamp",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 747,
+"keys": [
+"attachment",
+"cwd",
+"entrypoint",
+"gitBranch",
+"isSidechain",
+"parentUuid",
+"sessionId",
+"session_id",
+"timestamp",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 910,
+"keys": [
+"attachment",
+"cwd",
+"entrypoint",
+"gitBranch",
+"isSidechain",
+"parentUuid",
+"sessionId",
+"session_id",
+"timestamp",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 621,
+"keys": [
+"attachment",
+"cwd",
+"entrypoint",
+"gitBranch",
+"isSidechain",
+"parentUuid",
+"sessionId",
+"session_id",
+"timestamp",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 2313,
+"keys": [
+"cwd",
+"effort",
+"entrypoint",
+"gitBranch",
+"isSidechain",
+"message",
+"parentUuid",
+"requestId",
+"sessionId",
+"session_id",
+"timestamp",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 1614,
+"keys": [
+"cwd",
+"effort",
+"entrypoint",
+"gitBranch",
+"isSidechain",
+"message",
+"parentUuid",
+"requestId",
+"sessionId",
+"session_id",
+"timestamp",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 739,
+"keys": [
+"attachment",
+"cwd",
+"entrypoint",
+"gitBranch",
+"isSidechain",
+"parentUuid",
+"sessionId",
+"session_id",
+"timestamp",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 845,
+"keys": [
+"cwd",
+"entrypoint",
+"gitBranch",
+"isSidechain",
+"message",
+"parentUuid",
+"promptId",
+"sessionId",
+"session_id",
+"sourceToolAssistantUUID",
+"timestamp",
+"toolUseResult",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 748,
+"keys": [
+"attachment",
+"cwd",
+"entrypoint",
+"gitBranch",
+"isSidechain",
+"parentUuid",
+"sessionId",
+"session_id",
+"timestamp",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 747,
+"keys": [
+"attachment",
+"cwd",
+"entrypoint",
+"gitBranch",
+"isSidechain",
+"parentUuid",
+"sessionId",
+"session_id",
+"timestamp",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 754,
+"keys": [
+"attachment",
+"cwd",
+"entrypoint",
+"gitBranch",
+"isSidechain",
+"parentUuid",
+"sessionId",
+"session_id",
+"timestamp",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 2113,
+"keys": [
+"cwd",
+"effort",
+"entrypoint",
+"gitBranch",
+"isSidechain",
+"message",
+"parentUuid",
+"requestId",
+"sessionId",
+"session_id",
+"timestamp",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 1303,
+"keys": [
+"cwd",
+"effort",
+"entrypoint",
+"gitBranch",
+"isSidechain",
+"message",
+"parentUuid",
+"requestId",
+"sessionId",
+"session_id",
+"timestamp",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 1773,
+"keys": [
+"cwd",
+"effort",
+"entrypoint",
+"gitBranch",
+"isSidechain",
+"message",
+"parentUuid",
+"requestId",
+"sessionId",
+"session_id",
+"timestamp",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 740,
+"keys": [
+"attachment",
+"cwd",
+"entrypoint",
+"gitBranch",
+"isSidechain",
+"parentUuid",
+"sessionId",
+"session_id",
+"timestamp",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 1011,
+"keys": [
+"cwd",
+"entrypoint",
+"gitBranch",
+"isSidechain",
+"message",
+"parentUuid",
+"promptId",
+"sessionId",
+"session_id",
+"sourceToolAssistantUUID",
+"timestamp",
+"toolUseResult",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 748,
+"keys": [
+"attachment",
+"cwd",
+"entrypoint",
+"gitBranch",
+"isSidechain",
+"parentUuid",
+"sessionId",
+"session_id",
+"timestamp",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 747,
+"keys": [
+"attachment",
+"cwd",
+"entrypoint",
+"gitBranch",
+"isSidechain",
+"parentUuid",
+"sessionId",
+"session_id",
+"timestamp",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 754,
+"keys": [
+"attachment",
+"cwd",
+"entrypoint",
+"gitBranch",
+"isSidechain",
+"parentUuid",
+"sessionId",
+"session_id",
+"timestamp",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 2313,
+"keys": [
+"cwd",
+"effort",
+"entrypoint",
+"gitBranch",
+"isSidechain",
+"message",
+"parentUuid",
+"requestId",
+"sessionId",
+"session_id",
+"timestamp",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 1985,
+"keys": [
+"cwd",
+"effort",
+"entrypoint",
+"gitBranch",
+"isSidechain",
+"message",
+"parentUuid",
+"requestId",
+"sessionId",
+"session_id",
+"timestamp",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 207,
+"keys": [
+"lastPrompt",
+"leafUuid",
+"sessionId",
+"type"
+]
+},
+{
+"len": 103,
+"keys": [
+"aiTitle",
+"sessionId",
+"type"
+]
+},
+{
+"len": 82,
+"keys": [
+"mode",
+"sessionId",
+"type"
+]
+},
+{
+"len": 114,
+"keys": [
+"permissionMode",
+"sessionId",
+"type"
+]
+},
+{
+"len": 739,
+"keys": [
+"attachment",
+"cwd",
+"entrypoint",
+"gitBranch",
+"isSidechain",
+"parentUuid",
+"sessionId",
+"session_id",
+"timestamp",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 1581,
+"keys": [
+"cwd",
+"entrypoint",
+"gitBranch",
+"isSidechain",
+"message",
+"parentUuid",
+"promptId",
+"sessionId",
+"session_id",
+"sourceToolAssistantUUID",
+"timestamp",
+"toolUseResult",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 748,
+"keys": [
+"attachment",
+"cwd",
+"entrypoint",
+"gitBranch",
+"isSidechain",
+"parentUuid",
+"sessionId",
+"session_id",
+"timestamp",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 747,
+"keys": [
+"attachment",
+"cwd",
+"entrypoint",
+"gitBranch",
+"isSidechain",
+"parentUuid",
+"sessionId",
+"session_id",
+"timestamp",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 754,
+"keys": [
+"attachment",
+"cwd",
+"entrypoint",
+"gitBranch",
+"isSidechain",
+"parentUuid",
+"sessionId",
+"session_id",
+"timestamp",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 3421,
+"keys": [
+"cwd",
+"effort",
+"entrypoint",
+"gitBranch",
+"isSidechain",
+"message",
+"parentUuid",
+"requestId",
+"sessionId",
+"session_id",
+"timestamp",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 1543,
+"keys": [
+"cwd",
+"effort",
+"entrypoint",
+"gitBranch",
+"isSidechain",
+"message",
+"parentUuid",
+"requestId",
+"sessionId",
+"session_id",
+"timestamp",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 1736,
+"keys": [
+"cwd",
+"effort",
+"entrypoint",
+"gitBranch",
+"isSidechain",
+"message",
+"parentUuid",
+"requestId",
+"sessionId",
+"session_id",
+"timestamp",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 739,
+"keys": [
+"attachment",
+"cwd",
+"entrypoint",
+"gitBranch",
+"isSidechain",
+"parentUuid",
+"sessionId",
+"session_id",
+"timestamp",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 813,
+"keys": [
+"cwd",
+"entrypoint",
+"gitBranch",
+"isSidechain",
+"message",
+"parentUuid",
+"promptId",
+"sessionId",
+"session_id",
+"sourceToolAssistantUUID",
+"timestamp",
+"toolUseResult",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 748,
+"keys": [
+"attachment",
+"cwd",
+"entrypoint",
+"gitBranch",
+"isSidechain",
+"parentUuid",
+"sessionId",
+"session_id",
+"timestamp",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 754,
+"keys": [
+"attachment",
+"cwd",
+"entrypoint",
+"gitBranch",
+"isSidechain",
+"parentUuid",
+"sessionId",
+"session_id",
+"timestamp",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 747,
+"keys": [
+"attachment",
+"cwd",
+"entrypoint",
+"gitBranch",
+"isSidechain",
+"parentUuid",
+"sessionId",
+"session_id",
+"timestamp",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 2021,
+"keys": [
+"cwd",
+"effort",
+"entrypoint",
+"gitBranch",
+"isSidechain",
+"message",
+"parentUuid",
+"requestId",
+"sessionId",
+"session_id",
+"timestamp",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 1282,
+"keys": [
+"cwd",
+"effort",
+"entrypoint",
+"gitBranch",
+"isSidechain",
+"message",
+"parentUuid",
+"requestId",
+"sessionId",
+"session_id",
+"timestamp",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 2030,
+"keys": [
+"cwd",
+"effort",
+"entrypoint",
+"gitBranch",
+"isSidechain",
+"message",
+"parentUuid",
+"requestId",
+"sessionId",
+"session_id",
+"timestamp",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 739,
+"keys": [
+"attachment",
+"cwd",
+"entrypoint",
+"gitBranch",
+"isSidechain",
+"parentUuid",
+"sessionId",
+"session_id",
+"timestamp",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 37819,
+"keys": [
+"cwd",
+"entrypoint",
+"gitBranch",
+"isSidechain",
+"message",
+"parentUuid",
+"promptId",
+"sessionId",
+"session_id",
+"sourceToolAssistantUUID",
+"timestamp",
+"toolUseResult",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 748,
+"keys": [
+"attachment",
+"cwd",
+"entrypoint",
+"gitBranch",
+"isSidechain",
+"parentUuid",
+"sessionId",
+"session_id",
+"timestamp",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 747,
+"keys": [
+"attachment",
+"cwd",
+"entrypoint",
+"gitBranch",
+"isSidechain",
+"parentUuid",
+"sessionId",
+"session_id",
+"timestamp",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 754,
+"keys": [
+"attachment",
+"cwd",
+"entrypoint",
+"gitBranch",
+"isSidechain",
+"parentUuid",
+"sessionId",
+"session_id",
+"timestamp",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 446,
+"keys": [
+"attachment",
+"cwd",
+"entrypoint",
+"gitBranch",
+"isSidechain",
+"parentUuid",
+"sessionId",
+"session_id",
+"timestamp",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 207,
+"keys": [
+"lastPrompt",
+"leafUuid",
+"sessionId",
+"type"
+]
+},
+{
+"len": 103,
+"keys": [
+"aiTitle",
+"sessionId",
+"type"
+]
+},
+{
+"len": 82,
+"keys": [
+"mode",
+"sessionId",
+"type"
+]
+},
+{
+"len": 114,
+"keys": [
+"permissionMode",
+"sessionId",
+"type"
+]
+},
+{
+"len": 3409,
+"keys": [
+"cwd",
+"effort",
+"entrypoint",
+"gitBranch",
+"isSidechain",
+"message",
+"parentUuid",
+"requestId",
+"sessionId",
+"session_id",
+"timestamp",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 1347,
+"keys": [
+"cwd",
+"effort",
+"entrypoint",
+"gitBranch",
+"isSidechain",
+"message",
+"parentUuid",
+"requestId",
+"sessionId",
+"session_id",
+"timestamp",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 1860,
+"keys": [
+"cwd",
+"effort",
+"entrypoint",
+"gitBranch",
+"isSidechain",
+"message",
+"parentUuid",
+"requestId",
+"sessionId",
+"session_id",
+"timestamp",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 739,
+"keys": [
+"attachment",
+"cwd",
+"entrypoint",
+"gitBranch",
+"isSidechain",
+"parentUuid",
+"sessionId",
+"session_id",
+"timestamp",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 4331,
+"keys": [
+"cwd",
+"entrypoint",
+"gitBranch",
+"isSidechain",
+"message",
+"parentUuid",
+"promptId",
+"sessionId",
+"session_id",
+"sourceToolAssistantUUID",
+"timestamp",
+"toolUseResult",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 748,
+"keys": [
+"attachment",
+"cwd",
+"entrypoint",
+"gitBranch",
+"isSidechain",
+"parentUuid",
+"sessionId",
+"session_id",
+"timestamp",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 747,
+"keys": [
+"attachment",
+"cwd",
+"entrypoint",
+"gitBranch",
+"isSidechain",
+"parentUuid",
+"sessionId",
+"session_id",
+"timestamp",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 754,
+"keys": [
+"attachment",
+"cwd",
+"entrypoint",
+"gitBranch",
+"isSidechain",
+"parentUuid",
+"sessionId",
+"session_id",
+"timestamp",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 3647,
+"keys": [
+"cwd",
+"effort",
+"entrypoint",
+"gitBranch",
+"isSidechain",
+"message",
+"parentUuid",
+"requestId",
+"sessionId",
+"session_id",
+"timestamp",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 2618,
+"keys": [
+"cwd",
+"effort",
+"entrypoint",
+"gitBranch",
+"isSidechain",
+"message",
+"parentUuid",
+"requestId",
+"sessionId",
+"session_id",
+"timestamp",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 2250,
+"keys": [
+"cwd",
+"effort",
+"entrypoint",
+"gitBranch",
+"isSidechain",
+"message",
+"parentUuid",
+"requestId",
+"sessionId",
+"session_id",
+"timestamp",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 751,
+"keys": [
+"attachment",
+"cwd",
+"entrypoint",
+"gitBranch",
+"isSidechain",
+"parentUuid",
+"sessionId",
+"session_id",
+"timestamp",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 1862,
+"keys": [
+"cwd",
+"entrypoint",
+"gitBranch",
+"isSidechain",
+"message",
+"parentUuid",
+"promptId",
+"sessionId",
+"session_id",
+"sourceToolAssistantUUID",
+"timestamp",
+"toolUseResult",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 759,
+"keys": [
+"attachment",
+"cwd",
+"entrypoint",
+"gitBranch",
+"isSidechain",
+"parentUuid",
+"sessionId",
+"session_id",
+"timestamp",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 765,
+"keys": [
+"attachment",
+"cwd",
+"entrypoint",
+"gitBranch",
+"isSidechain",
+"parentUuid",
+"sessionId",
+"session_id",
+"timestamp",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 758,
+"keys": [
+"attachment",
+"cwd",
+"entrypoint",
+"gitBranch",
+"isSidechain",
+"parentUuid",
+"sessionId",
+"session_id",
+"timestamp",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 2345,
+"keys": [
+"cwd",
+"effort",
+"entrypoint",
+"gitBranch",
+"isSidechain",
+"message",
+"parentUuid",
+"requestId",
+"sessionId",
+"session_id",
+"timestamp",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 1316,
+"keys": [
+"cwd",
+"effort",
+"entrypoint",
+"gitBranch",
+"isSidechain",
+"message",
+"parentUuid",
+"requestId",
+"sessionId",
+"session_id",
+"timestamp",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 1732,
+"keys": [
+"cwd",
+"effort",
+"entrypoint",
+"gitBranch",
+"isSidechain",
+"message",
+"parentUuid",
+"requestId",
+"sessionId",
+"session_id",
+"timestamp",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 739,
+"keys": [
+"attachment",
+"cwd",
+"entrypoint",
+"gitBranch",
+"isSidechain",
+"parentUuid",
+"sessionId",
+"session_id",
+"timestamp",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 961,
+"keys": [
+"cwd",
+"entrypoint",
+"gitBranch",
+"isSidechain",
+"message",
+"parentUuid",
+"promptId",
+"sessionId",
+"session_id",
+"sourceToolAssistantUUID",
+"timestamp",
+"toolUseResult",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 747,
+"keys": [
+"attachment",
+"cwd",
+"entrypoint",
+"gitBranch",
+"isSidechain",
+"parentUuid",
+"sessionId",
+"session_id",
+"timestamp",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 748,
+"keys": [
+"attachment",
+"cwd",
+"entrypoint",
+"gitBranch",
+"isSidechain",
+"parentUuid",
+"sessionId",
+"session_id",
+"timestamp",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 754,
+"keys": [
+"attachment",
+"cwd",
+"entrypoint",
+"gitBranch",
+"isSidechain",
+"parentUuid",
+"sessionId",
+"session_id",
+"timestamp",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 207,
+"keys": [
+"lastPrompt",
+"leafUuid",
+"sessionId",
+"type"
+]
+},
+{
+"len": 103,
+"keys": [
+"aiTitle",
+"sessionId",
+"type"
+]
+},
+{
+"len": 82,
+"keys": [
+"mode",
+"sessionId",
+"type"
+]
+},
+{
+"len": 114,
+"keys": [
+"permissionMode",
+"sessionId",
+"type"
+]
+},
+{
+"len": 1526,
+"keys": [
+"cwd",
+"effort",
+"entrypoint",
+"gitBranch",
+"isSidechain",
+"message",
+"parentUuid",
+"requestId",
+"sessionId",
+"session_id",
+"timestamp",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 739,
+"keys": [
+"attachment",
+"cwd",
+"entrypoint",
+"gitBranch",
+"isSidechain",
+"parentUuid",
+"sessionId",
+"session_id",
+"timestamp",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 845,
+"keys": [
+"cwd",
+"entrypoint",
+"gitBranch",
+"isSidechain",
+"message",
+"parentUuid",
+"promptId",
+"sessionId",
+"session_id",
+"sourceToolAssistantUUID",
+"timestamp",
+"toolUseResult",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 748,
+"keys": [
+"attachment",
+"cwd",
+"entrypoint",
+"gitBranch",
+"isSidechain",
+"parentUuid",
+"sessionId",
+"session_id",
+"timestamp",
+"type",
+"userType",
+"uuid",
+"version"
+]
+},
+{
+"len": 747,
+"keys": [
+"attachment",
+"cwd",
+"entrypoint",
+"gitBranch",
+"isSidechain",
+"parentUuid",
+"sessionId",
+"session_id",
+"timestamp",
+"type",
+"userType",
+"uuid",
+"version"
+]
+}
+]
+}
