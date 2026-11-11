@@ -170,7 +170,11 @@ object ReplyGuard {
         !deliverable -> refuse(RefuseReason.NOT_CONNECTED, "the session is not connected")
         current != null && current.prompt.kind.isDialog() ->
             refuse(RefuseReason.PROMPT_CHANGED, "a dialog was announced last (${current.prompt.key})")
-        activity != SessionActivity.WAITING_FOR_INPUT -> refuse(RefuseReason.PROMPT_CHANGED, "not idle at the prompt ($activity)")
+        // IDLE = connected, nothing heard since the (re)attach: every reconnect, every app update sets it, and a quiet
+        // Jarvis keeps it until his next turn (2026-11-11: the conversation mode answered only "nemůže přijmout").
+        // It claims no turn either way; the server decides with the hook (stop/start = idle) and the empty box.
+        activity != SessionActivity.WAITING_FOR_INPUT && activity != SessionActivity.IDLE ->
+            refuse(RefuseReason.PROMPT_CHANGED, "not idle at the prompt ($activity)")
         else -> Verdict.Send(ServerExpectation.Idle)
     }
 

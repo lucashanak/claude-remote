@@ -331,7 +331,10 @@ class ReplyGuardTest {
     @Test fun aSpokenPromptNeedsARouteAndAKnownState() {
         assertEquals(RefuseReason.NOT_CONNECTED, ReplyGuard.voiceCheck(null, SessionActivity.WAITING_FOR_INPUT, false).reason())
         assertEquals(RefuseReason.PROMPT_CHANGED, ReplyGuard.voiceCheck(null, null, true).reason())
-        assertEquals(RefuseReason.PROMPT_CHANGED, ReplyGuard.voiceCheck(null, SessionActivity.IDLE, true).reason())
+        // IDLE after a reconnect claims nothing: the server's hook check (stop/start) and empty box decide
+        assertEquals(Verdict.Send(ServerExpectation.Idle), ReplyGuard.voiceCheck(null, SessionActivity.IDLE, true))
+        assertEquals(RefuseReason.PROMPT_CHANGED, ReplyGuard.voiceCheck(cur(permA), SessionActivity.IDLE, true).reason())
+        assertEquals(RefuseReason.NOT_CONNECTED, ReplyGuard.voiceCheck(null, SessionActivity.IDLE, false).reason())
     }
 
     @Test fun aDraftTokenIsTheDraftRefusal() {
