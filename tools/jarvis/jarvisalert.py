@@ -104,6 +104,9 @@ REPLY_WAIT_MS = 3 * 60 * 1000
 CONVERSATION_MS = 2 * 60 * 1000
 ROUND_MS = 30 * 60 * 1000
 STUCK_MS = 30 * 60 * 1000
+# live 2026-11-12: one session waiting for its workflow agents was "stuck" 4x in a day; one episode is told at most
+# once in 3 h per session, even when an event comes in between and the silence starts again
+STUCK_COOLDOWN_MS = 3 * 3600 * 1000
 CRASH_FRESH_MS = 10 * 60 * 1000
 CRASH_CLOSED_MS = 15 * 60 * 1000
 USAGE_LEVELS = (80, 90)
@@ -568,6 +571,7 @@ class AlertWorker:
             "wb": wb if isinstance(wb, dict) and self.M.WAKE_RE.fullmatch(str(wb.get("id"))) else None,
             "roundAt": _i(st.get("roundAt")),
             "stuck": d("stuck"),
+            "stuckTold": d("stuckTold"),
             "crashed": d("crashed"),
             "usageLvl": d("usageLvl"),
             "saver": _i(st.get("saver")),
@@ -849,11 +853,22 @@ class AlertWorker:
             st = s.get("state")
             short = J.short_name(name)
             if st == "busy":
-                # busy without any sign of life: no hook event, no registry change, no transcript write for 30 min
+                # busy without any sign of life: no hook event, no registry change, no write to its transcript or to
+                # any transcript of its subagents / workflow agents for 30 min (the agents' files are read only for
+                # a session whose own signals are already that old)
                 since = max(_i((s.get("lastEvent") or {}).get("ms")), _i(s.get("stateSince")), _tr_ms(s.get("trKey")))
                 if since and now - since >= STUCK_MS:
+                    since = max(since, J.transcript_activity_ms(s.get("transcript")))
+                if since and now - since >= STUCK_MS:
                     stuck[name] = since
-                    if _i(self.s["stuck"].get(name)) != since and not self.stuck_baseline:
+                    # rev-stuck MED: the TOLD episodes are kept apart ({since, at}); an episode found during the 3-h
+                    # cooldown is not dropped, it is told once the cooldown is over if it still lasts
+                    told = self.s["stuckTold"].get(name)
+                    told = told if isinstance(told, dict) else {"at": _i(told)}
+                    if self.stuck_baseline:
+                        self.s["stuckTold"][name] = {"since": since, "at": 0}  # the rollout's baseline: not news
+                    elif _i(told.get("since")) != since and now - _i(told.get("at")) >= STUCK_COOLDOWN_MS:
+                        self.s["stuckTold"][name] = {"since": since, "at": now}
                         # `at` = when it was found (the expiry counts from there; `since` may be hours old)
                         self._add(now, src="stuck", sub="stuck", name=name, at=now, since=since,
                                   text=f"{short} pracuje {J.minutes_cz(now - since)} bez známky života")
@@ -873,6 +888,8 @@ class AlertWorker:
                           text=f"{short} {'zmizela' if st == 'gone' else 'už nemá běžící claude'}"
                           + (" uprostřed práce" if work else " a měla rozdělaný úkol od Jarvise"))
         self.s["stuck"] = stuck
+        self.s["stuckTold"] = {k: v for k, v in self.s["stuckTold"].items() if k in stuck or (
+            isinstance(v, dict) and now - _i(v.get("at")) < STUCK_COOLDOWN_MS)}
         self.stuck_baseline = False
         self.s["crashed"] = {k: v for k, v in self.s["crashed"].items() if now - _i(v) < 2 * 3600 * 1000}
         for acct, u in sorted((self.usage or {}).items()):

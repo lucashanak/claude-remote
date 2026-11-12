@@ -550,12 +550,161 @@ class WakeTest(Base):
         self.assertEqual(self.keys(), ["Enter"])
 
 
+class TrustTmux:
+    """In-memory tmux for sessions on the folder-trust dialog: per pane a focus (1 = No, exit: the default, checked
+    live; 2 = Yes, I trust this folder), Down/Up move it, Enter answers (Yes: the dialog goes; No: claude exits)."""
+
+    def __init__(self, base, screens):
+        self.base, self.screens = base, screens  # pane -> (path)
+        self.focus = {p: 1 for p in screens}
+        self.state = {p: "open" for p in screens}
+        self.calls = base.calls
+        self.stuck_down = set()
+
+    def __getattr__(self, k):
+        return getattr(self.base, k)
+
+    def screen(self, pane):
+        raw = fixture("trust.ansi").replace("/home/lucas", self.screens[pane])
+        no, yes = ("❯ No, exit", "  Yes, I trust this folder") if self.focus[pane] == 1 else \
+            ("  No, exit", "❯ Yes, I trust this folder")
+        raw = re.sub(r"❯ No, exit", no, raw)
+        return re.sub(r"(?m)^(\s*)\s\sYes, I trust this folder", lambda m: m.group(1) + yes, raw)
+
+    def __call__(self, args):
+        pane = args[args.index("-t") + 1] if "-t" in args else None
+        if pane in self.screens and self.state[pane] == "open":
+            if args[0] == "capture-pane":
+                self.base.calls.append(list(args))
+                return 0, self.screen(pane)
+            if args[0] == "send-keys":
+                self.base.calls.append(list(args))
+                k = args[-1]
+                if k == "Down" and pane not in self.stuck_down:
+                    self.focus[pane] = 2
+                elif k == "Up":
+                    self.focus[pane] = 1
+                elif k == "Enter":
+                    self.state[pane] = "trusted" if self.focus[pane] == 2 else "exited"
+                return 0, ""
+        if pane in self.screens and args[0] == "capture-pane":
+            return 0, TM.screen()
+        return self.base(args)
+
+
+class TrustTest(Base):
+    NAMES = ("claude-server-~-yolo", "claude-server-~-yolo--home", "claude-server-~-yolo--etc",
+             "claude-server-~-yolo--sub")
+
+    def setUp(self):
+        super().setUp()
+        fx = self.fx
+        home = fx.home
+        paths = {"%20": home, "%21": home, "%22": "/etc", "%23": os.path.join(home, "sub")}
+        sessions = {}
+        for i, (name, pane) in enumerate(zip(self.NAMES, paths)):
+            pp, pid = 400 + 10 * i, 401 + 10 * i
+            fx.pane(pane, pp, name)
+            self.tm.add(TM.Pane(name, pane, pp, pid))
+            fx.ptable.update({pp: (1, "bash"), pid: (pp, "claude")})
+            fx.procs[pid] = str(7000 + i)
+            fx.cwds[pid] = paths[pane]  # the claude runs in the folder its dialog names
+            sessions[name] = {"name": name, "short": J.short_name(name), "state": "waiting",
+                              "waitingFor": J.TRUST_CZ, "noRegistry": True}
+        self.tt = TrustTmux(self.tm, paths)
+        self.m.tmux = self.tt
+        J.atomic_write(self.env.path("status.json"), json.dumps(
+            {"v": 1, "gen": 1, "at": fx.clock.ms, "d_heartbeat": fx.clock.ms, "sessions": sessions}))
+
+    def test_the_live_screen_its_folder_and_the_fingerprint(self):
+        path, text = JAP.trust_screen(fixture("trust.ansi"))
+        self.assertEqual(path, "/home/lucas")
+        self.assertNotIn("❯", text)
+        tr, why = JAP.read_trust(self.m, self.NAMES[0])
+        self.assertIsNone(why)
+        self.assertEqual(tr.path, self.fx.home)
+        rc, out, err = self.run_cli("show", self.NAMES[0])
+        self.assertEqual(rc, 0, err)
+        self.assertIn("dialog důvěry ke složce", out)
+
+    def test_one_session_down_check_enter(self):
+        rc, out, err = self.run_cli("propose", self.NAMES[0])
+        self.assertEqual(rc, 0, err)
+        self.assertIn(f"čeká na důvěru ke složce {self.fx.home}. Potvrdit?", out)
+        self.assertEqual(self.keys(), [])
+        recs = self.approve_and_run()
+        self.assertEqual(self.keys(), ["Down", "Enter"])
+        self.assertEqual(self.tt.state["%20"], "trusted")
+        self.assertTrue(recs[0]["message"].startswith("Potvrzena důvěra ke složce"))
+
+    def test_focus_that_does_not_reach_yes_gets_no_enter(self):
+        self.tt.stuck_down.add("%20")
+        self.run_cli("propose", self.NAMES[0])
+        recs = self.approve_and_run()
+        self.assertNotIn("Enter", self.keys())
+        self.assertEqual(self.tt.state["%20"], "open")
+        self.assertIn("fokus není na Yes", recs[0]["message"])
+
+    def test_a_folder_outside_home_never(self):
+        rc, _, err = self.run_cli("propose", self.NAMES[2])
+        self.assertEqual(rc, 2)
+        self.assertIn("mimo tvůj domov", err)
+
+    def test_trust_all_takes_only_the_same_folder_and_skips_what_changed(self):
+        rc, out, err = self.run_cli("propose", "--trust-all", self.fx.home)
+        self.assertEqual(rc, 0, err)
+        self.assertIn("2 sessions čeká na důvěru ke složce", out)
+        self.assertIn(": ~, home. Potvrdit všem?", out)  # their short names; the /etc one never joins
+        self.assertNotIn("etc", out.split("„")[1])
+        # the second one's claude restarted meanwhile: another pid under its pane
+        self.fx.ptable.pop(411)
+        self.fx.ptable[412] = (410, "claude")
+        self.fx.procs[412] = "9999"
+        self.fx.cwds[412] = self.fx.home  # the same folder: only the fingerprint (pid, procStart) tells it apart
+        recs = self.approve_and_run()
+        self.assertEqual(self.tt.state["%20"], "trusted")
+        self.assertEqual(self.tt.state["%21"], "open")
+        self.assertIn("Přeskočeno: home (dialog se změnil)", recs[0]["message"])
+
+    def test_never_while_lukas_types_into_it(self):
+        self.run_cli("propose", self.NAMES[0])
+        self.tm.panes["%20"].activity.append(self.fx.clock.ms // 1000)
+        recs = self.approve_and_run()
+        self.assertEqual(self.keys(), [])
+        self.assertIn("někdo do ní píše", recs[0]["message"])
+
+    def test_the_folder_must_be_the_claudes_own_cwd(self):
+        self.fx.cwds[401] = os.path.join(self.fx.home, "jinde")
+        rc, _, err = self.run_cli("propose", self.NAMES[0])
+        self.assertEqual(rc, 2)
+        self.assertIn("nesedí se složkou, ve které claude běží", err)
+
+    def test_never_prod(self):
+        with mock.patch.object(M, "HIGH_IMPACT", re.compile("yolo--home")):
+            rc, _, err = self.run_cli("propose", self.NAMES[1])
+        self.assertEqual(rc, 2)
+        self.assertIn("Tohle schval v aplikaci", err)
+
+
 class MutationTest(unittest.TestCase):
     MUTANTS = {
+        "trust-yes-check": (lambda: _mut(JAP, "execute_trust", " or not TRUST_YES.search(trust_plain(raw))", ""),
+                            TrustTest),
+        "trust-home": (lambda: mock.patch.object(JAP, "under_home", lambda env, p: True), TrustTest),
+        "trust-pid": (lambda: _mut(JAP, "Trust", "str(pane.pid), str(pane.start), ", ""), TrustTest),
+        "trust-hands": (lambda: _mut(JAP, "_trust_check", "if mail.check_hands(tr.target, mail.env.now_ms()):",
+                                     "if False:"), TrustTest),
+        "trust-same-folder": (lambda: _mut(cr_approve, "trusts_for", "if tr and os.path.realpath(tr.path) == want:",
+                                           "if tr:"), TrustTest),
+        "trust-cwd": (lambda: _mut(JAP, "read_trust", "if not cwd or os.path.realpath(path) != os.path.realpath(cwd):",
+                                   "if False:"), TrustTest),
+        "trust-prod": (lambda: _mut(JAP, "read_trust", "if mail.check_high_impact(name) or mail.check_high_impact(path):",
+                                    "if False:"), TrustTest),
         "fingerprint": (lambda: _mut(JAP, "execute", "or d.fp != args.get(\"fp\")", ""), FlowTest),
         "hands": (lambda: _mut(JAP, "execute", "why = mail.check_hands(d.target, mail.env.now_ms())", "why = None"),
                   FlowTest),
-        "prod": (lambda: _mut(JAP, "read_dialog", "if mail.check_high_impact(name):", "if False:"), ShowTest),
+        "prod": (lambda: _mut(JAP, "read_dialog", '"""(Dialog, None) or (None, why in Czech)."""\n    if mail.check_high_impact(name):',
+                              '"""(Dialog, None) or (None, why in Czech)."""\n    if False:'), ShowTest),
         "one-at-a-time": (lambda: _mut(cr_approve, "cmd_propose", "if m._pending():", "if False:"), FlowTest),
         "always-propose": (lambda: mock.patch.object(JO.Ops, "propose", lambda self, kind, target, title, detail, args,
                                                      pid, now, targets=None: self.start_now(

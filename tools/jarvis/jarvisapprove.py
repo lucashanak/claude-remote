@@ -25,6 +25,7 @@ never approves anything, and what gets approved is decided by the code from the 
 """
 import hashlib
 import json
+import os
 import re
 import time
 
@@ -326,3 +327,170 @@ def dump(d):
     return json.dumps({"name": d.name, "ev": d.ev, "ms": d.ms, "fp": d.fp, "dialog": {
         k: d.p[k] for k in ("kind", "title", "content", "question", "options", "pointer", "tabs", "multi")},
         "answers": [{"action": a, "n": n, "label": l} for a, n, l in d.answers()]}, ensure_ascii=False, indent=1)
+
+
+# ---------------------------------------------------------------------------------------------------------- trust
+# Lukáš 2026-11-12: the folder-trust dialog ("Yes, I trust this folder") may be approved through Jarvis too, for a
+# folder under his $HOME (realpath, $HOME itself included), never for a PROD / DB- / deploy / Proxmox session or path.
+# There is no hook event for it: the screen is read (jarvislib.trust_dialog, its four marks), and the fingerprint is
+# the folder, the pane, the claude below the pane (pid + procStart) and the dialog's text. The focus starts on
+# "No, exit" (checked live by the lead): Down, then the focus must stand on "Yes, I trust this folder", then Enter;
+# before every key the fingerprint again and nobody's hands on the pane (I5).
+
+OSC = re.compile(r"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)")
+TRUST_MAX = 10
+TRUST_YES = re.compile(r"^\s*❯\s*(?:\d\.\s*)?Yes, I trust this folder\s*$", re.M)
+TRUST_NO = re.compile(r"^\s*❯\s*(?:\d\.\s*)?No, exit\s*$", re.M)
+
+
+class Pane:
+    """What check_hands needs (name, pane) plus the claude below the pane."""
+
+    def __init__(self, name, pane, pane_pid, pid, start):
+        self.name, self.pane, self.pane_pid, self.pid, self.start = name, pane, pane_pid, pid, start
+
+
+class Trust:
+    def __init__(self, name, pane, path, text):
+        self.name, self.target, self.path, self.text = name, pane, path, text
+        self.fp = hashlib.sha256("\n".join([path, pane.pane, str(pane.pid), str(pane.start), text]).encode(
+            "utf-8", "replace")).hexdigest()[:16]
+
+    def item(self):
+        t = self.target
+        return {"name": self.name, "pane": t.pane, "pid": t.pid, "start": t.start, "path": self.path, "fp": self.fp}
+
+
+def trust_plain(raw):
+    return plain(OSC.sub("", raw or ""))
+
+
+def trust_screen(raw):
+    """(folder, dialog text without the pointer) of a trust dialog on the screen, or None."""
+    if not J.trust_dialog(raw):
+        return None
+    lines = [l.rstrip() for l in trust_plain(raw).splitlines()]
+    i = next((k for k, l in enumerate(lines) if l.strip() == "Accessing workspace:"), None)
+    if i is None:
+        return None
+    nxt = next((l.strip() for l in lines[i + 1:] if l.strip()), "")
+    if not nxt.startswith("/"):
+        return None
+    end = next((k for k in range(i, len(lines)) if "Enter to confirm" in lines[k]), len(lines) - 1)
+    text = "\n".join(x for x in (re.sub(r"\s+", " ", l.replace("❯", " ")).strip() for l in lines[i:end + 1]) if x)
+    return nxt, text
+
+
+def trust_pane(mail, name):
+    """Pane, or why not: the first live pane of the session and the claude that runs below it."""
+    rc, out = mail.tmux(["list-panes", "-s", "-t", "=" + name, "-F",
+                         "#{pane_id}\t#{pane_pid}\t#{session_name}\t#{pane_dead}\t#{pane_in_mode}"])
+    f = out.splitlines()[0].split("\t") if rc == 0 and out.strip() else []
+    if len(f) < 4 or f[3] == "1" or not f[0].startswith("%"):
+        return "pane"
+    try:
+        pane_pid = int(f[1])
+    except ValueError:
+        return "pane"
+    env = mail.env
+    pid = J._claude_under(J._children(env.proc_table()), pane_pid)
+    if not pid:
+        return "no-claude"
+    return Pane(name, f[0], pane_pid, pid, env.proc_start(pid))
+
+
+def under_home(env, path):
+    home = os.path.realpath(env.home)
+    real = os.path.realpath(path)
+    return real == home or real.startswith(home.rstrip("/") + "/")
+
+
+class NotTrust(str):
+    """A refusal that says the session shows no trust dialog at all (the caller may look for another dialog)."""
+
+
+def read_trust(mail, name):
+    """(Trust, None) or (None, why in Czech); `why` is a NotTrust when no trust dialog is on the screen."""
+    short = J.short_name(name)
+    t = trust_pane(mail, name)
+    if isinstance(t, str):
+        return None, NotTrust(f"{short} teď nemá živého claude ({t})")
+    rc, raw = mail.tmux(["capture-pane", "-p", "-e", "-t", t.pane])
+    got = trust_screen(raw) if rc == 0 else None
+    if not got:
+        return None, NotTrust(f"{short} nečeká na důvěru ke složce")
+    path, text = got
+    if mail.check_high_impact(name) or mail.check_high_impact(path):
+        return None, "Tohle schval v aplikaci (PROD, DB-, deploy, Proxmox)."
+    if not under_home(mail.env, path):
+        return None, f"složka {path} je mimo tvůj domov; tu potvrď v aplikaci"
+    # rev-stuck LOW: the folder on the screen must be the claude's own working directory (a wrapped or cut path on
+    # the screen never passes for another folder)
+    cwd = mail.env.proc_cwd(t.pid)
+    if not cwd or os.path.realpath(path) != os.path.realpath(cwd):
+        return None, f"složka v dialogu {short} nesedí se složkou, ve které claude běží; potvrď to v aplikaci"
+    return Trust(name, t, path, text), None
+
+
+def trust_sentence(trusts):
+    if len(trusts) == 1:
+        return f"{J.short_name(trusts[0].name)} čeká na důvěru ke složce {trusts[0].path}. Potvrdit?"
+    n = len(trusts)
+    return (f"{n} {J.plural(n, 'session', 'sessions', 'sessions')} čeká na důvěru ke složce {trusts[0].path}: "
+            + ", ".join(J.short_name(t.name) for t in trusts) + ". Potvrdit všem?")
+
+
+def _trust_check(mail, item):
+    """(Trust, None) when the dialog is still exactly the approved one and nobody's hands are on the pane."""
+    tr, why = read_trust(mail, item["name"])
+    # the fingerprint holds the folder, the pane, the claude's pid and procStart and the dialog's text
+    if not tr or tr.fp != item.get("fp"):
+        return None, "dialog se změnil"
+    if mail.check_hands(tr.target, mail.env.now_ms()):
+        return None, "někdo do ní píše"
+    return tr, None
+
+
+def execute_trust(mail, items, sleep=time.sleep):
+    """(ok, message): each session checked on its own; what does not fit is skipped and named in the result."""
+    if mail.off():
+        return False, "Jarvis je vypnutý (off), nic jsem nepotvrdil."
+    done, skipped = [], []
+    for item in items[:TRUST_MAX]:
+        short = J.short_name(item.get("name") or "?")
+        tr, why = _trust_check(mail, item)
+        if not tr:
+            skipped.append(f"{short} ({why})")
+            continue
+        pane = tr.target.pane
+        rc, raw = mail.tmux(["capture-pane", "-p", "-e", "-t", pane])
+        scr = trust_plain(raw) if rc == 0 else ""
+        if TRUST_NO.search(scr):
+            mail.tmux(["send-keys", "-t", pane, "Down"])
+            sleep(STEP_S)
+        tr, why = _trust_check(mail, item)  # again right before Enter
+        rc, raw = mail.tmux(["capture-pane", "-p", "-e", "-t", pane])
+        if not tr or rc != 0 or not TRUST_YES.search(trust_plain(raw)):
+            skipped.append(f"{short} ({why or 'fokus není na Yes, I trust this folder'})")
+            continue
+        mail.tmux(["send-keys", "-t", pane, "Enter"])
+        if _trust_gone(mail, pane, sleep):
+            done.append(short)
+        else:
+            skipped.append(f"{short} (nevím, jestli to prošlo)")
+    path = items[0].get("path") if items else "?"
+    msg = (f"Potvrzena důvěra ke složce {path}: {', '.join(done)}." if done else "Nic jsem nepotvrdil.")
+    if skipped:
+        msg += " Přeskočeno: " + ", ".join(skipped) + "."
+    return bool(done), msg
+
+
+def _trust_gone(mail, pane, sleep):
+    deadline = time.monotonic() + CONFIRM_S
+    while True:
+        rc, raw = mail.tmux(["capture-pane", "-p", "-e", "-t", pane])
+        if rc == 0 and not J.trust_dialog(raw):
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        sleep(POLL_S)

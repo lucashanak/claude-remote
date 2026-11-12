@@ -117,6 +117,14 @@ def own_pid_ns():
         return None
 
 
+def read_proc_cwd(pid):
+    """realpath of a process's working directory (read only), or None."""
+    try:
+        return os.path.realpath(os.readlink(f"/proc/{int(pid)}/cwd"))
+    except (OSError, ValueError, TypeError):
+        return None
+
+
 def tmux_capture_pane(tmux_bin, pane):
     """F5d: the visible screen of one pane (`capture-pane -p -e`), read only, or None. Same timeout rules as below."""
     if not tmux_bin or not re.fullmatch(r"%\d{1,9}", pane or ""):
@@ -188,7 +196,7 @@ class Env:
     """Paths and seams. Tests pass their own `environ` (temp HOME) and fake liveness/tmux/clock."""
 
     def __init__(self, environ=None, proc_start=None, ppid=None, tmux_panes=None, now_ms=None, pid_ns=None,
-                 proc_table=None, my_pid=None, capture_pane=None):
+                 proc_table=None, my_pid=None, capture_pane=None, proc_cwd=None):
         e = os.environ if environ is None else environ
         # kept for the F2 mail provenance (TMUX_PANE, CLAUDECODE): tests pass their own, never the real one
         self.environ = e
@@ -217,6 +225,7 @@ class Env:
         self.proc_table = proc_table or read_proc_table
         self.tmux_panes = tmux_panes or (lambda: tmux_list_panes(self.tmux_bin))
         self.capture_pane = capture_pane or (lambda pane: tmux_capture_pane(self.tmux_bin, pane))
+        self.proc_cwd = proc_cwd or read_proc_cwd
         self.now_ms = now_ms or (lambda: int(time.time() * 1000))
         self.pid_ns = own_pid_ns() if pid_ns is None else pid_ns
         self.my_pid = os.getpid() if my_pid is None else my_pid
@@ -754,6 +763,35 @@ def auto_continue_live(lim, now_ms):
     if not at:
         return now_ms <= _int(lim.get("ms")) + AUTO_CONTINUE_UNKNOWN_MS
     return now_ms <= at + AUTO_CONTINUE_GRACE_MS
+
+
+SUBAGENT_FILES_MAX = 4000
+
+
+def transcript_activity_ms(path):
+    """The newest write (mtime, ms) of a session's transcript OR of any transcript of its subagents and workflow
+    agents (`<transcript without .jsonl>/subagents/**/*.jsonl`, live 2026-11-12): a session that waits for its agents
+    writes nothing itself for an hour while they work. 0 when nothing can be read."""
+    if not isinstance(path, str) or not path.endswith(".jsonl"):
+        return 0
+    best = 0
+    try:
+        best = int(os.stat(path).st_mtime * 1000)
+    except OSError:
+        pass
+    seen = 0
+    for root, _dirs, files in os.walk(os.path.join(path[:-6], "subagents")):
+        for f in files:
+            if not f.endswith(".jsonl"):
+                continue
+            seen += 1
+            if seen > SUBAGENT_FILES_MAX:
+                return best
+            try:
+                best = max(best, int(os.stat(os.path.join(root, f)).st_mtime * 1000))
+            except OSError:
+                pass
+    return best
 
 
 def transcript_info(path, max_bytes=TRANSCRIPT_TAIL_BYTES, keep_texts=0):

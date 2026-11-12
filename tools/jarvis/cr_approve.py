@@ -38,7 +38,29 @@ def _dialog(m, q, fold=None):
     return d
 
 
+def _name(m, q):
+    name, why = m.resolve_name((q or "").strip())
+    if why:
+        raise Refused(why)
+    return name
+
+
+def _trust_or_none(m, name):
+    """The trust dialog of `name` when it waits on one (no perm/ask hook event), else None; a trust dialog that may
+    not be approved here (outside $HOME, PROD) is refused with its reason."""
+    tr, why = JAP.read_trust(m, name)
+    if why and not isinstance(why, JAP.NotTrust):
+        raise Refused(why)
+    return tr
+
+
 def cmd_show(env, a, out, m, ops):
+    tr = _trust_or_none(m, _name(m, a.name))
+    if tr:
+        out.write(f"[cr-approve: {M.DATA_NOTE}]\nsession: {J.short_name(tr.name)} · dialog důvěry ke složce · otisk "
+                  f"{tr.fp}\nsložka: «{J.safe_text(tr.path, 200)}»\nNavrhni: cr-approve propose '{tr.name}'"
+                  f" (potvrdí důvěru), nebo pro všechny se stejnou složkou: cr-approve propose --trust-all {tr.path}\n")
+        return 0
     d = _dialog(m, a.name)
     if a.json:
         out.write(JAP.dump(d) + "\n")
@@ -73,23 +95,55 @@ def pick(d, a):
     raise Refused("u otázky řekni, kterou možnost: --option N (zeptej se Lukáše)")
 
 
+def trusts_for(env, m, path, now):
+    """Every session waiting on the trust dialog of the same folder (realpath), at most TRUST_MAX; the others
+    (another folder, outside $HOME, PROD …) never join."""
+    import jarviswatch as JW
+    want = os.path.realpath(path)
+    out = []
+    for name, s in sorted(JW.sessions_now(env, now).items()):
+        if not isinstance(s, dict) or s.get("waitingFor") != J.TRUST_CZ:
+            continue
+        tr, _ = JAP.read_trust(m, name)
+        if tr and os.path.realpath(tr.path) == want:
+            out.append(tr)
+        if len(out) >= JAP.TRUST_MAX:
+            break
+    return out
+
+
 def cmd_propose(env, a, out, m, ops):
     now = env.now_ms()
     by = ops.caller(now)
     if m.off():
         raise Refused("Jarvis je vypnutý (off)")
-    d = _dialog(m, a.name)
-    action, n = pick(d, a)
     lp = (m.last_prompt() or m.wake_prompt(now) or {}) if by == "jarvis" else {}
     pid = lp.get("id")
+    trusts, d = None, None
+    if a.trust_all:
+        trusts = trusts_for(env, m, a.trust_all, now)
+        if not trusts:
+            raise Refused(f"na důvěru ke složce {a.trust_all} pod tvým domovem teď nic nečeká")
+    elif a.name:
+        tr = _trust_or_none(m, _name(m, a.name))
+        trusts = [tr] if tr else None
+    else:
+        raise Refused("řekni jméno session, nebo --trust-all <cesta>")
+    if not trusts:
+        d = _dialog(m, a.name)
+        action, n = pick(d, a)
     ops.per_prompt(pid, now)
     if m._pending():
         raise Refused("už čeká jiný návrh; nejdřív ať Lukáš rozhodne o něm")
     # rev-f5e HIGH (lead): never at once, not even "u X schval" or from a shell (a session can unset CLAUDECODE):
     # always a proposal, so Lukáš hears the code's sentence before anything is pressed and his bare "ano" decides
-    say = JAP.sentence(d, action, n, said=lp.get("optionNumbers") or None)
-    args = JAP.args_json(d, action, n)
-    p = ops.propose("approve", d.name, say, "", args, pid, now)
+    if trusts:
+        say = JAP.trust_sentence(trusts)
+        p = ops.propose("approve", trusts[0].name, say, "", {"trust": True, "items": [t.item() for t in trusts]},
+                        pid, now, targets=[t.name for t in trusts])
+    else:
+        say = JAP.sentence(d, action, n, said=lp.get("optionNumbers") or None)
+        p = ops.propose("approve", d.name, say, "", JAP.args_json(d, action, n), pid, now)
     out.write(f"Návrh {p['id']}. Řekni Lukášovi doslova (a nic víc o tom): „{say}“ Provede se po jeho ano "
               f"(do 10 minut) nebo po schválení v aplikaci, jinak se zahodí.\n")
     return 0
@@ -103,7 +157,8 @@ def main(argv=None, env=None, out=None, err=None, mail=None, ops=None):
     p.add_argument("name")
     p.add_argument("--json", action="store_true")
     p = sub.add_parser("propose")
-    p.add_argument("name")
+    p.add_argument("name", nargs="?")
+    p.add_argument("--trust-all", dest="trust_all")
     p.add_argument("--option", type=int)
     p.add_argument("--deny", action="store_true")
     a = ap.parse_args(argv)

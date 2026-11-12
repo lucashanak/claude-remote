@@ -1501,6 +1501,86 @@ class DaemonFlowTest(Base):
 
 # ------------------------------------------------------------------------------------------------- mutations
 
+class StuckTest(Base):
+    """Live 2026-11-12: "pracuje 30 minut bez známky života" 4x a day for a session waiting for its workflow agents."""
+
+    def busy(self, old_ms, tp=None):
+        s = sess(TARGET, state="busy", stateSince=old_ms, lastEvent={"ev": "work", "ms": old_ms},
+                 trKey=f"10:{old_ms * 1000000}")
+        if tp:
+            s["transcript"] = tp
+        self.sessions[TARGET] = s
+
+    def transcript(self, mtime_ms, sub_ms=None, sid="0000aaaa-0000-4000-8000-000000000000"):
+        tp = self.fx.transcript("/home/u/proj", sid, [user("pracuj")])
+        os.utime(tp, (mtime_ms / 1000, mtime_ms / 1000))
+        if sub_ms is not None:
+            d = os.path.join(tp[:-6], "subagents", "workflows", "wf_1")
+            os.makedirs(d)
+            f = os.path.join(d, "agent-a1.jsonl")
+            open(f, "w").close()
+            os.utime(f, (sub_ms / 1000, sub_ms / 1000))
+        return tp
+
+    def test_an_agent_writing_is_a_sign_of_life(self):
+        self.tick()  # baseline
+        old = self.fx.clock.ms - 40 * MIN
+        self.busy(old, self.transcript(old, sub_ms=self.fx.clock.ms - MIN))
+        self.tick()
+        self.assertIsNone(self.wb())
+        self.busy(old, self.transcript(old, sid="0000bbbb-0000-4000-8000-000000000000"))  # no agent writes
+        self.tick()
+        self.assertEqual([e["src"] for e in self.wb()["entries"]], ["stuck"])
+
+    def episodes(self, hours):
+        """Silence 31 min, an event, silence again ... for `hours`; returns how many stuck items were found."""
+        found = 0
+        self.tick()  # baseline
+        end = self.fx.clock.ms + hours * 3600 * 1000
+        while self.fx.clock.ms < end:
+            ev = self.fx.clock.ms
+            self.busy(ev)
+            self.advance(31)
+            self.busy(ev)
+            self.tick()
+            if self.wb():
+                found += 1
+                self.answer("[ticho]")
+            self.advance(1)
+        return found
+
+    def test_one_episode_at_most_once_in_3_h_wake(self):
+        self.assertEqual(self.episodes(2.9), 1)
+
+    def test_one_episode_at_most_once_in_3_h_template(self):
+        open(os.path.join(self.fx.state, JA.WAKE_OFF), "w").close()
+        self.episodes(2.9)
+        self.assertEqual(len([a for a in self.alerts() if "bez známky života" in a["text"]]), 1)
+
+    def test_an_episode_held_by_the_cooldown_is_told_when_it_ends_if_it_still_lasts(self):
+        self.tick()  # baseline
+        first = self.fx.clock.ms
+        self.busy(first)
+        self.advance(31)
+        self.busy(first)
+        self.tick()
+        self.assertIsNotNone(self.wb())  # episode 1 told
+        self.answer("[ticho]")
+        self.advance(5)
+        second = self.fx.clock.ms        # an event, then silence again: episode 2, inside the cooldown
+        for _ in range(6):               # 3 h of the same silence, checked every 30 min
+            self.advance(30)
+            self.busy(second)
+            self.tick()
+            if self.wb():
+                break
+        self.assertIsNotNone(self.wb())  # told once the 3 h were over, as it still lasts
+        self.assertGreaterEqual(self.fx.clock.ms - first, JA.STUCK_COOLDOWN_MS)
+
+    def test_after_3_h_it_may_be_told_again(self):
+        self.assertEqual(self.episodes(3.5), 2)
+
+
 class MutationTest(unittest.TestCase):
     """Each F5c gate's tests must FAIL when the gate is switched off."""
 
@@ -1607,8 +1687,11 @@ class MutationTest(unittest.TestCase):
             '"named": bool(lp.get("wake")) or (name in (lp.get("named") or []) and bool(lp.get("sendIntent"))),'),
             WakeProposalTest),
         "stuck": (lambda: mock.patch.object(JA, "STUCK_MS", 10 ** 12), SourcesTest),
-        "stuck-baseline": (lambda: _mut(JA, "AlertWorker", "!= since and not self.stuck_baseline:", "!= since:"),
-                           SourcesTest),
+        "stuck-baseline": (lambda: _mut(JA, "AlertWorker", "if self.stuck_baseline:", "if False:"), SourcesTest),
+        "stuck-subagents": (lambda: mock.patch.object(J, "transcript_activity_ms", lambda p: 0), StuckTest),
+        "stuck-cooldown": (lambda: mock.patch.object(JA, "STUCK_COOLDOWN_MS", 0), StuckTest),
+        "stuck-held-episode": (lambda: _mut(JA, "AlertWorker", '_i(told.get("since")) != since',
+                                            '_i(self.s["stuck"].get(name)) != since'), StuckTest),
         "dnd-requeue": (lambda: mock.patch.object(JA.AlertWorker, "_requeue", lambda self, e: 0), ModeTest),
     }
 

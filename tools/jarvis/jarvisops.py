@@ -990,6 +990,9 @@ class Ops:
         """The approved answer of a session's dialog, by the code (jarvisapprove.execute: the same fingerprint, the
         exact keys, never a persistent choice). Runs in the detached runner, never in Jarvis's turn."""
         import jarvisapprove as JAP
+        if rec["args"].get("trust"):
+            ok, msg = JAP.execute_trust(self.mail, rec["args"].get("items") or [])
+            return ok, msg, {"status": "answered" if ok else "not-answered"}
         ok, msg = JAP.execute(self.mail, rec["args"]["name"], rec["args"])
         return ok, msg, {"status": "answered" if ok else "not-answered"}
 

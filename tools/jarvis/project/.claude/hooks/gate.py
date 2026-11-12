@@ -76,7 +76,7 @@ ALLOWED = {
 # it to anyone but Lukáš's own shell already, this is the second layer.
 FORBIDDEN = {("cr-task", "done"): frozenset({"--force"}), ("cr-sessions", "close"): frozenset({"--force"})}
 # commands whose arguments may be quoted free text
-TEXT_CMDS = frozenset({"cr-mail", "cr-task", "cr-rules", "cr-sessions"})
+TEXT_CMDS = frozenset({"cr-mail", "cr-task", "cr-rules", "cr-sessions", "cr-approve"})
 HELP = frozenset({"-h", "--help"})
 # Options a subcommand cannot run without. `cr-digest delta` without --peek moves the cursor the UserPromptSubmit hook
 # reads from, so what changed (a perm, an ask) would never reach Lukáš's next delta.
