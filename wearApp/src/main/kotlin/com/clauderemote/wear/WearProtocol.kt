@@ -72,6 +72,8 @@ data class WearJarvisInfo(
     val recent: List<WearJarvisRecent> = emptyList(),
     // F5c: the id of Jarvis' question (jask) the merged notification offers "Ano" for; null = none / older phone.
     val askId: String? = null,
+    // The newest shown alert's id: the same wording of a NEW alert is new content (a swipe does not hide it). Older phone = null.
+    val latestId: String? = null,
 )
 
 /** Mirror of shared's WatchJarvis.Recent: one of Jarvis' alerts (Czech, one sentence, no paths). [atMs] = phone clock. */

@@ -76,4 +76,15 @@ class JarvisWatchDecisionTest {
             listOf("jblock", "jsay", "jask", "jblockask", "block", "future").map { JarvisRecentStore.glyph(it) },
         )
     }
+
+    // 2026-11-12: a new alert with the same wording (a second block of one session within a minute) shows again after a swipe
+    @Test fun aNewAlertWithTheSameWordingIsNewContent() {
+        val first = info(pending = 1, text = "▲ moje-prace-1b chce povolení.").copy(latestId = "a-1")
+        val second = first.copy(latestId = "a-2")
+        val swiped = JarvisWatchDecision.key(first)
+        assertEquals(Action.Skip, JarvisWatchDecision.decide(first, 0, null, swiped))
+        assertEquals(Action.Post(buzz = false), JarvisWatchDecision.decide(second, 0, null, swiped))
+        // an older phone sends no id: the key is as before
+        assertEquals(JarvisWatchDecision.key(info()), JarvisWatchDecision.key(info().copy(latestId = null)))
+    }
 }

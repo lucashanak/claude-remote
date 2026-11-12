@@ -118,6 +118,11 @@ data class WearJarvisInfo(
      * /jarvis-yes with this id and checked again here. Null = none. Trailing default: an older watch ignores it.
      */
     val askId: String? = null,
+    /**
+     * The id of the newest line the merged notification shows: a new alert with the same wording (a second block of
+     * the same session within a minute) is new content for the watch, so a swipe of the old one does not hide it.
+     */
+    val latestId: String? = null,
 )
 
 /** One "Vrátit" offer on the wrist: [tmux] on [serverId], [label] = its alias. */
@@ -545,7 +550,8 @@ object WearSync {
             // template lines only while routed through him
             val f = com.clauderemote.session.wear.WatchJarvis.shownFeed(full, carried)
             WearJarvisInfo(
-                pending = f.pending.size,
+                // the lines the wrist shows (one per session), not the alerts behind them
+                pending = com.clauderemote.session.service.JarvisMerged.count(f),
                 text = com.clauderemote.session.service.JarvisMerged.text(f).take(WATCH_TEXT_MAX),
                 notify = settings.notificationsEnabled && f.pending.isNotEmpty(),
                 buzzAt = jarvisBuzzAt,
@@ -556,6 +562,7 @@ object WearSync {
                 sessionId = jarvisTab,
                 recent = com.clauderemote.session.wear.WatchJarvis.recent(full.pending, full.said),
                 askId = com.clauderemote.session.service.JarvisSays.ask(full, System.currentTimeMillis())?.id,
+                latestId = com.clauderemote.session.service.JarvisMerged.shown(f.pending).firstOrNull()?.id,
             )
         }
         val payload = json.encodeToString<WearSessionsPayload>(

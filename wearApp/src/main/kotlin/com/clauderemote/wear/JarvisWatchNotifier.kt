@@ -28,7 +28,7 @@ internal object JarvisWatchDecision {
         data class Post(val buzz: Boolean) : Action
     }
 
-    fun key(info: WearJarvisInfo): String = "${info.pending}\u0000${info.text}\u0000${info.askId.orEmpty()}"
+    fun key(info: WearJarvisInfo): String = "${info.pending}\u0000${info.text}\u0000${info.askId.orEmpty()}\u0000${info.latestId.orEmpty()}"
 
     fun decide(info: WearJarvisInfo?, lastBuzzAt: Long, shownKey: String?, dismissedKey: String?): Action {
         if (info == null || !info.notify || info.pending <= 0 || info.text.isBlank()) return Action.Cancel

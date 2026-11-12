@@ -93,12 +93,12 @@ object JarvisNotifier {
                 .setContentIntent(openIntent(context))
                 .setAutoCancel(true)
                 .setOnlyAlertOnce(!buzz)
-                .setNumber(feed.pending.size)
+                .setNumber(JarvisMerged.count(feed))
                 .setCategory(Notification.CATEGORY_MESSAGE)
             JarvisUndo.undoable(feed.pending).forEach { b.addAction(undoAction(context, it)) }
             val n = b.build()
             (context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager).notify(MERGED_ID, n)
-            FileLogger.log(TAG, "merged posted: ${feed.pending.size} pending, buzz=$buzz")
+            FileLogger.log(TAG, "merged posted: ${feed.pending.size} pending in ${JarvisMerged.count(feed)} lines, buzz=$buzz")
         }.onFailure { FileLogger.log(TAG, "merged post FAILED: ${it.message}") }
     }
 
@@ -125,7 +125,7 @@ object JarvisNotifier {
                 .setWhen(alert.atMs)
                 .setShowWhen(true)
                 .setCategory(Notification.CATEGORY_MESSAGE)
-            if (feed.pending.size > 1) b.setNumber(feed.pending.size)
+            if (JarvisMerged.count(feed) > 1) b.setNumber(JarvisMerged.count(feed))
             if (ask) {
                 // L4: not from the lock screen — an approval needs the phone unlocked (API 31+)
                 fun locked(a: Notification.Action.Builder) =

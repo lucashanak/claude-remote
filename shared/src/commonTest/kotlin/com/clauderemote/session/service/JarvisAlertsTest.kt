@@ -590,4 +590,95 @@ class JarvisAlertsTest {
         now += 5_000
         assertTrue(t.decide(alert(JarvisAlertKind.JBLOCK), AlertRouting.VIA_JARVIS, true, true)!!.buzz)
     }
+
+    // ── 2026-11-12: one line per session in the merged notification ──
+
+    private fun a(id: String, kind: JarvisAlertKind, at: Long, text: String, tmux: String? = "claude-server-moje-prace-1b", server: String = "s") =
+        JarvisAlert(id, kind, at, at, text, tmux, server)
+
+    @Test fun threeTemplateLinesOfOneSessionAreOne() {
+        val feed = JarvisFeed(
+            pending = listOf(
+                a("4", JarvisAlertKind.INFO, 400, "moje-prace-1b pracuje 40 min bez známky života"),
+                a("3", JarvisAlertKind.BLOCK, 300, "moje-prace-1b čeká na tebe."),
+                a("2", JarvisAlertKind.BLOCK, 200, "moje-prace-1b chce povolení."),
+                a("1", JarvisAlertKind.BLOCK, 100, "soniox chce povolení.", tmux = "claude-server-soniox"),
+            ),
+        )
+        // the newer "stuck" (INFO) never hides that the session waits for him
+        assertEquals(listOf("▲ moje-prace-1b čeká na tebe.", "▲ soniox chce povolení."), JarvisMerged.lines(feed))
+        assertEquals("Jarvis · 2", JarvisMerged.title(feed), "the title counts the lines shown")
+        assertEquals(2, JarvisMerged.count(feed))
+    }
+
+    @Test fun linesAboutNoSessionAllStayAndTheSameNameOnAnotherServerIsAnotherSession() {
+        val feed = JarvisFeed(
+            pending = listOf(
+                a("5", JarvisAlertKind.INCIDENT, 500, "8 sessions skončilo", tmux = null),
+                a("4", JarvisAlertKind.INFO, 400, "3 věci čekají", tmux = null),
+                a("3", JarvisAlertKind.BLOCK, 300, "x na jiném boxu", server = "s2"),
+                a("2", JarvisAlertKind.BLOCK, 200, "x tady"),
+            ),
+        )
+        assertEquals(4, JarvisMerged.count(feed))
+    }
+
+    @Test fun hisNewerSentenceReplacesTheTemplateAndANewerTemplateReplacesHisOlderOne() {
+        val newerOwn = JarvisFeed(
+            pending = listOf(
+                a("t", JarvisAlertKind.BLOCK, 100, "moje-prace-1b chce povolení."),
+                a("j", JarvisAlertKind.JBLOCK, 200, "Moje-prace čeká na povolení k pushi, Ano?"),
+            ),
+        )
+        assertEquals(listOf("▲ Moje-prace čeká na povolení k pushi, Ano?"), JarvisMerged.lines(newerOwn), "newest first even out of order")
+        val newerTemplate = JarvisFeed(
+            pending = listOf(
+                a("t", JarvisAlertKind.DONE, 300, "moje-prace-1b je hotová."),
+                a("j", JarvisAlertKind.JSAY, 200, "Moje-prace pracuje."),
+            ),
+        )
+        assertEquals(listOf("✓ moje-prace-1b je hotová."), JarvisMerged.lines(newerTemplate))
+        val sameInstant = JarvisFeed(
+            pending = listOf(
+                a("t", JarvisAlertKind.BLOCK, 200, "moje-prace-1b chce povolení."),
+                a("j", JarvisAlertKind.JSAY, 200, "Moje-prace chce povolit push."),
+            ),
+        )
+        assertEquals(listOf("» Moje-prace chce povolit push."), JarvisMerged.lines(sameInstant), "at the same instant his own wins")
+    }
+
+    @Test fun theOverflowLineCountsSessionsNotAlerts() {
+        val pending = (1..8).flatMap { n ->
+            listOf(
+                a("b$n", JarvisAlertKind.BLOCK, n * 10L + 1, "s$n chce povolení.", tmux = "claude-server-s$n"),
+                a("w$n", JarvisAlertKind.BLOCK, n * 10L, "s$n čeká na tebe.", tmux = "claude-server-s$n"),
+            )
+        }
+        val lines = JarvisMerged.lines(JarvisFeed(pending = pending))
+        assertEquals(JarvisMerged.MAX_LINES + 1, lines.size)
+        assertEquals("… a 3 dalších", lines.last())
+        assertEquals("Jarvis · 8", JarvisMerged.title(JarvisFeed(pending = pending)))
+    }
+
+    @Test fun aWaitingLineGivesWayOnlyToANewerWaitingOrFinishedLine() {
+        fun one(vararg xs: JarvisAlert) = JarvisMerged.shown(xs.toList()).single().id
+        // INFO (stuck, the account) never hides a waiting line, whatever their order in the feed
+        assertEquals("b", one(a("i", JarvisAlertKind.INFO, 200, "stuck"), a("b", JarvisAlertKind.BLOCK, 100, "perm")))
+        assertEquals("j", one(a("j", JarvisAlertKind.JBLOCKASK, 100, "Ano?"), a("i", JarvisAlertKind.INFO, 200, "stuck")))
+        assertEquals("q", one(a("q", JarvisAlertKind.JASK, 100, "Ano?"), a("i", JarvisAlertKind.INFO, 300, "účet")))
+        // a newer waiting line, or a newer done/jsay (answered, finished), does
+        assertEquals("b2", one(a("b1", JarvisAlertKind.BLOCK, 100, "perm"), a("b2", JarvisAlertKind.JBLOCK, 200, "čeká")))
+        assertEquals("d", one(a("b", JarvisAlertKind.BLOCK, 100, "perm"), a("d", JarvisAlertKind.DONE, 200, "hotovo")))
+        assertEquals("s", one(a("b", JarvisAlertKind.JBLOCK, 100, "perm"), a("s", JarvisAlertKind.JSAY, 200, "Pustil jsem ji dál.")))
+        // an OLDER done does not
+        assertEquals("b", one(a("d", JarvisAlertKind.DONE, 100, "hotovo"), a("b", JarvisAlertKind.BLOCK, 200, "perm")))
+        // a non-waiting line gives way to anything newer, an INFO included
+        assertEquals("i", one(a("d", JarvisAlertKind.DONE, 100, "hotovo"), a("i", JarvisAlertKind.INFO, 200, "stuck")))
+        // block, then stuck, then done: the done (it finished) — then a later stuck may replace that
+        assertEquals("d", one(a("b", JarvisAlertKind.BLOCK, 100, "p"), a("i", JarvisAlertKind.INFO, 200, "s"), a("d", JarvisAlertKind.DONE, 300, "h")))
+        assertEquals(
+            "i2",
+            one(a("b", JarvisAlertKind.BLOCK, 100, "p"), a("d", JarvisAlertKind.DONE, 300, "h"), a("i2", JarvisAlertKind.INFO, 400, "s")),
+        )
+    }
 }

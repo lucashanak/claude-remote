@@ -537,12 +537,52 @@ class JarvisAlertBatcher(private val clock: () -> Long = { System.currentTimeMil
 object JarvisMerged {
     const val MAX_LINES = 5
 
-    fun title(feed: JarvisFeed): String = "Jarvis · ${feed.pending.size}"
+    /**
+     * What the merged notification shows (2026-11-12): ONE line per session, so "chce povolení", "čeká na tebe" and
+     * "pracuje bez známky života" of one session are not three rows. Which line a session keeps ([replaces]):
+     * - what blocks Lukáš (perm/ask/waiting, jblock, jblockask, jask) gives way only to a NEWER blocking line or a
+     *   newer done/jsay about the session (it was answered, or it finished) — never to an INFO (stuck, the account):
+     *   a session that waits for him and is also "stuck" shows that it waits;
+     * - anything else gives way to any newer line; at the same instant Jarvis' own sentence wins over a template.
+     * Alerts about no session (an incident, a batch) all stay. Newest first.
+     */
+    fun shown(pending: List<JarvisAlert>): List<JarvisAlert> {
+        val best = HashMap<Pair<String, String>, JarvisAlert>()
+        // oldest first, his own after a template of the same instant: each later line may take the session's place
+        for (a in pending.sortedWith(compareBy<JarvisAlert> { it.atMs }.thenBy { it.kind.own })) {
+            val key = (a.serverId to (a.tmux ?: continue))
+            val b = best[key]
+            if (b == null || replaces(a, b)) best[key] = a
+        }
+        return pending.withIndex()
+            .filter { (_, a) -> a.tmux == null || best[a.serverId to a.tmux] === a }
+            .sortedWith(compareByDescending<IndexedValue<JarvisAlert>> { it.value.atMs }.thenBy { it.index })
+            .map { it.value }
+    }
 
-    /** Newest first, one line per alert, the urgent glyph in front of what blocks. */
-    fun lines(feed: JarvisFeed): List<String> = feed.pending.take(MAX_LINES).map { a ->
-        glyph(a.kind) + " " + a.text
-    } + if (feed.pending.size > MAX_LINES) listOf("… a ${feed.pending.size - MAX_LINES} dalších") else emptyList()
+    /** The lines that say Lukáš is waited for. */
+    private fun waitsForLukas(k: JarvisAlertKind) =
+        k == JarvisAlertKind.BLOCK || k == JarvisAlertKind.JBLOCK || k == JarvisAlertKind.JBLOCKASK || k == JarvisAlertKind.JASK
+
+    /** Whether [a] takes the place of [b] as its session's one line. */
+    internal fun replaces(a: JarvisAlert, b: JarvisAlert): Boolean {
+        val later = a.atMs > b.atMs || (a.atMs == b.atMs && a.kind.own && !b.kind.own)
+        if (!later) return false
+        if (!waitsForLukas(b.kind)) return true
+        return waitsForLukas(a.kind) || a.kind == JarvisAlertKind.DONE || a.kind == JarvisAlertKind.JSAY
+    }
+
+    /** The count the title and the badge carry: the lines shown, not the alerts behind them. */
+    fun count(feed: JarvisFeed): Int = shown(feed.pending).size
+
+    fun title(feed: JarvisFeed): String = "Jarvis · ${count(feed)}"
+
+    /** Newest first, one line per session ([shown]), the urgent glyph in front of what blocks. */
+    fun lines(feed: JarvisFeed): List<String> {
+        val all = shown(feed.pending)
+        return all.take(MAX_LINES).map { a -> glyph(a.kind) + " " + a.text } +
+            if (all.size > MAX_LINES) listOf("… a ${all.size - MAX_LINES} dalších") else emptyList()
+    }
 
     fun text(feed: JarvisFeed): String = lines(feed).joinToString("\n")
 
