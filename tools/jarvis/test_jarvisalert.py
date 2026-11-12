@@ -240,14 +240,15 @@ class GraceTest(Base):
 
 class DedupTest(Base):
     def test_same_block_again_right_after_is_the_same_item(self):
-        self.sessions = {TARGET: sess(TARGET, "perm", T0, text="Bash: npm test")}
+        # (a registry waiting that flaps; a new perm / ask is always a new dialog: DialogEpisodeTest)
+        self.sessions = {TARGET: sess(TARGET, "waiting", T0, text="dialog open")}
         self.tick()
         self.advance(15)
         self.tick()
         self.sessions = {TARGET: sess(TARGET, state="busy")}
         self.advance(1)
         self.tick()
-        self.sessions = {TARGET: sess(TARGET, "perm", self.fx.clock.ms, text="Bash: npm test")}
+        self.sessions = {TARGET: sess(TARGET, "waiting", self.fx.clock.ms, text="dialog open")}
         self.tick()
         self.advance(16)
         self.tick()
@@ -274,6 +275,135 @@ class DedupTest(Base):
         self.advance(5)
         self.tick()
         self.assertEqual(len(self.alerts()), 1)
+
+
+class DialogEpisodeTest(Base):
+    """Live 2026-11-12 (moje-prace-1b): one dialog told as "chce povolení" and again as "čeká na tebe" (the hook's
+    perm and the registry's waiting), plus "stuck" on top."""
+
+    def test_perm_then_waiting_of_the_same_dialog_is_told_once(self):
+        self.sessions = {TARGET: sess(TARGET, "perm", T0, text="Bash: npm test")}
+        self.tick()
+        self.advance(15)
+        self.tick()
+        self.assertEqual(self.texts(), ["jarvis-test chce povolení."])
+        self.sessions = {TARGET: sess(TARGET, "waiting", T0 + 30000, text="permission prompt")}
+        self.advance(16)
+        self.tick()
+        self.assertEqual(len(self.alerts()), 1)
+
+    def test_waiting_then_perm_while_still_open_is_one_block(self):
+        self.sessions = {TARGET: sess(TARGET, "waiting", T0, text="permission prompt", stateSince=T0)}
+        self.tick()
+        self.advance(1)
+        # the registry has not moved since that waiting: provably the same dialog, now named by the hook
+        self.sessions = {TARGET: sess(TARGET, "perm", T0 + 500, text="Bash: npm test", stateSince=T0)}
+        self.tick()
+        self.advance(15)
+        self.tick()
+        self.advance(16)
+        self.tick()
+        self.assertEqual(self.texts(), ["jarvis-test chce povolení."])
+
+    def test_a_work_in_between_makes_it_another_episode(self):
+        self.present_at = self.fx.clock.ms  # Lukáš at a keyboard: 1-min grace, so all of it fits in 10 min
+        self.sessions = {TARGET: sess(TARGET, "perm", T0, text="Bash: npm test")}
+        self.tick()
+        self.advance(1.5)
+        self.present_at = self.fx.clock.ms
+        self.tick()
+        self.assertEqual(len(self.alerts()), 1)
+        self.advance(0.5)
+        ev = J.parse_event(ev_line("work", TARGET, self.fx.clock.ms, 200))
+        self.sessions = {TARGET: sess(TARGET, "waiting", self.fx.clock.ms + 1000, text="dialog")}
+        self.tick(new=[ev])
+        self.advance(6)
+        self.present_at = self.fx.clock.ms
+        self.tick()
+        self.assertEqual(len(self.alerts()), 2)  # 8 min after the perm, but a work came between
+
+    def test_a_restart_in_between_makes_it_another_episode(self):
+        # rev LOW: a restarted claude's waiting within 10 min of the told perm is a new dialog, never merged
+        self.present_at = self.fx.clock.ms
+        self.sessions = {TARGET: sess(TARGET, "perm", T0, text="Bash: npm test")}
+        self.tick()
+        self.advance(1.5)
+        self.present_at = self.fx.clock.ms
+        self.tick()
+        self.assertEqual(len(self.alerts()), 1)
+        self.advance(0.5)
+        ev = J.parse_event(ev_line("start", TARGET, self.fx.clock.ms, 200))
+        self.sessions = {TARGET: sess(TARGET, "waiting", self.fx.clock.ms + 1000, text="dialog")}
+        self.tick(new=[ev])
+        self.advance(6)
+        self.present_at = self.fx.clock.ms
+        self.tick()
+        self.assertEqual(len(self.alerts()), 2)
+
+    def _told_perm(self, text="Bash: npm test"):
+        self.present_at = self.fx.clock.ms  # Lukáš at a keyboard: 1-min grace
+        t = self.fx.clock.ms
+        self.sessions = {TARGET: sess(TARGET, "perm", t, text=text, stateSince=t - 200)}
+        self.tick()
+        self.advance(1.5)
+        self.present_at = self.fx.clock.ms
+        self.tick()
+        self.assertEqual(len(self.alerts()), 1)
+        return t
+
+    def test_a_second_perm_3_min_later_is_told_again(self):
+        # perm1 approved in the app: no event (PreToolUse is not hooked), and 3 min later perm2 of the same tool
+        self._told_perm()
+        self.advance(1.5)
+        p2 = self.fx.clock.ms
+        self.sessions = {TARGET: sess(TARGET, "perm", p2, text="Bash: npm test", stateSince=p2 - 200)}
+        self.tick()
+        self.advance(6)
+        self.present_at = self.fx.clock.ms
+        self.tick()
+        self.assertEqual(self.texts(), ["jarvis-test chce povolení."] * 2)
+
+    def test_perm_waiting_then_a_new_perm_is_told_again(self):
+        t = self._told_perm()
+        self.advance(0.5)
+        self.sessions = {TARGET: sess(TARGET, "waiting", t - 200, text="dialog open", stateSince=t - 200)}
+        self.tick()  # the same dialog under the registry's name: nothing new
+        self.advance(1)
+        p2 = self.fx.clock.ms  # the registry moved (answered in the app, a new dialog opened)
+        self.sessions = {TARGET: sess(TARGET, "perm", p2, text="Edit: a.py", stateSince=p2 - 200)}
+        self.tick()
+        self.advance(6)
+        self.present_at = self.fx.clock.ms
+        self.tick()
+        self.assertEqual(self.texts(), ["jarvis-test chce povolení."] * 2)
+
+    def test_waiting_then_perm_after_the_registry_moved_is_told(self):
+        self.present_at = self.fx.clock.ms
+        w = self.fx.clock.ms
+        self.sessions = {TARGET: sess(TARGET, "waiting", w, text="dialog open", stateSince=w)}
+        self.tick()
+        self.advance(1.5)
+        self.present_at = self.fx.clock.ms
+        self.tick()
+        self.assertEqual(self.texts(), ["jarvis-test čeká na tebe."])
+        self.advance(1)
+        p = self.fx.clock.ms  # not provably the same dialog: told
+        self.sessions = {TARGET: sess(TARGET, "perm", p, text="Bash: ls", stateSince=p - 100)}
+        self.tick()
+        self.advance(6)
+        self.present_at = self.fx.clock.ms
+        self.tick()
+        self.assertEqual(self.texts(), ["jarvis-test čeká na tebe.", "jarvis-test chce povolení."])
+
+    def test_no_stuck_while_a_dialog_waits(self):
+        old = self.fx.clock.ms - 40 * MIN
+        self.tick()  # the stuck baseline
+        self.sessions = {TARGET: dict(sess(TARGET, "perm", old, text="Bash: x"), state="busy", stateSince=old,
+                                      lastEvent={"ev": "perm", "ms": old})}
+        self.w.stuck_baseline = False
+        self.tick()
+        self.assertFalse(any("bez známky života" in t for t in self.texts()))
+        self.assertFalse(any(i["src"] == "stuck" for i in self.w.state["items"]))
 
 
 class BatchTest(Base):
@@ -1013,6 +1143,20 @@ class MutationTest(unittest.TestCase):
         "grace": (lambda: mock.patch.object(JA.AlertWorker, "grace", lambda self, b, now: 0), GraceTest),
         "batch": (lambda: mock.patch.object(JA, "BATCH_GAP_MS", 0), BatchTest),
         "dedup": (lambda: mock.patch.object(JA, "REPEAT_MS", 0), DedupTest),
+        "dialog-episode": (lambda: mock.patch.object(JA.AlertWorker, "same_dialog", lambda self, *a: False),
+                           DialogEpisodeTest),
+        "dialog-work": (lambda: _src_mutant(JA, "AlertWorker", "return hi - lo <= EPISODE_MS and not (lo < w <= hi)",
+                                            "return hi - lo <= EPISODE_MS"), DialogEpisodeTest),
+        "dialog-perm-repeat": (lambda: _src_mutant(JA, "AlertWorker", 'not new_dialog or _i(r.get("since")) == since',
+                                                   "True"), DialogEpisodeTest),
+        "dialog-reverse-registry": (lambda: _src_mutant(
+            JA, "AlertWorker", 'return (s.get("state") == "waiting" and _i(s.get("stateSince")) == prev_since',
+            "return (True"), DialogEpisodeTest),
+        "dialog-any-kinds": (lambda: _src_mutant(JA, "AlertWorker", 'if kind == "waiting" and prev_kind in ("perm", "ask"):',
+                                                 "if kind in DIALOG_KINDS and prev_kind in DIALOG_KINDS:"),
+                             DialogEpisodeTest),
+        "stuck-under-dialog": (lambda: _src_mutant(JA, "AlertWorker", 'if st == "busy" and not open_dialog:',
+                                                   'if st == "busy":'), DialogEpisodeTest),
         "never-silenced": (lambda: mock.patch.object(JA, "NEVER_SILENCED", ()), RulesTest),
         "mode": (lambda: mock.patch.object(JA, "allowed_by_mode", lambda it, mode: True), ModeTest),
         "expiry": (lambda: mock.patch.dict(JA.EXPIRE_MS, {"task": 10 ** 12}), TaskResultTest),

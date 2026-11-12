@@ -85,6 +85,12 @@ PRESENCE_EVERY_MS = 15 * 1000
 BATCH_GAP_MS = 5 * 60 * 1000
 BLOCK_STALE_MS = 6 * 3600 * 1000
 REPEAT_MS = 10 * 60 * 1000
+# live 2026-11-12 (moje-prace-1b): one dialog told twice, "chce povolení" (the hook's perm) and "čeká na tebe" (the
+# registry's waiting). A waiting within this long of a perm / ask of the session, with no stop / work / askdone in
+# between, is that same dialog under another name. Every new perm / ask (another event ms) is a new item: a perm
+# approved in the app leaves no event behind (PreToolUse is not hooked), so the next one 3 min later is a new dialog.
+DIALOG_KINDS = ("perm", "ask", "waiting")
+EPISODE_MS = 10 * 60 * 1000
 EXPIRE_MS = {"task": 2 * 3600 * 1000, "watch": 3600 * 1000, "reminder": 2 * 3600 * 1000, "incident": 10 * 60 * 1000,
              "closed": 2 * 3600 * 1000}
 INCIDENT_N = 8
@@ -572,6 +578,7 @@ class AlertWorker:
             "roundAt": _i(st.get("roundAt")),
             "stuck": d("stuck"),
             "stuckTold": d("stuckTold"),
+            "lastWork": d("lastWork"),
             "crashed": d("crashed"),
             "usageLvl": d("usageLvl"),
             "saver": _i(st.get("saver")),
@@ -648,6 +655,7 @@ class AlertWorker:
         if now - self.usage_at >= USAGE_EVERY_MS:
             self.usage, self.usage_at = self._safe("usage", J.read_usage, self.env, now) or {}, now
         self._safe("incident", self._incidents, new_events or (), now, self_name)
+        self._safe("work", self._note_work, new_events or (), now)
         self._safe("blocks", self._blocks, sessions, now, tasks, mails)
         self._safe("sources", self._sources, now, tasks, mails, sessions)
         self._safe("sources-f5c", self._sources_f5c, now, tasks, mails, sessions)
@@ -694,6 +702,33 @@ class AlertWorker:
 
     # ------------------------------------------------------------------ blocks
 
+    def _note_work(self, events, now):
+        """The newest stop / work / askdone / start / end of each session: it ends a dialog episode (a later one is
+        another; a restarted claude's dialog is never the one told before the restart)."""
+        lw = self.s["lastWork"]
+        for e in events:
+            if e.ev in ("stop", "work", "askdone", "start", "end") and e.ms > _i(lw.get(e.name)):
+                lw[e.name] = e.ms
+        self.s["lastWork"] = {k: v for k, v in lw.items() if now - _i(v) < 86400 * 1000}
+
+    def same_dialog(self, name, kind, since, prev_kind, prev_since, s=None):
+        """The dialog block `kind`/`since` seen now is the dialog `prev_kind`/`prev_since` seen before (one item):
+        - a waiting after a perm / ask: within EPISODE_MS and no stop / work / askdone of the session in between
+          (the registry's name for the dialog the hook named; its stateSince may be a moment before the hook's ms);
+        - a perm / ask after a waiting: only while the registry has not moved since that waiting (still waiting,
+          the same stateSince), so it is provably the dialog that waiting was; anything else is told.
+        Never two perm / ask: each new one is a new dialog."""
+        if not prev_since:
+            return False
+        if kind == "waiting" and prev_kind in ("perm", "ask"):
+            lo, hi = min(since, prev_since), max(since, prev_since)
+            w = _i(self.s["lastWork"].get(name))
+            return hi - lo <= EPISODE_MS and not (lo < w <= hi)
+        if kind in ("perm", "ask") and prev_kind == "waiting" and isinstance(s, dict):
+            return (s.get("state") == "waiting" and _i(s.get("stateSince")) == prev_since
+                    and prev_since <= since <= prev_since + EPISODE_MS)
+        return False
+
     def _blocks(self, sessions, now, tasks, mails):
         task_names = None
         seen = set()
@@ -717,12 +752,22 @@ class AlertWorker:
             if b and b.get("kind") == kind and b.get("since") == since and not (
                     relapse and b.get("relapse") != relapse):
                 continue
-            if b and b.get("kind") == kind and b.get("sig") == sig and not b.get("told"):
+            new_dialog = kind in ("perm", "ask")  # another event ms = another dialog (rev jarvis-blocks)
+            if b and b.get("kind") == kind and b.get("sig") == sig and not b.get("told") and not new_dialog:
                 continue  # the same thing, re-stamped (the registry moved, still blocked): one item
+            if b and b.get("kind") != kind and self.same_dialog(name, kind, since, b.get("kind"), _i(b.get("since")),
+                                                                s):
+                # the same dialog seen through another signal: one episode, told or not as it was
+                b.update(kind=kind, sig=sig, since=since, last=last)
+                continue
             r = self.s["recent"].get(name) or {}
             told = False
+            if r.get("kind") and r.get("kind") != kind and self.same_dialog(name, kind, since, r.get("kind"),
+                                                                            _i(r.get("since")), s):
+                told = True  # told a moment ago as another kind of the same dialog
             if r.get("sig") == sig and now - _i(r.get("at")) < REPEAT_MS and (not relapse
-                                                                               or r.get("relapse") == relapse):
+                                                                               or r.get("relapse") == relapse) and (
+                    not new_dialog or _i(r.get("since")) == since):
                 told = True  # blocked again on the same thing right after it was told: the same item
             if now - last > BLOCK_STALE_MS:
                 told = True  # old news when first seen (a daemon that was down for hours)
@@ -852,7 +897,10 @@ class AlertWorker:
                 continue
             st = s.get("state")
             short = J.short_name(name)
-            if st == "busy":
+            open_dialog = (s.get("attention") or {}).get("kind") in DIALOG_KINDS or (
+                self.s["blocks"].get(name) or {}).get("kind") in DIALOG_KINDS
+            if st == "busy" and not open_dialog:
+                # (a session that waits on its dialog is told as a block, never as stuck as well)
                 # busy without any sign of life: no hook event, no registry change, no write to its transcript or to
                 # any transcript of its subagents / workflow agents for 30 min (the agents' files are read only for
                 # a session whose own signals are already that old)
@@ -1031,7 +1079,8 @@ class AlertWorker:
             if ref[0] == "block":
                 b = self.s["blocks"][ref[1]]
                 b["told"] = True
-                self.s["recent"][ref[1]] = {"sig": b["sig"], "at": now, "relapse": b.get("relapse")}
+                self.s["recent"][ref[1]] = {"sig": b["sig"], "at": now, "relapse": b.get("relapse"),
+                                            "kind": b.get("kind"), "since": b.get("since")}
         done_ids = {ref[1] for e, ref in chosen if ref[0] == "item"}
         self.s["items"] = [i for i in self.s["items"] if id(i) not in done_ids]
         if any(e["src"] != "incident" for e, _ in chosen):
