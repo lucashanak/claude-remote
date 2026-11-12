@@ -74,6 +74,10 @@ Details live in `docs/`; this file only points at the places of truth and at the
   client launching later rewrites them again — then the way back is a v20 hotfix).
 - Drift's `for s in $(tmux list-sessions …)` splits names with a space: `claude-server-My Project` is adopted as `claude-server-My`
   and self-heal starts a duplicate claude. Open (HIGH, predates v19; see `davka-D/predavka-D.md`).
+- Claude 2.1.32x dialogs have NO `y`/`n` keys: Enter takes the focused option, Escape says no. `n` + Enter was ignored and
+  then picked the focused "1. Yes" — every "Ne" button approved (fixed 2026-11-11, 1445d7a/4b0f2c4). Answer a dialog only
+  with Enter while the screen shows the focus on the one-time "1. Yes" (never "always allow"/"auto mode"), or Escape while
+  the dialog's numbered options are still on the screen (`ReplyGuard.serverCommand`, `tools/jarvis/jarvisapprove.py`).
 - Generated shell: never a variable as the command (`$T tmux …`) — zsh does not word-split it; spell `timeout 3 tmux` in both branches.
 - `~/.cache/davka-a/sockguard.py` calls `tmux display` on the default socket: do not hand it to agents; take the server pid from `ss`.
 - Mutation runs: never a glob that matches your own runner (a recursion took the box to load 1400 on 2026-11-07); run mutants
