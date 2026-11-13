@@ -1,0 +1,7 @@
+// path: internal/daemon/s.go
+// want: signal
+package daemon
+
+import "syscall"
+
+func f(pid int) { _ = syscall.Kill(pid, syscall.SIGTERM) }

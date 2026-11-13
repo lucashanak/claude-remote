@@ -1,0 +1,7 @@
+// path: internal/daemon/m.go
+// want: must-encode must-encode
+package daemon
+
+import "github.com/lucashanak/claude-remote/crd/internal/crp"
+
+func f(fr crp.Frame) ([]byte, []byte) { return crp.MustEncode(fr), crp.MustCanon(fr.Header) }

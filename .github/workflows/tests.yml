@@ -19,6 +19,10 @@ concurrency:
   group: tests-${{ github.ref }}
   cancel-in-progress: true
 
+# No job here needs to write anything or read a secret (the Go job below runs on fork PRs too).
+permissions:
+  contents: read
+
 jobs:
   # ONE job on purpose. This was split into parallel `unit` and `integration`
   # jobs, which measured ~166s each — but only 1.1s and 8.5s of that was
@@ -34,6 +38,12 @@ jobs:
   # Cost of merging: the lanes are now serial, so wall-clock goes up slightly.
   # That is free in practice — the release workflow takes ~7 min and this runs
   # beside it.
+  #
+  # The Go daemon (`crd` job below) is the one exception, and it keeps the reason
+  # above true: it shares no compilation with the Kotlin lanes (own toolchain, own
+  # module), so a second job costs nothing extra and finishes long before `test`.
+  # A failed `crd` job still fails this workflow run, which is what tests-gate.sh
+  # reads for the release.
   test:
     runs-on: ubuntu-latest
     steps:
@@ -123,3 +133,73 @@ jobs:
           name: integration-diagnostics
           path: shared/build/integration-logs/
           if-no-files-found: ignore
+
+  # Go daemon crd (docs/crd.md, spec B0 §7.1). Invariants checked by scripts/ci/test-tests-gate.sh (run below):
+  # no `needs`, no `if`, no `continue-on-error`, a timeout, the workflow has no `paths` filter — a skipped or
+  # tolerated Go failure would let a release through, a missing run would block every release.
+  crd:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      GOTOOLCHAIN: local
+      GOFLAGS: -mod=readonly
+      # tests that need a real tmux skip without one locally; here a skip is a failure
+      CRD_REQUIRE_TMUX: '1'
+    defaults:
+      run:
+        working-directory: crd
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go (pinned in crd/go.version)
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: crd/go.version
+          check-latest: false
+          cache: false
+
+      - name: Toolchain pin
+        run: |
+          test "$(go env GOVERSION)" = "go$(cat go.version)"
+          grep -qx "go $(cat go.version)" go.mod
+          if grep -q '^toolchain' go.mod; then echo "go.mod must not name a toolchain"; exit 1; fi
+
+      - name: Install test dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq tmux python3-yaml
+          tmux -V
+
+      - name: Workflow and release-gate invariants
+        working-directory: .
+        run: bash scripts/ci/test-tests-gate.sh
+
+      - name: Golden vectors (protocol/crp/golden)
+        working-directory: protocol/crp/golden
+        run: python3 -I gen.py --check
+
+      - name: crdlint (tmux gate, codec writer, signals, test harness rules)
+        run: go run ./tools/crdlint .
+
+      - name: The crd binary does not contain the test harness
+        run: |
+          go list -deps ./cmd/crd > deps.txt
+          if grep -q '/internal/testenv$' deps.txt; then echo "cmd/crd depends on internal/testenv"; exit 1; fi
+          grep -q '/internal/daemon$' deps.txt
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: go test -race
+        run: CGO_ENABLED=1 go test -race -count=1 -timeout 10m ./...
+
+      - name: go test, CGO_ENABLED=0 (the shipped configuration)
+        run: CGO_ENABLED=0 go test -count=1 -timeout 10m ./...
+
+      - name: Static binary
+        run: |
+          CGO_ENABLED=0 go build -trimpath -o crd-linux-amd64 ./cmd/crd
+          file crd-linux-amd64
+          file crd-linux-amd64 | grep -q 'statically linked'
+          if ldd crd-linux-amd64; then echo "crd is not static"; exit 1; fi
+          ./crd-linux-amd64 version

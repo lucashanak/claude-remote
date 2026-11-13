@@ -1,0 +1,10 @@
+// path: internal/daemon/r.go
+// want: raw-syscall raw-syscall
+package daemon
+
+import "syscall"
+
+func f(pid uintptr) {
+	_, _, _ = syscall.RawSyscall(syscall.SYS_KILL, pid, 9, 0)
+	_, _, _ = syscall.Syscall(syscall.SYS_UNLINK, 0, 0, 0)
+}

@@ -1,0 +1,121 @@
+{
+  "id": "40-rpc-errors",
+  "title": "rpc exec failures: E_TIMEOUT, E_BUSY, E_OUTPUT",
+  "spec": "6.1, 9.2",
+  "description": "ms exceeded (child killed, TERM, 1 s, KILL) => E_TIMEOUT => ExecUnavailable(TIMEOUT); over the in-flight limit => E_BUSY => GATE_TIMEOUT; stdout over 8 MiB => E_OUTPUT => IO, never a partial ok:true.",
+  "framing": "every frame: u32be len | u8 type | u8 flags | u16be hlen | header JSON | blob; each (conn, dir) stream starts with the 8-byte magic",
+  "frames": [
+    {
+      "conn": "A",
+      "dir": "c2s",
+      "hex": "00000058500000547b22636d64223a2267697420737461747573222c226964223a37302c226b696e64223a2273686f7274222c226d223a2265786563222c226d73223a32303030302c22746167223a226769742e737461747573227d",
+      "type": 80,
+      "typeName": "RPC",
+      "header": {
+        "id": 70,
+        "m": "exec",
+        "tag": "git.status",
+        "cmd": "git status",
+        "ms": 20000,
+        "kind": "short"
+      }
+    },
+    {
+      "conn": "A",
+      "dir": "s2c",
+      "hex": "00000048510000447b22636f6465223a22455f54494d454f5554222c226964223a37302c226c617374223a747275652c226f6b223a66616c73652c2270617274223a302c227263223a2d317d",
+      "type": 81,
+      "typeName": "RPCRES",
+      "header": {
+        "id": 70,
+        "ok": false,
+        "code": "E_TIMEOUT",
+        "rc": -1,
+        "part": 0,
+        "last": true
+      }
+    },
+    {
+      "conn": "A",
+      "dir": "c2s",
+      "hex": "000000535000004f7b22636d64223a226563686f20706f6e67222c226964223a37312c226b696e64223a2273686f7274222c226d223a2265786563222c226d73223a31303030302c22746167223a226865616c7468227d",
+      "type": 80,
+      "typeName": "RPC",
+      "header": {
+        "id": 71,
+        "m": "exec",
+        "tag": "health",
+        "cmd": "echo pong",
+        "ms": 10000,
+        "kind": "short"
+      }
+    },
+    {
+      "conn": "A",
+      "dir": "s2c",
+      "hex": "0000003d510000397b22636f6465223a22455f42555359222c226964223a37312c226c617374223a747275652c226f6b223a66616c73652c2270617274223a307d",
+      "type": 81,
+      "typeName": "RPCRES",
+      "header": {
+        "id": 71,
+        "ok": false,
+        "code": "E_BUSY",
+        "part": 0,
+        "last": true
+      }
+    },
+    {
+      "conn": "A",
+      "dir": "c2s",
+      "hex": "00000054500000507b22636d64223a2263617420626967222c226964223a37322c226b696e64223a2273686f7274222c226d223a2265786563222c226d73223a31303030302c22746167223a227265636f6e63696c65227d",
+      "type": 80,
+      "typeName": "RPC",
+      "header": {
+        "id": 72,
+        "m": "exec",
+        "tag": "reconcile",
+        "cmd": "cat big",
+        "ms": 10000,
+        "kind": "short"
+      }
+    },
+    {
+      "conn": "A",
+      "dir": "s2c",
+      "hex": "00000046510000427b22636f6465223a22455f4f5554505554222c226964223a37322c226c617374223a747275652c226f6b223a66616c73652c2270617274223a302c227263223a307d",
+      "type": 81,
+      "typeName": "RPCRES",
+      "header": {
+        "id": 72,
+        "ok": false,
+        "code": "E_OUTPUT",
+        "rc": 0,
+        "part": 0,
+        "last": true
+      }
+    }
+  ],
+  "streams": [
+    {
+      "conn": "A",
+      "dir": "c2s",
+      "excerpt": true,
+      "maxFrame": 1048576,
+      "hex": "894352500d0a1a0a00000058500000547b22636d64223a2267697420737461747573222c226964223a37302c226b696e64223a2273686f7274222c226d223a2265786563222c226d73223a32303030302c22746167223a226769742e737461747573227d000000535000004f7b22636d64223a226563686f20706f6e67222c226964223a37312c226b696e64223a2273686f7274222c226d223a2265786563222c226d73223a31303030302c22746167223a226865616c7468227d00000054500000507b22636d64223a2263617420626967222c226964223a37322c226b696e64223a2273686f7274222c226d223a2265786563222c226d73223a31303030302c22746167223a227265636f6e63696c65227d"
+    },
+    {
+      "conn": "A",
+      "dir": "s2c",
+      "excerpt": true,
+      "maxFrame": 1048576,
+      "hex": "894352500d0a1a0a00000048510000447b22636f6465223a22455f54494d454f5554222c226964223a37302c226c617374223a747275652c226f6b223a66616c73652c2270617274223a302c227263223a2d317d0000003d510000397b22636f6465223a22455f42555359222c226964223a37312c226c617374223a747275652c226f6b223a66616c73652c2270617274223a307d00000046510000427b22636f6465223a22455f4f5554505554222c226964223a37322c226c617374223a747275652c226f6b223a66616c73652c2270617274223a302c227263223a307d"
+    }
+  ],
+  "expect": {
+    "kotlin": {
+      "E_TIMEOUT": "TIMEOUT",
+      "E_BUSY": "GATE_TIMEOUT",
+      "E_OUTPUT": "IO"
+    }
+  }
+}

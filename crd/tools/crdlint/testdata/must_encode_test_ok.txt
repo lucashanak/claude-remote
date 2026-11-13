@@ -1,0 +1,7 @@
+// path: internal/daemon/m_test.go
+// want:
+package daemon
+
+import "github.com/lucashanak/claude-remote/crd/internal/crp"
+
+func f(fr crp.Frame) []byte { return crp.MustEncode(fr) }

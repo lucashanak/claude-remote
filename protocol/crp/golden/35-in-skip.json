@@ -1,0 +1,123 @@
+{
+  "id": "35-in-skip",
+  "title": "A gap the client cannot fill: INSKIP moves hi without typing anything",
+  "spec": "5.4",
+  "description": "The daemon pruned the key of a session that came back under the same name (hi 0); the client's next iseq is 57 and its outbox holds nothing below it. E_IN_GAP carries the daemon's hi; the client sends INSKIP{to:56} (only ever for iseqs it has no payload for), then 57 applies. A later resend of an abandoned iseq is dup orig=skipped.",
+  "framing": "every frame: u32be len | u8 type | u8 flags | u16be hlen | header JSON | blob; each (conn, dir) stream starts with the 8-byte magic",
+  "frames": [
+    {
+      "conn": "A",
+      "dir": "c2s",
+      "hex": "000000544001004d7b22657870223a313739333939303036303030302c2269736571223a35372c22736964223a22636c617564652d7365727665722d636c617564652d72656d6f74652d2d6372746573742d31227d6f6b0d",
+      "type": 64,
+      "typeName": "IN",
+      "header": {
+        "sid": "claude-server-claude-remote--crtest-1",
+        "iseq": 57,
+        "exp": 1793990060000
+      },
+      "blobHex": "6f6b0d",
+      "blobText": "ok\r"
+    },
+    {
+      "conn": "A",
+      "dir": "s2c",
+      "hex": "00000065410000617b22636f6465223a22455f494e5f474150222c226869223a302c2269736571223a35372c22736964223a22636c617564652d7365727665722d636c617564652d72656d6f74652d2d6372746573742d31222c227374223a2272656675736564227d",
+      "type": 65,
+      "typeName": "INACK",
+      "header": {
+        "sid": "claude-server-claude-remote--crtest-1",
+        "iseq": 57,
+        "st": "refused",
+        "code": "E_IN_GAP",
+        "hi": 0
+      }
+    },
+    {
+      "conn": "A",
+      "dir": "c2s",
+      "hex": "0000003b420000377b22736964223a22636c617564652d7365727665722d636c617564652d72656d6f74652d2d6372746573742d31222c22746f223a35367d",
+      "type": 66,
+      "typeName": "INSKIP",
+      "header": {
+        "sid": "claude-server-claude-remote--crtest-1",
+        "to": 56
+      }
+    },
+    {
+      "conn": "A",
+      "dir": "s2c",
+      "hex": "0000004c410000487b2269736571223a35362c22736964223a22636c617564652d7365727665722d636c617564652d72656d6f74652d2d6372746573742d31222c227374223a22736b6970706564227d",
+      "type": 65,
+      "typeName": "INACK",
+      "header": {
+        "sid": "claude-server-claude-remote--crtest-1",
+        "iseq": 56,
+        "st": "skipped"
+      }
+    },
+    {
+      "conn": "A",
+      "dir": "c2s",
+      "hex": "000000544001004d7b22657870223a313739333939303036303030302c2269736571223a35372c22736964223a22636c617564652d7365727665722d636c617564652d72656d6f74652d2d6372746573742d31227d6f6b0d",
+      "type": 64,
+      "typeName": "IN",
+      "header": {
+        "sid": "claude-server-claude-remote--crtest-1",
+        "iseq": 57,
+        "exp": 1793990060000
+      },
+      "blobHex": "6f6b0d",
+      "blobText": "ok\r"
+    },
+    {
+      "conn": "A",
+      "dir": "s2c",
+      "hex": "00000059410000557b2269736571223a35372c22736964223a22636c617564652d7365727665722d636c617564652d72656d6f74652d2d6372746573742d31222c227374223a226170706c696564222c22766961223a226b657973227d",
+      "type": 65,
+      "typeName": "INACK",
+      "header": {
+        "sid": "claude-server-claude-remote--crtest-1",
+        "iseq": 57,
+        "st": "applied",
+        "via": "keys"
+      }
+    }
+  ],
+  "streams": [
+    {
+      "conn": "A",
+      "dir": "c2s",
+      "excerpt": true,
+      "maxFrame": 1048576,
+      "hex": "894352500d0a1a0a000000544001004d7b22657870223a313739333939303036303030302c2269736571223a35372c22736964223a22636c617564652d7365727665722d636c617564652d72656d6f74652d2d6372746573742d31227d6f6b0d0000003b420000377b22736964223a22636c617564652d7365727665722d636c617564652d72656d6f74652d2d6372746573742d31222c22746f223a35367d000000544001004d7b22657870223a313739333939303036303030302c2269736571223a35372c22736964223a22636c617564652d7365727665722d636c617564652d72656d6f74652d2d6372746573742d31227d6f6b0d"
+    },
+    {
+      "conn": "A",
+      "dir": "s2c",
+      "excerpt": true,
+      "maxFrame": 1048576,
+      "hex": "894352500d0a1a0a00000065410000617b22636f6465223a22455f494e5f474150222c226869223a302c2269736571223a35372c22736964223a22636c617564652d7365727665722d636c617564652d72656d6f74652d2d6372746573742d31222c227374223a2272656675736564227d0000004c410000487b2269736571223a35362c22736964223a22636c617564652d7365727665722d636c617564652d72656d6f74652d2d6372746573742d31222c227374223a22736b6970706564227d00000059410000557b2269736571223a35372c22736964223a22636c617564652d7365727665722d636c617564652d72656d6f74652d2d6372746573742d31222c227374223a226170706c696564222c22766961223a226b657973227d"
+    }
+  ],
+  "expect": {
+    "statuses": [
+      {
+        "st": "refused",
+        "code": "E_IN_GAP",
+        "hi": 0
+      },
+      {
+        "st": "skipped",
+        "hi": 56
+      },
+      {
+        "st": "applied"
+      }
+    ],
+    "resendOf30": {
+      "st": "dup",
+      "orig": "skipped"
+    }
+  }
+}

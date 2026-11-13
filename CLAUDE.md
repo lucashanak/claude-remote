@@ -60,6 +60,10 @@ Details live in `docs/`; this file only points at the places of truth and at the
   per-server Settings action; `~/.claude-remote/hookev.off` is the instant off switch.
 - **Wiring** — `session/SessionOrchestrator.kt` (`wireExecLayer`).
 - **Metrics** — `tools/relay-metrics/` (extractor + hourly `snapshot.sh` from the user crontab).
+- **crd (Stage B relay daemon, Go)** — `crd/` + `docs/crd.md`; wire format CRP/1 with golden vectors in `protocol/crp/golden/` (the
+  source of truth since B1a; `python3 -I protocol/crp/golden/gen.py --check`). Not installed anywhere yet: nothing of it runs on the dev
+  box until the B0 §9 gate and Lukáš's explicit go (no unit, no wants link, no `crd serve` against the live socket). Go 1.27.3 in
+  `~/.local/go`; CI job `crd` runs `go test -race` and `CGO_ENABLED=0`, crdlint and the static-binary check.
 
 ## Traps (each one has happened)
 - **Tests run inside one of the user's live tmux sessions.** Every Test task gets a private `TMUX_TMPDIR`/`HOME` and a tmux shim
@@ -106,6 +110,10 @@ Details live in `docs/`; this file only points at the places of truth and at the
 - `LiveFileCanary` tolerates exactly `~/.claude-remote/jarvis/status.json` and `d-state.json` (rewritten every ~5 s by `jarvis-d`);
   `~/.cache/claude-remote/jarvis-alerts` and `events` are append-tier. The live app rotates `events` after 1000 lines
   (`events.rotated` appears): a "truncated" alarm on it during a run is that rotation — rerun the class once.
+- crd tests: only through `crd/internal/testenv` (private root 0700 under a short `GOTMPDIR` base — `sun_path` is 108 bytes; the
+  harness refuses a base inside `/tmp/tmux-1000`, `~/.claude-remote` or `~/.cache/claude-remote`). `itest` takes
+  `~/.cache/crit-integration.lock` itself — never wrap `go test` in another `flock` (it deadlocks on its own lock). No
+  `pgrep`/`pkill`/`killall`, not even to read: a test runner signals only processes whose `/proc/<pid>/environ` carries its own base.
 
 ## Build and test
 See `docs/building.md` and `docs/TESTING.md` (gradle 8.11.1 in `~/.local/gradle/`, JDK `~/jdks/jdk-21.0.5+11`; integration tests

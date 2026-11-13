@@ -1,0 +1,124 @@
+{
+  "id": "36-in-state-lost",
+  "title": "The daemon's input state is not the one the client talked to: rotate `ie`, never resend",
+  "spec": "5.4",
+  "description": "WELCOME.inGen identifies the daemon's input.log generation (new when the state is created from scratch). A changed inGen, or inHi below what the client already had acknowledged (an older copy of the state, e.g. the cloned CT of 2026-10-31), makes the client rotate `ie` for that link: counters restart at 1, acknowledged input is never resent, unacknowledged input is shown 'unknown'. Otherwise the next iseq is max(local, inHi) + 1 and the outbox above inHi is resent in order.",
+  "framing": "every frame: u32be len | u8 type | u8 flags | u16be hlen | header JSON | blob; each (conn, dir) stream starts with the 8-byte magic",
+  "frames": [
+    {
+      "conn": "A",
+      "dir": "c2s",
+      "hex": "000000d9010000d57b22617070223a22312e302e353630222c22617474223a372c22646576223a22616e64726f69642d3730366362643762222c226665617473223a5b226576222c2273657373222c227478222c227465726d222c22696e222c227270632e65786563222c22677a6970225d2c226667223a747275652c226965223a2235663163306539613762336432633431222c226c696e6b223a2235623165326630633961376433653431222c226d61784672616d65223a313034383537362c2270696e674d73223a31353030302c2270726f746f223a5b315d7d",
+      "type": 1,
+      "typeName": "HELLO",
+      "header": {
+        "proto": [
+          1
+        ],
+        "dev": "android-706cbd7b",
+        "link": "5b1e2f0c9a7d3e41",
+        "att": 7,
+        "ie": "5f1c0e9a7b3d2c41",
+        "app": "1.0.560",
+        "feats": [
+          "ev",
+          "sess",
+          "tx",
+          "term",
+          "in",
+          "rpc.exec",
+          "gzip"
+        ],
+        "maxFrame": 1048576,
+        "fg": true,
+        "pingMs": 15000
+      }
+    },
+    {
+      "conn": "A",
+      "dir": "s2c",
+      "hex": "00000129020001257b22636f6e6e223a22632d30303031222c226665617473223a5b226576222c2273657373222c227478222c227465726d222c22696e222c227270632e65786563222c22677a6970225d2c22686f7374223a7b22626f6f74223a22622d37376531222c226964223a223966326334316161222c22746d7578506964223a333136373230387d2c22696e47656e223a223665326139316630222c22696e4869223a7b22636c617564652d7365727665722d636c617564652d72656d6f74652d2d6372746573742d31223a7b2269736571223a34307d7d2c226d61784672616d65223a313034383537362c226e6f77223a313739333939303030303030302c2270726f746f223a312c22737276223a2263726420302e312e30222c2273747265616d73223a7b7d7d",
+      "type": 2,
+      "typeName": "WELCOME",
+      "header": {
+        "proto": 1,
+        "conn": "c-0001",
+        "srv": "crd 0.1.0",
+        "feats": [
+          "ev",
+          "sess",
+          "tx",
+          "term",
+          "in",
+          "rpc.exec",
+          "gzip"
+        ],
+        "maxFrame": 1048576,
+        "now": 1793990000000,
+        "host": {
+          "id": "9f2c41aa",
+          "boot": "b-77e1",
+          "tmuxPid": 3167208
+        },
+        "streams": {},
+        "inGen": "6e2a91f0",
+        "inHi": {
+          "claude-server-claude-remote--crtest-1": {
+            "iseq": 40
+          }
+        }
+      }
+    }
+  ],
+  "streams": [
+    {
+      "conn": "A",
+      "dir": "c2s",
+      "excerpt": false,
+      "maxFrame": 1048576,
+      "hex": "894352500d0a1a0a000000d9010000d57b22617070223a22312e302e353630222c22617474223a372c22646576223a22616e64726f69642d3730366362643762222c226665617473223a5b226576222c2273657373222c227478222c227465726d222c22696e222c227270632e65786563222c22677a6970225d2c226667223a747275652c226965223a2235663163306539613762336432633431222c226c696e6b223a2235623165326630633961376433653431222c226d61784672616d65223a313034383537362c2270696e674d73223a31353030302c2270726f746f223a5b315d7d"
+    },
+    {
+      "conn": "A",
+      "dir": "s2c",
+      "excerpt": false,
+      "maxFrame": 1048576,
+      "hex": "894352500d0a1a0a00000129020001257b22636f6e6e223a22632d30303031222c226665617473223a5b226576222c2273657373222c227478222c227465726d222c22696e222c227270632e65786563222c22677a6970225d2c22686f7374223a7b22626f6f74223a22622d37376531222c226964223a223966326334316161222c22746d7578506964223a333136373230387d2c22696e47656e223a223665326139316630222c22696e4869223a7b22636c617564652d7365727665722d636c617564652d72656d6f74652d2d6372746573742d31223a7b2269736571223a34307d7d2c226d61784672616d65223a313034383537362c226e6f77223a313739333939303030303030302c2270726f746f223a312c22737276223a2263726420302e312e30222c2273747265616d73223a7b7d7d"
+    }
+  ],
+  "expect": {
+    "inGen-changed": {
+      "action": "rotate-ie",
+      "why": "inGen"
+    },
+    "inHi-below-acked": {
+      "action": "rotate-ie",
+      "why": "inHi-below-acked",
+      "sid": "claude-server-claude-remote--crtest-1"
+    },
+    "normal": {
+      "action": "keep",
+      "nextIseq": {
+        "claude-server-claude-remote--crtest-1": 60
+      }
+    }
+  },
+  "modelInput": {
+    "negotiate": {
+      "serverProto": [
+        1,
+        1
+      ],
+      "serverFeats": [
+        "ev",
+        "sess",
+        "tx",
+        "term",
+        "in",
+        "rpc.exec",
+        "gzip"
+      ],
+      "serverMaxFrame": 1048576
+    }
+  }
+}

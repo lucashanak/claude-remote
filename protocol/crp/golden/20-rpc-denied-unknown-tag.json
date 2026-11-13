@@ -1,0 +1,59 @@
+{
+  "id": "20-rpc-denied-unknown-tag",
+  "title": "rpc exec refused: tag:debug.shell",
+  "spec": "6.2",
+  "description": "A tag that is not on the list. The daemon runs nothing; RPCRES ok:false E_DENIED with the rule. The client maps it to ExecUnavailable(REFUSED) and does NOT retry it on another transport.",
+  "framing": "every frame: u32be len | u8 type | u8 flags | u16be hlen | header JSON | blob; each (conn, dir) stream starts with the 8-byte magic",
+  "frames": [
+    {
+      "conn": "A",
+      "dir": "c2s",
+      "hex": "000000535000004f7b22636d64223a226964202d75222c226964223a34312c226b696e64223a2273686f7274222c226d223a2265786563222c226d73223a353030302c22746167223a2264656275672e7368656c6c227d",
+      "type": 80,
+      "typeName": "RPC",
+      "header": {
+        "id": 41,
+        "m": "exec",
+        "tag": "debug.shell",
+        "cmd": "id -u",
+        "ms": 5000,
+        "kind": "short"
+      }
+    },
+    {
+      "conn": "A",
+      "dir": "s2c",
+      "hex": "00000058510000547b22636f6465223a22455f44454e494544222c226964223a34312c226c617374223a747275652c226f6b223a66616c73652c2270617274223a302c2272756c65223a227461673a64656275672e7368656c6c227d",
+      "type": 81,
+      "typeName": "RPCRES",
+      "header": {
+        "id": 41,
+        "ok": false,
+        "code": "E_DENIED",
+        "rule": "tag:debug.shell",
+        "part": 0,
+        "last": true
+      }
+    }
+  ],
+  "streams": [
+    {
+      "conn": "A",
+      "dir": "c2s",
+      "excerpt": true,
+      "maxFrame": 1048576,
+      "hex": "894352500d0a1a0a000000535000004f7b22636d64223a226964202d75222c226964223a34312c226b696e64223a2273686f7274222c226d223a2265786563222c226d73223a353030302c22746167223a2264656275672e7368656c6c227d"
+    },
+    {
+      "conn": "A",
+      "dir": "s2c",
+      "excerpt": true,
+      "maxFrame": 1048576,
+      "hex": "894352500d0a1a0a00000058510000547b22636f6465223a22455f44454e494544222c226964223a34312c226c617374223a747275652c226f6b223a66616c73652c2270617274223a302c2272756c65223a227461673a64656275672e7368656c6c227d"
+    }
+  ],
+  "expect": {
+    "denyScan": "tag:debug.shell",
+    "kotlin": "ExecUnavailable(REFUSED)"
+  }
+}

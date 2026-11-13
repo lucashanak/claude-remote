@@ -1,0 +1,94 @@
+{
+  "id": "03-version-mismatch",
+  "title": "No common protocol version: BYE E_VERSION, client falls back to Stage A",
+  "spec": "2.3, 8.3",
+  "description": "Client speaks only CRP/2, daemon 1..1. The daemon sends BYE{code:E_VERSION,min,max} and closes; the client marks crd incompatible for this server and uses the Stage A exec paths.",
+  "framing": "every frame: u32be len | u8 type | u8 flags | u16be hlen | header JSON | blob; each (conn, dir) stream starts with the 8-byte magic",
+  "frames": [
+    {
+      "conn": "A",
+      "dir": "c2s",
+      "hex": "000000d9010000d57b22617070223a22312e302e353630222c22617474223a372c22646576223a22616e64726f69642d3730366362643762222c226665617473223a5b226576222c2273657373222c227478222c227465726d222c22696e222c227270632e65786563222c22677a6970225d2c226667223a747275652c226965223a2235663163306539613762336432633431222c226c696e6b223a2235623165326630633961376433653431222c226d61784672616d65223a313034383537362c2270696e674d73223a31353030302c2270726f746f223a5b325d7d",
+      "type": 1,
+      "typeName": "HELLO",
+      "header": {
+        "proto": [
+          2
+        ],
+        "dev": "android-706cbd7b",
+        "link": "5b1e2f0c9a7d3e41",
+        "att": 7,
+        "ie": "5f1c0e9a7b3d2c41",
+        "app": "1.0.560",
+        "feats": [
+          "ev",
+          "sess",
+          "tx",
+          "term",
+          "in",
+          "rpc.exec",
+          "gzip"
+        ],
+        "maxFrame": 1048576,
+        "fg": true,
+        "pingMs": 15000
+      }
+    },
+    {
+      "conn": "A",
+      "dir": "s2c",
+      "hex": "0000004b030000477b22636f6465223a22455f56455253494f4e222c226d6178223a312c226d696e223a312c226d7367223a226e6f20636f6d6d6f6e2070726f746f636f6c2076657273696f6e227d",
+      "type": 3,
+      "typeName": "BYE",
+      "header": {
+        "code": "E_VERSION",
+        "min": 1,
+        "max": 1,
+        "msg": "no common protocol version"
+      }
+    }
+  ],
+  "streams": [
+    {
+      "conn": "A",
+      "dir": "c2s",
+      "excerpt": false,
+      "maxFrame": 1048576,
+      "hex": "894352500d0a1a0a000000d9010000d57b22617070223a22312e302e353630222c22617474223a372c22646576223a22616e64726f69642d3730366362643762222c226665617473223a5b226576222c2273657373222c227478222c227465726d222c22696e222c227270632e65786563222c22677a6970225d2c226667223a747275652c226965223a2235663163306539613762336432633431222c226c696e6b223a2235623165326630633961376433653431222c226d61784672616d65223a313034383537362c2270696e674d73223a31353030302c2270726f746f223a5b325d7d"
+    },
+    {
+      "conn": "A",
+      "dir": "s2c",
+      "excerpt": false,
+      "maxFrame": 1048576,
+      "hex": "894352500d0a1a0a0000004b030000477b22636f6465223a22455f56455253494f4e222c226d6178223a312c226d696e223a312c226d7367223a226e6f20636f6d6d6f6e2070726f746f636f6c2076657273696f6e227d"
+    }
+  ],
+  "expect": {
+    "negotiation": {
+      "result": "BYE",
+      "code": "E_VERSION",
+      "min": 1,
+      "max": 1
+    },
+    "client": "fallback-stage-a"
+  },
+  "modelInput": {
+    "negotiate": {
+      "serverProto": [
+        1,
+        1
+      ],
+      "serverFeats": [
+        "ev",
+        "sess",
+        "tx",
+        "term",
+        "in",
+        "rpc.exec",
+        "gzip"
+      ],
+      "serverMaxFrame": 1048576
+    }
+  }
+}

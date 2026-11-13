@@ -1,0 +1,5 @@
+// path: internal/daemon/n.go
+// want: tmux-verb
+package daemon
+
+const c = "tmux new-session -d -s x"

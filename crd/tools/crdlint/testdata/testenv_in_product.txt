@@ -1,0 +1,5 @@
+// path: internal/daemon/t.go
+// want: testenv-import
+package daemon
+
+import _ "github.com/lucashanak/claude-remote/crd/internal/testenv"

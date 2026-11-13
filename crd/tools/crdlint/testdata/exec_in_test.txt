@@ -1,0 +1,7 @@
+// path: internal/itest/z_test.go
+// want: exec exec-import
+package itest
+
+import "os/exec"
+
+func f() { _ = exec.Command("sh", "-c", "true").Run() }

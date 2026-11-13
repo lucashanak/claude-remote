@@ -1,0 +1,9 @@
+// path: internal/tmuxgate/gate.go
+// want: tmux-no-N
+package tmuxgate
+
+import "os/exec"
+
+func binary() string { p, _ := exec.LookPath("tmux"); return p }
+
+func Run(path string, a ...string) error { return exec.Command(binary(), append([]string{"-S", path}, a...)...).Run() }

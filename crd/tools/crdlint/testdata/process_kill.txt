@@ -1,0 +1,7 @@
+// path: internal/daemon/p.go
+// want: signal signal
+package daemon
+
+import "os"
+
+func f(pid int) { p, _ := os.FindProcess(pid); _ = p.Kill() }

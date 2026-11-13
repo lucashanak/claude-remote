@@ -1,0 +1,7 @@
+// path: internal/itest/r_test.go
+// want: fs-link-remove fs-link-remove
+package itest
+
+import "os"
+
+func f(p string) { _ = os.RemoveAll(p); _ = os.Symlink("/tmp", p) }

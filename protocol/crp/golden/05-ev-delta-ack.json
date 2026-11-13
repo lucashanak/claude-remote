@@ -1,0 +1,65 @@
+{
+  "id": "05-ev-delta-ack",
+  "title": "Durable ev item and the client's ACK",
+  "spec": "4.2",
+  "description": "The blob is the events-file line without its newline, unchanged, so HookEventReducer parses it as today. The ACK names the highest seq the client has processed in order (excerpt of a live connection).",
+  "framing": "every frame: u32be len | u8 type | u8 flags | u16be hlen | header JSON | blob; each (conn, dir) stream starts with the 8-byte magic",
+  "frames": [
+    {
+      "conn": "A",
+      "dir": "s2c",
+      "hex": "000000d2200100467b226174223a313739333939303030303030302c226570223a226131623263336434222c22736571223a34322c22737263223a226576656e7473222c227374223a226576227d636c617564652d72656d6f74652d65762061736b20593278686457526c4c584e6c636e5a6c6369316a624746315a475574636d56746233526c4c53316a636e526c633351744d513d3d2031373933393839393939313233203234373538323020536d467262335567596d4679646e556762634f6878614567626d5671636d466b7861467050773d3d",
+      "type": 32,
+      "typeName": "EV",
+      "header": {
+        "st": "ev",
+        "ep": "a1b2c3d4",
+        "seq": 42,
+        "src": "events",
+        "at": 1793990000000
+      },
+      "blobHex": "636c617564652d72656d6f74652d65762061736b20593278686457526c4c584e6c636e5a6c6369316a624746315a475574636d56746233526c4c53316a636e526c633351744d513d3d2031373933393839393939313233203234373538323020536d467262335567596d4679646e556762634f6878614567626d5671636d466b7861467050773d3d",
+      "blobText": "claude-remote-ev ask Y2xhdWRlLXNlcnZlci1jbGF1ZGUtcmVtb3RlLS1jcnRlc3QtMQ== 1793989999123 2475820 SmFrb3UgYmFydnUgbcOhxaEgbmVqcmFkxaFpPw=="
+    },
+    {
+      "conn": "A",
+      "dir": "c2s",
+      "hex": "0000002e1200002a7b2261636b73223a7b226576223a7b226570223a226131623263336434222c22736571223a34327d7d7d",
+      "type": 18,
+      "typeName": "ACK",
+      "header": {
+        "acks": {
+          "ev": {
+            "ep": "a1b2c3d4",
+            "seq": 42
+          }
+        }
+      }
+    }
+  ],
+  "streams": [
+    {
+      "conn": "A",
+      "dir": "s2c",
+      "excerpt": true,
+      "maxFrame": 1048576,
+      "hex": "894352500d0a1a0a000000d2200100467b226174223a313739333939303030303030302c226570223a226131623263336434222c22736571223a34322c22737263223a226576656e7473222c227374223a226576227d636c617564652d72656d6f74652d65762061736b20593278686457526c4c584e6c636e5a6c6369316a624746315a475574636d56746233526c4c53316a636e526c633351744d513d3d2031373933393839393939313233203234373538323020536d467262335567596d4679646e556762634f6878614567626d5671636d466b7861467050773d3d"
+    },
+    {
+      "conn": "A",
+      "dir": "c2s",
+      "excerpt": true,
+      "maxFrame": 1048576,
+      "hex": "894352500d0a1a0a0000002e1200002a7b2261636b73223a7b226576223a7b226570223a226131623263336434222c22736571223a34327d7d7d"
+    }
+  ],
+  "expect": {
+    "clientPosition": {
+      "ev": {
+        "ep": "a1b2c3d4",
+        "seq": 42
+      }
+    },
+    "daemonAck": "ok"
+  }
+}

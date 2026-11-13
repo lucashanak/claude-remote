@@ -1,0 +1,71 @@
+{
+  "id": "42-tmux-socket-and-server-change",
+  "title": "Socket unusable: TSTATE refused; tmux server replaced: server-changed and SNAP(tmux-restart), never mass `gone`",
+  "spec": "5.1, 6.3",
+  "description": "The guard refuses while the socket is missing or has != 1 listener (E_TMUX_SOCKET, transient). When the listener's identity (pid + start time) changes, the daemon sends TSTATE server-changed to term subscribers and a sess SNAP(reason=tmux-restart) instead of `del` for every row. Neither ever drives a rebuild, relaunch or respawn on the client: that stays a Stage A decision with its own guard.",
+  "framing": "every frame: u32be len | u8 type | u8 flags | u16be hlen | header JSON | blob; each (conn, dir) stream starts with the 8-byte magic",
+  "frames": [
+    {
+      "conn": "A",
+      "dir": "s2c",
+      "hex": "0000005e3100005a7b22726561736f6e223a22455f544d55585f534f434b4554222c22736964223a22636c617564652d7365727665722d636c617564652d72656d6f74652d2d6372746573742d31222c227374617465223a2272656675736564227d",
+      "type": 49,
+      "typeName": "TSTATE",
+      "header": {
+        "sid": "claude-server-claude-remote--crtest-1",
+        "state": "refused",
+        "reason": "E_TMUX_SOCKET"
+      }
+    },
+    {
+      "conn": "A",
+      "dir": "s2c",
+      "hex": "0000004c310000487b22736964223a22636c617564652d7365727665722d636c617564652d72656d6f74652d2d6372746573742d31222c227374617465223a227365727665722d6368616e676564227d",
+      "type": 49,
+      "typeName": "TSTATE",
+      "header": {
+        "sid": "claude-server-claude-remote--crtest-1",
+        "state": "server-changed"
+      }
+    },
+    {
+      "conn": "A",
+      "dir": "s2c",
+      "hex": "000000c7210000c37b226570223a226131623263336434222c2266726f6d223a39312c22726561736f6e223a22746d75782d72657374617274222c22736571223a39302c2273657373696f6e73223a5b7b22636c69656e7473223a302c22636d64223a22636c61756465222c2263726561746564223a313739333830303030302c2264656164223a66616c73652c226e616d65223a22636c617564652d7365727665722d6361736879222c2270616e65506964223a323430303030317d5d2c227374223a2273657373227d",
+      "type": 33,
+      "typeName": "SNAP",
+      "header": {
+        "st": "sess",
+        "ep": "a1b2c3d4",
+        "seq": 90,
+        "from": 91,
+        "reason": "tmux-restart",
+        "sessions": [
+          {
+            "name": "claude-server-cashy",
+            "created": 1793800000,
+            "clients": 0,
+            "panePid": 2400001,
+            "cmd": "claude",
+            "dead": false
+          }
+        ]
+      }
+    }
+  ],
+  "streams": [
+    {
+      "conn": "A",
+      "dir": "s2c",
+      "excerpt": true,
+      "maxFrame": 1048576,
+      "hex": "894352500d0a1a0a0000005e3100005a7b22726561736f6e223a22455f544d55585f534f434b4554222c22736964223a22636c617564652d7365727665722d636c617564652d72656d6f74652d2d6372746573742d31222c227374617465223a2272656675736564227d0000004c310000487b22736964223a22636c617564652d7365727665722d636c617564652d72656d6f74652d2d6372746573742d31222c227374617465223a227365727665722d6368616e676564227d000000c7210000c37b226570223a226131623263336434222c2266726f6d223a39312c22726561736f6e223a22746d75782d72657374617274222c22736571223a39302c2273657373696f6e73223a5b7b22636c69656e7473223a302c22636d64223a22636c61756465222c2263726561746564223a313739333830303030302c2264656164223a66616c73652c226e616d65223a22636c617564652d7365727665722d6361736879222c2270616e65506964223a323430303030317d5d2c227374223a2273657373227d"
+    }
+  ],
+  "expect": {
+    "client": {
+      "server-changed": "re-SUB later; no rebuild",
+      "tmux-restart": "replace table; no forget, no rebuild"
+    }
+  }
+}

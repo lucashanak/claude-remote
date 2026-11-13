@@ -1,0 +1,7 @@
+// path: internal/daemon/u.go
+// want: signal
+package daemon
+
+import "golang.org/x/sys/unix"
+
+func f(pid int) { _ = unix.Kill(pid, 15) }
