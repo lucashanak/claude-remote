@@ -444,6 +444,47 @@ class AttentionTest(unittest.TestCase):
         fx.clock.advance(13 * 3600)  # an old question is no longer news
         self.assertIsNone(self.snap()["attention"])
 
+    # ---- bgq (live 24.–25. 11.: ai-yolo--second and music-seeker-yolo--dj asked while their agents ran on, and the
+    # question was missed for 45–73 min): a turn that ended with a question asks Lukáš with background tasks too
+    def bg_question(self, status, extra="bg", after=()):
+        fx = self.fx
+        sid = "abcdef11-0000"
+        fx.session(self.name, 100, "%1", status=status, sid=sid, cwd="/w", status_at=T0 - 2000)
+        fx.transcript("/w", sid, [user("x"), assistant("Hotovo, 3 commity.\n\nMám je pushnout?")])
+        fx.append_events(ev_line("work", self.name, T0 - 60000, 100))
+        fx.append_events(ev_line("stop", self.name, T0 - 1000, 100, extra))
+        for line in after:
+            fx.append_events(line)
+        return self.snap()
+
+    def test_bgq_stop_bg_on_an_idle_record_is_a_question(self):
+        s = self.bg_question("idle")
+        self.assertEqual(s["state"], "bg")
+        a = s["attention"]
+        self.assertEqual((a["kind"], a["text"], a["since"]), ("question", "Mám je pushnout?", T0 - 1000))
+
+    def test_bgq_the_registrys_shell_is_a_question(self):
+        s = self.bg_question("shell")
+        self.assertEqual((s["state"], s["attention"]["kind"]), ("shell", "question"))
+        self.assertEqual(self.bg_question("shell", extra="")["attention"]["kind"], "question")
+
+    def test_bgq_busy_after_a_stop_bg_is_a_question_after_a_plain_stop_not(self):
+        self.assertEqual(self.bg_question("busy")["attention"]["kind"], "question")
+        self.assertIsNone(self.bg_question("busy", extra="")["attention"])
+
+    def test_bgq_work_after_the_stop_is_a_new_turn_the_question_is_gone(self):
+        for status in ("idle", "shell", "busy"):
+            s = self.bg_question(status, after=[ev_line("work", self.name, T0 - 500, 100)])
+            self.assertIsNone(s["attention"], status)
+
+    def test_bgq_no_question_no_attention(self):
+        fx = self.fx
+        sid = "abcdef12-0000"
+        fx.session(self.name, 100, "%1", status="shell", sid=sid, cwd="/w", status_at=T0 - 2000)
+        fx.transcript("/w", sid, [user("x"), assistant("Hotovo, agenti ještě běží.")])
+        fx.append_events(ev_line("stop", self.name, T0 - 1000, 100, "bg"))
+        self.assertIsNone(self.snap()["attention"])
+
     def test_injection_in_perm_text_is_hidden(self):
         fx = self.fx
         fx.session(self.name, 100, "%1", status="waiting", waiting_for="input needed", status_at=T0 - 5000)

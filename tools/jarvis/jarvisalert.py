@@ -935,7 +935,8 @@ class AlertWorker:
                 continue
             st = s.get("state")
             short = J.short_name(name)
-            open_dialog = (s.get("attention") or {}).get("kind") in DIALOG_KINDS or (
+            # bgq: a session whose turn ended with a question (its agents still run) waits for Lukáš, it is not stuck
+            open_dialog = (s.get("attention") or {}).get("kind") in DIALOG_KINDS + ("question",) or (
                 self.s["blocks"].get(name) or {}).get("kind") in DIALOG_KINDS
             if st == "busy" and not open_dialog:
                 # (a session that waits on its dialog is told as a block, never as stuck as well)

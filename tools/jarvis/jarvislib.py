@@ -1306,7 +1306,13 @@ def _attention(s, fs, ti, now_ms):
     if state == "waiting":
         return {"kind": "waiting", "text": s.get("waitingFor") or "", "since": s["stateSince"]}
     last = fs.get("last") or {}
-    if state == "idle" and s["endsWithQuestion"] and last.get("ev") in (None, "stop"):
+    # bgq (live 24.–25. 11.: 5 questions missed for 45–73 min, ai-yolo--second and music-seeker-yolo--dj): a turn that
+    # ended with a question while its agents or shells still run (stop bg -> state bg; the registry's `shell`; `busy`
+    # after a stop bg) asks Lukáš as much as an idle one. Only while the stop is the LAST event: a `work` after it is a
+    # new turn, and the question no longer stands.
+    ended_bg = last.get("ev") == "stop" and (
+        state in ("bg", "shell") or (state == "busy" and bool((fs.get("stop") or {}).get("bg"))))
+    if s["endsWithQuestion"] and ((state == "idle" and last.get("ev") in (None, "stop")) or ended_bg):
         pm, am = ti.get("lastPromptMs"), ti.get("lastAssistantMs")
         if am and (pm is None or am >= pm) and now_ms - am <= QUESTION_MAX_AGE_MS:
             return {"kind": "question", "text": ti.get("question") or "", "since": last.get("ms") or am}

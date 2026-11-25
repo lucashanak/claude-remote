@@ -675,6 +675,33 @@ class QuestionDataTest(Base):
         self.assertEqual(cr_digest.say_item(it), "jarvis test se v odpovědi ptá.")
 
 
+# ------------------------------------------------------------------------------------------------- bgq
+
+class BgQuestionTest(Base):
+    """bgq: a question at the end of a turn whose agents / shells still run is a block like any other question (grace,
+    dedup), and a busy session waiting on it is not stuck."""
+
+    def test_a_question_of_a_session_with_background_work_wakes_after_its_grace(self):
+        since = self.fx.clock.ms
+        self.sessions[TARGET] = sess(TARGET, "question", since, state="shell", text="Mám je pushnout?", stopBg=True)
+        self.tick()
+        self.advance(14)
+        self.tick()
+        self.assertIsNone(self.wb())  # 15 min grace, as every question
+        self.advance(2)
+        self.tick()
+        self.assertEqual([(e["src"], e["sub"]) for e in self.wb()["entries"]], [("block", "question")])
+
+    def test_busy_with_a_question_is_not_stuck(self):
+        self.tick()  # the stuck baseline
+        old = self.fx.clock.ms - 31 * MIN
+        self.sessions[TARGET] = sess(TARGET, "question", old, state="busy", text="Mám začít?", stopBg=True,
+                                     stateSince=old, lastEvent={"ev": "stop", "ms": old}, trKey=f"10:{old * 1000000}")
+        self.tick()
+        self.assertEqual([e["src"] for e in self.wb()["entries"]], ["block"])
+        self.assertEqual(self.w.state["stuck"], {})
+
+
 # ------------------------------------------------------------------------------------------------- r1125 P3
 
 class UsageTest(Base):
@@ -2108,6 +2135,17 @@ class MutationTest(unittest.TestCase):
                       __import__("test_cr_digest").DigestTest),
         "P2-prune": (lambda: mock.patch.object(JA, "ANSWERED_KEEP_MS", 10 ** 12), AnsweredTest),
         "P2-standing": (lambda: _mut(JA, "AlertWorker", 'v["at"] = now  # still standing', "pass"), AnsweredTest),
+        # bgq
+        "bgq-ended-bg": (lambda: _mut(J, "_attention", "or ended_bg):", "):"), __import__("test_jarvislib").AttentionTest),
+        "bgq-shell": (lambda: _mut(J, "_attention", 'state in ("bg", "shell") or', 'state in ("bg",) or'),
+                      __import__("test_jarvislib").AttentionTest),
+        "bgq-busy-bg": (lambda: _mut(J, "_attention", '(state == "busy" and bool((fs.get("stop") or {}).get("bg")))',
+                                     '(state == "busy")'), __import__("test_jarvislib").AttentionTest),
+        "bgq-last-stop": (lambda: _mut(J, "_attention", 'ended_bg = last.get("ev") == "stop" and (',
+                                       'ended_bg = last.get("ev") in ("stop", "work") and ('),
+                          __import__("test_jarvislib").AttentionTest),
+        "bgq-not-stuck": (lambda: _mut(JA, "AlertWorker", 'in DIALOG_KINDS + ("question",) or (', 'in DIALOG_KINDS or ('),
+                          BgQuestionTest),
         "P2-route": (lambda: _mut(JA, "AlertWorker", "if wake_on and wake_allowed(e, mode) and self._answered(e, ref, now):",
                                   "if self._answered(e, ref, now):"), AnsweredTest),
     }
