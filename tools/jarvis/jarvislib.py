@@ -794,6 +794,21 @@ def transcript_activity_ms(path):
     return best
 
 
+# r1125 P4: "X se v odpovědi ptá" carries the question as data: the last paragraph with a "?" of the last text
+QUESTION_MAX = 300
+_PARAGRAPH = re.compile(r"\n[ \t]*\n")
+
+
+def question_of(text):
+    """The last paragraph of `text` that holds a "?", stripped, or None. Raw: the caller escapes it (safe_text)."""
+    if not isinstance(text, str):
+        return None
+    for par in reversed(_PARAGRAPH.split(text)):
+        if "?" in par and par.strip():
+            return par.strip()
+    return None
+
+
 def transcript_info(path, max_bytes=TRANSCRIPT_TAIL_BYTES, keep_texts=0):
     """{title, lastPrompt, lastAssistantMs, endsWithQuestion, texts?} from the transcript's tail. Raw values: the
     caller escapes them before they go anywhere."""
@@ -866,6 +881,7 @@ def transcript_info(path, max_bytes=TRANSCRIPT_TAIL_BYTES, keep_texts=0):
     if last_text:
         tail = last_text.rstrip().rstrip("*_`)\"' ").rstrip()
         info["endsWithQuestion"] = tail.endswith("?")
+        info["question"] = question_of(last_text)
     if keep_texts:
         info["texts"] = list(texts)
     return info
@@ -1210,7 +1226,7 @@ def build_sessions(env, regs, panes, manifest, fold, self_name=None, tr_cache=No
             s["lastPrompt"] = safe_text(ti.get("lastPrompt"), 160) or None
             att = _attention(s, fs, ti, now_ms)
             if att:
-                att["text"] = safe_text(att.get("text"), 160)
+                att["text"] = safe_text(att.get("text"), QUESTION_MAX if att.get("kind") in ("ask", "question") else 160)
             s["attention"] = att
             out[name] = s
         except Exception as e:  # noqa: BLE001
@@ -1293,7 +1309,7 @@ def _attention(s, fs, ti, now_ms):
     if state == "idle" and s["endsWithQuestion"] and last.get("ev") in (None, "stop"):
         pm, am = ti.get("lastPromptMs"), ti.get("lastAssistantMs")
         if am and (pm is None or am >= pm) and now_ms - am <= QUESTION_MAX_AGE_MS:
-            return {"kind": "question", "text": "", "since": last.get("ms") or am}
+            return {"kind": "question", "text": ti.get("question") or "", "since": last.get("ms") or am}
     return None
 
 

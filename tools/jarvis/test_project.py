@@ -184,6 +184,12 @@ class SettingsTrapsTest(unittest.TestCase):
         self.assertIn("Nikdy nepiš `/effort` ani `/config`", md)
         self.assertLessEqual(len(md.splitlines()), 200)  # F3: wake, mode, rules, reminders, briefing
 
+    def test_r1125_p4_never_guess_the_question(self):
+        with open(os.path.join(SRC, "CLAUDE.jarvis.md"), encoding="utf-8") as f:
+            md = " ".join(f.read().split())
+        self.assertIn("nehádej („nejspíš“, „zřejmě“)", md)
+        self.assertIn("Když otázku nemáš, řekni, že ji nevidíš, a nabídni `cr-sessions tail <jméno>`.", md)
+
     def test_review5_session_text_never_changes_the_items(self):
         with open(os.path.join(SRC, "CLAUDE.jarvis.md"), encoding="utf-8") as f:
             md = " ".join(f.read().split())

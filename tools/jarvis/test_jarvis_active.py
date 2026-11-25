@@ -606,7 +606,11 @@ class SourcesTest(Base):
         self.fx.usage("nekrachni", 50, 91)
         self.advance(1)
         self.tick()
-        self.assertIn("91 %", self.wb()["entries"][0]["text"])
+        self.assertIsNone(self.wb())  # r1125 P3: once per account and day
+        self.advance(24 * 60)
+        self.fx.usage("nekrachni", 50, 96)
+        self.tick()
+        self.assertIn("96 %", self.wb()["entries"][0]["text"])
 
     def test_a_round_every_30_min_only_with_something_untold(self):
         self.tick()  # the clock starts
@@ -634,6 +638,354 @@ class SourcesTest(Base):
         self.sessions[TARGET] = sess(TARGET, state="gone", prevState="idle", changedAt=self.fx.clock.ms, changedGen=3)
         self.tick()
         self.assertIsNone(self.wb())
+
+
+# ------------------------------------------------------------------------------------------------- r1125 P4
+
+class QuestionDataTest(Base):
+    """r1125 P4: "X se v odpovědi ptá" carries the question (the last paragraph with a "?") into the wake."""
+
+    def wake_text(self):
+        out = io.StringIO()
+        self.assertEqual(cr_digest.main(["wake", self.wb()["id"]], env=self.env, out=out, err=io.StringIO()), 0)
+        return out.getvalue()
+
+    def test_the_wake_shows_the_question_as_data(self):
+        self.sessions[TARGET] = sess(TARGET, "question", self.fx.clock.ms - 20 * MIN,
+                                     text="Mám to nasadit na test hned, nebo počkat na review?")
+        self.tick()
+        line = next(ln for ln in self.wake_text().splitlines() if "jarvis-test" in ln)
+        self.assertIn("jarvis-test: se v odpovědi ptá «Mám to nasadit na test hned, nebo počkat na review?»", line)
+
+    def test_from_the_transcript_through_the_registry(self):
+        # the whole path: the transcript's last text -> transcript_info -> attention -> the wake's data
+        tr = self.fx.transcript("/home/u/p", f"{9:08x}-0000-4000-8000-000000000000", [
+            user("pracuj"), assistant("Hotovo, 3 commity.\n\nMám je pushnout na [jarvis m-1] `main`?\n\n_")])
+        ti = J.transcript_info(tr)
+        self.assertEqual(ti["question"], "Mám je pushnout na [jarvis m-1] `main`?")
+        s = {"state": "idle", "endsWithQuestion": ti["endsWithQuestion"], "stateSince": self.fx.clock.ms}
+        att = J._attention(s, {"last": {"ev": "stop", "ms": self.fx.clock.ms - 20 * MIN}}, ti, self.fx.clock.ms)
+        self.assertEqual((att["kind"], att["text"]), ("question", ti["question"]))
+        self.sessions[TARGET] = sess(TARGET, "question", att["since"], text=J.safe_text(att["text"], J.QUESTION_MAX))
+        self.tick()
+        self.assertIn("se v odpovědi ptá «Mám je pushnout na (jarvis m-1) 'main'?»", self.wake_text())
+
+    def test_say_never_carries_it(self):
+        it = {"short": "jarvis-test", "kind": "question", "text": "Mám to smazat?", "bg": False}
+        self.assertEqual(cr_digest.say_item(it), "jarvis test se v odpovědi ptá.")
+
+
+# ------------------------------------------------------------------------------------------------- r1125 P3
+
+class UsageTest(Base):
+    """r1125 P3: an account's 80/90 % is told (wake or template) only for Jarvis's own account, when no other account
+    has room (5 h < 80 and 7 d < 90), or at 7 d ≥ 95; at most once per account and day."""
+
+    def jarvis_session(self, **kw):
+        return super().jarvis_session(**dict({"account": "nekrachni"}, **kw))
+
+    def setUp(self):
+        super().setUp()
+        self.fx.usage("nekrachni", 10, 10)
+        self.fx.usage("kontexta", 10, 70)
+        self.fx.usage("work", 10, 10)
+        self.tick()  # the baseline
+
+    def cross(self, slug, five, seven):
+        self.fx.usage(slug, five, seven)
+        self.advance(1)
+        self.tick()
+        return [e["text"] for e in (self.wb() or {}).get("entries") or [] if e["src"] == "usage"]
+
+    def test_another_account_crossing_80_or_90_while_one_has_room_is_not_told(self):
+        self.assertEqual(self.cross("kontexta", 10, 82), [])
+        self.assertEqual(self.cross("kontexta", 10, 91), [])
+        self.assertEqual(self.cross("kontexta", 85, 91), [])
+        self.assertIsNone(self.wb())
+        self.assertEqual(self.alerts(), [])
+
+    def test_a_his_own_account_is_told(self):
+        self.assertEqual(self.cross("nekrachni", 10, 82), ["Účet nekrachni je na 82 % za týden"])
+
+    def test_b_no_other_account_has_room(self):
+        self.fx.usage("work", 85, 10)  # 5 h spent
+        self.fx.usage("nekrachni", 10, 92)  # a week spent
+        self.w = self.worker()  # a fresh baseline with these numbers
+        self.tick()
+        self.assertEqual(self.cross("kontexta", 10, 82), ["Účet kontexta je na 82 % za týden"])
+
+    def test_b_one_other_account_with_room_is_enough_to_keep_quiet(self):
+        self.fx.usage("work", 85, 10)
+        self.w = self.worker()
+        self.tick()
+        self.assertEqual(self.cross("kontexta", 10, 82), [])  # nekrachni (10/10) has room
+
+    def test_c_a_week_at_95_is_always_told(self):
+        self.assertEqual(self.cross("kontexta", 10, 96), ["Účet kontexta je na 96 % za týden"])
+
+    def test_c_95_is_a_level_of_its_own_above_90(self):
+        self.assertEqual(self.cross("kontexta", 10, 91), [])  # 90: another account has room
+        self.assertEqual(self.cross("kontexta", 10, 95), ["Účet kontexta je na 95 % za týden"])
+
+    def test_kolo2_95_has_its_own_day_slot(self):
+        self.assertEqual(self.cross("nekrachni", 10, 82), ["Účet nekrachni je na 82 % za týden"])
+        self.answer("[ticho]")
+        self.advance(6)
+        self.cross("nekrachni", 10, 96)  # his own week at 96 %: the saver, so a template
+        self.advance(10)
+        self.tick()
+        self.assertIn(("info", "Účet nekrachni je na 96 % za týden."), self.kinds())
+
+    def test_kolo2_a_held_back_crossing_is_told_once_no_other_account_has_room(self):
+        self.assertEqual(self.cross("kontexta", 10, 82), [])  # nekrachni and work have room
+        self.fx.usage("work", 85, 10)
+        self.fx.usage("nekrachni", 10, 92)  # Jarvis's own: told on its own
+        self.advance(1)
+        self.tick()
+        texts = [e["text"] for e in self.wb()["entries"]]
+        self.assertIn("Účet kontexta je na 82 % za týden", texts)
+
+    def test_once_per_account_and_day(self):
+        self.assertEqual(self.cross("nekrachni", 82, 10), ["Účet nekrachni je na 82 % za pět hodin"])
+        self.answer("[ticho]")
+        self.advance(6)
+        self.assertEqual(self.cross("nekrachni", 82, 83), [])
+        self.assertEqual(self.cross("kontexta", 10, 97), ["Účet kontexta je na 97 % za týden"])  # another account
+        self.answer("[ticho]")
+        self.advance(24 * 60)
+        self.assertEqual(self.cross("nekrachni", 82, 91), ["Účet nekrachni je na 91 % za týden"])
+
+    def test_the_template_obeys_the_same_rules(self):
+        open(self.env.path(JA.WAKE_OFF), "w").close()
+        self.cross("kontexta", 10, 82)
+        self.cross("work", 81, 10)
+        self.advance(10)
+        self.tick()
+        self.assertEqual(self.alerts(), [])
+        self.cross("nekrachni", 10, 81)
+        self.advance(10)
+        self.tick()
+        self.assertEqual(self.kinds(), [("info", "Účet nekrachni je na 81 % za týden.")])
+
+    def test_worth_unit(self):
+        room = {"fiveHour": 10, "sevenDay": 10}
+        self.assertTrue(JA.usage_worth("a", {"sevenDay": 82}, {"a": {}, "b": room}, own="a"))
+        self.assertFalse(JA.usage_worth("a", {"sevenDay": 82}, {"a": {}, "b": room}, own="x"))
+        self.assertTrue(JA.usage_worth("a", {"sevenDay": 82}, {"a": {}, "b": {"fiveHour": 80, "sevenDay": 10}}, "x"))
+        self.assertTrue(JA.usage_worth("a", {"sevenDay": 82}, {"a": {}, "b": {"fiveHour": 10, "sevenDay": 90}}, "x"))
+        self.assertTrue(JA.usage_worth("a", {"sevenDay": 82}, {"a": {}, "b": {"fiveHour": None, "sevenDay": 1}}, "x"))
+        self.assertTrue(JA.usage_worth("a", {"sevenDay": 95}, {"a": {}, "b": room}, own="x"))
+        self.assertFalse(JA.usage_worth("a", {"sevenDay": 94.9}, {"a": {}, "b": room}, own="x"))
+
+
+# ------------------------------------------------------------------------------------------------- r1125 P2
+
+LIMIT_TEXT = "You've hit your weekly limit · resets 11am (UTC)"
+
+
+class AnsweredTest(Base):
+    """r1125 P2: a block Jarvis already answered after a wake (wake-said) and that has not changed wakes him no more;
+    the limit whose first hit slides out of the transcript tail is one episode (the night of 22./23. 11.)."""
+
+    def limit(self, since):
+        self.sessions[TARGET] = sess(TARGET, "limit", since, state="idle", text=LIMIT_TEXT,
+                                     limit={"ms": since, "text": LIMIT_TEXT, "lastHitMs": self.fx.clock.ms - 1000})
+
+    def question(self, since, changed_gen=None):
+        self.sessions[TARGET] = sess(TARGET, "question", since, text="Mám to pushnout?", changedAt=since,
+                                     **({"changedGen": changed_gen} if changed_gen else {}))
+
+    def night(self, hours=12, step=10):
+        """The session's cron hits the limit every `step` min; the tail keeps ~2.5 h, so the first hit slides."""
+        woke = 0
+        for _ in range(int(hours * 60 / step)):
+            self.advance(step)
+            self.limit(self.fx.clock.ms - 150 * MIN)
+            self.tick()
+            if self.wb() is not None:
+                woke += 1
+                self.answer("[ticho]")
+        return woke
+
+    def test_the_night_of_22_23_wakes_once_not_every_20_min(self):
+        self.limit(self.fx.clock.ms - 150 * MIN)
+        self.tick()
+        self.assertEqual([e.get("sub") for e in self.wb()["entries"]], ["limit"])
+        self.answer("[ticho]")
+        self.assertEqual(self.night(), 0)
+        self.assertEqual(self.w.state["day"].get("wakes"), 1)
+        self.assertEqual(self.alerts(), [])
+
+    def test_the_sliding_limit_is_one_template_too_when_jarvis_cannot_be_woken(self):
+        # live 23. 11. from 08:46 (the saver): "PR-reviews narazila na limit účtu a stojí." every 20 min
+        open(self.env.path(JA.WAKE_OFF), "w").close()
+        self.limit(self.fx.clock.ms - 150 * MIN)
+        self.tick()
+        self.assertEqual(self.night(hours=3), 0)
+        self.assertEqual(self.kinds(), [("block", "jarvis-test narazila na limit účtu a stojí.")])
+
+    def test_another_limit_text_is_another_block(self):
+        self.limit(self.fx.clock.ms - 150 * MIN)
+        self.tick()
+        self.answer("[ticho]")
+        self.advance(20)
+        since = self.fx.clock.ms - 100 * MIN
+        self.sessions[TARGET] = sess(TARGET, "limit", since, state="idle", text="You've hit your 5-hour limit",
+                                     limit={"ms": since, "text": "You've hit your 5-hour limit"})
+        self.tick()
+        self.assertIsNotNone(self.wb())
+
+    def flicker(self, since):
+        """The block goes away for a moment and comes back after the 10-min repeat window. True when a wake was
+        made on the way back."""
+        self.sessions[TARGET] = sess(TARGET, state="busy")
+        self.tick()
+        self.advance(15)
+        self.question(since)
+        woke = False
+        for _ in range(4):
+            self.tick()
+            woke = woke or self.wb() is not None
+            self.advance(5)
+        return woke
+
+    def test_an_answered_question_that_comes_back_unchanged_wakes_no_more(self):
+        since = self.fx.clock.ms - 20 * MIN
+        self.question(since)
+        self.tick()
+        self.assertIsNotNone(self.wb())
+        self.answer("[ticho]")
+        self.assertFalse(self.flicker(since))
+        self.assertEqual(self.alerts(), [])
+        self.assertTrue(self.w.state["blocks"][TARGET]["told"])
+
+    def test_his_spoken_answer_counts_as_well(self):
+        since = self.fx.clock.ms - 20 * MIN
+        self.question(since)
+        self.tick()
+        self.answer("Pane, jarvis-test se ptá, jestli má pushnout.")
+        n = len(self.alerts())
+        self.assertFalse(self.flicker(since))
+        self.assertEqual(len(self.alerts()), n)
+
+    def test_a_changed_block_wakes_again(self):
+        since = self.fx.clock.ms - 20 * MIN
+        self.question(since)
+        self.tick()
+        self.answer("[ticho]")
+        self.assertTrue(self.flicker(self.fx.clock.ms + 5 * MIN))  # a new question: another Stop
+
+    def test_a_fallback_is_no_answer(self):
+        since = self.fx.clock.ms - 20 * MIN
+        self.question(since)
+        self.tick()
+        self.advance(3.1)
+        self.tick()  # no answer within 3 min: the template went out, Jarvis answered nothing
+        self.assertEqual(self.kinds(), [("block", "jarvis-test se v odpovědi ptá.")])
+        self.assertTrue(self.flicker(since))
+
+    def test_the_template_stays_as_before_when_the_wake_route_is_closed(self):
+        since = self.fx.clock.ms - 20 * MIN
+        self.question(since)
+        self.tick()
+        self.answer("[ticho]")
+        open(self.env.path(JA.WAKE_OFF), "w").close()
+        self.assertFalse(self.flicker(since))
+        self.assertEqual(self.kinds(), [("block", "jarvis-test se v odpovědi ptá.")])
+
+    def test_a_round_with_only_an_answered_block_does_not_wake(self):
+        self.tick()  # the round's clock starts
+        since = self.fx.clock.ms - 20 * MIN
+        self.question(since, changed_gen=3)
+        self.tick()
+        self.answer("[ticho]")
+        self.advance(31)
+        self.sessions[TARGET]["changedAt"] = self.fx.clock.ms - MIN  # the registry re-stamped it
+        self.tick()
+        self.assertIsNone(self.wb())
+        self.sessions[OTHER] = sess(OTHER, "question", self.fx.clock.ms - 5 * MIN, changedAt=self.fx.clock.ms - MIN,
+                                    changedGen=4)
+        self.advance(31)
+        self.sessions[TARGET]["changedAt"] = self.fx.clock.ms - MIN
+        self.sessions[OTHER]["changedAt"] = self.fx.clock.ms - MIN
+        self.tick()
+        self.assertIsNotNone(self.wb())
+        names = [i["name"] for e in self.wb()["entries"] for i in e.get("items") or [{"name": e.get("name")}]]
+        self.assertIn(OTHER, names)
+        self.assertNotIn(TARGET, names)
+
+    def test_the_memory_lasts_while_the_block_stands_and_a_day_after(self):
+        since = self.fx.clock.ms - 20 * MIN
+        self.question(since)
+        self.tick()
+        self.answer("[ticho]")
+        self.advance(24 * 60 + 1)
+        self.tick()
+        self.assertIn(f"question|{TARGET}", self.w.state["answered"])  # still standing
+        self.sessions[TARGET] = sess(TARGET, state="busy")
+        self.advance(24 * 60 - 1)
+        self.tick()
+        self.assertIn(f"question|{TARGET}", self.w.state["answered"])
+        self.advance(2)
+        self.tick()
+        self.assertEqual(self.w.state["answered"], {})
+
+    # ---- kolo 2 (review HIGH): the sig stands for the state only while the block stands or came back within 1 h
+    LT = "You've hit your 5-hour limit · resets 3pm (UTC)"
+
+    def lim(self, since):
+        self.sessions[TARGET] = sess(TARGET, "limit", since, state="idle", text=self.LT,
+                                     limit={"ms": since, "text": self.LT, "lastHitMs": since})
+
+    def back_after(self, minutes):
+        """Answered limit, the session works again, then after `minutes` the same limit text with a new since."""
+        self.lim(self.fx.clock.ms - 20 * MIN)
+        self.tick()
+        self.assertIsNotNone(self.wb())
+        self.answer("[ticho]")
+        self.advance(1)
+        self.sessions[TARGET] = sess(TARGET, state="busy")  # reset, the session works again
+        self.tick()
+        self.advance(minutes)
+        self.lim(self.fx.clock.ms - 20 * MIN)
+        woke = False
+        for _ in range(6):
+            self.tick()
+            woke = woke or self.wb() is not None
+            self.advance(5)
+        return woke
+
+    def test_next_day_same_limit_text(self):
+        # the reviewer's probe: a NEW 5-h limit 20 h later with the same "resets 3pm" must wake
+        self.assertTrue(self.back_after(20 * 60))
+
+    def test_same_limit_text_after_a_gap_of_an_hour_wakes(self):
+        self.assertTrue(self.back_after(60))
+
+    def test_same_limit_text_back_within_the_hour_is_the_same_state(self):
+        self.assertFalse(self.back_after(30))
+
+    def test_a_round_judges_by_the_blocks_since_not_the_sliding_attention(self):
+        self.tick()  # the round's clock starts
+        since = self.fx.clock.ms - 20 * MIN
+        self.question(since, changed_gen=3)
+        self.tick()
+        self.answer("[ticho]")
+        self.advance(31)
+        # the attention moved (a re-stamp the block episode absorbed); the block still holds the answered since
+        self.sessions[TARGET] = sess(TARGET, "question", since + MIN, text="Mám to pushnout?",
+                                     changedAt=self.fx.clock.ms - MIN, changedGen=4)
+        self.w.state["blocks"][TARGET].update(since=since, told=True)
+        self.w._round(self.fx.clock.ms, "normal", self.sessions, True)
+        self.assertIsNone(self.wb())
+
+    def test_the_memory_survives_a_daemon_restart(self):
+        since = self.fx.clock.ms - 20 * MIN
+        self.question(since)
+        self.tick()
+        self.answer("[ticho]")
+        self.w = self.worker(json.loads(json.dumps(self.w.state)))
+        self.assertFalse(self.flicker(since))
 
 
 # ------------------------------------------------------------------------------------------------- wake proposals
@@ -1432,6 +1784,25 @@ class LiveDebugTest(CliBase):
             self.assertIsNone(self.wb(), k)
         self.assertEqual(len(self.alerts()), n)
 
+    def test_r1125_p2_a_limit_jarvis_answered_still_wakes_him_on_the_relapse(self):
+        # the memory of answered blocks (P2) never swallows a relapse after his own resume (rev-dbg2)
+        text = "You've hit your limit"
+        ep = self.fx.clock.ms - 10 * MIN
+        old = {"ms": ep, "text": text, "lastHitMs": ep}
+        self.sessions[TARGET] = sess(TARGET, "limit", ep, state="idle", text=text, limit=old)
+        self.advance(16)
+        self.tick()
+        self.assertEqual([e.get("sub") for e in self.wb()["entries"]], ["limit"])
+        self.answer("Pane, jarvis-test stojí na limitu, po obnově jí pošlu pokračuj.")
+        self.assertIn(f"limit|{TARGET}", self.w.state["answered"])
+        ep2, d = self.delivered_resume()
+        self.sessions[TARGET] = sess(TARGET, "limit", ep, state="idle", text=text,
+                                     limit=dict(old, lastHitMs=d + 1000))
+        self.advance(6)
+        self.tick()
+        self.assertIsNotNone(self.wb())
+        self.assertEqual([e.get("sub") for e in self.wb()["entries"]], ["limit"])
+
     def test_7_a_prompt_just_before_the_promised_time_does_not_end_the_episode(self):
         t = self.fx.clock.ms
         promised = t + 10 * MIN
@@ -1662,8 +2033,12 @@ class MutationTest(unittest.TestCase):
         "dbg7-block-last": (lambda: _mut(JA, "AlertWorker", 'last = max(since, _i((s.get("limit") or {}).get('
                                          '"lastHitMs"))) if kind == "limit" else since', "last = since"),
                             LiveDebugTest),
-        "dbg8-relapse-once": (lambda: _mut(JA, "AlertWorker", 'relapse and b.get("relapse") != relapse):',
-                                           'relapse and _i(b.get("last")) != last):'), LiveDebugTest),
+        # r1125 P2's memory of answered blocks would also hold the repeat back, so it is switched off here: the
+        # mutant tests the relapse gate itself
+        "dbg8-relapse-once": (lambda: _mut_many(JA, "AlertWorker", ('relapse and b.get("relapse") != relapse):',
+                                                                    'relapse and _i(b.get("last")) != last):'),
+                                                ("if not k or not self.answered_match(e[\"name\"], *k):",
+                                                 "if True:")), LiveDebugTest),
         "dbg7-no-early-window": (lambda: _mut(J, "transcript_info", '>= auto_cont["autoContinueMs"]:',
                                               '>= auto_cont["autoContinueMs"] - 60000:'), LiveDebugTest),
         "dbg6-queue": (lambda: mock.patch.object(M, "_entry_prompt", lambda d: M._prompt_text(d) if isinstance(
@@ -1693,6 +2068,48 @@ class MutationTest(unittest.TestCase):
         "stuck-held-episode": (lambda: _mut(JA, "AlertWorker", '_i(told.get("since")) != since',
                                             '_i(self.s["stuck"].get(name)) != since'), StuckTest),
         "dnd-requeue": (lambda: mock.patch.object(JA.AlertWorker, "_requeue", lambda self, e: 0), ModeTest),
+        # r1125 P2
+        "P2-sliding-limit": (lambda: _mut(JA, "AlertWorker", "and since > _i(b.get(\"since\")) and not (relapse and ",
+                                          "and False and not (relapse and "), AnsweredTest),
+        "P2-answered": (lambda: mock.patch.object(JA.AlertWorker, "answered_match", lambda self, *a: False),
+                        AnsweredTest),
+        "P2-noted": (lambda: mock.patch.object(JA.AlertWorker, "_note_answered", lambda self, now, wb: None),
+                     AnsweredTest),
+        "P2-round": (lambda: _mut(JA, "AlertWorker", "if k == b.get(\"kind\") and self.answered_match(",
+                                  "if False and self.answered_match("), AnsweredTest),
+        # r1125 kolo 2
+        "P2-gap": (lambda: _mut(JA, "AlertWorker", 'v["sigOff"] = True', "pass"), AnsweredTest),
+        "P2-round-since": (lambda: _mut(JA, "AlertWorker", 'self.answered_match(name, k, b.get("since"), b.get("sig"),',
+                                        'self.answered_match(name, k, (s.get("attention") or {}).get("since"), '
+                                        'b.get("sig"),'), AnsweredTest),
+        "P3-95-slot": (lambda: _mut(JA, "AlertWorker", 'dk = f"{acct}|95" if win == "sevenDay" and lvl >= USAGE_ALWAYS_7D '
+                                    'else acct', "dk = acct"), UsageTest),
+        "P3-hold": (lambda: _mut(JA, "AlertWorker", "if not usage_worth(acct, u, fresh, own):\n                    continue",
+                                 "if not usage_worth(acct, u, fresh, own):\n                    "
+                                 "self.s[\"usageLvl\"][k] = lvl\n                    continue"), UsageTest),
+        "P2-relapse": (lambda: _mut(JA, "AlertWorker", 'or (a.get("relapse") or None) != (relapse or None):', ":"),
+                       LiveDebugTest),
+        "P3-worth": (lambda: mock.patch.object(JA, "usage_worth", lambda *a: True), UsageTest),
+        "P3-own": (lambda: _mut(JA, "usage_worth", "if acct == own:\n        return True", "if False:\n        pass"),
+                   UsageTest),
+        "P3-room": (lambda: mock.patch.object(JA, "has_room", lambda u: False), UsageTest),
+        "P3-95": (lambda: mock.patch.object(JA, "USAGE_ALWAYS_7D", 101), UsageTest),
+        "P3-day": (lambda: _mut(JA, "AlertWorker", 'if self.s["usageDay"].get(dk) == day:', "if False:"), UsageTest),
+        "P3-levels": (lambda: mock.patch.object(JA, "USAGE_LEVELS_7D", (80, 90)), UsageTest),
+        "P4-wake-line": (lambda: _mut(cr_digest, "_wake_line", 'e.get("sub") in ("perm", "ask", "waiting", "question")',
+                                      'e.get("sub") in ("perm", "ask", "waiting")'), QuestionDataTest),
+        "P4-attention": (lambda: _mut(J, "_attention", '"text": ti.get("question") or ""', '"text": ""'),
+                         QuestionDataTest),
+        "P4-paragraph": (lambda: mock.patch.object(J, "question_of", lambda t: t), QuestionDataTest),
+        "P4-ask-dialog": (lambda: mock.patch.object(__import__("jarvisapprove"), "ask_question", lambda *a, **k: None),
+                          __import__("test_jarvisapprove").QuestionTest),
+        "P4-cap": (lambda: mock.patch.object(J, "QUESTION_MAX", 120), __import__("test_cr_digest").DigestTest),
+        "P4-escape": (lambda: mock.patch.object(J, "safe_text", lambda t, n=120: (t or "")[:n]),
+                      __import__("test_cr_digest").DigestTest),
+        "P2-prune": (lambda: mock.patch.object(JA, "ANSWERED_KEEP_MS", 10 ** 12), AnsweredTest),
+        "P2-standing": (lambda: _mut(JA, "AlertWorker", 'v["at"] = now  # still standing', "pass"), AnsweredTest),
+        "P2-route": (lambda: _mut(JA, "AlertWorker", "if wake_on and wake_allowed(e, mode) and self._answered(e, ref, now):",
+                                  "if self._answered(e, ref, now):"), AnsweredTest),
     }
 
     def test_every_gate_test_fails_without_its_gate(self):
@@ -1714,6 +2131,22 @@ def _mut(mod, attr, old, new):
     m = types.ModuleType(mod.__name__ + "_mutant")
     m.__file__ = mod.__file__
     exec(compile(src.replace(old, new), mod.__file__, "exec"), m.__dict__)
+    if hasattr(mod, "Refused"):
+        m.Refused = mod.Refused
+    return mock.patch.object(mod, attr, getattr(m, attr))
+
+
+def _mut_many(mod, attr, *pairs):
+    """_mut with several replacements in one mutant module (each `old` exactly once)."""
+    import types
+    with open(mod.__file__, encoding="utf-8") as f:
+        src = f.read()
+    for old, new in pairs:
+        assert src.count(old) == 1, (mod.__name__, old)
+        src = src.replace(old, new)
+    m = types.ModuleType(mod.__name__ + "_mutant")
+    m.__file__ = mod.__file__
+    exec(compile(src, mod.__file__, "exec"), m.__dict__)
     if hasattr(mod, "Refused"):
         m.Refused = mod.Refused
     return mock.patch.object(mod, attr, getattr(m, attr))

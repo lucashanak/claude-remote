@@ -1409,6 +1409,30 @@ class Med4ApprovalTest(Base):
             self.assertEqual(self.m.get(rec["id"])["state"], "queued", yes)
             self.m.cancel(rec["id"])
 
+    def test_r1125_p5_words_of_consent_with_or_without_diacritics(self):
+        # live 2026-11-12 18:53: "potvrd to" was not taken, the proposal dropped and Jarvis made it again
+        for yes in ("potvrd to", "Potvrď to.", "potvrď", "schval", "Schval to!", "schvál to", "proveď", "proved to",
+                    "posli to", "Pošli!", "jasne", "Jasně.", "ANO!", "ok."):
+            self.prompt(pid="p-" + str(abs(hash(yes)))[:6])
+            rec, _ = self.send(approve=False)
+            self.lukas_says(yes)
+            self.assertEqual(self.m.get(rec["id"])["state"], "queued", yes)
+            self.m.cancel(rec["id"])
+
+    def test_r1125_p5_only_the_whole_prompt_is_consent(self):
+        for other in ("potvrď to a pak zavři rag", "schval to, ale až zítra", "potvrzuju", "schvaluju to",
+                      "proveď to jinak", "posli to do RAG", "ano ano?", "jasně, a co RAG?", "ok?"):
+            self.prompt(pid="p-" + str(abs(hash(other)))[:6])
+            rec, _ = self.send(approve=False)
+            self.lukas_says(other)
+            self.assertEqual(self.m.get(rec["id"])["state"], "dropped", other)
+
+    def test_r1125_p5_is_yes_is_the_one_decision(self):
+        self.assertTrue(M.is_yes("potvrď to!"))
+        self.assertTrue(M.is_yes("  schval  to "))
+        self.assertFalse(M.is_yes(None))
+        self.assertFalse(M.is_yes("schválíš to?"))
+
     def test_anything_else_drops(self):
         # rev-f4 M1: a yes followed by anything is not a bare yes ("OK, díky, a co dělá kontexta?")
         for other in ("ne", "počkej", "anonym", "ano, ale pošli to spíš do soniox a přidej k tomu ještě test parseru",

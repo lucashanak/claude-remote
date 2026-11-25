@@ -18,6 +18,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 
 import cr_approve  # noqa: E402
+import cr_digest  # noqa: E402
 import jarvisalert as JA  # noqa: E402
 import jarvisapprove as JAP  # noqa: E402
 import jarvislib as J  # noqa: E402
@@ -348,6 +349,16 @@ class Round4Test(Base):
         self.assertEqual(self.keys(), ["Enter"])
         self.assertEqual(recs[0]["state"], "done")
 
+    def test_r1125_p5_potvrd_to_still_needs_the_sentence_word_for_word(self):
+        self.run_cli("propose", TARGET)
+        self.say("Pane, jarvis-test chce něco spustit. Ano?")
+        recs = self.approve_and_run("potvrd to", said=False)
+        self.assertEqual((recs, self.keys()), ([], []))
+        self.assertEqual(len(self.pending()), 1)
+        recs = self.approve_and_run("Potvrď to.")  # now he read it
+        self.assertEqual(self.keys(), ["Enter"])
+        self.assertEqual(recs[0]["state"], "done")
+
     def test_no_transcript_is_no_approval(self):
         self.run_cli("propose", TARGET)
         st = self.fx.state
@@ -437,6 +448,38 @@ class QuestionTest(Base):
         super().setUp()
         self.ms += 1000
         self.dialog("ask", lambda p: redraw(fixture("ask-single.ansi"), p), 5, "xxx [a, b, c]")
+
+    # ---- r1125 P4: "X se ptá" carries the AskUserQuestion's question, read from its dialog
+    Q_HEAD = "xxxxxx xx: xxxxx xx xxxxx xxxxxx"
+
+    def test_r1125_p4_ask_question_reads_the_dialog(self):
+        q = JAP.ask_question(self.m, TARGET)
+        self.assertTrue(q.startswith(self.Q_HEAD), q)
+        self.assertTrue(q.endswith("?"), q)
+        self.assertEqual(self.keys(), [])  # read only
+
+    def test_r1125_p4_the_wake_carries_it_escaped_and_capped(self):
+        w = JA.AlertWorker(self.env, mail=self.m)
+        sessions = {TARGET: {"attention": {"kind": "ask", "text": "xxx [a, b, c]", "since": self.ms}}}
+        d = w.block_data(TARGET, "ask", sessions)
+        self.assertTrue(d.startswith(self.Q_HEAD), d)
+        self.assertLessEqual(len(d), J.QUESTION_MAX)
+        self.assertEqual(d, J.safe_text(d, J.QUESTION_MAX))
+
+    def test_r1125_p4_the_delta_carries_it(self):
+        s = {"name": TARGET, "short": "jarvis-test", "state": "waiting",
+             "attention": {"kind": "ask", "text": "xxx [a, b, c]", "since": self.ms}}
+        with mock.patch.object(cr_digest, "_mail_for", lambda env: self.m):
+            it = cr_digest.item(s, "ask", self.fx.clock.ms, self.env)
+        self.assertTrue(it["text"].startswith(self.Q_HEAD), it["text"])
+        self.assertIn(f"se ptá «{self.Q_HEAD}", cr_digest.line_of(it))
+
+    def test_r1125_p4_without_a_readable_dialog_the_hooks_text_stays(self):
+        self.dt.screen = lambda p: TM.screen()  # the dialog is not on the screen (any more)
+        self.assertIsNone(JAP.ask_question(self.m, TARGET))
+        w = JA.AlertWorker(self.env, mail=self.m)
+        sessions = {TARGET: {"attention": {"kind": "ask", "text": "xxx [a, b, c]", "since": self.ms}}}
+        self.assertEqual(w.block_data(TARGET, "ask", sessions), "xxx (a, b, c)")
 
     def test_the_recommended_option_by_default_and_option_n(self):
         rc, out, err = self.run_cli("propose", TARGET)

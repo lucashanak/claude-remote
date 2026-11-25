@@ -175,6 +175,26 @@ def read_dialog(mail, name, fold=None, now=None):
     return Dialog(name, t, op["ev"], op["ms"], op.get("extra") or "", p), None
 
 
+def ask_question(mail, name, fold=None):
+    """r1125 P4: the question of the session's open AskUserQuestion, read from the screen the way read_dialog reads it
+    (the open `ask` event + one read-only capture-pane), or None. Read only: no I7 refusal, nothing is answered, and
+    the text is raw (the caller escapes it)."""
+    try:
+        t = mail.resolve_target(name)
+        if isinstance(t, str):
+            return None
+        op = mail.fresh_events(name, fold).get("open")
+        if not op or op.get("ev") != "ask":
+            return None
+        rc, raw = mail.tmux(["capture-pane", "-p", "-e", "-t", t.pane])
+        p = parse_screen(raw) if rc == 0 else None
+    except Exception:  # noqa: BLE001  a question we cannot read is simply not there
+        return None
+    if not p or p["kind"] != "ask" or not p["question"].strip():
+        return None
+    return (f"{p['title']}: " if p["title"] else "") + p["question"].strip()
+
+
 def describe(d):
     """Structured, escaped lines for `cr-approve show` (texts are data)."""
     p = d.p

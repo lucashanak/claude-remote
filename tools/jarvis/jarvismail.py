@@ -95,7 +95,11 @@ MAX_ENTERS = 2
 # rev-f4 M1: a bare yes is the WHOLE prompt ("OK, díky, a co dělá kontexta?" approved three proposals), and it
 # approves only when exactly one proposal (mail or action) waits; with more, Lukáš names the id. The same rule for mail
 # and for actions (jarvisops uses this one).
-APPROVE = re.compile(r"^\s*(ano|jo|ok|jasně|pošli|pošli to|proveď|proveď to|udělej to)\s*[.!]*\s*$", re.IGNORECASE)
+# r1125 P5 (live 2026-11-12 18:53: "potvrd to" was not taken, the proposal dropped and Jarvis made it again): the
+# words of consent, matched on the prompt FOLDED by `yes_fold` (lower case, diacritics off), so "potvrď to" and
+# "potvrd to", "jasně" and "jasne" are one word. Still the whole prompt, at most a final "." or "!".
+APPROVE = re.compile(r"^\s*(ano|jo|ok|jasne|potvrd(?:\s+to)?|schval(?:\s+to)?|proved(?:\s+to)?|posli(?:\s+to)?"
+                     r"|udelej\s+to)\s*[.!]*\s*$", re.IGNORECASE)
 # rev-f4 H1 (lead): naming a session is not asking to send it anything ("kolik žere rag?"). Mail to a named target
 # goes out at once only when the prompt also asks for a message (an imperative); only the flag is kept, never the text.
 SEND_INTENT = re.compile(r"(?<!\w)(?:pošli|napiš|řekni|zadej|předej|vzkaž|pushni|commitni|oprav|udělej|dokonči|"
@@ -106,6 +110,18 @@ SEND_INTENT = re.compile(r"(?<!\w)(?:pošli|napiš|řekni|zadej|předej|vzkaž|p
 # approves the lone proposal exactly like a typed one, and a spoken name is a name. Once, at the very start only; a
 # `[jarvis` behind it is still a machine's (the check below sees the remainder).
 VOICE_PREFIX = re.compile(r"^\s*\[hlas\][ \t]?")
+
+
+def yes_fold(prompt):
+    """The prompt as APPROVE reads it: NFKD, combining marks (the Czech háčky and čárky) dropped, lower case."""
+    t = unicodedata.normalize("NFKD", prompt)
+    return "".join(c for c in t if not unicodedata.combining(c)).lower()
+
+
+def is_yes(prompt):
+    """r1125 P5: the ONE place that decides whether a prompt is a bare yes (mail proposals and action proposals
+    alike). Only a str, and only when the whole prompt is one of APPROVE's words."""
+    return isinstance(prompt, str) and bool(APPROVE.match(yes_fold(prompt)))
 
 
 def strip_voice(prompt):
@@ -674,7 +690,7 @@ class Mail:
     def decide_proposals(self, prompt, prev_id, now, single=False):
         """proposed -> queued (Lukáš said yes to it) or dropped (anything else). `single`: exactly one proposal (mail
         or action) waits, so a bare yes means it (M1)."""
-        short_yes = single and isinstance(prompt, str) and bool(APPROVE.match(prompt))
+        short_yes = single and is_yes(prompt)
         with self.lock():
             props = [r for r in self.all() if r["state"] == "proposed"]
             # a prompt that names ids approves exactly those ("pošli jen m-…, tu druhou ne"); a bare yes only a lone one

@@ -948,6 +948,24 @@ class ReviewFixTest(Base):
         self.lukas_says("[hlas] Ano.")
         self.assertEqual(len(self.spawned), 1)
 
+    def test_r1125_p5_potvrd_to_without_diacritics_runs_the_lone_action_proposal(self):
+        # the live 12. 11. 18:53 case: "potvrd to" dropped the proposal, Jarvis had to make it again
+        self.sessions_cli("open", "rag", "--alias", "b")
+        self.lukas_says("potvrd to")
+        self.assertEqual(len(self.spawned), 1)
+        self.assertEqual([r["state"] for r in self.ops.all()], ["approved"])
+
+    def test_r1125_p5_schval_to_with_diacritics_runs_it_too(self):
+        self.sessions_cli("open", "rag", "--alias", "b")
+        self.lukas_says("Schvál to!")
+        self.assertEqual(len(self.spawned), 1)
+
+    def test_r1125_p5_consent_with_two_pending_approves_nothing(self):
+        self.sessions_cli("open", "rag", "--alias", "a")
+        self.sessions_cli("open", "rag", "--alias", "b")
+        self.lukas_says("schval to")
+        self.assertEqual(self.spawned, [])
+
     def test_m1_close_targets_per_prompt_add_up_to_five(self):
         for i, n in enumerate(("x1", "x2", "x3", "x4")):
             name = f"claude-server-z-yolo--{n}"
@@ -1111,6 +1129,14 @@ class MutationTest(unittest.TestCase):
                                [("OpenTest", "test_a_task_makes_it_a_proposal_and_yes_queues_the_task")]),
         "M1 bare yes": (lambda: mock.patch.object(M, "APPROVE", __import__("re").compile(r"^\s*(ano|ok)\b", 2)),
                         [("ReviewFixTest", "test_m1_probe_ok_thanks_and_a_question_approves_nothing")]),
+        # r1125 P5: the words of consent and the diacritics fold; mail and actions decide through M.is_yes
+        "P5 words": (lambda: mock.patch.object(M, "APPROVE", __import__("re").compile(
+            r"^\s*(ano|jo|ok|jasně|pošli|pošli to|proveď|proveď to|udělej to)\s*[.!]*\s*$", 2)),
+            [("ReviewFixTest", "test_r1125_p5_potvrd_to_without_diacritics_runs_the_lone_action_proposal")]),
+        "P5 fold": (lambda: mock.patch.object(M, "yes_fold", lambda p: p.lower()),
+                    [("ReviewFixTest", "test_r1125_p5_schval_to_with_diacritics_runs_it_too")]),
+        "P5 single": (lambda: mock.patch.object(M.Mail, "_pending", lambda self: 1),
+                      [("ReviewFixTest", "test_r1125_p5_consent_with_two_pending_approves_nothing")]),
         "M1 single": (lambda: mock.patch.object(M.Mail, "_pending", lambda self: 1),
                       [("ReviewFixTest", "test_m1_bare_yes_only_for_a_lone_proposal_ids_otherwise")]),
         "M1 targets": (lambda: mock.patch.object(JO, "CLOSE_TARGETS_PER_PROMPT", 99),

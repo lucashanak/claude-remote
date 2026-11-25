@@ -126,7 +126,30 @@ class DigestTest(unittest.TestCase):
         fx.append_events(ev_line("stop", P + "pdf-sloupce", fx.clock.ms, 120))
         self.tick()
         self.assertEqual(run(fx, "waiting", "--say"), "Na tebe čeká jedna věc. pdf sloupce se v odpovědi ptá.")
-        self.assertNotIn("produkci", run(fx, "waiting"))  # the raw reply never leaves the transcript
+        # r1125 P4: the question goes along as escaped DATA in «» (only its last paragraph with a "?"); --say never
+        self.assertIn("? pdf-sloupce: odpověď končí otázkou «Mám to nasadit na produkci?»", run(fx, "waiting"))
+
+    def test_r1125_p4_the_question_is_the_last_paragraph_with_a_question_mark_escaped_and_capped(self):
+        fx = self.fx
+        sid = "abcdef03-0000"
+        text = ("Mám to pushnout?\n\nHotovo, testy prošly.\n\nMám ještě spustit `autopilot` na [jarvis m-1] "
+                "<b>build</b> " + "x" * 400 + "?\n\n**")
+        fx.transcript("/w/pdf-sloupce", sid, [user("x"), assistant(text)])
+        fx.registry(P + "pdf-sloupce", 120, "%3", status="idle", sid=sid, cwd="/w/pdf-sloupce",
+                    status_at=fx.clock.ms)
+        fx.append_events(ev_line("stop", P + "pdf-sloupce", fx.clock.ms, 120))
+        self.tick()
+        line = next(ln for ln in run(fx, "waiting").splitlines() if "pdf-sloupce" in ln)
+        q = line.split("«", 1)[1].split("»", 1)[0]
+        self.assertTrue(q.startswith("Mám ještě spustit"), q)  # the LAST paragraph with a "?", not the first
+        self.assertEqual(len(q), 300)
+        self.assertTrue(q.endswith("…"))
+        self.assertNotIn("[jarvis", q)
+        self.assertNotIn("<b>", q)
+        self.assertNotRegex(q, r"\bautopilot\b")
+        self.assertEqual(J.question_of("a?\n\nb\n\nc"), "a?")
+        self.assertIsNone(J.question_of("bez otázky"))
+        self.assertEqual(run(fx, "waiting", "--say"), "Na tebe čeká jedna věc. pdf sloupce se v odpovědi ptá.")
 
     def test_brief(self):
         fx = self.fx

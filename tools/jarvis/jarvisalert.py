@@ -113,9 +113,23 @@ STUCK_MS = 30 * 60 * 1000
 # live 2026-11-12: one session waiting for its workflow agents was "stuck" 4x in a day; one episode is told at most
 # once in 3 h per session, even when an event comes in between and the silence starts again
 STUCK_COOLDOWN_MS = 3 * 3600 * 1000
+# r1125 P2 (live night 22./23. 11.: PR-reviews on its weekly limit woke Jarvis every 20 min for 12 h, ~40 times, each
+# answered [ticho]): a block or a stuck session Jarvis answered after a wake (wake-said) wakes him again only when it
+# changed. "Unchanged" = the same kind and the same since; a limit or a stuck mail also by the same sig (their since
+# is not the episode's: a limit's first hit drops out of the transcript tail). Kept this long after it last applied.
+ANSWERED_KEEP_MS = 24 * 3600 * 1000
+# r1125 kolo 2 (HIGH): the sig stands for the state only while the block stands, or came back within this gap; a limit
+# with the same text after a longer pause ("resets 3pm" again the next day) is a new limit
+ANSWERED_SIG_GAP_MS = 60 * 60 * 1000
+SIG_SAME_KINDS = ("limit", "mail")
 CRASH_FRESH_MS = 10 * 60 * 1000
 CRASH_CLOSED_MS = 15 * 60 * 1000
 USAGE_LEVELS = (80, 90)
+# r1125 P3 (a week of "Účet X je na 80/90 % …, Nic jsem nedělal." ≈ 15×, every account and window): a crossing is told
+# only for Jarvis's own account, when no other account has room (5 h < 80 and 7 d < 90), or at 7 d ≥ 95; at most once
+# per account and day. 95 is a level of the week only (the 5 h window at 95 is the saver's business on his account).
+USAGE_LEVELS_7D = (80, 90, 95)
+USAGE_ROOM_5H, USAGE_ROOM_7D, USAGE_ALWAYS_7D = 80, 90, 95
 USAGE_FRESH_S = 900
 USAGE_EVERY_MS = 30 * 1000
 # the saver: Jarvis's own account this spent stops the wakes (templates go on); said once in the delta
@@ -583,6 +597,8 @@ class AlertWorker:
             "usageLvl": d("usageLvl"),
             "saver": _i(st.get("saver")),
             "autoAt": _i(st.get("autoAt")),
+            "answered": d("answered"),
+            "usageDay": d("usageDay"),
         }
         self.presence_fn = presence or self._tmux_presence
         # rev-f3 LOW5: jarvis-d's d-state writer. Called BEFORE an alert line or a wake paste goes out, with the
@@ -752,6 +768,15 @@ class AlertWorker:
             if b and b.get("kind") == kind and b.get("since") == since and not (
                     relapse and b.get("relapse") != relapse):
                 continue
+            if (b and kind == "limit" and b.get("kind") == "limit" and b.get("sig") == sig
+                    and since > _i(b.get("since")) and not (relapse and b.get("relapse") != relapse)):
+                # r1125 P2, the cause of the night 22./23. 11.: a session on its weekly limit whose cron prompts hit
+                # it again every 10 min. Its episode's first hit drops out of the transcript tail (256 KB, ~2.5 h
+                # there), so the limit's `since` slid forward on every hit and each slide was a new block, told
+                # again once REPEAT_MS was over. The same block still standing on the same limit text is one
+                # episode; only a relapse after Jarvis's resume (above) is news.
+                b["last"] = last
+                continue
             new_dialog = kind in ("perm", "ask")  # another event ms = another dialog (rev jarvis-blocks)
             if b and b.get("kind") == kind and b.get("sig") == sig and not b.get("told") and not new_dialog:
                 continue  # the same thing, re-stamped (the registry moved, still blocked): one item
@@ -789,6 +814,19 @@ class AlertWorker:
         for name in [n for n in self.s["blocks"] if n not in seen]:
             del self.s["blocks"][name]  # unblocked before or after its alert: nothing more to say (expiry)
         self.s["recent"] = {k: v for k, v in self.s["recent"].items() if now - _i(v.get("at")) < REPEAT_MS}
+
+    def block_data(self, name, kind, sessions):
+        """The block's text as DATA for the wake (escaped): an AskUserQuestion's question read from its dialog
+        (jarvisapprove, falling back to the hook's text), the question of an answer (r1125 P4: its last paragraph
+        with a "?", ≤ 300), the perm / waiting text (≤ 120)."""
+        text = ((sessions.get(name) or {}).get("attention") or {}).get("text")
+        if kind == "ask":
+            try:
+                import jarvisapprove as JAP
+                text = JAP.ask_question(self.mail, name) or text
+            except Exception:  # noqa: BLE001
+                pass
+        return J.safe_text(text, J.QUESTION_MAX if kind in ("ask", "question") else 120)
 
     def grace(self, b, now):
         if self.present(now):
@@ -940,20 +978,34 @@ class AlertWorker:
             isinstance(v, dict) and now - _i(v.get("at")) < STUCK_COOLDOWN_MS)}
         self.stuck_baseline = False
         self.s["crashed"] = {k: v for k, v in self.s["crashed"].items() if now - _i(v) < 2 * 3600 * 1000}
-        for acct, u in sorted((self.usage or {}).items()):
-            if not isinstance(u, dict) or (u.get("ageS") or 0) > USAGE_FRESH_S:
-                continue
-            for win, cz in (("fiveHour", "za pět hodin"), ("sevenDay", "za týden")):
+        fresh = {a: u for a, u in (self.usage or {}).items()
+                 if isinstance(u, dict) and (u.get("ageS") or 0) <= USAGE_FRESH_S}
+        me = next((s for s in sessions.values() if isinstance(s, dict) and s.get("self")), None) or {}
+        own = me.get("account") or "default"  # as the saver reads it
+        day = time.strftime("%Y-%m-%d", time.localtime(now / 1000))
+        self.s["usageDay"] = {k: v for k, v in self.s["usageDay"].items() if v == day}
+        for acct, u in sorted(fresh.items()):
+            for win, cz, levels in (("fiveHour", "za pět hodin", USAGE_LEVELS),
+                                    ("sevenDay", "za týden", USAGE_LEVELS_7D)):
                 v = u.get(win)
                 if not isinstance(v, (int, float)):
                     continue
-                lvl = max([x for x in USAGE_LEVELS if v >= x], default=0)
+                lvl = max([x for x in levels if v >= x], default=0)
                 k = f"{acct}|{win}"
                 old = self.s["usageLvl"].get(k)
+                if old is None or lvl <= _i(old):  # the first sight is a baseline, not news
+                    self.s["usageLvl"][k] = lvl
+                    continue
+                if not usage_worth(acct, u, fresh, own):
+                    continue  # kolo 2: the level stays, so the crossing is told once another account runs out too
                 self.s["usageLvl"][k] = lvl
-                if old is not None and lvl > _i(old):  # the first sight is a baseline, not news
-                    self._add(now, src="usage", sub=win, name=None, at=now, acct=acct,
-                              text=f"Účet {J.account_short(u.get('account'))} je na {v:.0f} % {cz}")
+                # kolo 2: the week at 95 % has a day slot of its own; an 80/90 told earlier today never hides it
+                dk = f"{acct}|95" if win == "sevenDay" and lvl >= USAGE_ALWAYS_7D else acct
+                if self.s["usageDay"].get(dk) == day:
+                    continue
+                self.s["usageDay"][dk] = day
+                self._add(now, src="usage", sub=win, name=None, at=now, acct=acct,
+                          text=f"Účet {J.account_short(u.get('account'))} je na {v:.0f} % {cz}")
 
     def _closed_on_purpose(self, name, ch):
         for c in J.read_closed(self.env, 100):
@@ -1013,6 +1065,7 @@ class AlertWorker:
 
     def _emit(self, now, mode, sessions, tasks, mails, wake_on=False):
         rules = self.rules.all(now)
+        self._prune_answered(now)
         keep = []
         for it in self.s["items"]:
             if now - _i(it.get("at")) > EXPIRE_MS.get(it["src"], 3600 * 1000):
@@ -1043,7 +1096,7 @@ class AlertWorker:
                     continue
                 it = {"src": "block", "sub": b["kind"], "name": name, "kind": "block",
                       "text": block_sentence(name, b["kind"]), "since": b["since"],
-                      "data": J.safe_text(((sessions.get(name) or {}).get("attention") or {}).get("text"), 120)}
+                      "data": self.block_data(name, b["kind"], sessions)}
                 if self.rules.silenced(it, now, sessions, rules):
                     continue
                 due.append((it, ("block", name)))
@@ -1062,9 +1115,11 @@ class AlertWorker:
                 e["task"] = it["task"]
             due.append((e, ("item", id(it))))
         busy = self.s["wb"] is not None  # one wake at a time: what may wake waits for the next one
-        to_wake, to_tpl = [], []
+        to_wake, to_tpl, quiet = [], [], []
         for e, ref in due:
-            if wake_on and wake_allowed(e, mode):
+            if wake_on and wake_allowed(e, mode) and self._answered(e, ref, now):
+                quiet.append((e, ref))  # r1125 P2: Jarvis answered exactly this already; neither a wake nor a line
+            elif wake_on and wake_allowed(e, mode):
                 if not busy:
                     to_wake.append((e, ref))
                 elif e["src"] == "incident":
@@ -1072,6 +1127,7 @@ class AlertWorker:
             elif allowed_by_mode(e, mode):
                 to_tpl.append((e, ref))
             # else: held back by the mode; told afterwards while it is still current (F3)
+        self._quiet(now, quiet)
         chosen = to_wake + to_tpl
         if not chosen:
             return
@@ -1088,6 +1144,83 @@ class AlertWorker:
         if to_wake:
             self._new_batch(now, [e for e, _ in to_wake], urgent=any(e["src"] == "incident" for e, _ in to_wake))
         self._template(now, [e for e, _ in to_tpl])
+
+    # ------------------------------------------------------------------ r1125 P2: what Jarvis already answered
+
+    def answered_match(self, name, kind, since, sig=None, relapse=None):
+        """Did Jarvis answer (wake-said) this very state of `name`: the same kind and since, or for a limit / stuck
+        mail the same sig? A limit that relapsed after his resume since then (another relapse id) is a change."""
+        a = self.s["answered"].get(f"{kind}|{name}")
+        if not isinstance(a, dict) or not name or (a.get("relapse") or None) != (relapse or None):
+            return False
+        if _i(a.get("since")) and _i(a.get("since")) == _i(since):
+            return True
+        return kind in SIG_SAME_KINDS and bool(sig) and not a.get("sigOff") and a.get("sig") == sig
+
+    def _entry_key(self, e):
+        """(kind, since, sig, relapse) of a wake entry Jarvis can answer for good: a block or a stuck session."""
+        name = e.get("name")
+        if not name:
+            return None
+        if e.get("src") == "block":
+            b = self.s["blocks"].get(name) or {}
+            same = b.get("kind") == e.get("sub")
+            return e.get("sub"), _i(e.get("since")), b.get("sig") if same else None, b.get("relapse") if same else None
+        if e.get("src") == "stuck":
+            return "stuck", _i((e.get("orig") or {}).get("since") or e.get("since")), None, None
+        return None
+
+    def _answered(self, e, ref, now):
+        k = self._entry_key(e)
+        if not k or not self.answered_match(e["name"], *k):
+            return False
+        a = self.s["answered"][f"{k[0]}|{e['name']}"]
+        a.update(at=now, since=k[1])  # still standing (its since may have slid): the memory follows it
+        return True
+
+    def _quiet(self, now, quiet):
+        """Due items Jarvis already answered: told (no wake, no line), so they never come back as due."""
+        if not quiet:
+            return
+        for e, ref in quiet:
+            if ref[0] == "block":
+                b = self.s["blocks"][ref[1]]
+                b["told"] = True
+                self.s["recent"][ref[1]] = {"sig": b["sig"], "at": now, "relapse": b.get("relapse"),
+                                            "kind": b.get("kind"), "since": b.get("since")}
+        done_ids = {ref[1] for e, ref in quiet if ref[0] == "item"}
+        self.s["items"] = [i for i in self.s["items"] if id(i) not in done_ids]
+        self.log("probuzení vynecháno, Jarvis už odpověděl: " + ", ".join(
+            f"{e.get('sub') or e['src']} {J.short_name(e['name'])}" for e, _ in quiet)[:300])
+
+    def _note_answered(self, now, wb):
+        """wake-said: every block / stuck entry of the batch is answered in the state it had then."""
+        for e in wb.get("entries") or ():
+            k = self._entry_key(e)
+            if k and k[1]:
+                self.s["answered"][f"{k[0]}|{e['name']}"] = {"since": k[1], "sig": k[2], "relapse": k[3], "at": now}
+        self._prune_answered(now)
+
+    def _prune_answered(self, now):
+        """An answered state is remembered while its block still stands as it was, and ANSWERED_KEEP_MS after. The
+        sig match ends once the block was gone for ANSWERED_SIG_GAP_MS or more (kolo 2): only the same since then."""
+        keep = {}
+        for k, v in self.s["answered"].items():
+            if not isinstance(v, dict):
+                continue
+            kind, _, name = k.partition("|")
+            b = self.s["blocks"].get(name) or {}
+            if b.get("kind") == kind:
+                gone = _i(v.pop("goneAt", 0))
+                if gone and now - gone >= ANSWERED_SIG_GAP_MS:
+                    v["sigOff"] = True
+                if _i(b.get("since")) == _i(v.get("since")):
+                    v["at"] = now  # still standing
+            elif not v.get("goneAt"):
+                v["goneAt"] = now
+            if now - _i(v.get("at")) < ANSWERED_KEEP_MS:
+                keep[k] = v
+        self.s["answered"] = keep
 
     def _template(self, now, entries):
         """Today's (F3) lines: every incident on its own, the rest in one batch line. Persisted before the write."""
@@ -1305,6 +1438,7 @@ class AlertWorker:
         self.s["wb"] = None
         auto = self.auto_entries(max(_i(wb.get("pasteAt")), self.s["autoAt"]), now)
         if SILENT_RE.match(reply or ""):
+            self._note_answered(now, wb)
             self.s["autoAt"] = now
             must = [e for e in wb["entries"] if always_told(e)] + auto
             with self.mail.lock():
@@ -1325,6 +1459,7 @@ class AlertWorker:
             # could make him describe another command, and Lukáš taps Ano on what he reads)
             text = self._approve_sentence() or text
         self.s["autoAt"] = now  # his own words cover the steps of his turn
+        self._note_answered(now, wb)
         names = {e.get("name") for e in wb["entries"]}
         one = next(iter(names)) if len(names) == 1 else None
         self._count(now, "alerts")
@@ -1463,6 +1598,9 @@ class AlertWorker:
             k = CD.classify(s)
             if k in ("busy", "cleared", "idle"):
                 continue
+            b = self.s["blocks"].get(name) or {}
+            if k == b.get("kind") and self.answered_match(name, k, b.get("since"), b.get("sig"), b.get("relapse")):
+                continue  # r1125 P2: a block Jarvis answered and that did not change since is no news for a round
             if k == "done":
                 if own is None:
                     own = self.task_sessions(tasks or {}, mails or [])
@@ -1509,6 +1647,23 @@ class AlertWorker:
                 os.unlink(lp)
             except OSError:
                 pass
+
+
+def has_room(u):
+    """r1125 P3: an account with room to work on: both windows known and under 80 % (5 h) and 90 % (7 d)."""
+    fh, sd = (u or {}).get("fiveHour"), (u or {}).get("sevenDay")
+    return isinstance(fh, (int, float)) and isinstance(sd, (int, float)) and fh < USAGE_ROOM_5H and sd < USAGE_ROOM_7D
+
+
+def usage_worth(acct, u, fresh, own):
+    """r1125 P3: is an account's crossing worth Jarvis's and Lukáš's attention: (a) it is Jarvis's own account, (b) no
+    OTHER account (fresh data) has room, or (c) its week is at 95 % or more."""
+    if acct == own:
+        return True
+    if not any(has_room(o) for a, o in fresh.items() if a != acct):
+        return True
+    sd = (u or {}).get("sevenDay")
+    return isinstance(sd, (int, float)) and sd >= USAGE_ALWAYS_7D
 
 
 def _tr_ms(key):

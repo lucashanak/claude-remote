@@ -82,12 +82,28 @@ def classify(s):
     return "idle"
 
 
-def item(s, kind, now):
+def item(s, kind, now, env=None):
     a = s.get("attention") or {}
     since = a.get("since") or s.get("stateSince") or (s.get("changedAt") if kind == "gone" else None)
+    text = a.get("text") or ""
+    if kind == "ask" and env is not None:
+        text = _ask_text(env, s["name"]) or text
     return {"name": s["name"], "short": s.get("short") or J.short_name(s["name"]), "kind": kind,
-            "state": s.get("state"), "text": a.get("text") or "", "title": s.get("title"),
+            "state": s.get("state"), "text": text, "title": s.get("title"),
             "ageMs": (now - since) if since else None, "bg": bool(s.get("stopBg"))}
+
+
+def _mail_for(env):
+    return M.Mail(env)
+
+
+def _ask_text(env, name):
+    """r1125 P4: an AskUserQuestion's question as its dialog shows it (jarvisapprove), escaped; "" when unread."""
+    try:
+        import jarvisapprove as JAP
+        return J.safe_text(JAP.ask_question(_mail_for(env), name), J.QUESTION_MAX)
+    except Exception:  # noqa: BLE001  the delta never fails on it: the hook's text stays
+        return ""
 
 
 def sort_items(items):
@@ -102,7 +118,7 @@ def line_of(it):
     age = f" · {J.ago_short(it['ageMs'])}" if it["ageMs"] is not None else ""
     body = {
         "perm": f"chce povolení {t}", "ask": f"se ptá {t}", "waiting": f"čeká «{it['text'] or 'dialog'}»",
-        "question": "odpověď končí otázkou", "done": "doběhl" + (" (na pozadí ještě běží úloha)" if it["bg"] else ""),
+        "question": f"odpověď končí otázkou {t}", "done": "doběhl" + (" (na pozadí ještě běží úloha)" if it["bg"] else ""),
         "dead": "claude v ní neběží", "missing": "chybí v tmux", "closed": "zavřená", "gone": "zmizela",
         "back": "je zpět", "new": "nová", "cleared": "vyřízeno", "busy": "pracuje", "idle": "nečinná",
     }.get(it["kind"], it["kind"])
@@ -223,7 +239,7 @@ def cmd_delta(env, a, now):
         picked = [s for s in vis.values() if s.get("attention") or s.get("state") in ("dead", "missing")]
     else:
         picked = [s for s in vis.values() if _i(s.get("changedGen")) > cur["gen"]]
-    items = [item(s, classify(s), now) for s in picked]
+    items = [item(s, classify(s), now, env) for s in picked]
     closed_names = set()
     if st and cur and not first:
         for c in st.get("closed") or []:
@@ -359,7 +375,7 @@ def cmd_brief(env, a, now):
     counts = {}
     for s in vis:
         counts[s["state"]] = counts.get(s["state"], 0) + 1
-    wait = [item(s, classify(s), now) for s in J.inbox({s["name"]: s for s in vis})]
+    wait = [item(s, classify(s), now, env) for s in J.inbox({s["name"]: s for s in vis})]
     usage = (st or {}).get("usage") or J.read_usage(env, now)
     if a.json:
         return _dump({"warning": warn, "counts": counts, "inbox": wait, "usage": usage,
@@ -420,7 +436,7 @@ def _brief_row(s, now):
 def cmd_waiting(env, a, now):
     sessions, st, warn = load(env, now)
     vis = {k: s for k, s in sessions.items() if not s.get("self")}
-    items = [item(s, classify(s), now) for s in J.inbox(vis)]
+    items = [item(s, classify(s), now, env) for s in J.inbox(vis)]
     if a.json:
         return _dump({"warning": warn, "items": items})
     if a.say:
@@ -532,8 +548,8 @@ def _wake_line(e, step, now, note=None):
     short = e.get("short") or (J.short_name(e["name"]) if e.get("name") else "")
     if e.get("src") == "block":
         body = f"{short}: {JA.BLOCK_CZ.get(e.get('sub'), 'čeká na tebe')}"
-        if e.get("data") and e.get("sub") in ("perm", "ask", "waiting"):
-            body += f" «{J.safe_text(e['data'], 120)}»"
+        if e.get("data") and e.get("sub") in ("perm", "ask", "waiting", "question"):
+            body += f" «{J.safe_text(e['data'], J.QUESTION_MAX if e.get('sub') in ('ask', 'question') else 120)}»"
         if e.get("since"):
             body += f" · {J.ago_short(now - _i(e['since']))}"
     elif e.get("src") == "round":

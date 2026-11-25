@@ -872,7 +872,7 @@ class Ops:
         during the PREVIOUS prompt, within 10 minutes, and this prompt is a short yes or names its id; anything else
         drops it. Approved ones run in a detached process, so the hook stays fast."""
         # M1: a bare yes (the whole prompt) approves only when exactly one proposal, mail or action, waits
-        short_yes = single and isinstance(prompt, str) and bool(self.M.APPROVE.match(prompt))
+        short_yes = single and self.M.is_yes(prompt)
         go = []
         if not os.path.exists(os.path.join(self.dir, "proposals.json")):
             return go  # nothing was ever proposed: every prompt of Lukáš's must not create files here
