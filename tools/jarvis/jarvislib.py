@@ -55,6 +55,13 @@ SELF_ALIAS = "jarvis"
 # Hashes of the last lines read. The app's rotation keeps the last 200 lines under a NEW inode, so after a rotation
 # those lines come round again and must not be applied twice.
 EVENTS_RING = 2000
+# The app's rotation (NotificationService, at most once a day past 1000 lines) keeps the last 200 lines of `events` and
+# drops the rest, so the file holds a day at best. jarvis-d keeps every event line it reads in
+# <state>/events-archive/<UTC day>.ev (the event's own day), one append per day file per tick, and removes day files
+# older than EVENTS_ARCHIVE_DAYS. Only names matching EVENTS_ARCHIVE_FILE are ever removed.
+EVENTS_ARCHIVE_DIR = "events-archive"
+EVENTS_ARCHIVE_DAYS = 30
+EVENTS_ARCHIVE_FILE = re.compile(r"(\d{4}-\d{2}-\d{2})\.ev")  # fullmatch
 
 
 # --------------------------------------------------------------------------------------------------------------------
@@ -553,11 +560,14 @@ class EventsReader:
         self.off = int(st.get("off") or 0)
         self.ring = collections.deque(st.get("ring") or [], maxlen=EVENTS_RING)
         self.rotations = 0
+        # (ms, line) of every event the last read() returned, for the archive
+        self.lines = []
 
     def state(self):
         return {"ino": self.ino, "off": self.off, "ring": list(self.ring)}
 
     def read(self, path):
+        self.lines = []  # a file that cannot be opened must not hand the last batch to the archive again
         try:
             f = open(path, "rb")
         except OSError:
@@ -601,12 +611,94 @@ class EventsReader:
             if seen is not None and h in seen:
                 continue
             self.ring.append(h)
-            ev = parse_event(bline.decode("utf-8", "replace"))
+            line = bline.decode("utf-8", "replace")
+            ev = parse_event(line)
             if ev:
                 out.append(ev)
+                self.lines.append((ev.ms, line))
         self.ino = st.st_ino
         self.off = start + consumed
         return out
+
+
+def events_archive_dir(env):
+    return env.path(EVENTS_ARCHIVE_DIR)
+
+
+def _archive_day(ms, now_ms):
+    # a clock far off (or a forged ms) lands on today, never on a day the pruning would remove at once or never
+    if not isinstance(ms, int) or ms < now_ms - EVENTS_ARCHIVE_DAYS * 86400000 or ms > now_ms + 86400000:
+        ms = now_ms
+    return time.strftime("%Y-%m-%d", time.gmtime(ms / 1000))
+
+
+def archive_events(env, items, now_ms):
+    """Appends (ms, line) event lines to the archive, one O_APPEND write per day file. Returns lines written."""
+    if not items:
+        return 0
+    by_day = collections.OrderedDict()
+    for ms, line in items:
+        if "\n" in line or "\r" in line:
+            continue
+        by_day.setdefault(_archive_day(ms, now_ms), []).append(line)
+    d = events_archive_dir(env)
+    os.makedirs(d, mode=0o700, exist_ok=True)
+    n = 0
+    for day, lines in by_day.items():
+        fd = os.open(os.path.join(d, day + ".ev"), os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
+        try:
+            data = ("\n".join(lines) + "\n").encode("utf-8")
+            while data:  # a short write (disk full) raises on the next round instead of gluing lines together
+                data = data[os.write(fd, data):]
+        finally:
+            os.close(fd)
+        n += len(lines)
+    return n
+
+
+def seed_events_archive(env, path, upto, now_ms):
+    """First run only (no archive dir yet): what the events file still holds up to the reader's offset (its last
+    EVENTS_MAX_READ bytes), so the archive starts with the day the file kept instead of with this tick. Returns the
+    (ms, line) list."""
+    try:
+        upto = max(0, int(upto))
+        start = max(0, upto - EVENTS_MAX_READ)
+        with open(path, "rb") as f:
+            f.seek(start)
+            raw = f.read(upto - start)
+    except (OSError, ValueError, TypeError):
+        return []
+    if start > 0:  # the window starts inside a line
+        raw = raw[raw.find(b"\n") + 1:] if b"\n" in raw else b""
+    end = raw.rfind(b"\n")
+    out = []
+    for bline in raw[:end + 1].split(b"\n") if end >= 0 else []:
+        line = bline.decode("utf-8", "replace")
+        ev = parse_event(line) if bline else None
+        # older than the archive keeps: it would only land on today's file under the wrong day
+        if ev and ev.ms >= now_ms - EVENTS_ARCHIVE_DAYS * 86400000:
+            out.append((ev.ms, line))
+    return out
+
+
+def prune_events_archive(env, now_ms):
+    """Removes day files older than EVENTS_ARCHIVE_DAYS; nothing else in the directory is touched."""
+    d = events_archive_dir(env)
+    cutoff = time.strftime("%Y-%m-%d", time.gmtime(now_ms / 1000 - EVENTS_ARCHIVE_DAYS * 86400))
+    removed = []
+    try:
+        names = os.listdir(d)
+    except OSError:
+        return removed
+    for name in names:
+        m = EVENTS_ARCHIVE_FILE.fullmatch(name)
+        if m and m.group(1) < cutoff:
+            try:
+                os.unlink(os.path.join(d, name))
+                removed.append(name)
+            except OSError:
+                pass
+    return removed
 
 
 class Fold:

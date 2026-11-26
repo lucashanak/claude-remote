@@ -204,5 +204,128 @@ class DaemonTest(unittest.TestCase):
         self.assertEqual(st["sessions"][NAME]["lastEvent"]["ev"], "perm")
 
 
+    # ---------------------------------------------------------------- the events archive (the app's rotation drops)
+
+    def archive(self):
+        d = os.path.join(self.fx.state, "events-archive")
+        out = {}
+        for n in sorted(os.listdir(d)):
+            with open(os.path.join(d, n)) as f:
+                out[n] = f.read().splitlines()
+        return out
+
+    def test_archive_seeds_then_appends_and_survives_rotation_without_duplicates(self):
+        fx = self.fx
+        lines = [ev_line("work", NAME, T0 - 100 + i, 100) for i in range(5)]
+        fx.append_events(*lines)
+        d = D.Daemon(fx.env())
+        d.tick()
+        self.assertEqual(self.archive(), {"2026-11-06.ev": [x.rstrip("\n") for x in lines]})  # seeded
+        fx.append_events(ev_line("stop", NAME, T0 + 1, 100), "garbage line\n")
+        fx.clock.advance(5)
+        d.tick()
+        # the app's rotation keeps the last lines under a new inode: they are not archived twice
+        rot = fx.events + ".rot"
+        with open(rot, "w") as f:
+            f.write("".join(lines[-2:]) + ev_line("stop", NAME, T0 + 2, 100))
+        os.replace(rot, fx.events)
+        fx.clock.advance(5)
+        d.tick()
+        d2 = D.Daemon(fx.env())  # the next minute's process goes on where the state says
+        fx.append_events(ev_line("work", NAME, T0 + 86400000, 100))  # the next UTC day
+        fx.clock.advance(5)
+        d2.tick()
+        a = self.archive()
+        self.assertEqual([len(a["2026-11-06.ev"]), len(a["2026-11-07.ev"])], [7, 1])
+        self.assertEqual(len(set(a["2026-11-06.ev"])), 7)
+        self.assertNotIn("garbage line", a["2026-11-06.ev"])
+        self.assertEqual(oct(os.stat(os.path.join(fx.state, "events-archive", "2026-11-06.ev")).st_mode & 0o777),
+                         "0o600")
+
+    def test_archive_seed_on_upgrade_takes_what_the_reader_already_read(self):
+        """The live case: jarvis-d had read the file for days (cursor in d-state.json) before the archive existed."""
+        fx = self.fx
+        old = [ev_line("work", NAME, T0 - 100 + i, 100) for i in range(4)]
+        fx.append_events(*old)
+        D.Daemon(fx.env()).tick()
+        a = os.path.join(fx.state, "events-archive")  # as before this version: no archive yet
+        for n in os.listdir(a):
+            os.unlink(os.path.join(a, n))
+        os.rmdir(a)
+        fx.append_events(ev_line("stop", NAME, T0 + 1, 100))
+        fx.clock.advance(5)
+        D.Daemon(fx.env()).tick()
+        self.assertEqual(len(self.archive()["2026-11-06.ev"]), 5)
+
+    def test_archive_never_twice_when_a_tick_dies_before_the_cursor_is_saved(self):
+        fx = self.fx
+        fx.append_events(ev_line("work", NAME, T0, 100))
+        D.Daemon(fx.env()).tick()
+        fx.append_events(ev_line("stop", NAME, T0 + 1, 100))
+        d = D.Daemon(fx.env())
+
+        def boom(*a, **k):
+            raise RuntimeError("a tick that fails before d-state.json")
+        d._diff = boom
+        with self.assertRaises(RuntimeError):
+            d.tick()
+        self.assertEqual(len(self.archive()["2026-11-06.ev"]), 1)  # not archived yet
+        for _ in range(2):  # the next cron processes re-read the line: archived once
+            fx.clock.advance(5)
+            D.Daemon(fx.env()).tick()
+        self.assertEqual(len(self.archive()["2026-11-06.ev"]), 2)
+
+    def test_archive_keeps_the_lines_of_a_failed_tick_for_the_next_tick_of_the_same_process(self):
+        fx = self.fx
+        fx.append_events(ev_line("work", NAME, T0, 100))
+        d = D.Daemon(fx.env())
+        d.tick()
+        fx.append_events(ev_line("stop", NAME, T0 + 1, 100))
+        diff = d._diff
+
+        def boom(*a, **k):
+            raise RuntimeError("one failed tick")
+        d._diff = boom
+        with self.assertRaises(RuntimeError):
+            d.tick()
+        d._diff = diff
+        fx.append_events(ev_line("work", NAME, T0 + 2, 100))
+        fx.clock.advance(5)
+        d.tick()
+        self.assertEqual(len(self.archive()["2026-11-06.ev"]), 3)
+
+    def test_archive_seed_drops_lines_older_than_it_keeps(self):
+        fx = self.fx
+        fx.append_events(ev_line("work", NAME, T0 - 31 * 86400000, 100), ev_line("work", NAME, T0 - 1000, 100))
+        D.Daemon(fx.env()).tick()
+        self.assertEqual({k: len(v) for k, v in self.archive().items()}, {"2026-11-06.ev": 1})
+
+    def test_archive_prunes_only_old_day_files(self):
+        fx = self.fx
+        d = os.path.join(fx.state, "events-archive")
+        os.makedirs(d)
+        for n in ("2026-10-06.ev", "2026-10-07.ev", "2026-11-05.ev", "notes.txt", "2026-01-01.ev.bak"):
+            with open(os.path.join(d, n), "w") as f:
+                f.write("x\n")
+        fx.append_events(ev_line("work", NAME, T0, 100))
+        D.Daemon(fx.env()).tick()
+        # 30 days before 2026-11-06 is 2026-10-07: that day stays, the day before goes, other names never
+        self.assertEqual(sorted(os.listdir(d)),
+                         ["2026-01-01.ev.bak", "2026-10-07.ev", "2026-11-05.ev", "2026-11-06.ev", "notes.txt"])
+        # the dir existed, so this was no first run: only the new line (the reader's first window), old files intact
+        self.assertEqual(self.archive()["2026-11-05.ev"], ["x"])
+        self.assertEqual(len(self.archive()["2026-11-06.ev"]), 1)
+
+    def test_archive_failure_never_stops_the_tick(self):
+        fx = self.fx
+        os.makedirs(fx.state, exist_ok=True)
+        with open(os.path.join(fx.state, "events-archive"), "w") as f:
+            f.write("not a dir")
+        fx.append_events(ev_line("perm", NAME, T0, 100, "Bash: ls"))
+        st = D.Daemon(fx.env()).tick()
+        self.assertEqual(st["sessions"][NAME]["lastEvent"]["ev"], "perm")
+        with open(os.path.join(fx.state, "jarvis-d.log")) as f:
+            self.assertIn("events archive: ", f.read())
+
 if __name__ == "__main__":
     unittest.main()

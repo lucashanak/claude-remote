@@ -171,6 +171,28 @@ class EventsTest(unittest.TestCase):
             f.write(ev_line("perm", "s1", 500, extra="Bash: x"))
         self.assertEqual([e.ms for e in r.read(self.fx.events)], [500])
 
+    def test_archive_day_clamps_a_far_clock_and_drops_multiline(self):
+        now = 1794000000000  # 2026-11-06
+        self.assertEqual(J._archive_day(now - 86400000, now), "2026-11-05")
+        for bad in (0, now + 3 * 86400000, now - 40 * 86400000, None, "x"):
+            self.assertEqual(J._archive_day(bad, now), "2026-11-06", bad)
+        env = self.fx.env()
+        self.assertEqual(J.archive_events(env, [(now, "a\nb"), (now, "ok")], now), 1)
+        with open(os.path.join(J.events_archive_dir(env), "2026-11-06.ev")) as f:
+            self.assertEqual(f.read(), "ok\n")
+
+    def test_unreadable_file_leaves_no_lines_for_the_archive(self):
+        r = J.EventsReader()
+        self.fx.append_events(ev_line("work", "s1", 1))
+        r.read(self.fx.events)
+        self.assertEqual(len(r.lines), 1)
+        os.unlink(self.fx.events)
+        self.assertEqual((r.read(self.fx.events), r.lines), ([], []))
+
+    def test_archive_prune_pattern_is_whole_name(self):
+        self.assertIsNone(J.EVENTS_ARCHIVE_FILE.fullmatch("2026-01-01.ev\n"))
+        self.assertIsNotNone(J.EVENTS_ARCHIVE_FILE.fullmatch("2026-01-01.ev"))
+
     def test_state_round_trip(self):
         r = J.EventsReader()
         self.fx.append_events(ev_line("work", "s1", 1))

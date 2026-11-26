@@ -106,6 +106,9 @@ Details live in `docs/`; this file only points at the places of truth and at the
 - `LiveFileCanary` tolerates exactly `~/.claude-remote/jarvis/status.json` and `d-state.json` (rewritten every ~5 s by `jarvis-d`);
   `~/.cache/claude-remote/jarvis-alerts` and `events` are append-tier. The live app rotates `events` after 1000 lines
   (`events.rotated` appears): a "truncated" alarm on it during a run is that rotation — rerun the class once.
+  That rotation keeps only the last 200 lines; the history lives in `~/.claude-remote/jarvis/events-archive/<UTC day>.ev`
+  (jarvis-d appends every event line it reads, keeps 30 days; files 0600 — they hold permission texts such as Bash
+  commands, so they never leave the box).
 
 ## Build and test
 See `docs/building.md` and `docs/TESTING.md` (gradle 8.11.1 in `~/.local/gradle/`, JDK `~/jdks/jdk-21.0.5+11`; integration tests

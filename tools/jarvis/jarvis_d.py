@@ -18,6 +18,8 @@ Writes, only under JARVIS_STATE_DIR (default ~/.claude-remote/jarvis), each with
 - `status.json`  the state of every session, `gen` / `changedGen` for the delta, `inbox`, `d_heartbeat`;
 - `d-state.json` the events cursor (inode, offset, ring of recent line hashes) and the per-session event fold;
 - `jarvis-d.log` errors only, capped.
+Appends (O_APPEND, 0600) to `events-archive/<UTC day>.ev` every event line it reads, after the cursor is saved, and
+removes day files older than 30 days: the app's rotation keeps only the last 200 lines of `events`.
 Events of Jarvis's own session (name in `<state>/self`) are ignored (I8), so its own Stop never shows up as news.
 
 F2a: it is also the mail deliverer (jarvismail.MailWorker): a `stop` of a target with queued mail is tried 1.5 s later
@@ -124,6 +126,9 @@ class Daemon:
             self.log("acct off: " + traceback.format_exc(limit=3))
         self.time_left = lambda: 60.0
         self.integrity, self.integrity_at = [], 0
+        self.archive_pruned = False
+        # lines read but not archived yet: a tick that fails in this process keeps them for the next one
+        self.archive_pending = []
 
     def tick(self):
         env = self.env
@@ -140,6 +145,7 @@ class Daemon:
             self.good_panes if self.good_panes is not None and now - self.good_at <= PANES_STALE_OK_MS else None)
         self_name = J.resolve_self(env, regs, panes, ancestor=False)
         new = self.reader.read(env.events_path)
+        self.archive_pending.extend(self.reader.lines)
         for e in new:
             self.fold.apply(e, ignore=self_name)
         self.mail.on_events(new)
@@ -180,6 +186,10 @@ class Daemon:
         }
         J.atomic_write(env.path("status.json"), json.dumps(status, ensure_ascii=False, separators=(",", ":")))
         self._write_dstate()
+        # after the cursor is saved, so a line is never archived twice: a tick that fails earlier keeps its lines in
+        # archive_pending for the next tick of this process, and a new cron process re-reads them from the old cursor
+        # (a crash right here loses one tick of history at most)
+        self._archive(now)
         # after status.json: a delivery may wait up to 20 s for its confirmation, the picture must not wait for it
         try:
             self.mail.tick(sessions, self.fold, now, self.time_left)
@@ -215,6 +225,21 @@ class Daemon:
             except Exception:
                 self.log("ops: " + traceback.format_exc(limit=3))
         return status
+
+    def _archive(self, now):
+        """Keeps what the app's rotation drops (jarvislib EVENTS_ARCHIVE_*). Never stops the tick."""
+        try:
+            items = self.archive_pending
+            if not os.path.exists(J.events_archive_dir(self.env)):
+                items = J.seed_events_archive(self.env, self.env.events_path, self.reader.off, now)
+            J.archive_events(self.env, items, now)
+            self.archive_pending = []
+            if not self.archive_pruned:
+                self.archive_pruned = True
+                J.prune_events_archive(self.env, now)
+        except Exception:
+            del self.archive_pending[:-20000]
+            self.log("events archive: " + traceback.format_exc(limit=3))
 
     def _write_dstate(self):
         J.atomic_write(self.env.path("d-state.json"), json.dumps(
